@@ -97,10 +97,27 @@ def test_health_success_resets_failure_and_prune_removes_terminal_receipts():
 def test_nonavailability_health_error_does_not_increase_backoff_counter():
     first = store.record_model_health("m", error="timeout", disabled_until=time.time() + 1)
     assert first["failure_count"] == 1
+    assert first["availability_failure_count"] == 1
     prompt_error = store.record_model_health(
         "m", error="request rejected", counts_toward_backoff=False,
     )
-    assert prompt_error["failure_count"] == 1
+    assert prompt_error["failure_count"] == 2
+    assert prompt_error["availability_failure_count"] == 1
+
+
+def test_health_migration_starts_availability_counter_at_zero(tmp_path, monkeypatch):
+    database = tmp_path / "legacy-fanout.db"
+    conn = sqlite3.connect(database)
+    conn.execute("CREATE TABLE model_health (model TEXT PRIMARY KEY, model_class TEXT NOT NULL DEFAULT '', failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', disabled_until REAL, last_success_ts REAL, updated_ts REAL NOT NULL)")
+    conn.execute("INSERT INTO model_health(model, failure_count, updated_ts) VALUES('m', 9, 1)")
+    conn.commit(); conn.close()
+    monkeypatch.setattr(store, "database_path", lambda: str(database))
+    store.reset_schema_cache_for_tests()
+
+    health = store.get_model_health("m")
+
+    assert health["failure_count"] == 9
+    assert health["availability_failure_count"] == 0
 
 
 def test_resume_requires_explicit_unknown_retry():

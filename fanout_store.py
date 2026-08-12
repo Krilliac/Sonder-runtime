@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS fanout_events (
 CREATE INDEX IF NOT EXISTS idx_fanout_events_run ON fanout_events(run_id, event_id DESC);
 CREATE TABLE IF NOT EXISTS model_health (
  model TEXT PRIMARY KEY, model_class TEXT NOT NULL DEFAULT '', failure_count INTEGER NOT NULL DEFAULT 0,
+ availability_failure_count INTEGER NOT NULL DEFAULT 0,
  last_error TEXT NOT NULL DEFAULT '', disabled_until REAL, last_success_ts REAL, updated_ts REAL NOT NULL
 );
 """
@@ -122,6 +123,14 @@ def _ensure_schema(path: str) -> None:
             if "execution_prompt_ciphertext" not in columns:
                 conn.execute(
                     "ALTER TABLE fanout_runs ADD COLUMN execution_prompt_ciphertext TEXT NOT NULL DEFAULT ''"
+                )
+            health_columns = {row[1] for row in conn.execute("PRAGMA table_info(model_health)")}
+            if "availability_failure_count" not in health_columns:
+                # ``failure_count`` historically included prompt/configuration
+                # rejects. Do not copy it: a fresh zero is the only safe value
+                # for an availability-only cooldown counter.
+                conn.execute(
+                    "ALTER TABLE model_health ADD COLUMN availability_failure_count INTEGER NOT NULL DEFAULT 0"
                 )
             # Before sealed prompts existed this database retained a best-effort
             # redacted copy plus a stable digest.  That is not an acceptable
@@ -379,15 +388,16 @@ def record_model_health(model: str, *, model_class: str = "", success: bool = Fa
     with _write_transaction() as conn:
         existing = conn.execute("SELECT * FROM model_health WHERE model=?", (model,)).fetchone()
         if success:
-            conn.execute("INSERT INTO model_health(model,model_class,failure_count,last_error,disabled_until,last_success_ts,updated_ts) VALUES(?,?,0,'',NULL,?,?) ON CONFLICT(model) DO UPDATE SET model_class=excluded.model_class,failure_count=0,last_error='',disabled_until=NULL,last_success_ts=excluded.last_success_ts,updated_ts=excluded.updated_ts", (model, _safe_text(model_class, 40), now, now))
+            conn.execute("INSERT INTO model_health(model,model_class,failure_count,availability_failure_count,last_error,disabled_until,last_success_ts,updated_ts) VALUES(?,?,0,0,'',NULL,?,?) ON CONFLICT(model) DO UPDATE SET model_class=excluded.model_class,failure_count=0,availability_failure_count=0,last_error='',disabled_until=NULL,last_success_ts=excluded.last_success_ts,updated_ts=excluded.updated_ts", (model, _safe_text(model_class, 40), now, now))
         else:
             increment = bool(counts_toward_backoff)
             conn.execute(
-                "INSERT INTO model_health(model,model_class,failure_count,last_error,disabled_until,updated_ts) VALUES(?,?,?,?,?,?) "
+                "INSERT INTO model_health(model,model_class,failure_count,availability_failure_count,last_error,disabled_until,updated_ts) VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(model) DO UPDATE SET model_class=excluded.model_class,"
-                "failure_count=CASE WHEN ? THEN model_health.failure_count+1 ELSE model_health.failure_count END,"
+                "failure_count=model_health.failure_count+1,"
+                "availability_failure_count=CASE WHEN ? THEN model_health.availability_failure_count+1 ELSE model_health.availability_failure_count END,"
                 "last_error=excluded.last_error,disabled_until=excluded.disabled_until,updated_ts=excluded.updated_ts",
-                (model, _safe_text(model_class, 40), 1 if increment else 0,
+                (model, _safe_text(model_class, 40), 1, 1 if increment else 0,
                  _safe_text(error, MAX_ERROR_CHARS), disabled_until, now, increment),
             )
         return _row(conn.execute("SELECT * FROM model_health WHERE model=?", (model,)).fetchone())
