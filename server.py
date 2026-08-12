@@ -1032,7 +1032,9 @@ def _direct_fanout_identity(token: str):
     username = str((account or {}).get("username") or "").strip()
     if not username:
         return "", account
-    material = "fanout-direct-owner\0" + username
+    # Match sonder_serve._fanout_request_owner exactly so an account can use
+    # either supported interface to manage the same durable receipt.
+    material = "fanout-owner\0account:" + username
     return "fo-" + hashlib.sha256(material.encode("utf-8")).hexdigest(), account
 
 
