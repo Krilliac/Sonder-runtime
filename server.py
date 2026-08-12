@@ -6607,6 +6607,15 @@ def sonder_stats() -> str:
 def learning_health_data() -> dict:
     """Return structured outcome grounding, lesson provenance, and hygiene metrics."""
     _maybe_live_reload()
+    # Backfill already compares against the revision the loopback Ollama
+    # service is serving *now*.  Health used the import-time value instead,
+    # which made a retagged local embedder look stale in the improvement report
+    # even when memory_embedding_backfill correctly selected zero rows.  Keep
+    # those two reports on the same local provenance authority.  Never probe a
+    # remote endpoint merely to render health: cloud embedding is not an
+    # implicit status dependency or disclosure consent.
+    if embeddings.endpoint_is_loopback(embeddings.BASE):
+        embeddings.refresh_runtime_revision()
     conn = _open_db()
     try:
         return learning_health.build_report(conn)
