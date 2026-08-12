@@ -113,6 +113,7 @@ import permission_modes
 import reloadable_mcp
 import autopilot_store
 import autopilot_controller
+import fanout_store
 from model_transport import ModelCallError
 import context_overflow
 import ollama_endpoint
@@ -310,6 +311,45 @@ def discovered_models():
             names.append(name)
             seen.add(key)
     return sorted(names, key=str.casefold)
+
+
+def discovered_model_records():
+    """Return canonical live catalog records without probing or selecting them.
+
+    Ollama's tag payload is the only cheap metadata available for every model.
+    Unknown records deliberately remain eligible; fanout excludes only models
+    which the operator's catalog positively identifies as non-generative.
+    """
+    payload = _get("/api/tags")
+    raw = payload.get("models", []) if isinstance(payload, dict) else []
+    records, seen = [], set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("model") or "").strip()
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        records.append((name, item))
+    return sorted(records, key=lambda row: row[0].casefold())
+
+
+def _fanout_nonchat_reason(record):
+    """Return a skip reason only for explicit non-chat catalog capability."""
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    raw = record.get("capabilities", details.get("capabilities", ()))
+    if not isinstance(raw, (list, tuple, set)):
+        return ""
+    capabilities = {str(value).strip().lower() for value in raw if str(value).strip()}
+    generative = {"completion", "chat", "generate", "text-generation"}
+    if capabilities & generative:
+        return ""
+    if "embedding" in capabilities:
+        return "embedding-only capability"
+    if "vision" in capabilities:
+        return "vision-only capability"
+    return ""
 
 
 def resolve_discovered_model(selector):
@@ -21303,24 +21343,39 @@ def natural_model_request(text):
     return None
 
 
-def _fanout_models(scope):
+def _fanout_plan(scope, *, include_unhealthy=False):
     scope = str(scope or "local").strip().lower()
     if scope not in ("local", "cloud", "all", "available"):
-        return [], ModelCallError("configuration", "scope must be local, cloud, or all")
+        return {"selected": [], "skipped": []}, ModelCallError("configuration", "scope must be local, cloud, or all")
     if scope == "available":
         scope = "all"
-    names = discovered_models()
-    selected = [name for name in names if (
-        scope == "all" or
-        (scope == "cloud" and _is_cloud_model_name(name)) or
-        (scope == "local" and not _is_cloud_model_name(name))
-    )]
+    selected, skipped, now = [], [], time.time()
+    for name, record in discovered_model_records():
+        cloud = _is_cloud_model_name(name)
+        if not (scope == "all" or (scope == "cloud" and cloud) or (scope == "local" and not cloud)):
+            continue
+        reason = _fanout_nonchat_reason(record)
+        if reason:
+            skipped.append({"model": name, "reason": reason})
+            continue
+        health = fanout_store.get_model_health(name)
+        disabled_until = health.get("disabled_until") if health else None
+        if disabled_until and float(disabled_until) > now and not include_unhealthy:
+            skipped.append({"model": name, "reason": "health cooldown active"})
+            continue
+        selected.append(name)
     if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not cloud_allowed():
-        return [], ModelCallError(
+        return {"selected": [], "skipped": skipped}, ModelCallError(
             "configuration",
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
         )
-    return selected, None
+    return {"scope": scope, "selected": selected, "skipped": skipped}, None
+
+
+def _fanout_models(scope):
+    """Compatibility selector retained for callers that only need targets."""
+    plan, error = _fanout_plan(scope)
+    return plan["selected"], error
 
 
 @mcp.tool()
@@ -21347,11 +21402,12 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
             "configuration", "num_predict, timeout, and max_cloud_workers must be integers."
         ))
     try:
-        targets, error = _fanout_models(scope)
+        plan, error = _fanout_plan(scope)
     except ModelCallError as exc:
         return _format_model_call_error(exc)
     if error:
         return _format_model_call_error(error)
+    targets = plan["selected"]
     if not targets:
         return _format_model_call_error(ModelCallError(
             "configuration", "no %s models are currently discovered." % scope
@@ -21402,6 +21458,8 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
         "resident_before": resident_before,
         "total_elapsed_ms": int((time.monotonic() - started) * 1000),
         "cloud_workers": cloud_workers if cloud else 0,
+        "models_skipped": len(plan["skipped"]),
+        "skipped": plan["skipped"],
         "answers": sorted(answers, key=lambda row: row["model"].casefold()),
         "failures": sorted(failures, key=lambda row: row["model"].casefold()),
     }

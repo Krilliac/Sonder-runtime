@@ -84,6 +84,28 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
 
 
+def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch):
+    monkeypatch.setattr(server, "_get", lambda _path: {"models": [
+        {"name": "chat-unknown"},
+        {"name": "embed", "capabilities": ["embedding"]},
+        {"name": "vision", "capabilities": ["vision"]},
+        {"name": "chat", "capabilities": ["chat", "vision"]},
+        {"name": "cooled", "capabilities": ["completion"]},
+    ]})
+    monkeypatch.setattr(
+        server.fanout_store, "get_model_health",
+        lambda name: {"disabled_until": 9_999_999_999} if name == "cooled" else None,
+    )
+
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan["selected"] == ["chat", "chat-unknown"]
+    assert {row["model"] for row in plan["skipped"]} == {"embed", "vision", "cooled"}
+    override, _ = server._fanout_plan("local", include_unhealthy=True)
+    assert "cooled" in override["selected"]
+
+
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
 
