@@ -222,6 +222,26 @@ def test_model_fanout_never_persists_a_model_echo_of_the_prompt(monkeypatch, tmp
     assert secret_prompt not in stored
 
 
+def test_fanout_redacts_substantial_partial_prompt_echoes():
+    prompt = "private deployment token: secret-123456789"
+    answer = "I received private deployment token: secret-123456789; here is the answer."
+
+    redacted = server._fanout_redact_prompt_echo(answer, prompt)
+
+    assert "secret-123456789" not in redacted
+    assert "<redacted prompt>" in redacted
+    assert redacted.endswith("; here is the answer.")
+
+
+def test_fanout_keeps_answers_without_verbatim_prompt_material():
+    redacted = server._fanout_redact_prompt_echo(
+        "The deployment completed successfully.",
+        "private deployment token: secret-123456789",
+    )
+
+    assert redacted == "The deployment completed successfully."
+
+
 def test_model_fanout_rejects_oversized_prompt_before_vault(monkeypatch):
     monkeypatch.setattr(
         server.fanout_prompt_vault, "encrypt_prompt",
