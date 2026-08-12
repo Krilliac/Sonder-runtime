@@ -534,6 +534,52 @@ def test_failed_local_model_gets_a_bounded_health_cooldown(monkeypatch):
     assert "private prompt" not in recorded[0][1]["error"]
 
 
+def test_failed_cloud_model_without_provider_retry_hint_gets_backoff(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _model: None)
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "remote:cloud",
+        server.ModelCallError("timeout", "provider timed out", cloud=True),
+        "private prompt",
+    )
+
+    assert 298 <= recorded[0][1]["disabled_until"] - time.time() <= 301
+    assert recorded[0][1]["counts_toward_backoff"] is True
+
+
+def test_cloud_retry_after_remains_provider_authoritative(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "remote:cloud",
+        server.ModelCallError("http", "rate limited", status=429, cloud=True, retry_after_seconds=17),
+        "private prompt",
+    )
+
+    assert 16 <= recorded[0][1]["disabled_until"] - time.time() <= 18
+    assert recorded[0][1]["counts_toward_backoff"] is False
+
+
+def test_transient_cloud_retry_after_remains_provider_authoritative(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "remote:cloud",
+        server.ModelCallError(
+            "http", "provider unavailable", transient=True, status=503,
+            cloud=True, retry_after_seconds=900,
+        ),
+        "private prompt",
+    )
+
+    assert 898 <= recorded[0][1]["disabled_until"] - time.time() <= 901
+    assert recorded[0][1]["counts_toward_backoff"] is False
+
+
 def test_repeated_local_availability_failures_back_off(monkeypatch):
     recorded = []
     monkeypatch.setattr(
