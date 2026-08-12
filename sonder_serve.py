@@ -240,6 +240,27 @@ def _state_principal(context):
     return "local-open"
 
 
+def _fanout_request_owner(context):
+    """Stable, non-secret receipt owner key for durable fanout state.
+
+    Usernames are client-controlled account data and may look like a secret
+    assignment (for example ``api_key=...``).  Receipt storage redacts text by
+    design, so never use that raw principal as an authorization key.  A domain
+    separated digest remains stable for owner comparison without persisting an
+    identifier that the generic secret redactor can transform or collide.
+    """
+    material = "fanout-owner\0" + _state_principal(context)
+    return "fo-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _fanout_request_role(context):
+    account = context.get("account") or {}
+    role = str(account.get("role") or "").strip()
+    if role:
+        return role
+    return "api-key" if context.get("api_key") else "local-open"
+
+
 def _prune_http_session_states(max_size=HTTP_SESSION_STATE_LIMIT):
     for key, candidate in list(_HTTP_SESSION_STATES.items()):
         if len(_HTTP_SESSION_STATES) <= max_size:
@@ -2028,6 +2049,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._handle_permission_mode_get():
             return
+        if self._handle_fanout_get():
+            return
         self._send_not_found()
 
     def _handle_commands_get(self):
@@ -2074,6 +2097,88 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(server.permission_mode_data())
         return True
 
+    def _fanout_run_for_context(self, context, run_id):
+        """Return a lifecycle receipt only to its shared-deployment owner.
+
+        Fanout answers are durable and can contain a caller's private prompt
+        context.  Developers may launch fanouts, but that alone must not make
+        every other developer's receipt readable.  Administrators retain the
+        explicit operational recovery path; local-open remains single-user.
+        """
+        if not _developer_authorized(context):
+            return None, (403, "developer or admin authentication is required for model fanout")
+        run = server.fanout_store.get_run(run_id)
+        if run is None:
+            return None, (404, "fanout run was not found")
+        account = context.get("account") or {}
+        is_admin = account.get("role") == "admin"
+        if context.get("mode") != "local-open" and not is_admin:
+            if run.get("request_owner") != _fanout_request_owner(context):
+                # Do not disclose another developer's run identifier.
+                return None, (404, "fanout run was not found")
+        return run, None
+
+    def _handle_fanout_get(self):
+        route = urllib.parse.urlsplit(self.path).path.rstrip("/")
+        prefix = "/v1/fanout/"
+        if not route.startswith(prefix) or "/" in route[len(prefix):]:
+            return False
+        run_id = route[len(prefix):]
+        if not run_id or len(run_id) > 80:
+            self._send_json_payload({"error": {"message": "invalid fanout run id", "type": "invalid_request"}}, status=400)
+            return True
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return True
+        _run, error = self._fanout_run_for_context(context, run_id)
+        if error:
+            status, message = error
+            self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
+            return True
+        self._send_json_payload(server._fanout_receipt(run_id))
+        return True
+
+    def _handle_fanout_post(self, path, req, context):
+        """Cancel or explicitly resume the caller's durable fanout receipt."""
+        prefix = "/v1/fanout/"
+        if not path.startswith(prefix):
+            return False
+        suffix = path[len(prefix):].strip("/")
+        parts = suffix.split("/")
+        if len(parts) != 2 or parts[1] not in ("cancel", "resume") or not parts[0] or len(parts[0]) > 80:
+            return False
+        run_id, action = parts
+        if not context["authorized"]:
+            self._send_auth_error()
+            return True
+        _run, error = self._fanout_run_for_context(context, run_id)
+        if error:
+            status, message = error
+            self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
+            return True
+        if action == "cancel":
+            server.fanout_store.request_cancel(run_id)
+        else:
+            for name in ("include_failed", "retry_unknown"):
+                if name in req and not isinstance(req[name], bool):
+                    self._send_json_payload({"error": {"message": "%s must be a boolean" % name, "type": "invalid_request"}}, status=400)
+                    return True
+            resumed = server.fanout_store.resume_run(
+                run_id, include_failed=req.get("include_failed") is True,
+                retry_unknown=req.get("retry_unknown") is True,
+            )
+            if resumed is None:
+                self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
+                return True
+            # A resume is an explicit replay instruction. _execute preserves
+            # the stored snapshot and never retries unknown rows unless this
+            # request included retry_unknown=true.
+            server._execute_fanout_run(run_id)
+        receipt = server._fanout_receipt(run_id)
+        self._send_json_payload(receipt or {"error": {"message": "fanout receipt was unavailable", "type": "not_found"}}, status=200 if receipt else 404)
+        return True
+
     def _handle_permission_mode_post(self, req):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
         wanted = ""
@@ -2115,6 +2220,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        if self._handle_fanout_post(path, req, context):
+            return
         if path == "/v1/permission-mode":
             if not context["authorized"]:
                 self._send_auth_error()
@@ -2355,6 +2462,8 @@ class Handler(BaseHTTPRequestHandler):
                         # developer account a second time.
                         reply = server._model_fanout_authorized(
                             natural_model["prompt"], scope=natural_model["scope"],
+                            request_owner=_fanout_request_owner(context),
+                            request_role=_fanout_request_role(context),
                         )
                     if reply is None:
                         reply = server.chat_web_response(
