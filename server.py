@@ -21392,10 +21392,16 @@ def _fanout_safe_error(exc, prompt):
         rendered = "ERROR: model request failed (%s)" % type(exc).__name__
     # Providers occasionally include a request excerpt in an error body.  The
     # durable receipt must not turn that into a second plaintext prompt store.
+    return _fanout_redact_prompt_echo(rendered, prompt)[:4000]
+
+
+def _fanout_redact_prompt_echo(value, prompt):
+    """Remove a verbatim request echo before a durable receipt is written."""
+    rendered = str(value or "")
     question = str(prompt or "")
     if question:
         rendered = rendered.replace(question, "<redacted prompt>")
-    return rendered[:4000]
+    return rendered
 
 
 def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers):
@@ -21405,6 +21411,8 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers):
     selected-model snapshot.  The exact user prompt is retained solely in the
     authenticated vault token used by the local execution worker.
     """
+    if len(str(prompt or "")) > fanout_store.MAX_PROMPT_CHARS:
+        raise ModelCallError("configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS)
     plan, error = _fanout_plan(scope)
     if error:
         raise error
@@ -21514,7 +21522,13 @@ def _execute_fanout_run(run_id):
     for potentially metered cloud requests.
     """
     owner_id = _fanout_worker_id()
-    run = fanout_store.claim_run(run_id, owner_id, owner_pid=os.getpid())
+    initial = fanout_store.get_run(run_id)
+    initial_limits = _fanout_limits(initial or {})
+    # A call may consume its full configured timeout.  Keep its receipt lease
+    # longer than that timeout so normal completion cannot be fenced out by the
+    # store at the exact request deadline.
+    lease_seconds = min(3600, initial_limits["timeout"] + 60)
+    run = fanout_store.claim_run(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
     if run is None:
         return _fanout_receipt(run_id)
     limits = _fanout_limits(run)
@@ -21525,7 +21539,7 @@ def _execute_fanout_run(run_id):
         # Claim each pending row before recording the generic failure; do not
         # leak either the ciphertext or the original prompt in the receipt.
         while True:
-            row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid())
+            row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
             if row is None:
                 break
             fanout_store.record_result(run_id, row["model"], owner_id, "failed",
@@ -21545,7 +21559,7 @@ def _execute_fanout_run(run_id):
                                      timeout=limits["timeout"])(question) or "").strip()
             if not answer:
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
-            return row, "answered", answer, "", int((time.monotonic() - started) * 1000), None
+            return row, "answered", _fanout_redact_prompt_echo(answer, question), "", int((time.monotonic() - started) * 1000), None
         except Exception as caught:
             exc = caught
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc
@@ -21568,11 +21582,11 @@ def _execute_fanout_run(run_id):
     # Local execution stays serial for VRAM safety.  Cloud calls retain their
     # public two-worker cap while each model row remains independently claimed.
     while True:
-        row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid())
+        row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
         if row is None or _is_cloud_model_name(row["model"]):
             break
         persist(invoke(row))
-        fanout_store.heartbeat(run_id, owner_id)
+        fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
     # If the first unclaimed remaining row is cloud, it is still pending; claim
     # the cloud set below.  A local row can never follow it because result rows
     # are alphabetically ordered, so claim all rows then route each safely.
@@ -21589,7 +21603,7 @@ def _execute_fanout_run(run_id):
                 else:
                     persist(invoke(claimed))
             while len(inflight) < limits["cloud_workers"]:
-                claimed = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid())
+                claimed = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
                 if claimed is None:
                     break
                 if _is_cloud_model_name(claimed["model"]):
@@ -21601,7 +21615,7 @@ def _execute_fanout_run(run_id):
             future = next(as_completed(inflight))
             del inflight[future]
             persist(future.result())
-            fanout_store.heartbeat(run_id, owner_id)
+            fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
     receipt = _fanout_receipt(run_id)
     if receipt is not None:
         activity_tracker.record_event(
@@ -21627,6 +21641,10 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
         return _format_model_call_error(
             ModelCallError("configuration", "model_fanout needs a prompt.")
         )
+    if len(question) > fanout_store.MAX_PROMPT_CHARS:
+        return _format_model_call_error(ModelCallError(
+            "configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS
+        ))
     try:
         cap = max(32, min(int(num_predict), 4096))
         request_timeout = max(5, min(int(timeout), 300))
@@ -21641,6 +21659,62 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
         receipt = _execute_fanout_run(run["id"])
     except ModelCallError as exc:
         return _format_model_call_error(exc)
+    if receipt is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+    return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout_status(run_id: str, token: str = "") -> str:
+    """Return the durable receipt for a model fanout run.
+
+    On an authenticated multi-user deployment this is developer-only, because
+    receipts may contain another caller's model answers.  Local-open use keeps
+    the full local toolset.
+    """
+    started = time.time()
+    refusal = _developer_gate("model_fanout_status", token, started)
+    if refusal:
+        return refusal
+    receipt = _fanout_receipt(run_id)
+    if receipt is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+    return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout_cancel(run_id: str, token: str = "") -> str:
+    """Cancel a durable model fanout; late provider results are discarded."""
+    started = time.time()
+    refusal = _developer_gate("model_fanout_cancel", token, started)
+    if refusal:
+        return refusal
+    if fanout_store.request_cancel(run_id) is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+    receipt = _fanout_receipt(run_id)
+    if receipt is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+    return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout_resume(run_id: str, include_failed: bool = False,
+                        retry_unknown: bool = False, token: str = "") -> str:
+    """Explicitly resume selected durable fanout results.
+
+    Unknown results are never retried unless ``retry_unknown`` is true, which
+    prevents accidental replays of metered cloud calls after an interruption.
+    """
+    started = time.time()
+    refusal = _developer_gate("model_fanout_resume", token, started)
+    if refusal:
+        return refusal
+    run = fanout_store.resume_run(run_id, include_failed=bool(include_failed), retry_unknown=bool(retry_unknown))
+    if run is None:
+        return _format_model_call_error(ModelCallError(
+            "configuration", "fanout run is not resumable with the selected retry options"
+        ))
+    receipt = _execute_fanout_run(run["id"])
     if receipt is None:
         return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)

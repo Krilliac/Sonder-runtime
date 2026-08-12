@@ -42,6 +42,27 @@ def test_sealed_execution_prompt_is_not_exposed_by_receipt_readers():
     assert store.execution_prompt_ciphertext(run["id"]) == "ciphertext"
 
 
+def test_schema_migration_scrubs_pre_vault_prompt_and_digest(isolated):
+    run = store.create_run("private legacy prompt", ["local"])
+    conn = sqlite3.connect(isolated)
+    conn.execute("UPDATE fanout_runs SET prompt=?, prompt_sha256=?, execution_prompt_ciphertext='' WHERE id=?",
+                 ("private legacy prompt", "guessable-digest", run["id"]))
+    conn.commit(); conn.close()
+    store.reset_schema_cache_for_tests()
+
+    migrated = store.get_run(run["id"])
+    assert migrated["prompt"] == "legacy-fanout-prompt:redacted"
+    conn = sqlite3.connect(isolated)
+    raw = conn.execute("SELECT prompt, prompt_sha256 FROM fanout_runs WHERE id=?", (run["id"],)).fetchone()
+    conn.close()
+    assert raw == ("legacy-fanout-prompt:redacted", "")
+
+
+def test_execution_ciphertext_is_bounded_without_truncation():
+    with pytest.raises(ValueError, match="sealed prompt exceeds"):
+        store.create_run("question", ["local"], execution_prompt_ciphertext="x" * 64_001)
+
+
 def test_cancel_skips_pending_and_discards_late_answer():
     run = store.create_run("question", ["a", "b"])
     store.claim_run(run["id"], "worker", owner_pid=os.getpid())
@@ -95,6 +116,16 @@ def test_lease_transfer_marks_old_inflight_result_unknown(monkeypatch):
     assert store.claim_run(run["id"], "new", owner_pid=os.getpid())
     assert store.list_results(run["id"])[0]["status"] == "unknown"
     assert store.record_result(run["id"], "a", "old", "answered", answer="late") is None
+
+
+def test_request_timeout_lease_has_completion_margin(monkeypatch):
+    now = [1_000.0]
+    monkeypatch.setattr(store.time, "time", lambda: now[0])
+    run = store.create_run("question", ["a"])
+    assert store.claim_run(run["id"], "worker", owner_pid=os.getpid(), lease_seconds=360)
+    claim = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid(), lease_seconds=360)
+    now[0] += 301  # A 300-second request still has time to commit its receipt.
+    assert store.record_result(run["id"], claim["model"], "worker", "answered", answer="done")
 
 
 def test_redactor_covers_quoted_json_and_spaced_credentials():
