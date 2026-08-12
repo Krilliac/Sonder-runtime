@@ -2348,7 +2348,12 @@ class Handler(BaseHTTPRequestHandler):
                             prompt, messages=messages, state=state
                         )
                     if reply is None and natural_model and natural_model["kind"] == "fanout":
-                        reply = server.model_fanout(
+                        # Developer authority was established above from this
+                        # request's HTTP auth context.  Do not call the public
+                        # MCP wrapper: it intentionally has no knowledge of
+                        # HTTP principals and would reject an API-key owner or
+                        # developer account a second time.
+                        reply = server._model_fanout_authorized(
                             natural_model["prompt"], scope=natural_model["scope"],
                         )
                     if reply is None:
