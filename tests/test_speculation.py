@@ -117,6 +117,24 @@ def test_mispredict_squashes(predictor):
     assert predictor.stats()["squashes"] == 1
 
 
+def test_squashed_read_is_reused_if_the_model_selects_it_next_turn(predictor):
+    calls = []
+
+    def dispatch(tool, args):
+        calls.append((tool, args["path"]))
+        return "contents", True
+
+    engine = _engine(predictor, dispatch)
+    assert engine.begin("file_read", "gamma", {"path": "gamma.md"})
+    # The model takes another branch this turn, so gamma is squashed but its
+    # completed read remains eligible for exact later retirement.
+    assert engine.resolve("beta") is None
+    assert engine.begin("file_read", "gamma", {"path": "gamma.md"}) is False
+    result = engine.resolve("gamma")
+    assert result is not None and result.observation == "contents"
+    assert calls == [("file_read", "gamma.md")]
+
+
 def test_mutation_never_speculated(predictor):
     def dispatch(tool, args):
         raise AssertionError("mutation must never be dispatched speculatively")
