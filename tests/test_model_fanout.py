@@ -357,6 +357,9 @@ def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch)
     assert error is None
     assert plan["selected"] == ["chat", "chat-unknown"]
     assert {row["model"] for row in plan["skipped"]} == {"embed", "vision", "cooled"}
+    cooled = next(row for row in plan["skipped"] if row["model"] == "cooled")
+    assert cooled["reason"] == "health cooldown active"
+    assert cooled["retry_after_ms"] > 0
     override, _ = server._fanout_plan("local", include_unhealthy=True)
     assert "cooled" in override["selected"]
 

@@ -21492,7 +21492,14 @@ def _fanout_plan(scope, *, include_unhealthy=False):
         health = fanout_store.get_model_health(name)
         disabled_until = health.get("disabled_until") if health else None
         if disabled_until and float(disabled_until) > now and not include_unhealthy:
-            skipped.append({"model": name, "reason": "health cooldown active"})
+            # Keep the actionable timing on a normal receipt, where the caller
+            # already sees the selected/skipped model list. The no-eligible-
+            # models error deliberately aggregates only the reason counts.
+            skipped.append({
+                "model": name,
+                "reason": "health cooldown active",
+                "retry_after_ms": max(1, int((float(disabled_until) - now) * 1000)),
+            })
             continue
         selected.append(name)
     if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not cloud_allowed():
