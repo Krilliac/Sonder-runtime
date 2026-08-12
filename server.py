@@ -21,6 +21,7 @@ Tiers (escalation ladder, cheapest first):
 import collections
 import contextlib
 import datetime
+import difflib
 import email.utils
 import hashlib
 import hmac
@@ -21603,12 +21604,47 @@ def _fanout_safe_error(exc, prompt):
 
 
 def _fanout_redact_prompt_echo(value, prompt):
-    """Remove a verbatim request echo before a durable receipt is written."""
+    """Remove verbatim request material before a durable receipt is written.
+
+    Models frequently preface an answer by quoting only part of their input,
+    rather than echoing the whole prompt.  The receipt is durable, so a
+    full-string replacement alone would turn that small presentation choice
+    into persistent disclosure.  Redact long shared spans, plus shorter spans
+    that look like a credential or are explicitly labeled as one; ordinary
+    shared wording such as a project name must remain readable.
+    """
     rendered = str(value or "")
     question = str(prompt or "")
-    if question:
-        rendered = rendered.replace(question, "<redacted prompt>")
-    return rendered
+    if not question or not rendered:
+        return rendered
+    spans = []
+    matcher = difflib.SequenceMatcher(None, question, rendered, autojunk=False)
+    for source_start, response_start, size in matcher.get_matching_blocks():
+        fragment = question[source_start:source_start + size]
+        labeled_secret = re.search(
+            r"(?:api[ _-]?key|token|secret|password|bearer|authorization)",
+            fragment, re.IGNORECASE,
+        )
+        compact_credential = re.search(r"(?=.*\d)[A-Za-z0-9_./:+-]{8,}", fragment)
+        if size >= 24 or (size >= 8 and (labeled_secret or compact_credential)):
+            spans.append((response_start, response_start + size))
+    if not spans:
+        return rendered
+    # SequenceMatcher reports non-overlapping blocks, but merge defensively so
+    # this stays correct if its implementation or our thresholds change.
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    parts, cursor = [], 0
+    for start, end in merged:
+        parts.append(rendered[cursor:start])
+        parts.append("<redacted prompt>")
+        cursor = end
+    parts.append(rendered[cursor:])
+    return "".join(parts)
 
 
 def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers,
