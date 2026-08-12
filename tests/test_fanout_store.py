@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import fanout_store as store
+import server
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +209,24 @@ def test_request_timeout_lease_has_completion_margin(monkeypatch):
     claim = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid(), lease_seconds=360)
     now[0] += 301  # A 300-second request still has time to commit its receipt.
     assert store.record_result(run["id"], claim["model"], "worker", "answered", answer="done")
+
+
+def test_process_instance_token_fences_identical_pid_thread_workers(monkeypatch):
+    """Cross-host workers can share numeric PID/thread values but not identity."""
+    monkeypatch.setattr(server.os, "getpid", lambda: 417)
+    monkeypatch.setattr(server.threading, "get_ident", lambda: 9)
+    monkeypatch.setattr(server, "_FANOUT_WORKER_INSTANCE", "host-a-instance")
+    worker_a = server._fanout_worker_id()
+    monkeypatch.setattr(server, "_FANOUT_WORKER_INSTANCE", "host-b-instance")
+    worker_b = server._fanout_worker_id()
+    assert worker_a != worker_b
+
+    run = store.create_run("question", ["a", "b"])
+    assert store.claim_run(run["id"], worker_a, owner_pid=417, lease_seconds=60)
+    assert store.claim_run(run["id"], worker_b, owner_pid=417, lease_seconds=60) is None
+    claimed = store.claim_next_result(run["id"], worker_a, owner_pid=417, lease_seconds=60)
+    assert claimed is not None
+    assert store.record_result(run["id"], claimed["model"], worker_b, "answered", answer="spoofed") is None
 
 
 def test_redactor_covers_quoted_json_and_spaced_credentials():
