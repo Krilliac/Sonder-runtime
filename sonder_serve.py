@@ -1505,6 +1505,16 @@ def _request_model_selector(model):
     if selected is not None:
         return selected
     raw = str(model or "").strip()
+    # OpenAI-compatible clients often use gpt-* model identifiers.  Preserve
+    # their default fallback *unless* that exact identifier is actually in the
+    # live Ollama catalog (for example gpt-oss:20b).
+    if raw:
+        try:
+            discovered = server.resolve_discovered_model(raw)
+        except Exception:
+            discovered = None
+        if discovered:
+            return discovered
     if not raw or raw in ("sonder", "local") or raw.startswith("gpt-"):
         return None
     return raw
@@ -2208,6 +2218,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         prompt = _last_user_message(messages)
+        # Normalize an explicitly recognized whole-turn model request before
+        # policy checks.  Otherwise ``use model x: /run ...`` could evade the
+        # initial slash-command gate and execute after the rewrite below.
+        natural_model = server.natural_model_request(prompt)
+        if natural_model and natural_model["kind"] == "model":
+            prompt = natural_model["prompt"]
         if _dangerous_http_slash(prompt) and not _developer_authorized(context):
             self._send_json_payload(
                 {
@@ -2230,7 +2246,6 @@ class Handler(BaseHTTPRequestHandler):
 
         stream = bool(req.get("stream", False))
         model = req.get("model", "sonder")
-        natural_model = server.natural_model_request(prompt)
         if natural_model and natural_model["kind"] == "fanout":
             # A whole-catalog request spends several model calls.  Local-open
             # keeps its single-user/full-tool behavior; shared deployments
@@ -2243,7 +2258,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
         if natural_model and natural_model["kind"] == "model":
             model = natural_model["model"]
-            prompt = natural_model["prompt"]
         model_selector = _request_model_selector(model)
         # Speculatively load the target model now, overlapping its cold-load
         # cost with the history assembly, scope resolution, and memory work

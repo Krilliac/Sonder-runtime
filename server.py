@@ -21248,7 +21248,10 @@ def natural_model_request(text):
         scope = (fanout.group(1) or "all").lower()
         return {"kind": "fanout", "scope": scope, "prompt": fanout.group(2).strip()}
     single = re.match(
-        r"^(?:use|run|ask)\s+model\s+([^:\n]+)\s*:\s*(.+)$",
+        # A model tag commonly contains a colon (for example ``phi4:latest``).
+        # Requiring whitespace after the prompt separator makes the final
+        # ``: `` unambiguous without turning ordinary prose into a request.
+        r"^(?:use|run|ask)\s+model\s+(.+?)\s*:\s+(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if single:
@@ -21330,8 +21333,17 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
     local = [name for name in targets if not _is_cloud_model_name(name)]
     cloud = [name for name in targets if _is_cloud_model_name(name)]
     for name in local:
-        row = call(name)
-        (answers if "answer" in row else failures).append(row)
+        try:
+            row = call(name)
+            (answers if "answer" in row else failures).append(row)
+        finally:
+            # A whole-catalog run must not strand each local model in VRAM.
+            # This is deliberately best-effort: a completed answer remains a
+            # completed answer even if Ollama rejects the unload request.
+            try:
+                _post("/api/generate", {"model": name, "keep_alive": 0}, timeout=30)
+            except Exception:
+                pass
     if cloud:
         with ThreadPoolExecutor(max_workers=cloud_workers) as pool:
             for row in (future.result() for future in as_completed([pool.submit(call, name) for name in cloud])):
