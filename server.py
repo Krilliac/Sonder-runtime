@@ -14471,6 +14471,7 @@ def tool_manifest() -> str:
         "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary. task_depend manages blocking relationships.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
+        "tool_manifest/tool_capability_manifest/access_request_preview": "Inspect the human-readable MCP tool catalog, fingerprint the live registered capability schemas, or preview a non-authorizing scoped filesystem access request.",
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
         "permission_policy/permission_rule_set": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- or guarded-edit a rule.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
