@@ -21398,7 +21398,7 @@ def natural_model_request(text):
         # Keep this an imperative whole-turn grammar: it is deliberately not
         # a classifier over retrieved prose.  ``available`` describes the
         # catalog while local/cloud selects its bounded scope.
-        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:available\s+)?(?:(local|cloud)\s+)?models\s*(?::|to answer:?|answer:?|to)\s*(.+)$",
+        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:available\s+)?(?:(local|cloud)\s+)?models?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b)\s*(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if fanout:
