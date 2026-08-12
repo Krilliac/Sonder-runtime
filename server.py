@@ -18802,6 +18802,10 @@ def _agent_turn(
     successful_inspection_results = {}
     repeated_inspection_counts = {}
     failed_call_counts = {}
+    # A later unrelated success must not turn a failed required/evidence call
+    # into a host-approved completion.  Keep only the tool name and a bounded
+    # diagnostic; a successful retry of that same tool is explicit recovery.
+    completion_blocking_failures = {}
     # Paths this run itself created via file_write mode=create. Re-creating one
     # of them is unambiguous intent to replace the run's own file, so the host
     # promotes the retry to mode=overwrite deterministically instead of letting
@@ -18930,6 +18934,19 @@ def _agent_turn(
     def finish_final(final):
         _teardown_speculation()
         final = str(final or "")
+        if completion_blocking_failures:
+            failures = "; ".join(
+                "%s: %s" % (name, detail[:240])
+                for name, detail in sorted(completion_blocking_failures.items())
+            )
+            evidence_failure = any(
+                name in _AGENT_FILE_EVIDENCE_TOOLS
+                for name in completion_blocking_failures
+            )
+            prefix = "EVIDENCE_REQUIRED" if evidence_failure else "ERROR"
+            return "%s: required host evidence did not recover (%s)." % (
+                prefix, failures,
+            )
         validated = _work_validated()
         if auto_checklist:
             _agent_checklist_mark(
@@ -19197,6 +19214,16 @@ def _agent_turn(
             )
         if "final" in decision:
             final = str(decision.get("final") or "")
+            if completion_blocking_failures:
+                if step < max_steps:
+                    observations.append(
+                        "HOST REQUIREMENT: retry and successfully complete the failed "
+                        "evidence tool(s): %s. An unrelated successful tool does not "
+                        "recover this failure."
+                        % ", ".join(sorted(completion_blocking_failures))
+                    )
+                    continue
+                return finish_final(final)
             if required_tools and not (required_tools & used_tool_names):
                 if step < max_steps:
                     observations.append(
@@ -19479,6 +19506,7 @@ def _agent_turn(
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
+            completion_blocking_failures.pop(tool_name, None)
             if tool_name == "file_write":
                 run_created_paths.add(
                     _agent_created_path_key(policy_tool_args.get("path"))
@@ -19503,6 +19531,17 @@ def _agent_turn(
                 )
         else:
             failed_call_counts[call_signature] = prior_identical_failures + 1
+            # Multiple required tools are intentionally alternatives.  A
+            # singleton is a hard caller contract; evidence-required review
+            # likewise needs a successful evidence tool of the failed kind.
+            if (
+                tool_dispatched and (
+                    (len(required_tools) == 1 and tool_name in required_tools)
+                    or (read_only and require_file_evidence
+                        and tool_name in _AGENT_FILE_EVIDENCE_TOOLS)
+                )
+            ):
+                completion_blocking_failures[tool_name] = observation_text[:600]
             recovery = (
                 "HOST RECOVERY: do not repeat this exact failed call unchanged. "
                 "Inspect the error and change the target, arguments, or tool."
