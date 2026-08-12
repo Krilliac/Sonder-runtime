@@ -424,10 +424,14 @@ def _catalog_rows():
 _DISCOVERY_STOP_WORDS = frozenset({
     "a", "an", "and", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
 })
+_DISCOVERY_EQUIVALENCE_GROUPS = (
+    frozenset({"task", "todo", "checklist", "plan"}),
+    frozenset({"status", "state", "show", "list", "inspect"}),
+)
 _DISCOVERY_EQUIVALENTS = {
-    "task": frozenset({"task", "todo", "checklist", "plan"}),
-    "checklist": frozenset({"task", "todo", "checklist", "plan"}),
-    "status": frozenset({"status", "state", "show", "list", "inspect"}),
+    word: group
+    for group in _DISCOVERY_EQUIVALENCE_GROUPS
+    for word in group
 }
 
 
