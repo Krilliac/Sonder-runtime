@@ -204,8 +204,10 @@ def _record_builds(monkeypatch):
     built = []
     real_build = server._build_system
 
-    def recording_build(system, trace, persona):
-        out = real_build(system, trace, persona)
+    def recording_build(system, trace, persona, **kwargs):
+        # Preserve the production signature: model identity is request-scoped
+        # metadata in addition to the pinned standing-instruction context.
+        out = real_build(system, trace, persona, **kwargs)
         built.append(out)
         return out
 
