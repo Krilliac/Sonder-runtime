@@ -245,7 +245,7 @@ def test_chat_rejects_invalid_messages_with_structured_400(
     request = json.dumps({"model": "sonder", "messages": messages}).encode("utf-8")
 
     with _http_server(monkeypatch) as port:
-        status, _, body = _request(
+        status, headers, body = _request(
             port,
             "POST",
             "/v1/chat/completions",
@@ -257,6 +257,7 @@ def test_chat_rejects_invalid_messages_with_structured_400(
     assert status == 400
     assert payload["error"]["type"] == "invalid_request"
     assert message in payload["error"]["message"]
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
 def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
