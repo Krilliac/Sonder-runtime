@@ -1,6 +1,9 @@
 import os
 import sqlite3
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -118,6 +121,29 @@ def test_health_migration_starts_availability_counter_at_zero(tmp_path, monkeypa
 
     assert health["failure_count"] == 9
     assert health["availability_failure_count"] == 0
+
+
+def test_schema_migration_is_safe_across_two_processes(tmp_path):
+    database = tmp_path / "legacy-fanout.db"
+    conn = sqlite3.connect(database)
+    conn.execute("CREATE TABLE model_health (model TEXT PRIMARY KEY, model_class TEXT NOT NULL DEFAULT '', failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', disabled_until REAL, last_success_ts REAL, updated_ts REAL NOT NULL)")
+    conn.commit(); conn.close()
+    env = os.environ.copy()
+    env["SONDER_FANOUT_DB"] = str(database)
+    root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
+    script = (
+        "import fanout_store as s; "
+        "conn=s._connect(); "
+        "assert 'availability_failure_count' in "
+        "{row['name'] for row in conn.execute('PRAGMA table_info(model_health)')}; "
+        "conn.close()"
+    )
+    first = subprocess.Popen([sys.executable, "-c", script], cwd=root, env=env)
+    second = subprocess.Popen([sys.executable, "-c", script], cwd=root, env=env)
+
+    assert first.wait(timeout=15) == 0
+    assert second.wait(timeout=15) == 0
 
 
 def test_resume_requires_explicit_unknown_retry():

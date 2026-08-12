@@ -116,6 +116,10 @@ def _ensure_schema(path: str) -> None:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.executescript(_SCHEMA)
+            # The process-local lock above is not enough for two live runtime
+            # processes upgrading the same durable fanout.db. Take SQLite's
+            # cross-process write lock before every probe-and-ALTER sequence.
+            conn.execute("BEGIN IMMEDIATE")
             # Existing receipt databases predate the sealed execution payload.
             # Migration is additive and the ciphertext is never exposed by the
             # public receipt readers below.
@@ -144,6 +148,9 @@ def _ensure_schema(path: str) -> None:
                 "AND prompt NOT LIKE 'legacy-fanout-prompt:%'"
             )
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
         if os.name != "nt":
