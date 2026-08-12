@@ -21387,11 +21387,18 @@ def _fanout_worker_id():
 def _fanout_safe_error(exc, prompt):
     """Render a useful failure without allowing an echoed prompt into a receipt."""
     if isinstance(exc, ModelCallError):
-        rendered = _format_model_call_error(exc)
+        # Provider-controlled details may contain only a *partial* request
+        # excerpt, which cannot be safely removed with exact replacement.
+        # Keep stable diagnostic class/status metadata, but never persist that
+        # untrusted body in a durable receipt or event.
+        rendered = "ERROR: fanout model failure (%s%s)" % (
+            exc.kind,
+            " HTTP %s" % exc.status if exc.status is not None else "",
+        )
     else:
         rendered = "ERROR: model request failed (%s)" % type(exc).__name__
-    # Providers occasionally include a request excerpt in an error body.  The
-    # durable receipt must not turn that into a second plaintext prompt store.
+    # This also protects local exception messages that happen to echo the full
+    # request.  Provider excerpts were excluded above rather than redacted.
     return _fanout_redact_prompt_echo(rendered, prompt)[:4000]
 
 

@@ -77,7 +77,7 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert receipt["resident_before"] == ["local-a"]
     assert receipt["total_elapsed_ms"] >= 0
     assert receipt["answers"][0]["answer"] == "answer from local-a"
-    assert "timed out" in receipt["failures"][0]["error"]
+    assert "timeout" in receipt["failures"][0]["error"]
     assert unloads == []
 
 
@@ -211,6 +211,16 @@ def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
 
     assert recorded[0][1]["disabled_until"] is not None
     assert "private prompt" not in recorded[0][1]["error"]
+
+
+def test_fanout_error_never_persists_a_partial_provider_prompt_excerpt():
+    prompt = "private request with distinctive ending 78421"
+    error = server.ModelCallError("http", "provider saw: private request", status=400, cloud=True)
+
+    rendered = server._fanout_safe_error(error, prompt)
+
+    assert "private request" not in rendered
+    assert "HTTP 400" in rendered
 
 
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
