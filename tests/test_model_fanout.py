@@ -1,7 +1,18 @@
 import json
+import sqlite3
 
 import server
 import sonder_serve
+
+
+def _isolated_durable_fanout(monkeypatch, tmp_path):
+    database = tmp_path / "fanout.db"
+    key = tmp_path / "fanout.key"
+    monkeypatch.setattr(server.fanout_store, "database_path", lambda: str(database))
+    monkeypatch.setenv("SONDER_FANOUT_KEY_FILE", str(key))
+    server.fanout_store.reset_schema_cache_for_tests()
+    server.fanout_prompt_vault.reset_cache_for_tests()
+    return database
 
 
 def test_direct_discovered_model_is_a_safe_serve_target(monkeypatch):
@@ -82,6 +93,29 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
 
     assert receipt["models_answered"] == 1
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
+
+
+def test_model_fanout_persists_a_sealed_prompt_and_durable_receipt(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    secret_prompt = "private fanout prompt: do-not-store-me"
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout(secret_prompt, scope="local"))
+
+    assert receipt["run_id"].startswith("fan-")
+    assert receipt["status"] == "completed"
+    assert receipt["models_answered"] == 1
+    assert secret_prompt not in json.dumps(receipt)
+    with sqlite3.connect(database) as conn:
+        stored = "\n".join(str(value) for row in conn.execute(
+            "SELECT prompt, execution_prompt_ciphertext FROM fanout_runs"
+        ) for value in row)
+    assert secret_prompt not in stored
+    assert "sealed-fanout-prompt:" in stored
 
 
 def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch):
