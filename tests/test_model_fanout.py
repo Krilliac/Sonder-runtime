@@ -177,6 +177,21 @@ def test_model_fanout_lifecycle_is_gated_for_shared_deployments(monkeypatch):
     assert reply.startswith("refused:")
 
 
+def test_model_fanout_and_natural_wrapper_are_gated_for_shared_deployments(monkeypatch):
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: None)
+    monkeypatch.setattr(
+        server, "_get",
+        lambda _path: (_ for _ in ()).throw(AssertionError("discovery must not run")),
+    )
+
+    direct = server.model_fanout("private question")
+    natural = server.sonder("ask all local models: private question", session="none")
+
+    assert direct.startswith("refused:")
+    assert natural.startswith("refused:")
+
+
 def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda _path: {"models": [
         {"name": "chat-unknown"},
