@@ -21423,11 +21423,13 @@ def natural_model_request(text):
         # Keep this an imperative whole-turn grammar: it is deliberately not
         # a classifier over retrieved prose.  ``available`` describes the
         # catalog while local/cloud selects its bounded scope.
-        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:(?:currently\s+)?available\s+)?(?:(local|cloud)\s+)?models?(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b)\s*(.+)$",
+        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:(?:currently\s+)?available\s+)?(?:(local|cloud|local\s+(?:and|\+)\s+cloud|cloud\s+(?:and|\+)\s+local)\s+)?models?(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b)\s*(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if fanout:
         scope = (fanout.group(1) or "all").lower()
+        if "local" in scope and "cloud" in scope:
+            scope = "all"
         return {"kind": "fanout", "scope": scope, "prompt": fanout.group(2).strip()}
     single = re.match(
         # A model tag commonly contains a colon (for example ``phi4:latest``).
