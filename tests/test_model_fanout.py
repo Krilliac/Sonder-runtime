@@ -1,7 +1,18 @@
 import json
+import sqlite3
 
 import server
 import sonder_serve
+
+
+def _isolated_durable_fanout(monkeypatch, tmp_path):
+    database = tmp_path / "fanout.db"
+    key = tmp_path / "fanout.key"
+    monkeypatch.setattr(server.fanout_store, "database_path", lambda: str(database))
+    monkeypatch.setenv("SONDER_FANOUT_KEY_FILE", str(key))
+    server.fanout_store.reset_schema_cache_for_tests()
+    server.fanout_prompt_vault.reset_cache_for_tests()
+    return database
 
 
 def test_direct_discovered_model_is_a_safe_serve_target(monkeypatch):
@@ -66,7 +77,7 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert receipt["resident_before"] == ["local-a"]
     assert receipt["total_elapsed_ms"] >= 0
     assert receipt["answers"][0]["answer"] == "answer from local-a"
-    assert "timed out" in receipt["failures"][0]["error"]
+    assert "timeout" in receipt["failures"][0]["error"]
     assert unloads == []
 
 
@@ -82,6 +93,169 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
 
     assert receipt["models_answered"] == 1
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
+
+
+def test_model_fanout_persists_a_sealed_prompt_and_durable_receipt(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    secret_prompt = "private fanout prompt: do-not-store-me"
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout(secret_prompt, scope="local"))
+
+    assert receipt["run_id"].startswith("fan-")
+    assert receipt["status"] == "completed"
+    assert receipt["models_answered"] == 1
+    assert secret_prompt not in json.dumps(receipt)
+    with sqlite3.connect(database) as conn:
+        stored = "\n".join(str(value) for row in conn.execute(
+            "SELECT prompt, execution_prompt_ciphertext FROM fanout_runs"
+        ) for value in row)
+    assert secret_prompt not in stored
+    assert "sealed-fanout-prompt:" in stored
+
+
+def test_model_fanout_never_persists_a_model_echo_of_the_prompt(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    secret_prompt = "private fanout prompt: echo-must-not-persist"
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda prompt: "echo: " + prompt)
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout(secret_prompt, scope="local"))
+
+    assert secret_prompt not in json.dumps(receipt)
+    assert "<redacted prompt>" in receipt["answers"][0]["answer"]
+    with sqlite3.connect(database) as conn:
+        stored = "\n".join(str(value) for row in conn.execute(
+            "SELECT prompt, execution_prompt_ciphertext FROM fanout_runs"
+        ) for value in row)
+        stored += "\n".join(str(value) for row in conn.execute(
+            "SELECT answer, error FROM fanout_results"
+        ) for value in row)
+    assert secret_prompt not in stored
+
+
+def test_model_fanout_rejects_oversized_prompt_before_vault(monkeypatch):
+    monkeypatch.setattr(
+        server.fanout_prompt_vault, "encrypt_prompt",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("vault should not run")),
+    )
+
+    reply = server.model_fanout("x" * (server.fanout_store.MAX_PROMPT_CHARS + 1))
+
+    assert "prompt exceeds" in reply
+
+
+def test_model_fanout_lifecycle_tools_work_in_local_open_mode(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+    status = json.loads(server.model_fanout_status(receipt["run_id"]))
+    cancelled = json.loads(server.model_fanout_cancel(receipt["run_id"]))
+
+    assert status["run_id"] == receipt["run_id"]
+    assert cancelled["status"] == "completed"
+
+
+def test_model_fanout_lifecycle_is_gated_for_shared_deployments(monkeypatch):
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: None)
+
+    reply = server.model_fanout_status("fan-not-owned")
+
+    assert reply.startswith("refused:")
+
+
+def test_model_fanout_and_natural_wrapper_are_gated_for_shared_deployments(monkeypatch):
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: None)
+    monkeypatch.setattr(
+        server, "_get",
+        lambda _path: (_ for _ in ()).throw(AssertionError("discovery must not run")),
+    )
+
+    direct = server.model_fanout("private question")
+    natural = server.sonder("ask all local models: private question", session="none")
+
+    assert direct.startswith("refused:")
+    assert natural.startswith("refused:")
+
+
+def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch):
+    monkeypatch.setattr(server, "_get", lambda _path: {"models": [
+        {"name": "chat-unknown"},
+        {"name": "embed", "capabilities": ["embedding"]},
+        {"name": "vision", "capabilities": ["vision"]},
+        {"name": "chat", "capabilities": ["chat", "vision"]},
+        {"name": "cooled", "capabilities": ["completion"]},
+    ]})
+    monkeypatch.setattr(
+        server.fanout_store, "get_model_health",
+        lambda name: {"disabled_until": 9_999_999_999} if name == "cooled" else None,
+    )
+
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan["selected"] == ["chat", "chat-unknown"]
+    assert {row["model"] for row in plan["skipped"]} == {"embed", "vision", "cooled"}
+    override, _ = server._fanout_plan("local", include_unhealthy=True)
+    assert "cooled" in override["selected"]
+
+
+def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "retired:cloud",
+        server.ModelCallError("http", "retired", status=410, cloud=True),
+        "private prompt",
+    )
+
+    assert recorded[0][1]["disabled_until"] is not None
+    assert "private prompt" not in recorded[0][1]["error"]
+
+
+def test_fanout_error_never_persists_a_partial_provider_prompt_excerpt():
+    prompt = "private request with distinctive ending 78421"
+    error = server.ModelCallError("http", "provider saw: private request", status=400, cloud=True)
+
+    rendered = server._fanout_safe_error(error, prompt)
+
+    assert "private request" not in rendered
+    assert "HTTP 400" in rendered
+
+
+def test_fanout_execution_rejects_a_model_outside_its_snapshot(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    calls = []
+    monkeypatch.setattr(server, "_make_generate", lambda model, *_args, **_kwargs: (
+        lambda _prompt: calls.append(model) or "answer"
+    ))
+    run = server._fanout_start("private prompt", "local", cap=32, request_timeout=5, cloud_workers=1)
+    with server.fanout_store._write_transaction() as conn:
+        conn.execute("INSERT INTO fanout_results(run_id,model,status,updated_ts) VALUES(?,?,'pending',0)",
+                     (run["id"], "injected:cloud"))
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert calls == ["local-a"]
+    assert any(row["model"] == "injected:cloud" for row in receipt["skipped"])
 
 
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():

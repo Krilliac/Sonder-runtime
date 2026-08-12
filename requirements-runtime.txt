@@ -2,3 +2,4 @@
 # MCP 2.x removed mcp.server.fastmcp, so keep the breaking major out until the
 # runtime is deliberately migrated and tested against its replacement API.
 mcp>=1.28.1,<2
+cryptography>=42,<46
