@@ -324,7 +324,7 @@ def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     calls = []
     monkeypatch.setattr(
         ts.server, "_model_fanout_authorized",
-        lambda prompt, scope: calls.append((prompt, scope)) or '{"models_answered": 1}',
+        lambda prompt, scope, **_kwargs: calls.append((prompt, scope)) or '{"models_answered": 1}',
     )
     request = json.dumps({
         "model": "sonder",
@@ -340,6 +340,56 @@ def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     assert status == 200
     assert calls == [("summarize this", "local")]
     assert json.loads(body)["choices"][0]["message"]["content"].startswith('{"models_answered": 1}')
+
+
+def test_http_fanout_lifecycle_is_owner_scoped(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(
+        ts, "_auth_account",
+        lambda header: {"username": "dev-a" if "a-token" in header else "dev-b", "role": "developer"},
+    )
+    run = {"id": "fan-owned", "request_owner": "account:dev-a"}
+    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: run)
+    monkeypatch.setattr(ts.server, "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "completed"})
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "GET", "/v1/fanout/fan-owned",
+            headers={"Authorization": "Bearer a-token"},
+        )
+        denied, _, denied_body = _request(
+            port, "GET", "/v1/fanout/fan-owned",
+            headers={"Authorization": "Bearer b-token"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["run_id"] == "fan-owned"
+    assert denied == 404
+    assert json.loads(denied_body)["error"]["type"] == "not_found"
+
+
+def test_http_fanout_cancel_requires_developer_and_uses_owned_run(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts, "_auth_account", lambda _header: {"username": "dev", "role": "developer"})
+    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-owned", "request_owner": "account:dev"})
+    cancelled = []
+    monkeypatch.setattr(ts.server.fanout_store, "request_cancel", lambda run_id: cancelled.append(run_id) or {})
+    monkeypatch.setattr(ts.server, "_fanout_receipt", lambda run_id: {"run_id": run_id, "status": "cancelled"})
+    request = json.dumps({}).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/fanout/fan-owned/cancel", body=request,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer dev-token"},
+        )
+
+    assert status == 200
+    assert cancelled == ["fan-owned"]
+    assert json.loads(body)["status"] == "cancelled"
 
 
 def test_http_todo_command_preserves_task_text_contract(monkeypatch, tmp_path):
