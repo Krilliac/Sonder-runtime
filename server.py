@@ -21423,7 +21423,7 @@ def natural_model_request(text):
         # Keep this an imperative whole-turn grammar: it is deliberately not
         # a classifier over retrieved prose.  ``available`` describes the
         # catalog while local/cloud selects its bounded scope.
-        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:(?:currently\s+)?available\s+)?(?:(local|cloud|local\s+(?:and|\+)\s+cloud|cloud\s+(?:and|\+)\s+local)\s+)?models?(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b)\s*(.+)$",
+        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:(?:currently\s+)?available\s+)?(?:(local|cloud|local\s+(?:and|\+)\s+cloud|cloud\s+(?:and|\+)\s+local)\s+)?models?(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b)\s*(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if fanout:
@@ -21435,7 +21435,7 @@ def natural_model_request(text):
         # A model tag commonly contains a colon (for example ``phi4:latest``).
         # Requiring whitespace after the prompt separator makes the final
         # ``: `` unambiguous without turning ordinary prose into a request.
-        r"^(?:use|run|ask|try|query)\s+model\s+(.+?)\s*:\s+(.+)$",
+        r"^(?:use|run|ask|try|query)\s+model\s+([A-Za-z0-9][A-Za-z0-9._:/-]*)\s*:\s+(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if single:
@@ -21497,6 +21497,14 @@ def _fanout_plan(scope, *, include_unhealthy=False):
         return {"selected": [], "skipped": []}, ModelCallError("configuration", "scope must be local, cloud, or all")
     if scope == "available":
         scope = "all"
+    # Cloud-only fanout must fail before catalog discovery, prompt sealing, or
+    # receipt creation when the operator has not opted in. This avoids making
+    # a privacy policy depend on the currently visible model catalog.
+    if scope == "cloud" and not cloud_allowed():
+        return {"scope": scope, "selected": [], "skipped": []}, ModelCallError(
+            "configuration",
+            "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
+        )
     selected, skipped, now = [], [], time.time()
     for name, record in discovered_model_records():
         cloud = _is_cloud_model_name(name)
