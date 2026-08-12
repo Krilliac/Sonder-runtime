@@ -563,3 +563,7 @@ def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("run model phi4 to /run echo should-not-run", session="none")
 
     assert reply.startswith("ERROR: model selection cannot wrap a slash command")
+
+    reply = server.sonder("run using model phi4: /run echo should-not-run", session="none")
+
+    assert reply.startswith("ERROR: model selection cannot wrap a slash command")
