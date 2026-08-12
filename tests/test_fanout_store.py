@@ -34,6 +34,14 @@ def test_receipt_lifecycle_is_wal_foreign_key_and_bounded(isolated):
         active.close()
 
 
+def test_sealed_execution_prompt_is_not_exposed_by_receipt_readers():
+    run = store.create_run("private prompt", ["local"], execution_prompt_ciphertext="ciphertext")
+
+    assert "execution_prompt_ciphertext" not in store.get_run(run["id"])
+    assert "execution_prompt_ciphertext" not in store.list_runs()[0]
+    assert store.execution_prompt_ciphertext(run["id"]) == "ciphertext"
+
+
 def test_cancel_skips_pending_and_discards_late_answer():
     run = store.create_run("question", ["a", "b"])
     store.claim_run(run["id"], "worker", owner_pid=os.getpid())
