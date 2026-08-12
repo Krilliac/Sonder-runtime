@@ -195,6 +195,27 @@ def test_model_fanout_lifecycle_tools_work_in_local_open_mode(monkeypatch, tmp_p
     assert cancelled["status"] == "completed"
 
 
+@pytest.mark.parametrize(("name", "value"), [
+    ("include_failed", "false"),
+    ("retry_unknown", 1),
+])
+def test_model_fanout_resume_requires_literal_boolean_flags(
+    monkeypatch, name, value,
+):
+    """A truthy JSON-ish value must not replay metered model calls."""
+    calls = []
+    monkeypatch.setattr(
+        server.fanout_store, "resume_run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    kwargs = {name: value}
+    reply = server.model_fanout_resume("fan-test", **kwargs)
+
+    assert "%s must be a boolean" % name in reply
+    assert calls == []
+
+
 def test_model_fanout_lifecycle_is_gated_for_shared_deployments(monkeypatch):
     monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
     monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: None)
