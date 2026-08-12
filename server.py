@@ -21522,9 +21522,18 @@ def _fanout_models(scope):
 def _fanout_no_eligible_models_error(plan, scope):
     """Explain a zero-target plan without exposing model names or prompts."""
     counts = {}
+    earliest_retry = None
+    now = time.time()
     for row in plan.get("skipped", []):
         reason = str(row.get("reason") or "not eligible")[:160]
         counts[reason] = counts.get(reason, 0) + 1
+        if reason == "health cooldown active":
+            try:
+                remaining = float(row.get("retry_after_ts")) - now
+            except (TypeError, ValueError):
+                remaining = 0
+            if remaining > 0:
+                earliest_retry = remaining if earliest_retry is None else min(earliest_retry, remaining)
     label = str(plan.get("scope") or scope or "local")
     if not counts:
         return ModelCallError(
@@ -21534,6 +21543,9 @@ def _fanout_no_eligible_models_error(plan, scope):
         "%s (%d)" % (reason, count)
         for reason, count in sorted(counts.items())
     )
+    if earliest_retry is not None:
+        retry_seconds = max(1, int(math.ceil(earliest_retry)))
+        summary += "; earliest cooldown retry in about %ds" % retry_seconds
     return ModelCallError(
         "configuration",
         "no eligible %s models are currently available; skipped: %s." % (label, summary),

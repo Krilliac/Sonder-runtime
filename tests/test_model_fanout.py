@@ -371,7 +371,7 @@ def test_fanout_reports_why_no_eligible_models_can_start(monkeypatch):
     ]})
     monkeypatch.setattr(
         server.fanout_store, "get_model_health",
-        lambda name: {"disabled_until": 9_999_999_999} if name == "cooled" else None,
+        lambda name: {"disabled_until": server.time.time() + 90} if name == "cooled" else None,
     )
 
     with pytest.raises(server.ModelCallError) as error:
@@ -380,6 +380,7 @@ def test_fanout_reports_why_no_eligible_models_can_start(monkeypatch):
     assert "no eligible local models" in error.value.detail
     assert "health cooldown active (1)" in error.value.detail
     assert "embedding-only capability (1)" in error.value.detail
+    assert "earliest cooldown retry in about 90s" in error.value.detail
     assert "cooled" not in error.value.detail
     assert "private prompt" not in error.value.detail
 
