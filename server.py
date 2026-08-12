@@ -1455,17 +1455,11 @@ def _resolve_project(project):
     return p
 
 
-# The model resolved for the request currently being prepared. Set by
-# _resolve_model_and_system so the identity block can name the model that
-# is actually answering rather than offer a table of tiers to pick from.
-_ACTIVE_MODEL_HINT = ""
-
-
 def _join_system_parts(*parts):
     return "\n\n".join(p for p in parts if p)
 
 
-def _runtime_identity_block() -> str:
+def _runtime_identity_block(model: str, cloud: bool = False) -> str:
     """Authoritative facts about what is actually serving this request.
 
     Asked what model it was, the runtime answered from the weights -- and a
@@ -1481,36 +1475,48 @@ def _runtime_identity_block() -> str:
     prompt. The model facts were not, so answering became recall, and recall is
     the axis this model class is measured worst on.
 
-    Putting the facts in the prompt stops the question being recall. Built from
-    the live TIERS table rather than written into system_profile.md, because a
-    fact copied into a document is a second source of truth that drifts the
-    moment a tier is repointed. No network call: this runs on every request,
-    and an /api/show round trip per request would charge every caller for a
-    question few of them ask.
+    Putting the facts in the prompt stops the question being recall. No network
+    call: this runs on every request, and an /api/show round trip per request
+    would charge every caller for a question few of them ask.
+
+    `model` is passed in by the caller, which has already resolved it. It used
+    to arrive through a module global, `_ACTIVE_MODEL_HINT`, whose only writer
+    (`_resolve_model_and_system`) had zero callers anywhere in the tree -- so
+    the hint was always empty and every request fell through to `TIERS["code"]`.
+    A `fast`-tier router and a `code`-tier agent were both handed a block
+    asserting, as authoritative, that the code tier was serving them. The block
+    that exists to stop a model guessing its identity was itself the guess.
+    A global is also the wrong carrier here: two concurrent serve requests on
+    different tiers would race for it. The model is in scope at every call
+    site, so it is now a parameter.
+
+    With no model, this emits nothing. A wrong identity asserted as
+    authoritative is worse than no identity at all.
     """
     # Naming THIS request's model, not the tier table. The first version listed
     # all seven tiers and the model answered "my architecture is based on the
     # kimi-k2.7-code:cloud tier" while actually running on sonder:latest -- a
     # menu of names it had no way to choose between, so it picked one. A block
     # meant to remove a guess must not introduce a new thing to guess.
-    current = ""
     try:
-        current = str(_ACTIVE_MODEL_HINT or "")
+        current = str(model or "")
     except Exception:
-        current = ""
-    if not current:
-        try:
-            current = str(TIERS.get("code") or "")
-        except Exception:
-            return ""
+        return ""
     if not current:
         return ""
+    # Cloud tiers reach this too. Saying a hosted model runs "on this machine"
+    # would replace one confident falsehood with another.
+    where = (
+        "served by Ollama's hosted service, not on this machine"
+        if cloud else
+        "an open-weights model served by Ollama on this machine"
+    )
     return (
         "Facts about what is serving this request (authoritative -- use these, "
         "never your own recollection):\n"
-        "- The model answering right now is `%s`, an open-weights model served "
-        "by Ollama on this machine. You are NOT ChatGPT, GPT-4, Claude, or "
-        "Gemini, and you share no architecture or training run with them.\n"
+        "- The model answering right now is `%s`, %s. You are NOT ChatGPT, "
+        "GPT-4, Claude, or Gemini, and you share no architecture or training "
+        "run with them.\n"
         "- Sonder is the runtime around you (memory, tools, policy, grounding). "
         "Sonder is not a model and has no parameters of its own.\n"
         "- If asked about your architecture, parameter count, training data, "
@@ -1518,7 +1524,7 @@ def _runtime_identity_block() -> str:
         "block or in the conversation, say you do not know and point the caller "
         "at `ollama ps` or Sonder's diagnostics. Do NOT guess a number, and do "
         "not infer one from the model's name: a confident wrong figure is worse "
-        "than an admission." % current
+        "than an admission." % (current, where)
     )
 
 
@@ -1580,9 +1586,14 @@ def _stable_system_context():
         _SYSTEM_CONTEXT.parts = None
 
 
-def _build_system(system, trace, persona):
+def _build_system(system, trace, persona, model="", cloud=False):
     """Compose the effective system prompt from a base `system`, optional trace
-    instruction, optional persona, editable profile, and emotion vectors."""
+    instruction, optional persona, editable profile, and emotion vectors.
+
+    `model`/`cloud` describe the target the caller resolved for THIS request;
+    they are threaded to the runtime identity block. Callers that genuinely do
+    not know the target omit them, and the identity block is then left out
+    rather than guessing one."""
     effective_system = system
     if trace:
         effective_system = "%s\n\n%s" % (system, TRACE_SYSTEM) if system else TRACE_SYSTEM
@@ -1596,7 +1607,8 @@ def _build_system(system, trace, persona):
     parts = getattr(_SYSTEM_CONTEXT, "parts", None)
     profile, emotions, goal_block = parts or _read_system_context()
     return _join_system_parts(
-        _runtime_identity_block(), profile, emotions, goal_block, effective_system
+        _runtime_identity_block(model, cloud), profile, emotions, goal_block,
+        effective_system,
     )
 
 
@@ -1604,14 +1616,18 @@ def _resolve_model_and_system(system, trace, strict, persona):
     """Shared prep for the Sonder Runtime tool and HTTP serve layer.
 
     Returns (model, effective_system); model is None if the strict alias is missing.
+
+    NOTE: this helper currently has no callers -- the surfaces it was written
+    for resolve their own target through `_serve_target` and call
+    `_build_system` directly. It is kept only because it is the documented
+    shape of that prep; it no longer sets any process-wide state, so leaving it
+    uncalled cannot desynchronise anything.
     """
     strict_eff = _STRICT_DEFAULT if strict is None else strict
     model = resolve_sonder_model(strict_eff)
     if model is None:
         return None, None
-    global _ACTIVE_MODEL_HINT
-    _ACTIVE_MODEL_HINT = model or ""
-    return model, _build_system(system, trace, persona)
+    return model, _build_system(system, trace, persona, model=model, cloud=False)
 
 
 def _serve_target(tier, strict):
@@ -5096,7 +5112,8 @@ def _sonder_impl_serialized(
         return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
     internal_generate = _internal_generate_for_route(tgt_model, cloud)
-    effective_system = _build_system(system, trace, persona)
+    effective_system = _build_system(
+        system, trace, persona, model=tgt_model, cloud=cloud)
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
@@ -5341,7 +5358,7 @@ def _answer_with_history_impl(
     if model is None:
         return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
-    effective_system = _build_system("", trace, "")
+    effective_system = _build_system("", trace, "", model=model, cloud=cloud)
     # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
     # resends history each request), so a non-learning model can skip capture entirely:
     # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
@@ -15792,6 +15809,8 @@ def _agent_negative_claim_review(
         % ", ".join(vocabulary),
         False,
         "",
+        model=model,
+        cloud=cloud,
     )
     review_prompt = (
         "Task:\n%s\n\nProposed final:\n%s\n\n%s\n\n"
@@ -18797,7 +18816,10 @@ def _agent_turn(
     system = (
         system or default_agent_system
         if cloud
-        else _build_system(system or default_agent_system, False, "")
+        # cloud is False in this branch, so the identity block correctly
+        # describes a locally served model.
+        else _build_system(
+            system or default_agent_system, False, "", model=model, cloud=False)
     )
     agent_num_predict = (
         _CLOUD_AGENT_NUM_PREDICT if cloud else _LOCAL_AGENT_NUM_PREDICT
@@ -20091,6 +20113,8 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
         "budgets, or completion rules." % role,
         False,
         "",
+        model=model,
+        cloud=False,
     )
     gen = _make_generate(model, system, 0.05, 1800, SESSION_NUM_CTX, cloud=False)
     correction = ""
@@ -20555,6 +20579,8 @@ def _execution_route_model(
         "or tools.",
         False,
         "",
+        model=model,
+        cloud=False,
     )
     route_prompt = (
         "Choose the smallest reliable execution mode for this developer-authorized "
