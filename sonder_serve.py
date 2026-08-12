@@ -1494,6 +1494,22 @@ def _model_to_tier(model):
     return None
 
 
+def _request_model_selector(model):
+    """Keep OpenAI defaults, but pass explicit non-default selectors to server.
+
+    ``server._serve_target`` performs the live-catalog allowlist check.  Keeping
+    it there means MCP, desktop, and HTTP cannot disagree about which concrete
+    model names are safe to request.
+    """
+    selected = _model_to_tier(model)
+    if selected is not None:
+        return selected
+    raw = str(model or "").strip()
+    if not raw or raw in ("sonder", "local") or raw.startswith("gpt-"):
+        return None
+    return raw
+
+
 def _reasoning_audience():
     """Who may receive model reasoning over HTTP: 'developer' or 'all'.
 
@@ -2214,11 +2230,26 @@ class Handler(BaseHTTPRequestHandler):
 
         stream = bool(req.get("stream", False))
         model = req.get("model", "sonder")
+        natural_model = server.natural_model_request(prompt)
+        if natural_model and natural_model["kind"] == "fanout":
+            # A whole-catalog request spends several model calls.  Local-open
+            # keeps its single-user/full-tool behavior; shared deployments
+            # require the same developer authority as /ensemble.
+            if not _developer_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "developer or admin authentication is required for model fanout", "type": "forbidden_command"}},
+                    status=403,
+                )
+                return
+        if natural_model and natural_model["kind"] == "model":
+            model = natural_model["model"]
+            prompt = natural_model["prompt"]
+        model_selector = _request_model_selector(model)
         # Speculatively load the target model now, overlapping its cold-load
         # cost with the history assembly, scope resolution, and memory work
         # below. Best-effort and local-only (see server.prewarm_model).
         try:
-            server.prewarm_model(_model_to_tier(model) or "")
+            server.prewarm_model(model_selector or "")
         except Exception:
             pass
         context_size = req.get("context_size", "")
@@ -2290,11 +2321,15 @@ class Handler(BaseHTTPRequestHandler):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state
                         )
+                    if reply is None and natural_model and natural_model["kind"] == "fanout":
+                        reply = server.model_fanout(
+                            natural_model["prompt"], scope=natural_model["scope"],
+                        )
                     if reply is None:
                         reply = server.chat_web_response(
                             prompt,
                             history=history,
-                            tier=_model_to_tier(model) or "code",
+                            tier=model_selector or "code",
                             location_consent=location_consent,
                             location_hint=location_hint,
                             allow_server_location_lookup=(
@@ -2317,7 +2352,7 @@ class Handler(BaseHTTPRequestHandler):
                         turn = _run_prompt(
                             prompt,
                             history,
-                            _model_to_tier(model),
+                            model_selector,
                             context_size=context_size,
                             session=storage_session,
                             project=storage_project,
