@@ -5258,6 +5258,7 @@ def sonder(
     project: str = "",
     tier: str = "",
     location_consent: bool = None,
+    token: str = "",
 ) -> str:
     """Ask through Sonder Runtime and show observable activity for the response."""
     command = control_command(prompt, session=session, project=project)
@@ -5265,7 +5266,9 @@ def sonder(
         return command
     natural = natural_model_request(prompt)
     if natural and natural["kind"] == "fanout":
-        return model_fanout(natural["prompt"], scope=natural["scope"], num_predict=num_predict)
+        return model_fanout(
+            natural["prompt"], scope=natural["scope"], num_predict=num_predict, token=token,
+        )
     if natural and natural["kind"] == "model":
         if natural["prompt"].lstrip().startswith("/"):
             return _format_model_call_error(ModelCallError(
@@ -21635,7 +21638,7 @@ def _execute_fanout_run(run_id):
 
 @mcp.tool()
 def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
-                 timeout: int = 45, max_cloud_workers: int = 2) -> str:
+                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "") -> str:
     """Ask every discovered local, cloud, or all model the same prompt.
 
     Local models are serial to avoid GPU/VRAM contention.  Cloud calls require
@@ -21643,6 +21646,10 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
     no failed cloud call is retried automatically.  The JSON receipt reports
     selected, answered, failed, resident-before, and total elapsed metrics.
     """
+    started = time.time()
+    refusal = _developer_gate("model_fanout", token, started)
+    if refusal:
+        return refusal
     question = str(prompt or "").strip()
     if not question:
         return _format_model_call_error(
