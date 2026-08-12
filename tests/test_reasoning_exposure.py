@@ -117,6 +117,12 @@ def test_completion_object_omits_reasoning_when_empty():
     assert obj["sonder_reasoning"] == "because"
 
 
+def test_completion_object_includes_nonnegative_elapsed_metric():
+    obj = ts._chat_completion_object("hi", "sonder", elapsed_ms=-1)
+
+    assert obj["sonder_elapsed_ms"] == 0
+
+
 def test_chat_completion_activity_is_always_metadata_only(monkeypatch):
     monkeypatch.setenv("SONDER_EXECUTION_FEED_DETAIL", "1")
     at.reset_for_tests()
