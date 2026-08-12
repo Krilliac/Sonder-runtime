@@ -293,6 +293,36 @@ def _is_cloud_model_name(model):
     return "-cloud" in name or name.endswith(":cloud")
 
 
+def discovered_models():
+    """Return the live Ollama catalog as canonical, deduplicated model names.
+
+    This is deliberately discovery-only: callers may select a model that the
+    operator's Ollama endpoint currently advertises, but cannot turn an
+    arbitrary string into a backend request.
+    """
+    payload = _get("/api/tags")
+    raw = payload.get("models", []) if isinstance(payload, dict) else []
+    names, seen = [], set()
+    for item in raw if isinstance(raw, list) else []:
+        name = str(item.get("name") or item.get("model") or "").strip() if isinstance(item, dict) else ""
+        key = name.casefold()
+        if name and key not in seen:
+            names.append(name)
+            seen.add(key)
+    return sorted(names, key=str.casefold)
+
+
+def resolve_discovered_model(selector):
+    """Resolve an exact live catalog name case-insensitively, or return None."""
+    wanted = str(selector or "").strip().casefold()
+    if not wanted:
+        return None
+    for name in discovered_models():
+        if name.casefold() == wanted:
+            return name
+    return None
+
+
 def reasoning_exposure_enabled() -> bool:
     """Whether this deployment surfaces model reasoning to callers.
 
@@ -1568,6 +1598,18 @@ def _serve_target(tier, strict):
         if _is_cloud_tier(t, model) and not cloud_allowed():
             return None, True, False, "cloud-disabled"
         return model, _is_cloud_tier(t, model), t == "code", t
+    # A caller may name an installed/discovered model directly.  Exact catalog
+    # membership is required, so this is not an arbitrary backend URL/model
+    # injection surface and it automatically tracks models being added/removed.
+    try:
+        model = resolve_discovered_model(tier)
+    except Exception:
+        model = None
+    if model:
+        cloud = _is_cloud_model_name(model)
+        if cloud and not cloud_allowed():
+            return None, True, False, "cloud-disabled"
+        return model, cloud, False, "model:%s" % model
     return None, False, True, None
 
 
@@ -5180,6 +5222,12 @@ def sonder(
     command = control_command(prompt, session=session, project=project)
     if command is not None:
         return command
+    natural = natural_model_request(prompt)
+    if natural and natural["kind"] == "fanout":
+        return model_fanout(natural["prompt"], scope=natural["scope"], num_predict=num_predict)
+    if natural and natural["kind"] == "model":
+        prompt = natural["prompt"]
+        tier = natural["model"]
     label = "sonder:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
         label,
@@ -21182,6 +21230,129 @@ ENSEMBLE_MAX_MODELS = 4
 # Vision needs an image channel this path does not have, and a VLM handed a
 # text-only prompt answers with an immediate end-of-sequence.
 ENSEMBLE_SKIP_TIERS = ("vision",)
+
+
+def natural_model_request(text):
+    """Recognize explicit user requests for a model or bounded model fanout.
+
+    This intentionally recognizes only imperative, whole-turn forms.  It does
+    not inspect retrieved files, web pages, or model output, preventing those
+    untrusted inputs from spending local compute or cloud budget.
+    """
+    value = str(text or "").strip()
+    fanout = re.match(
+        r"^(?:ask|run)\s+(?:all|every)\s+(?:(local|cloud|available)\s+)?models\s*(?::|to answer:?|answer:?)\s*(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if fanout:
+        scope = (fanout.group(1) or "all").lower()
+        return {"kind": "fanout", "scope": scope, "prompt": fanout.group(2).strip()}
+    single = re.match(
+        r"^(?:use|run|ask)\s+model\s+([^:\n]+)\s*:\s*(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if single:
+        return {"kind": "model", "model": single.group(1).strip(), "prompt": single.group(2).strip()}
+    return None
+
+
+def _fanout_models(scope):
+    scope = str(scope or "local").strip().lower()
+    if scope not in ("local", "cloud", "all", "available"):
+        return [], ModelCallError("configuration", "scope must be local, cloud, or all")
+    if scope == "available":
+        scope = "all"
+    names = discovered_models()
+    selected = [name for name in names if (
+        scope == "all" or
+        (scope == "cloud" and _is_cloud_model_name(name)) or
+        (scope == "local" and not _is_cloud_model_name(name))
+    )]
+    if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not cloud_allowed():
+        return [], ModelCallError(
+            "configuration",
+            "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
+        )
+    return selected, None
+
+
+@mcp.tool()
+def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
+                 timeout: int = 45, max_cloud_workers: int = 2) -> str:
+    """Ask every discovered local, cloud, or all model the same prompt.
+
+    Local models are serial to avoid GPU/VRAM contention.  Cloud calls require
+    SONDER_ALLOW_CLOUD=1 and are bounded to two concurrent requests by default;
+    no failed cloud call is retried automatically.  The JSON receipt reports
+    selected, answered, failed, resident-before, and total elapsed metrics.
+    """
+    question = str(prompt or "").strip()
+    if not question:
+        return _format_model_call_error(
+            ModelCallError("configuration", "model_fanout needs a prompt.")
+        )
+    try:
+        cap = max(32, min(int(num_predict), 4096))
+        request_timeout = max(5, min(int(timeout), 300))
+        cloud_workers = max(1, min(int(max_cloud_workers), 2))
+    except (TypeError, ValueError):
+        return _format_model_call_error(ModelCallError(
+            "configuration", "num_predict, timeout, and max_cloud_workers must be integers."
+        ))
+    try:
+        targets, error = _fanout_models(scope)
+    except ModelCallError as exc:
+        return _format_model_call_error(exc)
+    if error:
+        return _format_model_call_error(error)
+    if not targets:
+        return _format_model_call_error(ModelCallError(
+            "configuration", "no %s models are currently discovered." % scope
+        ))
+    try:
+        resident_before = [str(row.get("name")) for row in _get("/api/ps").get("models", []) if row.get("name")]
+    except Exception:
+        resident_before = []
+    started = time.monotonic()
+    answers, failures = [], []
+
+    def call(model):
+        call_started = time.monotonic()
+        try:
+            text = (_make_generate(model, "", 0.2, cap, 4096, timeout=request_timeout)(question) or "").strip()
+            if not text:
+                raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
+            return {"model": model, "answer": text, "elapsed_ms": int((time.monotonic() - call_started) * 1000)}
+        except Exception as exc:
+            detail = _format_model_call_error(exc) if isinstance(exc, ModelCallError) else str(exc)
+            return {"model": model, "error": detail, "elapsed_ms": int((time.monotonic() - call_started) * 1000)}
+
+    local = [name for name in targets if not _is_cloud_model_name(name)]
+    cloud = [name for name in targets if _is_cloud_model_name(name)]
+    for name in local:
+        row = call(name)
+        (answers if "answer" in row else failures).append(row)
+    if cloud:
+        with ThreadPoolExecutor(max_workers=cloud_workers) as pool:
+            for row in (future.result() for future in as_completed([pool.submit(call, name) for name in cloud])):
+                (answers if "answer" in row else failures).append(row)
+    receipt = {
+        "scope": "all" if str(scope).lower() == "available" else str(scope).lower(),
+        "models_selected": len(targets),
+        "models_answered": len(answers),
+        "models_failed": len(failures),
+        "resident_before": resident_before,
+        "total_elapsed_ms": int((time.monotonic() - started) * 1000),
+        "cloud_workers": cloud_workers if cloud else 0,
+        "answers": sorted(answers, key=lambda row: row["model"].casefold()),
+        "failures": sorted(failures, key=lambda row: row["model"].casefold()),
+    }
+    activity_tracker.record_event(
+        "model_fanout", summary="%d/%d model answers in %dms" % (
+            len(answers), len(targets), receipt["total_elapsed_ms"]
+        ),
+    )
+    return json.dumps(receipt, indent=2, sort_keys=True)
 
 
 def _ensemble_targets(tiers: str = ""):
