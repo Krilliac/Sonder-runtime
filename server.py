@@ -21422,6 +21422,19 @@ def natural_model_request(text):
     )
     if single_to:
         return {"kind": "model", "model": single_to.group(1).strip(), "prompt": single_to.group(2).strip()}
+    named_model_to = re.match(
+        # Natural phrasing commonly puts ``model`` after the name.  Keep the
+        # same constrained selector and whole-turn delimiter as ``model X to``
+        # above; _serve_target still resolves only a live catalog entry.
+        r"^(?:use|run|ask|try|query)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9._:/-]*)\s+model\s+to\s+(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if named_model_to:
+        return {
+            "kind": "model",
+            "model": named_model_to.group(1).strip(),
+            "prompt": named_model_to.group(2).strip(),
+        }
     return None
 
 
