@@ -21799,7 +21799,20 @@ def model_fanout_resume(run_id: str, include_failed: bool = False,
     refusal = _developer_gate("model_fanout_resume", token, started)
     if refusal:
         return refusal
-    run = fanout_store.resume_run(run_id, include_failed=bool(include_failed), retry_unknown=bool(retry_unknown))
+    # MCP clients may serialize booleans loosely.  ``bool("false")`` is true,
+    # which would silently turn a status lookup-style resume into a metered
+    # replay.  Keep direct MCP behavior as strict as the HTTP lifecycle API.
+    for name, value in (
+        ("include_failed", include_failed),
+        ("retry_unknown", retry_unknown),
+    ):
+        if not isinstance(value, bool):
+            return _format_model_call_error(ModelCallError(
+                "configuration", "%s must be a boolean" % name,
+            ))
+    run = fanout_store.resume_run(
+        run_id, include_failed=include_failed, retry_unknown=retry_unknown,
+    )
     if run is None:
         return _format_model_call_error(ModelCallError(
             "configuration", "fanout run is not resumable with the selected retry options"
