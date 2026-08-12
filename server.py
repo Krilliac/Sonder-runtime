@@ -39,6 +39,8 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from pydantic import StrictBool
+
 import sonder_runtime.adapters.task_store as task_state_adapter
 import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
@@ -21788,8 +21790,8 @@ def model_fanout_cancel(run_id: str, token: str = "") -> str:
 
 
 @mcp.tool()
-def model_fanout_resume(run_id: str, include_failed: bool = False,
-                        retry_unknown: bool = False, token: str = "") -> str:
+def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
+                        retry_unknown: StrictBool = False, token: str = "") -> str:
     """Explicitly resume selected durable fanout results.
 
     Unknown results are never retried unless ``retry_unknown`` is true, which
@@ -21799,7 +21801,20 @@ def model_fanout_resume(run_id: str, include_failed: bool = False,
     refusal = _developer_gate("model_fanout_resume", token, started)
     if refusal:
         return refusal
-    run = fanout_store.resume_run(run_id, include_failed=bool(include_failed), retry_unknown=bool(retry_unknown))
+    # Keep direct Python calls strict too.  MCP transport enforces this at the
+    # schema boundary through StrictBool, before Pydantic can coerce 1 or
+    # "false" into True; this check protects in-process callers as well.
+    for name, value in (
+        ("include_failed", include_failed),
+        ("retry_unknown", retry_unknown),
+    ):
+        if not isinstance(value, bool):
+            return _format_model_call_error(ModelCallError(
+                "configuration", "%s must be a boolean" % name,
+            ))
+    run = fanout_store.resume_run(
+        run_id, include_failed=include_failed, retry_unknown=retry_unknown,
+    )
     if run is None:
         return _format_model_call_error(ModelCallError(
             "configuration", "fanout run is not resumable with the selected retry options"
