@@ -7713,11 +7713,10 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     """Machine-readable next-step report for system self-improvement."""
     _maybe_live_reload()
     context = context_health_data(session=session, project=project)
-    conn = _open_db()
-    try:
-        learning_state = learning_health.build_report(conn)
-    finally:
-        conn.close()
+    # Share the same loopback provenance refresh as the health surface.  A
+    # report that recommends a backfill must use the exact eligibility view
+    # the backfill tool and ``learning_health_status`` use.
+    learning_state = learning_health_data()
 
     quality = learning_state["quality"]
     interactions = learning_state["interactions"]
