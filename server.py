@@ -5226,6 +5226,8 @@ def sonder(
     if natural and natural["kind"] == "fanout":
         return model_fanout(natural["prompt"], scope=natural["scope"], num_predict=num_predict)
     if natural and natural["kind"] == "model":
+        if natural["prompt"].lstrip().startswith("/"):
+            return "ERROR: model selection cannot wrap a slash command; issue the command directly."
         prompt = natural["prompt"]
         tier = natural["model"]
     label = "sonder:%s" % ((tier or "sonder").strip() or "sonder")
@@ -21332,6 +21334,7 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
 
     local = [name for name in targets if not _is_cloud_model_name(name)]
     cloud = [name for name in targets if _is_cloud_model_name(name)]
+    resident_at_start = {name.casefold() for name in resident_before}
     for name in local:
         try:
             row = call(name)
@@ -21340,10 +21343,11 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
             # A whole-catalog run must not strand each local model in VRAM.
             # This is deliberately best-effort: a completed answer remains a
             # completed answer even if Ollama rejects the unload request.
-            try:
-                _post("/api/generate", {"model": name, "keep_alive": 0}, timeout=30)
-            except Exception:
-                pass
+            if name.casefold() not in resident_at_start:
+                try:
+                    _post("/api/generate", {"model": name, "keep_alive": 0}, timeout=30)
+                except Exception:
+                    pass
     if cloud:
         with ThreadPoolExecutor(max_workers=cloud_workers) as pool:
             for row in (future.result() for future in as_completed([pool.submit(call, name) for name in cloud])):

@@ -35,3 +35,14 @@ def test_task_list_hides_done_by_default():
     rows = memory_store.list_tasks(conn)
     assert [row["title"] for row in rows] == ["open"]
     assert done["id"] in [row["id"] for row in memory_store.list_tasks(conn, include_done=True)]
+
+
+def test_task_list_accepts_pipe_delimited_status_filter():
+    conn = memory_store.connect(":memory:")
+    pending = memory_store.create_task(conn, "pending", status="pending")
+    blocked = memory_store.create_task(conn, "blocked", status="blocked")
+    memory_store.create_task(conn, "done", status="done")
+
+    rows = memory_store.list_tasks(conn, status="pending|blocked")
+
+    assert {row["id"] for row in rows} == {pending["id"], blocked["id"]}

@@ -67,4 +67,24 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert receipt["total_elapsed_ms"] >= 0
     assert receipt["answers"][0]["answer"] == "answer from local-a"
     assert "timed out" in receipt["failures"][0]["error"]
+    assert unloads == []
+
+
+def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
+    unloads = []
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda path, payload, **_kwargs: unloads.append((path, payload)))
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+
+    assert receipt["models_answered"] == 1
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
+
+
+def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
+    reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
+
+    assert reply.startswith("ERROR: model selection cannot wrap a slash command")

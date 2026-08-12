@@ -2602,6 +2602,18 @@ def _normalize_task_status(status):
     return s
 
 
+def _normalize_task_status_filter(status):
+    """Parse the task-list status filter, including documented ``a|b`` sets."""
+    values = []
+    for item in str(status or "").split("|"):
+        item = item.strip()
+        if item:
+            normalized = _normalize_task_status(item)
+            if normalized not in values:
+                values.append(normalized)
+    return values
+
+
 def _normalize_priority(priority):
     try:
         value = int(priority)
@@ -2715,8 +2727,9 @@ def list_tasks(conn, status="", project="", owner="", limit=50, include_done=Fal
     clauses = []
     values = []
     if status:
-        clauses.append("status=?")
-        values.append(_normalize_task_status(status))
+        statuses = _normalize_task_status_filter(status)
+        clauses.append("status IN (%s)" % ", ".join("?" for _ in statuses))
+        values.extend(statuses)
     elif not include_done:
         clauses.append("status NOT IN ('done', 'canceled')")
     if project:
