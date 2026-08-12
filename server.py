@@ -7728,7 +7728,12 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     # carry that claim, and keep the blended number explicitly labelled below.
     reviewed = learning_state.get("reviewed_outcomes", 0)
     reviewed_positive = learning_state.get("reviewed_positive_percent", 0.0)
-    acceptance = reviewed_positive / 100.0 if reviewed >= 30 else None
+    gated_positive, acceptance_basis = learning_health.gating_positive_percent(
+        learning_state
+    )
+    acceptance = (
+        gated_positive / 100.0 if gated_positive is not None else None
+    )
     issues = []
     try:
         autopilot = _application().automation.snapshot(include_finished=False, limit=100)
@@ -7890,18 +7895,18 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     # good. learning_health_status separates these; this report used to blend
     # them, so it could show 96% positive and 100/100 readiness while
     # caller-judged work sat near 53% and the health view said "watch".
-    if reviewed >= 30 and reviewed_positive < 60.0:
+    if acceptance_basis == "reviewed" and gated_positive < 60.0:
         add(
             "learning",
             "medium",
             "Caller-judged work succeeds %.1f%% of the time (%d reviewed outcome(s))."
-            % (reviewed_positive, reviewed),
+            % (gated_positive, reviewed),
             "This is the honest hit rate; the blended figure is inflated by "
             "autograded self-marking. Review roughly half of delegated output, "
             "and record negatives -- record_outcome with a failing signal is "
             "what the store is starved of.",
         )
-    elif reviewed < 30 and outcomes >= 200:
+    elif acceptance_basis == "unmeasured" and outcomes >= 200:
         # #62: since provenance is recorded, "not judged" and "cannot tell who
         # judged" are different states with different remedies, and reporting
         # the second as the first would be the same substitution the reviewed
@@ -7936,17 +7941,24 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
 
     severity_rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
     issues.sort(key=lambda item: (severity_rank.get(item["severity"], 9), item["area"], item["title"]))
+    score = max(0, min(100, int(round(
+        100
+        - 18 * sum(1 for i in issues if i["severity"] == "high")
+        - 9 * sum(1 for i in issues if i["severity"] == "medium")
+        - 4 * sum(1 for i in issues if i["severity"] == "low")
+    ))))
+    # A clean runtime and many self-recorded outcomes are useful operational
+    # signals, but they do not establish that delegated work is reliable.  Do
+    # not let the aggregate score read like validated quality when a populated
+    # outcome history has no caller-measured sample at all.
+    if outcomes >= 200 and acceptance_basis == "unmeasured":
+        score = min(score, 75)
     return {
-        "score": max(0, min(100, int(round(
-            100
-            - 18 * sum(1 for i in issues if i["severity"] == "high")
-            - 9 * sum(1 for i in issues if i["severity"] == "medium")
-            - 4 * sum(1 for i in issues if i["severity"] == "low")
-        )))),
+        "score": score,
         "interactions": interactions,
         "outcomes": outcomes,
         "acceptance_percent": round(acceptance * 100.0, 1) if acceptance is not None else None,
-        "acceptance_basis": "reviewed" if acceptance is not None else "unmeasured",
+        "acceptance_basis": acceptance_basis,
         "reviewed_outcomes": learning_state.get("reviewed_outcomes", 0),
         "reviewed_positive_percent": learning_state.get("reviewed_positive_percent", 0.0),
         "autograded_outcomes": learning_state.get("autograded_outcomes", 0),
