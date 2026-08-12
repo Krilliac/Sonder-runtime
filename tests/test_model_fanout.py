@@ -140,6 +140,20 @@ def test_fanout_plan_skips_only_explicit_nonchat_or_cooldown_models(monkeypatch)
     assert "cooled" in override["selected"]
 
 
+def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "retired:cloud",
+        server.ModelCallError("http", "retired", status=410, cloud=True),
+        "private prompt",
+    )
+
+    assert recorded[0][1]["disabled_until"] is not None
+    assert "private prompt" not in recorded[0][1]["error"]
+
+
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
 
