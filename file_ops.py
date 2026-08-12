@@ -244,6 +244,22 @@ def _control_plane_paths() -> set[Path]:
         db, Path(str(db) + "-wal"), Path(str(db) + "-shm"),
         root / "memory.db", root / "memory.db-wal", root / "memory.db-shm",
     })
+    # Fanout receipts are executable runtime state: even a custom file name
+    # must not turn them into an ordinary SQLite target.  Keep the override
+    # resolution identical to SONDER_DB above so a relative override is also
+    # protected at the process' actual working directory.
+    fanout_override = os.environ.get("SONDER_FANOUT_DB", "").strip()
+    if fanout_override:
+        fanout_db = Path(fanout_override).expanduser()
+        if not fanout_db.is_absolute():
+            fanout_db = Path.cwd() / fanout_db
+        fanout_db = _resolve_best_effort(fanout_db)
+    else:
+        fanout_db = home / "fanout.db"
+    paths.update({
+        fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"),
+        root / "fanout.db", root / "fanout.db-wal", root / "fanout.db-shm",
+    })
     return {_resolve_best_effort(path) for path in paths}
 
 
