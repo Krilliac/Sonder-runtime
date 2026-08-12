@@ -387,7 +387,7 @@ class LocalManager {
         );
         if (await script.exists()) {
           if (persistOnAppClose) {
-            return _startHeadlessServer(
+            return await _startHeadlessServer(
               system,
               allowHosted: allowHosted,
               contextSize: contextSize,
@@ -401,14 +401,14 @@ class LocalManager {
             environment: serverEnvironment,
           );
           _trackManagedServer(process);
-          return _awaitServerReady(
+          return await _awaitServerReady(
             'Server startup requested. Managed PID ${process.pid}.',
             readyTimeout,
           );
         }
       }
       if (persistOnAppClose) {
-        return _startHeadlessServer(
+        return await _startHeadlessServer(
           system,
           allowHosted: allowHosted,
           contextSize: contextSize,
@@ -428,7 +428,7 @@ class LocalManager {
         environment: serverEnvironment,
       );
       _trackManagedServer(process);
-      return _awaitServerReady(
+      return await _awaitServerReady(
         'Server startup requested. Managed PID ${process.pid}.',
         readyTimeout,
       );
@@ -767,7 +767,7 @@ class LocalManager {
     try {
       final gitDir = Directory('${system.path}${Platform.pathSeparator}.git');
       if (!await gitDir.exists()) {
-        return _replaceBundledSystemFromGit(system);
+        return await _replaceBundledSystemFromGit(system);
       }
       final safeUpdater =
           File('${system.path}${Platform.pathSeparator}safe_update.py');
