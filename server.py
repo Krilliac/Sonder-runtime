@@ -21674,7 +21674,7 @@ def _fanout_health(model, exc, prompt):
             # The tag disappeared from Ollama after the immutable run snapshot
             # was created. Avoid rediscovering and failing it on every fanout.
             disabled_until = time.time() + 3600
-        elif exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
+        elif exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
             # These identify the model/daemon response path, not the prompt.
             # A brief cooldown excludes failed local models from a subsequent
             # mass request while still allowing recovery without intervention.

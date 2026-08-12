@@ -389,6 +389,19 @@ def test_failed_local_model_gets_a_bounded_health_cooldown(monkeypatch):
     assert "private prompt" not in recorded[0][1]["error"]
 
 
+def test_transient_local_http_failure_gets_a_health_cooldown(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "local-a",
+        server.ModelCallError("http", "daemon unavailable", status=503, transient=True),
+        "private prompt",
+    )
+
+    assert recorded[0][1]["disabled_until"] is not None
+
+
 def test_local_request_error_does_not_disable_a_model(monkeypatch):
     recorded = []
     monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
