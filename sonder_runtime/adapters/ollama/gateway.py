@@ -134,7 +134,8 @@ class OllamaGateway:
         timeout = _check_liveness(context)
         gen = server._make_generate(
             model,
-            request.system or server._build_system("", False, ""),
+            request.system or server._build_system(
+                "", False, "", model=model, cloud=cloud),
             float(options.get("temperature", 0.2)),
             int(options.get("num_predict", 1024)),
             int(options.get("num_ctx", server.SESSION_NUM_CTX)),

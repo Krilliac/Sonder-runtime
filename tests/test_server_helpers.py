@@ -2942,9 +2942,7 @@ def test_runtime_identity_names_the_serving_model_only(monkeypatch):
         "reasoning": "deepseek-r1:7b",
         "cloud-code": "kimi-k2.7-code:cloud",
     }, raising=False)
-    monkeypatch.setattr(server, "_ACTIVE_MODEL_HINT", "sonder:latest", raising=False)
-
-    block = server._runtime_identity_block()
+    block = server._runtime_identity_block("sonder:latest")
 
     assert "sonder:latest" in block
     # The regression: no other tier's model may appear, or the model chooses.
@@ -2956,21 +2954,94 @@ def test_runtime_identity_names_the_serving_model_only(monkeypatch):
     assert "do not know" in block.lower()
 
 
-def test_runtime_identity_falls_back_and_never_raises(monkeypatch):
-    """This runs on every request, so it must degrade rather than break one."""
-    monkeypatch.setattr(server, "_ACTIVE_MODEL_HINT", "", raising=False)
+def test_runtime_identity_degrades_to_silence_and_never_raises(monkeypatch):
+    """This runs on every request, so it must degrade rather than break one.
+
+    This test previously asserted the OPPOSITE: that an unknown model falls
+    back to `TIERS["code"]`. That fallback was the #49 defect -- with the only
+    writer of `_ACTIVE_MODEL_HINT` uncalled, the fallback fired on 100% of
+    requests and asserted the code tier at models that were not it. The test
+    encoded the defect as the requirement, so wiring the block correctly would
+    have failed it. Silence is the correct degradation.
+    """
     monkeypatch.setattr(server, "TIERS", {"code": "sonder:latest"}, raising=False)
-    assert "sonder:latest" in server._runtime_identity_block()
+    assert server._runtime_identity_block("") == ""
+    assert server._runtime_identity_block(None) == ""
 
     # No usable name anywhere: emit nothing rather than a half-stated fact.
     monkeypatch.setattr(server, "TIERS", {}, raising=False)
-    assert server._runtime_identity_block() == ""
+    assert server._runtime_identity_block("") == ""
 
 
-def test_build_system_puts_the_identity_facts_first(monkeypatch):
+def test_build_system_puts_the_identity_facts_first():
     """Wiring test. The block existing is not the same as it being sent --
     the first version of this change was verified by reading the block and
     still shipped a model that named the wrong tier."""
-    monkeypatch.setattr(server, "_ACTIVE_MODEL_HINT", "sonder:latest", raising=False)
-    built = server._build_system("", False, "")
+    built = server._build_system("", False, "", model="sonder:latest")
     assert built.startswith("Facts about what is serving this request")
+    # Omitting the model must drop the block, not guess one.
+    assert not server._build_system(
+        "", False, "").startswith("Facts about what is serving")
+
+
+# --- #49: the identity block must name the model the call site resolved ----
+#
+# `_ACTIVE_MODEL_HINT` was only ever written by `_resolve_model_and_system`,
+# which has zero callers anywhere in the tree. So the hint was always "" and
+# every request fell through to `TIERS["code"]` -- the block that exists to
+# stop a model guessing its identity asserted a guess, authoritatively, to
+# models that were not that model.
+
+
+def test_execution_router_is_told_the_router_model_not_the_code_tier(monkeypatch):
+    """The defect, at a real call site.
+
+    `_execution_route_model` resolves the `fast` tier and then builds a system
+    prompt. Before the fix that prompt asserted `TIERS["code"]` was serving the
+    request, to a model that was not it.
+    """
+    captured = {}
+
+    def fake_make_generate(model, system, *args, **kwargs):
+        captured["model"] = model
+        captured["system"] = system
+        return lambda prompt, history=None: (
+            '{"mode":"workbench","tier":"fast","reason":"one step","confidence":0.6}'
+        )
+
+    monkeypatch.setattr(
+        server, "TIERS", {"code": "sonder:latest", "fast": "qwen2.5:3b"}, raising=False)
+    monkeypatch.setattr(server, "LOCAL_TIERS", ("code", "fast"), raising=False)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *_a, **_k: ("qwen2.5:3b", False, False, "fast"))
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+
+    server._execution_route_model("inspect and implement")
+
+    assert captured["model"] == "qwen2.5:3b"
+    assert "qwen2.5:3b" in captured["system"]
+    # The regression: the code tier must not be asserted at a fast-tier model.
+    assert "sonder:latest" not in captured["system"]
+
+
+def test_identity_block_omits_the_claim_when_no_model_is_known(monkeypatch):
+    """A wrong identity asserted as authoritative is worse than none.
+
+    The old fallback guessed `TIERS["code"]` whenever the hint was empty --
+    which, with no caller setting it, was every single request.
+    """
+    monkeypatch.setattr(server, "TIERS", {"code": "sonder:latest"}, raising=False)
+    assert server._runtime_identity_block("") == ""
+
+
+def test_identity_block_does_not_place_a_cloud_model_on_this_machine():
+    """Cloud tiers reach _build_system too; the block must not claim a hosted
+    model is running locally."""
+    _LOCAL_CLAIM = "served by Ollama on this machine"
+    block = server._runtime_identity_block("kimi-k2.7-code:cloud", cloud=True)
+    assert "kimi-k2.7-code:cloud" in block
+    assert _LOCAL_CLAIM not in block
+    assert "not on this machine" in block
+    local = server._runtime_identity_block("sonder:latest", cloud=False)
+    assert _LOCAL_CLAIM in local

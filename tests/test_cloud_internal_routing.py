@@ -38,7 +38,7 @@ def _install_request_fakes(monkeypatch, *, model, cloud, tier_label):
         server, "_serve_target",
         lambda requested_tier, strict: (model, cloud, False, tier_label),
     )
-    monkeypatch.setattr(server, "_build_system", lambda *args: "")
+    monkeypatch.setattr(server, "_build_system", lambda *args, **kwargs: "")
     monkeypatch.setattr(server, "_open_db", _Connection)
 
     monkeypatch.setattr(server.memory_store, "session_turn_count", lambda *args: 0)
