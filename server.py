@@ -113,6 +113,8 @@ import permission_modes
 import reloadable_mcp
 import autopilot_store
 import autopilot_controller
+import fanout_store
+import fanout_prompt_vault
 from model_transport import ModelCallError
 import context_overflow
 import ollama_endpoint
@@ -310,6 +312,45 @@ def discovered_models():
             names.append(name)
             seen.add(key)
     return sorted(names, key=str.casefold)
+
+
+def discovered_model_records():
+    """Return canonical live catalog records without probing or selecting them.
+
+    Ollama's tag payload is the only cheap metadata available for every model.
+    Unknown records deliberately remain eligible; fanout excludes only models
+    which the operator's catalog positively identifies as non-generative.
+    """
+    payload = _get("/api/tags")
+    raw = payload.get("models", []) if isinstance(payload, dict) else []
+    records, seen = [], set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("model") or "").strip()
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        records.append((name, item))
+    return sorted(records, key=lambda row: row[0].casefold())
+
+
+def _fanout_nonchat_reason(record):
+    """Return a skip reason only for explicit non-chat catalog capability."""
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    raw = record.get("capabilities", details.get("capabilities", ()))
+    if not isinstance(raw, (list, tuple, set)):
+        return ""
+    capabilities = {str(value).strip().lower() for value in raw if str(value).strip()}
+    generative = {"completion", "chat", "generate", "text-generation"}
+    if capabilities & generative:
+        return ""
+    if "embedding" in capabilities:
+        return "embedding-only capability"
+    if "vision" in capabilities:
+        return "vision-only capability"
+    return ""
 
 
 def resolve_discovered_model(selector):
@@ -5217,6 +5258,7 @@ def sonder(
     project: str = "",
     tier: str = "",
     location_consent: bool = None,
+    token: str = "",
 ) -> str:
     """Ask through Sonder Runtime and show observable activity for the response."""
     command = control_command(prompt, session=session, project=project)
@@ -5224,7 +5266,9 @@ def sonder(
         return command
     natural = natural_model_request(prompt)
     if natural and natural["kind"] == "fanout":
-        return model_fanout(natural["prompt"], scope=natural["scope"], num_predict=num_predict)
+        return model_fanout(
+            natural["prompt"], scope=natural["scope"], num_predict=num_predict, token=token,
+        )
     if natural and natural["kind"] == "model":
         if natural["prompt"].lstrip().startswith("/"):
             return _format_model_call_error(ModelCallError(
@@ -21303,29 +21347,314 @@ def natural_model_request(text):
     return None
 
 
-def _fanout_models(scope):
+def _fanout_plan(scope, *, include_unhealthy=False):
     scope = str(scope or "local").strip().lower()
     if scope not in ("local", "cloud", "all", "available"):
-        return [], ModelCallError("configuration", "scope must be local, cloud, or all")
+        return {"selected": [], "skipped": []}, ModelCallError("configuration", "scope must be local, cloud, or all")
     if scope == "available":
         scope = "all"
-    names = discovered_models()
-    selected = [name for name in names if (
-        scope == "all" or
-        (scope == "cloud" and _is_cloud_model_name(name)) or
-        (scope == "local" and not _is_cloud_model_name(name))
-    )]
+    selected, skipped, now = [], [], time.time()
+    for name, record in discovered_model_records():
+        cloud = _is_cloud_model_name(name)
+        if not (scope == "all" or (scope == "cloud" and cloud) or (scope == "local" and not cloud)):
+            continue
+        reason = _fanout_nonchat_reason(record)
+        if reason:
+            skipped.append({"model": name, "reason": reason})
+            continue
+        health = fanout_store.get_model_health(name)
+        disabled_until = health.get("disabled_until") if health else None
+        if disabled_until and float(disabled_until) > now and not include_unhealthy:
+            skipped.append({"model": name, "reason": "health cooldown active"})
+            continue
+        selected.append(name)
     if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not cloud_allowed():
-        return [], ModelCallError(
+        return {"selected": [], "skipped": skipped}, ModelCallError(
             "configuration",
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
         )
-    return selected, None
+    return {"scope": scope, "selected": selected, "skipped": skipped}, None
+
+
+def _fanout_models(scope):
+    """Compatibility selector retained for callers that only need targets."""
+    plan, error = _fanout_plan(scope)
+    return plan["selected"], error
+
+
+def _fanout_worker_id():
+    """Return a receipt owner identifier that is unique within this process."""
+    return "fanout-%d-%d" % (os.getpid(), threading.get_ident())
+
+
+def _fanout_safe_error(exc, prompt):
+    """Render a useful failure without allowing an echoed prompt into a receipt."""
+    if isinstance(exc, ModelCallError):
+        # Provider-controlled details may contain only a *partial* request
+        # excerpt, which cannot be safely removed with exact replacement.
+        # Keep stable diagnostic class/status metadata, but never persist that
+        # untrusted body in a durable receipt or event.
+        rendered = "ERROR: fanout model failure (%s%s)" % (
+            exc.kind,
+            " HTTP %s" % exc.status if exc.status is not None else "",
+        )
+    else:
+        rendered = "ERROR: model request failed (%s)" % type(exc).__name__
+    # This also protects local exception messages that happen to echo the full
+    # request.  Provider excerpts were excluded above rather than redacted.
+    return _fanout_redact_prompt_echo(rendered, prompt)[:4000]
+
+
+def _fanout_redact_prompt_echo(value, prompt):
+    """Remove a verbatim request echo before a durable receipt is written."""
+    rendered = str(value or "")
+    question = str(prompt or "")
+    if question:
+        rendered = rendered.replace(question, "<redacted prompt>")
+    return rendered
+
+
+def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers):
+    """Seal a fanout request and persist its immutable target snapshot.
+
+    The public receipt database gets only a non-sensitive marker plus the
+    selected-model snapshot.  The exact user prompt is retained solely in the
+    authenticated vault token used by the local execution worker.
+    """
+    if len(str(prompt or "")) > fanout_store.MAX_PROMPT_CHARS:
+        raise ModelCallError("configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS)
+    plan, error = _fanout_plan(scope)
+    if error:
+        raise error
+    targets = plan["selected"]
+    if not targets:
+        raise ModelCallError("configuration", "no %s models are currently discovered." % scope)
+    try:
+        resident_before = [
+            str(row.get("name")) for row in _get("/api/ps").get("models", [])
+            if row.get("name")
+        ]
+    except Exception:
+        resident_before = []
+    try:
+        sealed = fanout_prompt_vault.encrypt_prompt(prompt)
+    except fanout_prompt_vault.PromptVaultError as exc:
+        raise ModelCallError("configuration", "could not securely start model fanout") from exc
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    # Do not pass the raw prompt to the receipt store: its normal redaction is
+    # intentionally best effort, whereas this path needs a hard guarantee.
+    marker = "sealed-fanout-prompt:%s" % digest
+    limits = {
+        "num_predict": cap,
+        "timeout": request_timeout,
+        "cloud_workers": cloud_workers,
+        "resident_before": resident_before,
+        "plan_skipped": plan["skipped"],
+    }
+    try:
+        run = fanout_store.create_run(
+            marker, targets, scope=plan["scope"], cloud_opt_in=cloud_allowed(),
+            limits=limits, execution_prompt_ciphertext=sealed,
+        )
+    except (OSError, ValueError) as exc:
+        raise ModelCallError("configuration", "could not persist model fanout receipt") from exc
+    return run
+
+
+def _fanout_limits(run):
+    try:
+        raw = json.loads(run.get("limits_json") or "{}")
+    except (TypeError, ValueError):
+        raw = {}
+    return {
+        "num_predict": max(32, min(int(raw.get("num_predict", 512)), 4096)),
+        "timeout": max(5, min(int(raw.get("timeout", 45)), 300)),
+        "cloud_workers": max(1, min(int(raw.get("cloud_workers", 2)), 2)),
+        "resident_before": [str(name) for name in raw.get("resident_before", []) if str(name)],
+        "plan_skipped": list(raw.get("plan_skipped", [])),
+    }
+
+
+def _fanout_snapshot_allows(run, model):
+    """Check a claimed receipt against the run's immutable target contract."""
+    try:
+        snapshot = json.loads(run.get("models_json") or "[]")
+    except (TypeError, ValueError):
+        snapshot = []
+    selected = {str(name).casefold() for name in snapshot if str(name).strip()}
+    if str(model).casefold() not in selected:
+        return False
+    scope = str(run.get("scope") or "local").casefold()
+    cloud = _is_cloud_model_name(model)
+    return scope in ("all", "available") or (scope == "cloud" and cloud) or (scope == "local" and not cloud)
+
+
+def _fanout_receipt(run_id):
+    """Build a serializable receipt without exposing the sealed prompt."""
+    run = fanout_store.get_run(run_id)
+    if run is None:
+        return None
+    limits = _fanout_limits(run)
+    rows = fanout_store.list_results(run_id)
+    answers = [{"model": row["model"], "answer": row["answer"], "elapsed_ms": row["elapsed_ms"]}
+               for row in rows if row["status"] == "answered"]
+    failures = [{"model": row["model"], "error": row["error"], "elapsed_ms": row["elapsed_ms"],
+                 "status": row["status"]}
+                for row in rows if row["status"] in ("failed", "unknown")]
+    execution_skips = [{"model": row["model"], "reason": row["error"] or "not executed"}
+                       for row in rows if row["status"] == "skipped"]
+    ended = run.get("finished_ts") or time.time()
+    return {
+        "run_id": run["id"],
+        "status": run["status"],
+        "scope": run["scope"],
+        "models_selected": len(rows),
+        "models_answered": len(answers),
+        "models_failed": len(failures),
+        "models_skipped": len(limits["plan_skipped"]) + len(execution_skips),
+        "skipped": limits["plan_skipped"] + execution_skips,
+        "resident_before": limits["resident_before"],
+        "total_elapsed_ms": max(0, int((float(ended) - float(run["created_ts"])) * 1000)),
+        "cloud_workers": limits["cloud_workers"],
+        "answers": sorted(answers, key=lambda row: row["model"].casefold()),
+        "failures": sorted(failures, key=lambda row: row["model"].casefold()),
+    }
+
+
+def _fanout_health(model, exc, prompt):
+    """Keep health advisory-only, with cooldowns only for known cloud rejects."""
+    if exc is None:
+        fanout_store.record_model_health(model, model_class="cloud" if _is_cloud_model_name(model) else "local", success=True)
+        return
+    disabled_until = None
+    if isinstance(exc, ModelCallError) and _is_cloud_model_name(model):
+        if exc.status in (402, 404, 410):
+            disabled_until = time.time() + 3600
+        elif exc.status == 429:
+            disabled_until = time.time() + (exc.retry_after_seconds or 60)
+    fanout_store.record_model_health(
+        model, model_class="cloud" if _is_cloud_model_name(model) else "local",
+        error=_fanout_safe_error(exc, prompt), disabled_until=disabled_until,
+    )
+
+
+def _execute_fanout_run(run_id):
+    """Claim and execute a sealed durable run exactly once per receipt row.
+
+    A process interruption leaves a claimed row as ``unknown`` after lease
+    reconciliation; this worker never automatically replays it, particularly
+    for potentially metered cloud requests.
+    """
+    owner_id = _fanout_worker_id()
+    initial = fanout_store.get_run(run_id)
+    initial_limits = _fanout_limits(initial or {})
+    # A call may consume its full configured timeout.  Keep its receipt lease
+    # longer than that timeout so normal completion cannot be fenced out by the
+    # store at the exact request deadline.
+    lease_seconds = min(3600, initial_limits["timeout"] + 60)
+    run = fanout_store.claim_run(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
+    if run is None:
+        return _fanout_receipt(run_id)
+    limits = _fanout_limits(run)
+    try:
+        ciphertext = fanout_store.execution_prompt_ciphertext(run_id)
+        question = fanout_prompt_vault.decrypt_prompt(ciphertext or "")
+    except fanout_prompt_vault.PromptVaultError:
+        # Claim each pending row before recording the generic failure; do not
+        # leak either the ciphertext or the original prompt in the receipt.
+        while True:
+            row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
+            if row is None:
+                break
+            fanout_store.record_result(run_id, row["model"], owner_id, "failed",
+                                       error="sealed prompt unavailable", elapsed_ms=0)
+        return _fanout_receipt(run_id)
+
+    resident_at_start = {name.casefold() for name in limits["resident_before"]}
+
+    def invoke(row):
+        model = row["model"]
+        started = time.monotonic()
+        if not _fanout_snapshot_allows(run, model):
+            return row, "skipped", "", "model is outside immutable fanout target snapshot", 0, None
+        if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not cloud_allowed()):
+            return row, "skipped", "", "cloud access disabled before execution", 0, None
+        exc = None
+        try:
+            answer = (_make_generate(model, "", 0.2, limits["num_predict"], 4096,
+                                     timeout=limits["timeout"])(question) or "").strip()
+            if not answer:
+                raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
+            return row, "answered", _fanout_redact_prompt_echo(answer, question), "", int((time.monotonic() - started) * 1000), None
+        except Exception as caught:
+            exc = caught
+            return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc
+        finally:
+            if not _is_cloud_model_name(model) and model.casefold() not in resident_at_start:
+                with contextlib.suppress(Exception):
+                    _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+
+    def persist(result):
+        row, status, answer, error, elapsed, exc = result
+        recorded = fanout_store.record_result(run_id, row["model"], owner_id, status,
+                                              answer=answer, error=error, elapsed_ms=elapsed)
+        if recorded is not None:
+            with contextlib.suppress(Exception):
+                if status == "answered":
+                    _fanout_health(row["model"], None, question)
+                elif status == "failed":
+                    _fanout_health(row["model"], exc, question)
+
+    # Local execution stays serial for VRAM safety.  Cloud calls retain their
+    # public two-worker cap while each model row remains independently claimed.
+    while True:
+        row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
+        if row is None or _is_cloud_model_name(row["model"]):
+            break
+        persist(invoke(row))
+        fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
+    # If the first unclaimed remaining row is cloud, it is still pending; claim
+    # the cloud set below.  A local row can never follow it because result rows
+    # are alphabetically ordered, so claim all rows then route each safely.
+    pending_cloud = []
+    if row is not None:
+        pending_cloud.append(row)
+    with ThreadPoolExecutor(max_workers=limits["cloud_workers"]) as pool:
+        inflight = {}
+        while True:
+            while pending_cloud and len(inflight) < limits["cloud_workers"]:
+                claimed = pending_cloud.pop()
+                if _is_cloud_model_name(claimed["model"]):
+                    inflight[pool.submit(invoke, claimed)] = claimed
+                else:
+                    persist(invoke(claimed))
+            while len(inflight) < limits["cloud_workers"]:
+                claimed = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
+                if claimed is None:
+                    break
+                if _is_cloud_model_name(claimed["model"]):
+                    inflight[pool.submit(invoke, claimed)] = claimed
+                else:
+                    persist(invoke(claimed))
+            if not inflight:
+                break
+            future = next(as_completed(inflight))
+            del inflight[future]
+            persist(future.result())
+            fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
+    receipt = _fanout_receipt(run_id)
+    if receipt is not None:
+        activity_tracker.record_event(
+            "model_fanout", summary="%d/%d model answers in %dms" % (
+                receipt["models_answered"], receipt["models_selected"], receipt["total_elapsed_ms"]
+            ),
+        )
+    return receipt
 
 
 @mcp.tool()
 def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
-                 timeout: int = 45, max_cloud_workers: int = 2) -> str:
+                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "") -> str:
     """Ask every discovered local, cloud, or all model the same prompt.
 
     Local models are serial to avoid GPU/VRAM contention.  Cloud calls require
@@ -21333,11 +21662,19 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
     no failed cloud call is retried automatically.  The JSON receipt reports
     selected, answered, failed, resident-before, and total elapsed metrics.
     """
+    started = time.time()
+    refusal = _developer_gate("model_fanout", token, started)
+    if refusal:
+        return refusal
     question = str(prompt or "").strip()
     if not question:
         return _format_model_call_error(
             ModelCallError("configuration", "model_fanout needs a prompt.")
         )
+    if len(question) > fanout_store.MAX_PROMPT_CHARS:
+        return _format_model_call_error(ModelCallError(
+            "configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS
+        ))
     try:
         cap = max(32, min(int(num_predict), 4096))
         request_timeout = max(5, min(int(timeout), 300))
@@ -21347,69 +21684,69 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
             "configuration", "num_predict, timeout, and max_cloud_workers must be integers."
         ))
     try:
-        targets, error = _fanout_models(scope)
+        run = _fanout_start(question, scope, cap=cap, request_timeout=request_timeout,
+                            cloud_workers=cloud_workers)
+        receipt = _execute_fanout_run(run["id"])
     except ModelCallError as exc:
         return _format_model_call_error(exc)
-    if error:
-        return _format_model_call_error(error)
-    if not targets:
+    if receipt is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+    return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout_status(run_id: str, token: str = "") -> str:
+    """Return the durable receipt for a model fanout run.
+
+    On an authenticated multi-user deployment this is developer-only, because
+    receipts may contain another caller's model answers.  Local-open use keeps
+    the full local toolset.
+    """
+    started = time.time()
+    refusal = _developer_gate("model_fanout_status", token, started)
+    if refusal:
+        return refusal
+    receipt = _fanout_receipt(run_id)
+    if receipt is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+    return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout_cancel(run_id: str, token: str = "") -> str:
+    """Cancel a durable model fanout; late provider results are discarded."""
+    started = time.time()
+    refusal = _developer_gate("model_fanout_cancel", token, started)
+    if refusal:
+        return refusal
+    if fanout_store.request_cancel(run_id) is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+    receipt = _fanout_receipt(run_id)
+    if receipt is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+    return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout_resume(run_id: str, include_failed: bool = False,
+                        retry_unknown: bool = False, token: str = "") -> str:
+    """Explicitly resume selected durable fanout results.
+
+    Unknown results are never retried unless ``retry_unknown`` is true, which
+    prevents accidental replays of metered cloud calls after an interruption.
+    """
+    started = time.time()
+    refusal = _developer_gate("model_fanout_resume", token, started)
+    if refusal:
+        return refusal
+    run = fanout_store.resume_run(run_id, include_failed=bool(include_failed), retry_unknown=bool(retry_unknown))
+    if run is None:
         return _format_model_call_error(ModelCallError(
-            "configuration", "no %s models are currently discovered." % scope
+            "configuration", "fanout run is not resumable with the selected retry options"
         ))
-    try:
-        resident_before = [str(row.get("name")) for row in _get("/api/ps").get("models", []) if row.get("name")]
-    except Exception:
-        resident_before = []
-    started = time.monotonic()
-    answers, failures = [], []
-
-    def call(model):
-        call_started = time.monotonic()
-        try:
-            text = (_make_generate(model, "", 0.2, cap, 4096, timeout=request_timeout)(question) or "").strip()
-            if not text:
-                raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
-            return {"model": model, "answer": text, "elapsed_ms": int((time.monotonic() - call_started) * 1000)}
-        except Exception as exc:
-            detail = _format_model_call_error(exc) if isinstance(exc, ModelCallError) else str(exc)
-            return {"model": model, "error": detail, "elapsed_ms": int((time.monotonic() - call_started) * 1000)}
-
-    local = [name for name in targets if not _is_cloud_model_name(name)]
-    cloud = [name for name in targets if _is_cloud_model_name(name)]
-    resident_at_start = {name.casefold() for name in resident_before}
-    for name in local:
-        try:
-            row = call(name)
-            (answers if "answer" in row else failures).append(row)
-        finally:
-            # A whole-catalog run must not strand each local model in VRAM.
-            # This is deliberately best-effort: a completed answer remains a
-            # completed answer even if Ollama rejects the unload request.
-            if name.casefold() not in resident_at_start:
-                try:
-                    _post("/api/generate", {"model": name, "keep_alive": 0}, timeout=30)
-                except Exception:
-                    pass
-    if cloud:
-        with ThreadPoolExecutor(max_workers=cloud_workers) as pool:
-            for row in (future.result() for future in as_completed([pool.submit(call, name) for name in cloud])):
-                (answers if "answer" in row else failures).append(row)
-    receipt = {
-        "scope": "all" if str(scope).lower() == "available" else str(scope).lower(),
-        "models_selected": len(targets),
-        "models_answered": len(answers),
-        "models_failed": len(failures),
-        "resident_before": resident_before,
-        "total_elapsed_ms": int((time.monotonic() - started) * 1000),
-        "cloud_workers": cloud_workers if cloud else 0,
-        "answers": sorted(answers, key=lambda row: row["model"].casefold()),
-        "failures": sorted(failures, key=lambda row: row["model"].casefold()),
-    }
-    activity_tracker.record_event(
-        "model_fanout", summary="%d/%d model answers in %dms" % (
-            len(answers), len(targets), receipt["total_elapsed_ms"]
-        ),
-    )
+    receipt = _execute_fanout_run(run["id"])
+    if receipt is None:
+        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
