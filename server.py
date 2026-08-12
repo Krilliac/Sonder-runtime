@@ -21427,7 +21427,8 @@ def _fanout_redact_prompt_echo(value, prompt):
     return rendered
 
 
-def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers):
+def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers,
+                  request_owner="", request_role=""):
     """Seal a fanout request and persist its immutable target snapshot.
 
     The public receipt database gets only a non-sensitive marker plus the
@@ -21466,7 +21467,8 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers):
     }
     try:
         run = fanout_store.create_run(
-            marker, targets, scope=plan["scope"], cloud_opt_in=cloud_allowed(),
+            marker, targets, request_owner=request_owner, request_role=request_role,
+            scope=plan["scope"], cloud_opt_in=cloud_allowed(),
             limits=limits, execution_prompt_ciphertext=sealed,
         )
     except (OSError, ValueError) as exc:
@@ -21666,7 +21668,8 @@ def _execute_fanout_run(run_id):
 
 
 def _model_fanout_authorized(prompt: str, scope: str = "local", num_predict: int = 512,
-                             timeout: int = 45, max_cloud_workers: int = 2) -> str:
+                             timeout: int = 45, max_cloud_workers: int = 2,
+                             request_owner: str = "", request_role: str = "") -> str:
     """Execute fanout after the caller's authority was established upstream.
 
     This is intentionally private.  HTTP has an authenticated principal and
@@ -21692,8 +21695,11 @@ def _model_fanout_authorized(prompt: str, scope: str = "local", num_predict: int
             "configuration", "num_predict, timeout, and max_cloud_workers must be integers."
         ))
     try:
-        run = _fanout_start(question, scope, cap=cap, request_timeout=request_timeout,
-                            cloud_workers=cloud_workers)
+        run = _fanout_start(
+            question, scope, cap=cap, request_timeout=request_timeout,
+            cloud_workers=cloud_workers, request_owner=request_owner,
+            request_role=request_role,
+        )
         receipt = _execute_fanout_run(run["id"])
     except ModelCallError as exc:
         return _format_model_call_error(exc)
