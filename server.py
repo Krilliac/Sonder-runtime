@@ -14518,10 +14518,23 @@ def tool_capability_manifest() -> str:
     """
     _maybe_live_reload()
     manifest = tool_manifest()
-    digest = hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+    registered = getattr(mcp._tool_manager, "_tools", {})
+    capabilities = [
+        {
+            "name": str(name),
+            "description": str(getattr(tool, "description", "")),
+            "parameters": getattr(tool, "parameters", {}),
+        }
+        for name, tool in sorted(registered.items())
+    ]
+    canonical = json.dumps(
+        capabilities, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return json.dumps({
         "sha256": digest,
-        "tool_count": len(getattr(mcp._tool_manager, "_tools", {})),
+        "tool_count": len(capabilities),
         "manifest": manifest,
         "authority": "informational only; host policy remains authoritative",
     }, indent=2, sort_keys=True)
@@ -14545,7 +14558,7 @@ def access_request_preview(path: str, mode: str = "read") -> str:
         error = "ERROR: path is required."
         return error
     try:
-        resolved = file_ops.resolve_path(requested)
+        resolved = str(file_ops.resolve_path(requested))
         state = "already_authorized"
         detail = "The guarded root policy already admits this path."
     except (OSError, ValueError, PermissionError) as exc:

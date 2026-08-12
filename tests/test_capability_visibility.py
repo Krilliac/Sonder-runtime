@@ -22,5 +22,12 @@ def test_access_request_preview_never_grants_or_mutates(tmp_path, monkeypatch):
     assert "cannot approve" in result["model_authority"]
 
 
+def test_access_request_preview_serializes_already_authorized_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.file_ops, "resolve_path", lambda path: tmp_path)
+    result = json.loads(server.access_request_preview(str(tmp_path), "read"))
+    assert result["state"] == "already_authorized"
+    assert result["path"] == str(tmp_path)
+
+
 def test_access_request_preview_rejects_unknown_mode():
     assert server.access_request_preview(".", "execute").startswith("ERROR:")
