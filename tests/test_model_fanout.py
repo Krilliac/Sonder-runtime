@@ -257,6 +257,9 @@ def test_direct_mcp_fanout_receipts_are_owner_scoped_on_shared_deployments(
     owner = captured["request_owner"]
     assert owner.startswith("fo-")
     assert "developer-a" not in owner
+    assert owner == sonder_serve._fanout_request_owner({
+        "account": accounts["developer-a"], "api_key": False,
+    })
     monkeypatch.setattr(
         server.fanout_store, "get_run",
         lambda _run_id: {"id": "fan-private", "request_owner": owner},
