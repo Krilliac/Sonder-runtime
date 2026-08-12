@@ -99,6 +99,20 @@ def test_inspect_data_refuses_memory_db_for_non_developer(workspace):
         file_ops.inspect_data("memory.db")
 
 
+def test_read_file_refuses_custom_named_fanout_receipt_store(workspace, monkeypatch):
+    receipt = workspace / "runtime-receipts.sqlite"
+    receipt.write_bytes(b"SQLite format 3\x00")
+    monkeypatch.setenv("SONDER_FANOUT_DB", str(receipt))
+
+    with pytest.raises(PermissionError, match="protected Sonder secret/control-plane"):
+        file_ops.read_file(str(receipt))
+
+    journal = type(receipt)(str(receipt) + "-journal")
+    journal.write_bytes(b"active rollback journal")
+    with pytest.raises(PermissionError, match="protected Sonder secret/control-plane"):
+        file_ops.read_file(str(journal))
+
+
 def test_inspect_data_developer_can_read_secret(workspace):
     (workspace / "credentials.json").write_text('{"token": "s"}', encoding="utf-8")
     out = file_ops.inspect_data("credentials.json", developer_authorized=True)
