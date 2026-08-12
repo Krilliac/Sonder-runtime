@@ -1,4 +1,5 @@
 import memory_store
+import server
 
 
 def test_task_create_list_update_and_events():
@@ -46,3 +47,8 @@ def test_task_list_accepts_pipe_delimited_status_filter():
     rows = memory_store.list_tasks(conn, status="pending|blocked")
 
     assert {row["id"] for row in rows} == {pending["id"], blocked["id"]}
+
+
+def test_task_list_contract_documents_multi_status_filtering():
+    assert "pipe-delimited set" in server.task_list.__doc__
+    assert "pending|blocked" in server.task_list.__doc__

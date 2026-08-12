@@ -6929,7 +6929,12 @@ def task_list(
     include_done: bool = False,
     limit: int = 50,
 ) -> str:
-    """List visible task/todo rows, pending and active by default."""
+    """List visible task/todo rows, pending and active by default.
+
+    ``status`` accepts one normalized status or a pipe-delimited set, such as
+    ``pending|blocked``.  This filters tasks with either status in one call;
+    it is not a literal status name.
+    """
     _maybe_live_reload()
     conn = _open_db()
     try:
