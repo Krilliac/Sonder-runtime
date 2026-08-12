@@ -298,8 +298,10 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
     )
 
     assert status == 200
+    payload = json.loads(body)
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
-    assert json.loads(body)["choices"][0]["message"]["content"].startswith(
+    assert payload["sonder_elapsed_ms"] == int(headers["X-Sonder-Elapsed-Ms"])
+    assert payload["choices"][0]["message"]["content"].startswith(
         "VALID ANSWER"
     )
     assert forwarded == [(
