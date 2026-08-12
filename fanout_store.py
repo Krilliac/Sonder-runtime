@@ -403,7 +403,7 @@ def reconcile_stale_runs(now: float | None = None) -> int:
             stale = run["status"] != "queued" and (run["lease_until"] is None or run["lease_until"] < current or (run["owner_host"] == host and not _process_pid_alive(run["owner_pid"])))
             if not stale: continue
             conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease ended; request was not replayed',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (current, current, run["id"]))
-            conn.execute("UPDATE fanout_runs SET status='interrupted',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE id=?", (current, run["id"]))
+            conn.execute("UPDATE fanout_runs SET status='interrupted',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? WHERE id=?", (current, current, run["id"]))
             _event(conn, run["id"], "interrupted", "worker lease ended; explicit resume is required", current); changed += 1
     return changed
 
