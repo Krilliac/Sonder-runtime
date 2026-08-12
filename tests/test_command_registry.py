@@ -20,6 +20,19 @@ def test_command_registry_handles_no_matches():
     assert "(no matching commands)" in out
 
 
+def test_command_registry_discovers_related_multiword_capabilities():
+    task_commands = command_registry.format_commands("task checklist status")
+    todo_commands = command_registry.format_commands("todo checklist status")
+    fanout_commands = command_registry.format_commands("fanout model")
+    agent_checklist_commands = command_registry.format_commands("agent checklist")
+
+    assert "/task_list" in task_commands
+    assert "/checklist_show" in task_commands
+    assert "/task_list" in todo_commands
+    assert "/model_fanout" in fanout_commands
+    assert "/workbench_agent" in agent_checklist_commands
+
+
 def test_command_registry_exposes_restart_safe_agent_controls():
     agents = command_registry.format_commands("agents")
 
