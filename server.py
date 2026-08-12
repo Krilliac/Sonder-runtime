@@ -21498,7 +21498,10 @@ def _fanout_plan(scope, *, include_unhealthy=False):
             skipped.append({
                 "model": name,
                 "reason": "health cooldown active",
-                "retry_after_ms": max(1, int((float(disabled_until) - now) * 1000)),
+                # Store the stable expiry, not a stale point-in-time delay.
+                # _fanout_receipt derives retry_after_ms immediately before
+                # returning a receipt/status response.
+                "retry_after_ts": float(disabled_until),
             })
             continue
         selected.append(name)
@@ -21661,6 +21664,18 @@ def _fanout_receipt(run_id):
     execution_skips = [{"model": row["model"], "reason": row["error"] or "not executed"}
                        for row in rows if row["status"] == "skipped"]
     ended = run.get("finished_ts") or time.time()
+    now = time.time()
+    plan_skips = []
+    for row in limits["plan_skipped"]:
+        item = dict(row) if isinstance(row, dict) else {"reason": str(row or "not eligible")}
+        expiry = item.pop("retry_after_ts", None)
+        try:
+            remaining_ms = int((float(expiry) - now) * 1000)
+        except (TypeError, ValueError):
+            remaining_ms = 0
+        if remaining_ms > 0:
+            item["retry_after_ms"] = remaining_ms
+        plan_skips.append(item)
     return {
         "run_id": run["id"],
         "status": run["status"],
@@ -21668,8 +21683,8 @@ def _fanout_receipt(run_id):
         "models_selected": len(rows),
         "models_answered": len(answers),
         "models_failed": len(failures),
-        "models_skipped": len(limits["plan_skipped"]) + len(execution_skips),
-        "skipped": limits["plan_skipped"] + execution_skips,
+        "models_skipped": len(plan_skips) + len(execution_skips),
+        "skipped": plan_skips + execution_skips,
         "resident_before": limits["resident_before"],
         "total_elapsed_ms": max(0, int((float(ended) - float(run["created_ts"])) * 1000)),
         "cloud_workers": limits["cloud_workers"],
