@@ -58,6 +58,7 @@ def test_tool_manifest_documents_guarded_model_routes():
 
     assert "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume" in manifest
     assert "ask all available local models: ..." in manifest
+    assert "ask all local and cloud models: ..." in manifest
     assert "ask the phi4:latest model to ..." in manifest
     assert "run using model phi4:latest: ..." in manifest
     assert "explicit operator opt-in" in manifest
