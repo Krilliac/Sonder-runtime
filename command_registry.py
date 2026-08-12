@@ -1,5 +1,7 @@
 """Readable command/tool inventory for console, app, and agents."""
 
+import re
+
 COMMANDS = [
     {
         "name": "/help",
@@ -419,6 +421,56 @@ def _catalog_rows():
     ]
 
 
+_DISCOVERY_STOP_WORDS = frozenset({
+    "a", "an", "and", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+})
+_DISCOVERY_EQUIVALENTS = {
+    "task": frozenset({"task", "todo", "checklist", "plan"}),
+    "checklist": frozenset({"task", "todo", "checklist", "plan"}),
+    "status": frozenset({"status", "state", "show", "list", "inspect"}),
+}
+
+
+def _discovery_match_score(command, filter_text):
+    """Score a human capability query against one catalog row.
+
+    Slash names are often terse while users ask for a capability using several
+    related words (for example ``task checklist status``).  Exact phrase
+    matching made those queries appear empty even though the catalog contained
+    every relevant command.  Keep the old exact match, then require every
+    distinct meaningful concept with a small, explicit task/status vocabulary.
+    """
+    haystack = " ".join(
+        str(command.get(key, ""))
+        for key in ("name", "category", "risk", "summary", "aliases", "usage")
+    ).lower()
+    query = str(filter_text or "").strip().lower()
+    if not query:
+        return 1
+    if query in haystack:
+        return len(query)
+    tokens = [
+        token for token in re.findall(r"[a-z0-9_]+", query)
+        if token not in _DISCOVERY_STOP_WORDS
+    ]
+    if not tokens:
+        return 0
+    # Tool names use underscores (``model_fanout``), while people naturally
+    # ask with spaces (``fanout model``).  Treat the separator as a word break
+    # for discovery without changing the canonical command name we display.
+    words = frozenset(re.findall(r"[a-z0-9_]+", haystack.replace("_", " ")))
+    concepts = []
+    seen = set()
+    for token in tokens:
+        variants = _DISCOVERY_EQUIVALENTS.get(token, frozenset({token}))
+        identity = tuple(sorted(variants))
+        if identity not in seen:
+            concepts.append(variants)
+            seen.add(identity)
+    score = sum(bool(words & variants) for variants in concepts)
+    return score if score == len(concepts) else 0
+
+
 def list_commands(filter_text=""):
     """Filter the live command surface, falling back to the curated seed.
 
@@ -431,14 +483,16 @@ def list_commands(filter_text=""):
     except Exception:
         source = [dict(command) for command in COMMANDS]
     f = (filter_text or "").strip().lower()
-    rows = []
+    intent_words = frozenset(re.findall(r"[a-z0-9_]+", f))
+    planning_intent = bool(intent_words & {"task", "checklist"})
+    scored_rows = []
     for command in source:
-        haystack = " ".join(
-            str(command.get(k, "")) for k in ("name", "category", "risk", "summary")
-        ).lower()
-        if not f or f in haystack:
-            rows.append(dict(command))
-    return rows
+        score = _discovery_match_score(command, f)
+        if score and (not planning_intent or command.get("category") == "planning"):
+            scored_rows.append((score, dict(command)))
+    return [row for _score, row in sorted(
+        scored_rows, key=lambda item: (-item[0], item[1]["name"]),
+    )]
 
 
 def format_commands(filter_text=""):
