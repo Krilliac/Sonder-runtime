@@ -371,7 +371,9 @@ def reconcile_stale_runs(now: float | None = None) -> int:
     return changed
 
 
-def record_model_health(model: str, *, model_class: str = "", success: bool = False, error: str = "", disabled_until: float | None = None) -> dict:
+def record_model_health(model: str, *, model_class: str = "", success: bool = False,
+                        error: str = "", disabled_until: float | None = None,
+                        counts_toward_backoff: bool = True) -> dict:
     now = time.time(); model = _safe_text(model, 200).strip()
     if not model: raise ValueError("model is required")
     with _write_transaction() as conn:
@@ -379,7 +381,15 @@ def record_model_health(model: str, *, model_class: str = "", success: bool = Fa
         if success:
             conn.execute("INSERT INTO model_health(model,model_class,failure_count,last_error,disabled_until,last_success_ts,updated_ts) VALUES(?,?,0,'',NULL,?,?) ON CONFLICT(model) DO UPDATE SET model_class=excluded.model_class,failure_count=0,last_error='',disabled_until=NULL,last_success_ts=excluded.last_success_ts,updated_ts=excluded.updated_ts", (model, _safe_text(model_class, 40), now, now))
         else:
-            conn.execute("INSERT INTO model_health(model,model_class,failure_count,last_error,disabled_until,updated_ts) VALUES(?,?,1,?,?,?) ON CONFLICT(model) DO UPDATE SET model_class=excluded.model_class,failure_count=model_health.failure_count+1,last_error=excluded.last_error,disabled_until=excluded.disabled_until,updated_ts=excluded.updated_ts", (model, _safe_text(model_class, 40), _safe_text(error, MAX_ERROR_CHARS), disabled_until, now))
+            increment = bool(counts_toward_backoff)
+            conn.execute(
+                "INSERT INTO model_health(model,model_class,failure_count,last_error,disabled_until,updated_ts) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(model) DO UPDATE SET model_class=excluded.model_class,"
+                "failure_count=CASE WHEN ? THEN model_health.failure_count+1 ELSE model_health.failure_count END,"
+                "last_error=excluded.last_error,disabled_until=excluded.disabled_until,updated_ts=excluded.updated_ts",
+                (model, _safe_text(model_class, 40), 1 if increment else 0,
+                 _safe_text(error, MAX_ERROR_CHARS), disabled_until, now, increment),
+            )
         return _row(conn.execute("SELECT * FROM model_health WHERE model=?", (model,)).fetchone())
 
 

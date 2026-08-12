@@ -454,6 +454,43 @@ def test_repeated_local_availability_failures_back_off(monkeypatch):
 
     # Prior failures=2, this is the third: 5m * 2^2 = 20m.
     assert 1_198 <= recorded[0][1]["disabled_until"] - time.time() <= 1_201
+    assert recorded[0][1]["counts_toward_backoff"] is True
+
+
+def test_local_prompt_error_does_not_count_toward_backoff(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        server.fanout_store, "record_model_health",
+        lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+
+    server._fanout_health(
+        "local-a",
+        server.ModelCallError("request", "prompt was rejected", status=400),
+        "private prompt",
+    )
+
+    assert recorded[0][1]["counts_toward_backoff"] is False
+
+
+def test_local_backoff_reaches_one_hour_cap(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        server.fanout_store, "get_model_health",
+        lambda _model: {"failure_count": 5},
+    )
+    monkeypatch.setattr(
+        server.fanout_store, "record_model_health",
+        lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+
+    server._fanout_health(
+        "local-a",
+        server.ModelCallError("timeout", "model timed out", transient=True),
+        "private prompt",
+    )
+
+    assert 3_598 <= recorded[0][1]["disabled_until"] - time.time() <= 3_601
 
 
 def test_transient_local_http_failure_gets_a_health_cooldown(monkeypatch):
