@@ -110,49 +110,70 @@ def _ensure_schema(path: str) -> None:
         if resolved in _INITIALIZED_PATHS:
             return
         Path(resolved).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(resolved, timeout=5)
-        try:
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(_SCHEMA)
-            # The process-local lock above is not enough for two live runtime
-            # processes upgrading the same durable fanout.db. Take SQLite's
-            # cross-process write lock before every probe-and-ALTER sequence.
-            conn.execute("BEGIN IMMEDIATE")
-            # Existing receipt databases predate the sealed execution payload.
-            # Migration is additive and the ciphertext is never exposed by the
-            # public receipt readers below.
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(fanout_runs)")}
-            if "execution_prompt_ciphertext" not in columns:
+        # ``journal_mode=WAL`` requires a database-level lock of its own. Two
+        # processes opening a pre-WAL legacy receipt can race *before* the
+        # BEGIN IMMEDIATE below. Bound and retry that transient lock instead of
+        # treating a concurrent upgrade as a failed runtime startup.
+        deadline = time.monotonic() + 5.0
+        while True:
+            retry = False
+            conn = sqlite3.connect(resolved, timeout=5)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.executescript(_SCHEMA)
+                # The process-local lock above is not enough for two live runtime
+                # processes upgrading the same durable fanout.db. Take SQLite's
+                # cross-process write lock before every probe-and-ALTER sequence.
+                conn.execute("BEGIN IMMEDIATE")
+                # Existing receipt databases predate the sealed execution payload.
+                # Migration is additive and the ciphertext is never exposed by the
+                # public receipt readers below.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(fanout_runs)")}
+                if "execution_prompt_ciphertext" not in columns:
+                    conn.execute(
+                        "ALTER TABLE fanout_runs ADD COLUMN execution_prompt_ciphertext TEXT NOT NULL DEFAULT ''"
+                    )
+                health_columns = {row[1] for row in conn.execute("PRAGMA table_info(model_health)")}
+                if "availability_failure_count" not in health_columns:
+                    # ``failure_count`` historically included prompt/configuration
+                    # rejects. Do not copy it: a fresh zero is the only safe value
+                    # for an availability-only cooldown counter.
+                    conn.execute(
+                        "ALTER TABLE model_health ADD COLUMN availability_failure_count INTEGER NOT NULL DEFAULT 0"
+                    )
+                # Before sealed prompts existed this database retained a best-effort
+                # redacted copy plus a stable digest.  That is not an acceptable
+                # durable prompt store: a redactor cannot safely classify arbitrary
+                # private prose, and a digest enables offline guessing.  Old runs
+                # cannot be resumed without their sealed payload, so scrub them in
+                # the same migration that introduces the vault column.
                 conn.execute(
-                    "ALTER TABLE fanout_runs ADD COLUMN execution_prompt_ciphertext TEXT NOT NULL DEFAULT ''"
+                    "UPDATE fanout_runs SET prompt='legacy-fanout-prompt:redacted', "
+                    "prompt_sha256='' WHERE COALESCE(execution_prompt_ciphertext, '')='' "
+                    "AND prompt NOT LIKE 'legacy-fanout-prompt:%'"
                 )
-            health_columns = {row[1] for row in conn.execute("PRAGMA table_info(model_health)")}
-            if "availability_failure_count" not in health_columns:
-                # ``failure_count`` historically included prompt/configuration
-                # rejects. Do not copy it: a fresh zero is the only safe value
-                # for an availability-only cooldown counter.
-                conn.execute(
-                    "ALTER TABLE model_health ADD COLUMN availability_failure_count INTEGER NOT NULL DEFAULT 0"
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.rollback()
+                # SQLite's messages are stable across supported Python builds;
+                # retry only contention, never malformed schemas or I/O faults.
+                retry = (
+                    ("locked" in str(exc).lower() or "busy" in str(exc).lower())
+                    and time.monotonic() < deadline
                 )
-            # Before sealed prompts existed this database retained a best-effort
-            # redacted copy plus a stable digest.  That is not an acceptable
-            # durable prompt store: a redactor cannot safely classify arbitrary
-            # private prose, and a digest enables offline guessing.  Old runs
-            # cannot be resumed without their sealed payload, so scrub them in
-            # the same migration that introduces the vault column.
-            conn.execute(
-                "UPDATE fanout_runs SET prompt='legacy-fanout-prompt:redacted', "
-                "prompt_sha256='' WHERE COALESCE(execution_prompt_ciphertext, '')='' "
-                "AND prompt NOT LIKE 'legacy-fanout-prompt:%'"
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+                if not retry:
+                    raise
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            if not retry:
+                break
+            time.sleep(0.05)
         if os.name != "nt":
             with contextlib.suppress(OSError):
                 os.chmod(resolved, 0o600)
