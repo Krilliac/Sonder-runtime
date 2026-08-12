@@ -237,6 +237,58 @@ def test_model_fanout_lifecycle_is_gated_for_shared_deployments(monkeypatch):
     assert reply.startswith("refused:")
 
 
+def test_direct_mcp_fanout_receipts_are_owner_scoped_on_shared_deployments(
+    monkeypatch,
+):
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    accounts = {
+        "developer-a": {"username": "developer-a", "role": "developer"},
+        "developer-b": {"username": "developer-b", "role": "developer"},
+        "admin": {"username": "admin", "role": "admin"},
+    }
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda token: accounts.get(token))
+    captured = {}
+    monkeypatch.setattr(
+        server, "_model_fanout_authorized",
+        lambda *_args, **kwargs: captured.update(kwargs) or "created",
+    )
+
+    assert server.model_fanout("private question", token="developer-a") == "created"
+    owner = captured["request_owner"]
+    assert owner.startswith("fo-")
+    assert "developer-a" not in owner
+    assert owner == sonder_serve._fanout_request_owner({
+        "account": accounts["developer-a"], "api_key": False,
+    })
+    monkeypatch.setattr(
+        server.fanout_store, "get_run",
+        lambda _run_id: {"id": "fan-private", "request_owner": owner},
+    )
+    monkeypatch.setattr(server, "_fanout_receipt", lambda run_id: {"run_id": run_id})
+
+    assert "not found" in server.model_fanout_status("fan-private", token="developer-b")
+    assert json.loads(server.model_fanout_status("fan-private", token="developer-a")) == {
+        "run_id": "fan-private"
+    }
+    assert json.loads(server.model_fanout_status("fan-private", token="admin")) == {
+        "run_id": "fan-private"
+    }
+
+
+def test_shared_direct_mcp_fanout_does_not_expose_legacy_unowned_receipts(monkeypatch):
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    monkeypatch.setattr(
+        server, "_admin_account_from_token",
+        lambda token: {"username": "developer", "role": "developer"} if token == "dev" else None,
+    )
+    monkeypatch.setattr(
+        server.fanout_store, "get_run",
+        lambda _run_id: {"id": "legacy", "request_owner": ""},
+    )
+
+    assert "not found" in server.model_fanout_status("legacy", token="dev")
+
+
 def test_model_fanout_and_natural_wrapper_are_gated_for_shared_deployments(monkeypatch):
     monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
     monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: None)
