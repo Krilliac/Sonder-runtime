@@ -237,6 +237,23 @@ def test_model_fanout_lifecycle_is_gated_for_shared_deployments(monkeypatch):
     assert reply.startswith("refused:")
 
 
+@pytest.mark.parametrize("operation", [
+    server.model_fanout_status,
+    server.model_fanout_cancel,
+])
+def test_direct_fanout_lifecycle_runs_authorization_once(monkeypatch, operation):
+    calls = []
+    monkeypatch.setattr(
+        server, "_developer_gate",
+        lambda *args: calls.append(args) or "refused: developer authorization is required.",
+    )
+
+    reply = operation("fan-test", token="bad-token")
+
+    assert reply.startswith("refused:")
+    assert len(calls) == 1
+
+
 def test_direct_mcp_fanout_receipts_are_owner_scoped_on_shared_deployments(
     monkeypatch,
 ):
