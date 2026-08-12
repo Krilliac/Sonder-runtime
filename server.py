@@ -5227,7 +5227,10 @@ def sonder(
         return model_fanout(natural["prompt"], scope=natural["scope"], num_predict=num_predict)
     if natural and natural["kind"] == "model":
         if natural["prompt"].lstrip().startswith("/"):
-            return "ERROR: model selection cannot wrap a slash command; issue the command directly."
+            return _format_model_call_error(ModelCallError(
+                "configuration",
+                "model selection cannot wrap a slash command; issue the command directly.",
+            ))
         prompt = natural["prompt"]
         tier = natural["model"]
     label = "sonder:%s" % ((tier or "sonder").strip() or "sonder")
