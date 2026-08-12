@@ -36,8 +36,11 @@ _INITIALIZED_PATHS: set[str] = set()
 # Intentionally conservative: the database is a receipt, not a secret store.
 _BEARER = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}")
 _URI_CREDENTIAL = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]+)?@")
-_ASSIGNMENT = re.compile(r"(?i)\b([a-z_][a-z0-9_]*(?:token|secret|password|api[_-]?key|authorization))\s*[:=]\s*([^\s,;]{4,})")
-_SENSITIVE_ASSIGNMENT = re.compile(r"(?i)\b(api[_-]?key|access[_-]?key|secret|password|authorization)\s*[:=]\s*([^\s,;]{4,})")
+_SENSITIVE_NAME = r"(?:api[_-]?key|access[_-]?key|authorization|token|secret|password|[a-z][a-z0-9_-]{0,40}_(?:token|secret|password))"
+_ASSIGNMENT = re.compile(r"(?i)\b(" + _SENSITIVE_NAME + r")\s*[:=]\s*([^\s,;]{4,})")
+_SENSITIVE_ASSIGNMENT = re.compile(r"(?i)\b(" + _SENSITIVE_NAME + r")\s*[:=]\s*([^\s,;]{4,})")
+_DOUBLE_QUOTED_ASSIGNMENT = re.compile(r"(?i)([\"']?" + _SENSITIVE_NAME + r"[\"']?\s*[:=]\s*)\"(?:\\.|[^\"])*\"")
+_SINGLE_QUOTED_ASSIGNMENT = re.compile(r"(?i)([\"']?" + _SENSITIVE_NAME + r"[\"']?\s*[:=]\s*)'(?:\\.|[^'])*'")
 _KEY = re.compile(r"\b(?:sk|rk|ghp)_[A-Za-z0-9_-]{16,}\b")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -79,8 +82,14 @@ def _safe_text(value, limit: int) -> str:
     text = str(value or "")
     text = _BEARER.sub("Bearer <redacted>", text)
     text = _URI_CREDENTIAL.sub(r"\1<redacted>@", text)
-    text = _ASSIGNMENT.sub(lambda m: "%s=<redacted>" % m.group(1), text)
-    text = _SENSITIVE_ASSIGNMENT.sub(lambda m: "%s=<redacted>" % m.group(1), text)
+    # Avoid repeatedly running field-name patterns across megabyte-scale model
+    # output that has none of the relevant markers.
+    lower = text.casefold()
+    if any(marker in lower for marker in ("token", "secret", "password", "api_key", "api-key", "access_key", "access-key", "authorization")):
+        text = _DOUBLE_QUOTED_ASSIGNMENT.sub(r"\1<redacted>", text)
+        text = _SINGLE_QUOTED_ASSIGNMENT.sub(r"\1<redacted>", text)
+        text = _ASSIGNMENT.sub(lambda m: "%s=<redacted>" % m.group(1), text)
+        text = _SENSITIVE_ASSIGNMENT.sub(lambda m: "%s=<redacted>" % m.group(1), text)
     text = _KEY.sub("<redacted-key>", text)
     return _CONTROL.sub("?", text)[:limit]
 
@@ -218,6 +227,11 @@ def claim_run(run_id: str, owner_id: str, *, owner_pid: int, lease_seconds: int 
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None or row["status"] in TERMINAL_RUNS or row["cancel_requested"]: return None
         if row["owner_id"] and row["owner_id"] != owner_id and row["lease_until"] and row["lease_until"] >= now: return None
+        if row["owner_id"] and row["owner_id"] != owner_id:
+            # Lease ownership is a run-wide fence.  A successor must atomically
+            # retire any old in-flight result before taking the run, otherwise
+            # a delayed prior worker can commit after its lease has ended.
+            conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease transferred; request was not replayed',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (now, now, str(run_id)))
         changed = conn.execute("UPDATE fanout_runs SET status='running',owner_id=?,owner_pid=?,owner_host=?,lease_until=?,updated_ts=? WHERE id=? AND status NOT IN ('completed','cancelled','interrupted') AND cancel_requested=0",
                                (_safe_text(owner_id, 200), int(owner_pid), socket.gethostname(), lease, now, str(run_id))).rowcount
         if not changed: return None
@@ -243,8 +257,10 @@ def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer
     if status not in ("answered", "failed", "skipped", "unknown"): raise ValueError("invalid fanout result status: %s" % status)
     now = time.time(); elapsed = None if elapsed_ms is None else max(0, min(int(elapsed_ms), 86_400_000))
     with _write_transaction() as conn:
-        run = conn.execute("SELECT cancel_requested FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
-        if run is None or run["cancel_requested"]: return None
+        run = conn.execute("SELECT cancel_requested,owner_id,status,lease_until FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
+        if (run is None or run["cancel_requested"] or run["owner_id"] != owner_id
+                or run["status"] != "running" or run["lease_until"] is None
+                or run["lease_until"] < now): return None
         changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
                                WHERE run_id=? AND model=? AND owner_id=? AND status='running'""",
                                (status, _safe_text(answer, MAX_ANSWER_CHARS), _safe_text(error, MAX_ERROR_CHARS), elapsed, retry_after_ts, now, now, str(run_id), str(model), str(owner_id))).rowcount

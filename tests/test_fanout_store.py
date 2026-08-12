@@ -74,3 +74,25 @@ def test_resume_requires_explicit_unknown_retry():
     resumed = store.resume_run(run["id"], retry_unknown=True)
     assert resumed["status"] == "queued"
     assert store.list_results(run["id"])[0]["status"] == "pending"
+
+
+def test_lease_transfer_marks_old_inflight_result_unknown(monkeypatch):
+    now = [1_000.0]
+    monkeypatch.setattr(store.time, "time", lambda: now[0])
+    run = store.create_run("question", ["a"])
+    store.claim_run(run["id"], "old", owner_pid=os.getpid(), lease_seconds=30)
+    store.claim_next_result(run["id"], "old", owner_pid=os.getpid(), lease_seconds=30)
+    now[0] += 31
+
+    assert store.claim_run(run["id"], "new", owner_pid=os.getpid())
+    assert store.list_results(run["id"])[0]["status"] == "unknown"
+    assert store.record_result(run["id"], "a", "old", "answered", answer="late") is None
+
+
+def test_redactor_covers_quoted_json_and_spaced_credentials():
+    run = store.create_run(
+        '{"api_key": "supersecret123", "token": \'secret value here\'}', ["a"],
+    )
+
+    assert "supersecret123" not in run["prompt"]
+    assert "secret value here" not in run["prompt"]
