@@ -21665,20 +21665,15 @@ def _execute_fanout_run(run_id):
     return receipt
 
 
-@mcp.tool()
-def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
-                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "") -> str:
-    """Ask every discovered local, cloud, or all model the same prompt.
+def _model_fanout_authorized(prompt: str, scope: str = "local", num_predict: int = 512,
+                             timeout: int = 45, max_cloud_workers: int = 2) -> str:
+    """Execute fanout after the caller's authority was established upstream.
 
-    Local models are serial to avoid GPU/VRAM contention.  Cloud calls require
-    SONDER_ALLOW_CLOUD=1 and are bounded to two concurrent requests by default;
-    no failed cloud call is retried automatically.  The JSON receipt reports
-    selected, answered, failed, resident-before, and total elapsed metrics.
+    This is intentionally private.  HTTP has an authenticated principal and
+    enforces developer authority at its boundary; direct MCP has no HTTP
+    principal and must go through ``model_fanout`` below.  A public boolean
+    bypass would let an untrusted caller self-authorize the costly operation.
     """
-    started = time.time()
-    refusal = _developer_gate("model_fanout", token, started)
-    if refusal:
-        return refusal
     question = str(prompt or "").strip()
     if not question:
         return _format_model_call_error(
@@ -21705,6 +21700,26 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
     if receipt is None:
         return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
+                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "") -> str:
+    """Ask every discovered local, cloud, or all model the same prompt.
+
+    Local models are serial to avoid GPU/VRAM contention.  Cloud calls require
+    SONDER_ALLOW_CLOUD=1 and are bounded to two concurrent requests by default;
+    no failed cloud call is retried automatically.  The JSON receipt reports
+    selected, answered, failed, resident-before, and total elapsed metrics.
+    """
+    started = time.time()
+    refusal = _developer_gate("model_fanout", token, started)
+    if refusal:
+        return refusal
+    return _model_fanout_authorized(
+        prompt, scope=scope, num_predict=num_predict, timeout=timeout,
+        max_cloud_workers=max_cloud_workers,
+    )
 
 
 @mcp.tool()
