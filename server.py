@@ -36,6 +36,7 @@ import time
 import urllib.request
 import urllib.error
 import urllib.parse
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -21579,9 +21580,22 @@ def _fanout_no_eligible_models_error(plan, scope):
     )
 
 
+_FANOUT_WORKER_INSTANCE = uuid.uuid4().hex
+
+
 def _fanout_worker_id():
-    """Return a receipt owner identifier that is unique within this process."""
-    return "fanout-%d-%d" % (os.getpid(), threading.get_ident())
+    """Return a globally unique durable-receipt lease owner identifier.
+
+    A fanout database may be intentionally shared by several runtime hosts.
+    PID/thread pairs are only process-local and can collide across hosts (or
+    after a quick PID reuse), which would let two workers impersonate one
+    lease owner.  The random instance token is created once per import/process
+    and remains stable for its worker's lifetime while fencing every other
+    runtime instance.
+    """
+    return "fanout-%s-%d-%d" % (
+        _FANOUT_WORKER_INSTANCE, os.getpid(), threading.get_ident(),
+    )
 
 
 def _fanout_safe_error(exc, prompt):
