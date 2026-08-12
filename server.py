@@ -21719,6 +21719,7 @@ def _fanout_health(model, exc, prompt):
         fanout_store.record_model_health(model, model_class="cloud" if _is_cloud_model_name(model) else "local", success=True)
         return
     disabled_until = None
+    availability_failure = False
     if isinstance(exc, ModelCallError):
         if _is_cloud_model_name(model):
             if exc.status in (402, 404, 410):
@@ -21729,14 +21730,25 @@ def _fanout_health(model, exc, prompt):
             # The tag disappeared from Ollama after the immutable run snapshot
             # was created. Avoid rediscovering and failing it on every fanout.
             disabled_until = time.time() + 3600
+            availability_failure = True
         elif exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
             # These identify the model/daemon response path, not the prompt.
-            # A brief cooldown excludes failed local models from a subsequent
-            # mass request while still allowing recovery without intervention.
-            disabled_until = time.time() + 300
+            # Back off repeated availability failures instead of making every
+            # frequent all-model request re-probe the same unhealthy daemon.
+            # Cap at an hour so recovery remains automatic without operator
+            # intervention. A successful model call resets the stored count.
+            previous = fanout_store.get_model_health(model)
+            try:
+                failure_count = max(0, int((previous or {}).get("failure_count", 0))) + 1
+            except (TypeError, ValueError):
+                failure_count = 1
+            delay_seconds = min(3600, 300 * (2 ** min(4, failure_count - 1)))
+            disabled_until = time.time() + delay_seconds
+            availability_failure = True
     fanout_store.record_model_health(
         model, model_class="cloud" if _is_cloud_model_name(model) else "local",
         error=_fanout_safe_error(exc, prompt), disabled_until=disabled_until,
+        counts_toward_backoff=availability_failure,
     )
 
 
