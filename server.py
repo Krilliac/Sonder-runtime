@@ -21509,6 +21509,27 @@ def _fanout_models(scope):
     return plan["selected"], error
 
 
+def _fanout_no_eligible_models_error(plan, scope):
+    """Explain a zero-target plan without exposing model names or prompts."""
+    counts = {}
+    for row in plan.get("skipped", []):
+        reason = str(row.get("reason") or "not eligible")[:160]
+        counts[reason] = counts.get(reason, 0) + 1
+    label = str(plan.get("scope") or scope or "local")
+    if not counts:
+        return ModelCallError(
+            "configuration", "no eligible %s models are currently discovered." % label,
+        )
+    summary = "; ".join(
+        "%s (%d)" % (reason, count)
+        for reason, count in sorted(counts.items())
+    )
+    return ModelCallError(
+        "configuration",
+        "no eligible %s models are currently available; skipped: %s." % (label, summary),
+    )
+
+
 def _fanout_worker_id():
     """Return a receipt owner identifier that is unique within this process."""
     return "fanout-%d-%d" % (os.getpid(), threading.get_ident())
@@ -21556,7 +21577,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers,
         raise error
     targets = plan["selected"]
     if not targets:
-        raise ModelCallError("configuration", "no %s models are currently discovered." % scope)
+        raise _fanout_no_eligible_models_error(plan, scope)
     try:
         resident_before = [
             str(row.get("name")) for row in _get("/api/ps").get("models", [])
