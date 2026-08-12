@@ -233,6 +233,25 @@ def test_fanout_redacts_substantial_partial_prompt_echoes():
     assert redacted.endswith("; here is the answer.")
 
 
+def test_fanout_redacts_partial_prompt_echoes_in_a_different_order():
+    first = "first private deployment token: alpha-123456789"
+    second = "second private deployment token: bravo-987654321"
+    prompt = first + "\n" + second
+    answer = "Quoted later first: %s. Quoted earlier second: %s." % (second, first)
+
+    redacted = server._fanout_redact_prompt_echo(answer, prompt)
+
+    assert first not in redacted
+    assert second not in redacted
+    assert redacted.count("<redacted prompt>") == 2
+
+
+def test_fanout_redaction_has_a_bounded_repetitive_input_fallback():
+    redacted = server._fanout_redact_prompt_echo("a" * 64_000, ("a" * 15_999) + "b")
+
+    assert redacted == "<redacted fanout answer>"
+
+
 def test_fanout_keeps_answers_without_verbatim_prompt_material():
     redacted = server._fanout_redact_prompt_echo(
         "The deployment completed successfully.",
