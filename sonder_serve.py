@@ -1573,7 +1573,7 @@ def _run_prompt(
     return result if return_result else result.content
 
 
-def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
+def _chat_completion_object(content, model="sonder", iid=None, reasoning="", elapsed_ms=None):
     iid = iid or uuid.uuid4().hex[:12]
     obj = {
         "id": "chatcmpl-%s" % iid,
@@ -1594,10 +1594,14 @@ def _chat_completion_object(content, model="sonder", iid=None, reasoning=""):
     # clients can treat absence as "this deployment does not expose reasoning".
     if reasoning:
         obj["sonder_reasoning"] = reasoning
+    if elapsed_ms is not None:
+        # Vendor extension: monotonic wall duration for the complete HTTP
+        # request, including routing/tool work, not just model generation.
+        obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
     return obj
 
 
-def _chunk(iid, model, delta, finish_reason=None):
+def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
@@ -1605,6 +1609,8 @@ def _chunk(iid, model, delta, finish_reason=None):
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
+    if elapsed_ms is not None:
+        obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -2464,13 +2470,14 @@ class Handler(BaseHTTPRequestHandler):
         ).observe(time.monotonic() - _request_started)
         if not _reasoning_visible_to(context):
             response_reasoning = ""
+        elapsed_ms = int((time.monotonic() - _request_started) * 1000)
         if stream:
-            self._send_stream(content, model, iid=response_iid)
+            self._send_stream(content, model, iid=response_iid, elapsed_ms=elapsed_ms)
         else:
             self._send_json(
                 _chat_completion_object(
                     content, model, iid=response_iid,
-                    reasoning=response_reasoning,
+                    reasoning=response_reasoning, elapsed_ms=elapsed_ms,
                 )
             )
 
@@ -2489,7 +2496,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_stream(self, content, model, iid=None):
+    def _send_stream(self, content, model, iid=None, elapsed_ms=None):
         iid = iid or uuid.uuid4().hex[:12]
         self.send_response(200)
         self._cors()
@@ -2502,7 +2509,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
-            self.wfile.write(_chunk(iid, model, {}, finish_reason="stop").encode("utf-8"))
+            self.wfile.write(_chunk(
+                iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
+            ).encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
