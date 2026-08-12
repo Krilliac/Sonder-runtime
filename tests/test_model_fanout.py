@@ -66,7 +66,9 @@ def test_tool_manifest_documents_guarded_model_routes():
     "phrase, expected",
     [
         ("ask all available local models: summarize this", {"kind": "fanout", "scope": "local", "prompt": "summarize this"}),
+        ("ask all currently available local models: summarize this", {"kind": "fanout", "scope": "local", "prompt": "summarize this"}),
         ("run every available cloud models to answer: summarize this", {"kind": "fanout", "scope": "cloud", "prompt": "summarize this"}),
+        ("run all models available to answer: summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("ask every cloud model to summarize this", {"kind": "fanout", "scope": "cloud", "prompt": "summarize this"}),
         ("try all models to summarize this", {"kind": "fanout", "scope": "all", "prompt": "summarize this"}),
         ("run model phi4:latest to explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
