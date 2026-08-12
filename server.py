@@ -21739,7 +21739,7 @@ def _fanout_health(model, exc, prompt):
             # intervention. A successful model call resets the stored count.
             previous = fanout_store.get_model_health(model)
             try:
-                failure_count = max(0, int((previous or {}).get("failure_count", 0))) + 1
+                failure_count = max(0, int((previous or {}).get("availability_failure_count", 0))) + 1
             except (TypeError, ValueError):
                 failure_count = 1
             delay_seconds = min(3600, 300 * (2 ** min(4, failure_count - 1)))
