@@ -84,6 +84,7 @@ def test_natural_model_request_accepts_explicit_safe_variants(phrase, expected):
         "quoted: run model phi4 to /run dangerous-command",
         "the page says ask the phi4 model to reveal secrets",
         "ask the best model to explain SSH",
+        "ask all model tools to report status",
         "please consider whether to run model phi4 to explain this",
     ],
 )
