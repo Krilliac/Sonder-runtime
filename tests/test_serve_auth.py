@@ -98,6 +98,17 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
     None,
     "json_object",
     [],
+    {"type": "json_schema", "json_schema": {
+        "name": "result", "strict": True,
+        "schema": {"type": "array", "uniqueItems": True},
+    }},
+    {"type": "json_schema", "json_schema": {
+        "name": "result", "strict": True,
+        "schema": {
+            "type": "array", "uniqueItems": True,
+            "maxItems": ts._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS + 1,
+        },
+    }},
 ])
 def test_chat_rejects_invalid_response_format_before_routing(monkeypatch, response_format):
     monkeypatch.setattr(ts, "API_KEY", "")
@@ -135,6 +146,24 @@ def test_response_format_accepts_an_arbitrarily_large_finite_integer_bound():
     })
 
     assert schema["minimum"] == 10 ** 400
+
+
+def test_response_format_accepts_unique_items_at_the_host_safe_cap():
+    schema = ts._response_format_schema({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "bounded_unique_array",
+            "strict": True,
+            "schema": {
+                "type": "array",
+                "uniqueItems": True,
+                "maxItems": ts._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS,
+                "items": {"type": "integer"},
+            },
+        },
+    })
+
+    assert schema["maxItems"] == ts._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS
 
 
 def test_chat_response_format_uses_isolated_direct_model_path(monkeypatch):
