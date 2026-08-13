@@ -272,13 +272,16 @@ _SCOPED_TASK_TOOLS = frozenset((
 # first-class task-scope argument on the agent/master/workflow internals, so
 # fail closed here rather than create durable state in the shared namespace.
 _ACCOUNT_UNSCOPED_TASK_TOOLS = frozenset((
-    "agent", "workbench_agent", "master_orchestrate", "workflow_run",
-    "self_heal_repair",
+    "agent", "workbench_agent", "master_orchestrate", "master_retry",
+    "agent_retry", "workflow_run", "self_heal_repair",
 ))
 _ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
     "checklist_create", "checklist_update", "checklist_show",
     "work", "agent", "workbench_agent", "master", "master_orchestrate",
-    "self_heal_repair",
+    # Retrying an existing master re-enters the worker path, which enables
+    # auto_checklist.  It is therefore the same global task-store escape as
+    # a fresh master run, even though the retry itself names no task row.
+    "master_retry", "agent_retry", "self_heal_repair",
 ))
 
 
@@ -1335,6 +1338,12 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
         "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
         "/agentretry", "/retryagent",
     ):
+        if cmd in ("/agentretry", "/retryagent"):
+            task_boundary_error = _account_task_boundary_refusal(
+                "master_retry", {}, context,
+            )
+            if task_boundary_error:
+                return task_boundary_error
         return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
@@ -1476,6 +1485,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
             path=arg.strip(), dry_run=True, token=state.token
         )
     if cmd == "/master":
+        task_boundary_error = _account_task_boundary_refusal(
+            "master_orchestrate", {}, context,
+        )
+        if task_boundary_error:
+            return task_boundary_error
         text = arg.strip()
         mode = "ask"
         task = text
