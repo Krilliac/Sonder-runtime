@@ -250,6 +250,28 @@ def test_tab_with_no_match_leaves_the_buffer_alone():
     assert state.buffer == "/zzz"
 
 
+def test_argument_context_renders_usage_instead_of_selectable_completion():
+    state = slash_menu.MenuState(
+        completer=_completer,
+        hint_provider=lambda buffer: "usage for %s" % buffer,
+    )
+    state.feed("/read notes.txt")
+
+    assert state.argument_context is True
+    assert state.has_palette_matches() is False
+    assert state.selection() is None
+    assert state.render_rows(width=200) == ["  usage for /read notes.txt"]
+
+
+def test_argument_context_does_not_replace_input_on_tab():
+    state = slash_menu.MenuState(
+        completer=_completer, hint_provider=lambda _buffer: "usage",
+    )
+    state.feed("/read notes.txt")
+    state.handle_key("\t")
+    assert state.buffer == "/read notes.txt"
+
+
 def test_enter_accepts_the_line_as_typed():
     state = _state("/read notes.txt")
     assert state.handle_key("\r") == slash_menu.ACCEPT
@@ -456,6 +478,14 @@ def test_raw_reader_editing_recalled_input_keeps_the_saved_draft(monkeypatch):
         history=["older"],
     )
     assert line == "draft"
+
+
+def test_raw_reader_uses_history_after_a_command_enters_argument_context(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, list("/read notes.txt") + ["\xe0", "H", "\r"],
+        history=["previous request"],
+    )
+    assert line == "previous request"
 
 
 def test_raw_reader_ignores_an_unmapped_extended_key(monkeypatch):
