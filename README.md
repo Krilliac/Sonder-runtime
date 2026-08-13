@@ -139,10 +139,14 @@ detects available memory, starts Ollama, and selects a compatible local model.
 
 ### Launch and use
 
-Start the interactive terminal and ask normally; type `/help` for guarded
+After the bootstrap/installer has added Sonder to your `PATH`, simply type
+`sonder` in Bash or PowerShell. From a source checkout, use the explicit
+module command below. In either case, ask normally; type `/help` for guarded
 commands and use the visible composer shortcuts for history and editing.
 
 ```bash
+sonder
+# or, from this source checkout:
 python -m sonder_runtime repl
 # sonder > explain this repository's test layout
 ```
