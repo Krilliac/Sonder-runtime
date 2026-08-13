@@ -21948,7 +21948,10 @@ def _execute_fanout_run(run_id):
         exc = None
         try:
             answer = (_make_generate(model, "", 0.2, limits["num_predict"], 4096,
-                                     timeout=limits["timeout"])(question) or "").strip()
+                                     timeout=limits["timeout"],
+                                     cancel_check=lambda: not fanout_store.worker_can_dispatch(
+                                         run_id, owner_id,
+                                     ))(question) or "").strip()
             if not answer:
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
             return row, "answered", _fanout_redact_prompt_echo(answer, question), "", int((time.monotonic() - started) * 1000), None
