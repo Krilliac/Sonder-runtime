@@ -788,6 +788,70 @@ def test_models_response_includes_elapsed_header(monkeypatch):
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
+def test_models_response_lists_discovered_chat_models_not_nonchat_catalog_entries(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {
+        "code": "gemma3:12b", "cloud-code": "cloud-code:cloud",
+    })
+    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+        ("gemma3:12b", {"name": "gemma3:12b", "capabilities": ["chat"]}),
+        ("cloud-code:cloud", {"name": "cloud-code:cloud", "capabilities": ["chat"]}),
+        ("nomic-embed-text:latest", {"capabilities": "embedding"}),
+        ("llava:latest", {"name": "llava:latest"}),
+    ])
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/models")
+
+    assert status == 200
+    rows = json.loads(body)["data"]
+    assert [row["id"] for row in rows] == [
+        "sonder", "code", "cloud-code", "gemma3:12b", "cloud-code:cloud",
+    ]
+    assert rows[-1]["owned_by"] == "cloud"
+    assert "nomic-embed-text:latest" not in {row["id"] for row in rows}
+    assert "llava:latest" not in {row["id"] for row in rows}
+
+
+@pytest.mark.parametrize(
+    ("selector", "record", "expected"),
+    [
+        ("nomic-embed-text:latest", {"capabilities": ["embedding"]}, "not chat-capable"),
+        ("missing-model", None, "unknown model 'missing-model'"),
+    ],
+)
+def test_chat_rejects_unusable_explicit_model_before_prewarm(monkeypatch, selector, record, expected):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "_request_model_selector", lambda _model: selector)
+    monkeypatch.setattr(ts.server, "_serve_target", lambda *_args: (None, False, False, None))
+    monkeypatch.setattr(
+        ts.server, "resolve_discovered_model_record",
+        lambda _selector: (selector, record) if record is not None else None,
+    )
+    calls = []
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: calls.append("prewarm"))
+    request = json.dumps({
+        "model": selector,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert expected in json.loads(body)["error"]["message"]
+    assert json.loads(body)["error"]["type"] == "invalid_request"
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+    assert calls == []
+
+
 def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     """An API-key owner must not be rejected by MCP's token-only gate."""
     api_key = "k" * 32
