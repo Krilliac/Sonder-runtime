@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import http.client
+import io
 import json
 import os
 import socket
@@ -550,7 +551,36 @@ def test_chat_maps_typed_model_failures_to_http_errors(
         "type": expected_type,
     }
     assert headers.get("Retry-After") == retry_after
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
     assert "choices" not in payload
+
+
+def test_stream_exposes_same_elapsed_header_as_terminal_chunk():
+    class StreamProbe:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = io.BytesIO()
+            self.close_connection = False
+
+        def send_response(self, status):
+            assert status == 200
+
+        def _cors(self):
+            pass
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            pass
+
+    probe = StreamProbe()
+    assert ts.Handler._send_stream(probe, "hello", "sonder", iid="stream", elapsed_ms=37)
+
+    body = probe.wfile.getvalue().decode("utf-8")
+    assert probe.headers["X-Sonder-Elapsed-Ms"] == "37"
+    assert '"sonder_elapsed_ms": 37' in body
+    assert body.endswith("data: [DONE]\n\n")
 
 
 def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):

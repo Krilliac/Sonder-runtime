@@ -1891,6 +1891,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _record_chat_completion_metric(self, lifecycle, result, started):
+        """Record exactly one terminal metric for a chat-completion request."""
+        if getattr(self, "_chat_completion_metrics_recorded", False):
+            return
+        self._chat_completion_metrics_recorded = True
+        lifecycle.metrics.requests_total.labels(
+            route="/v1/chat/completions", result=result
+        ).inc()
+        lifecycle.metrics.request_duration_seconds.labels(
+            route="/v1/chat/completions"
+        ).observe(max(0.0, time.monotonic() - started))
+
     def _read_json(self):
         if self.headers.get("Transfer-Encoding"):
             raise HTTPRequestError(400, "transfer encoding is not supported")
@@ -2202,6 +2214,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._request_started = time.monotonic()
+        # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive
+        # requests. The terminal-metric latch is per request, never per socket.
+        self._chat_completion_metrics_recorded = False
         if self._reject_disallowed_origin():
             return
         _maybe_live_reload()
@@ -2517,9 +2532,10 @@ class Handler(BaseHTTPRequestHandler):
                     state=state,
                 )
         except sonder_lifecycle.AdmissionRejected as rejection:
-            _lifecycle.metrics.requests_total.labels(
-                route="/v1/chat/completions", result=rejection.code.lower()
-            ).inc()
+            self._record_chat_completion_metric(
+                _lifecycle, rejection.code.lower(),
+                getattr(self, "_request_started", _request_started),
+            )
             self._send_json_payload(
                 sonder_lifecycle.error_envelope(
                     rejection.code,
@@ -2532,9 +2548,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         except server.ModelCallError as error:
-            _lifecycle.metrics.requests_total.labels(
-                route="/v1/chat/completions", result="model_error"
-            ).inc()
+            self._record_chat_completion_metric(
+                _lifecycle, "model_error",
+                getattr(self, "_request_started", _request_started),
+            )
             status = error.status or (
                 502 if error.kind in ("protocol", "empty_response", "request")
                 else 504 if error.kind == "timeout"
@@ -2572,9 +2589,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as error:
             self.log_error("request failed: %s", type(error).__name__)
-            _lifecycle.metrics.requests_total.labels(
-                route="/v1/chat/completions", result="error"
-            ).inc()
+            self._record_chat_completion_metric(
+                _lifecycle, "error",
+                getattr(self, "_request_started", _request_started),
+            )
             self._send_json_payload(
                 {"error": {"message": "internal server error",
                            "type": "server_error",
@@ -2583,28 +2601,31 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        _lifecycle.metrics.requests_total.labels(
-            route="/v1/chat/completions", result="ok"
-        ).inc()
         # The handler timer starts before body parsing, authentication, and
         # routing.  It is the public HTTP contract, unlike the inner request
         # timer which exists only for the lifecycle histogram.
         request_started = getattr(self, "_request_started", _request_started)
-        _lifecycle.metrics.request_duration_seconds.labels(
-            route="/v1/chat/completions"
-        ).observe(time.monotonic() - request_started)
         if not _reasoning_visible_to(context):
             response_reasoning = ""
         elapsed_ms = int((time.monotonic() - request_started) * 1000)
         if stream:
-            self._send_stream(content, model, iid=response_iid, elapsed_ms=elapsed_ms)
-        else:
-            self._send_json(
-                _chat_completion_object(
-                    content, model, iid=response_iid,
-                    reasoning=response_reasoning, elapsed_ms=elapsed_ms,
-                ), elapsed_ms=elapsed_ms,
+            streamed = self._send_stream(content, model, iid=response_iid, elapsed_ms=elapsed_ms)
+            self._record_chat_completion_metric(
+                _lifecycle, "ok" if streamed else "cancelled", request_started,
             )
+        else:
+            try:
+                self._send_json(
+                    _chat_completion_object(
+                        content, model, iid=response_iid,
+                        reasoning=response_reasoning, elapsed_ms=elapsed_ms,
+                    ), elapsed_ms=elapsed_ms,
+                )
+            finally:
+                # A client can close after generation but before the JSON body
+                # is written. That is still a terminal server-side request and
+                # must not silently disappear from latency observability.
+                self._record_chat_completion_metric(_lifecycle, "ok", request_started)
 
     def _send_error_completion(self, text, stream):
         if stream:
@@ -2621,6 +2642,10 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        if elapsed_ms is None:
+            started = getattr(self, "_request_started", None)
+            elapsed_ms = int((time.monotonic() - started) * 1000) if started else 0
+        self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
         # No Content-Length on an SSE body — signal end-of-response by closing the
         # connection, otherwise HTTP/1.1 keep-alive leaves clients blocked on read().
         self.send_header("Connection", "close")
@@ -2632,8 +2657,9 @@ class Handler(BaseHTTPRequestHandler):
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
             ).encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
+            return True
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-            pass
+            return False
 
 
 def main():
