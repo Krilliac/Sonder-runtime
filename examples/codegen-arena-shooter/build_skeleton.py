@@ -72,6 +72,33 @@ ensure_project_file = _SCAFFOLD_MODULE.ensure_project_file
 
 FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
+# Compilation alone cannot see two Raylib lifecycle bugs observed in the
+# generated entrypoint: a match can start without a local player, and screen
+# handlers can incorrectly nest BeginDrawing/EndDrawing inside Main's frame.
+# These narrow body-local checks are derived from the published skeleton
+# contract. They do not attempt to grade gameplay or replace the real build.
+_REQUIRED_BODY_TEXT = {
+    ("Program.cs", "StartMatch"): ("_match.AddLocalPlayer(",),
+}
+_FORBIDDEN_BODY_TEXT = {
+    ("Program.cs", "DoLobby"): ("Raylib.BeginDrawing", "Raylib.EndDrawing"),
+    ("Program.cs", "DoScoreboard"): ("Raylib.BeginDrawing", "Raylib.EndDrawing"),
+}
+
+
+def body_contract_issues(name: str, body_name: str, body: str) -> list[str]:
+    """Return deterministic, body-local contract violations before compiling."""
+    source = str(body or "")
+    key = (name, body_name)
+    issues = []
+    for required in _REQUIRED_BODY_TEXT.get(key, ()):
+        if required not in source:
+            issues.append("must contain %s" % required)
+    for forbidden in _FORBIDDEN_BODY_TEXT.get(key, ()):
+        if forbidden in source:
+            issues.append("must not contain %s" % forbidden)
+    return issues
+
 
 def build_errors():
     """Distinct compiler error lines, and whether the build actually ran.
@@ -293,6 +320,18 @@ def main():
             body = extract_body(reply, signature)
             if not body:
                 status = "attempt %d: empty reply" % attempt
+                continue
+
+            contract_issues = body_contract_issues(name, body_name, body)
+            if contract_issues:
+                status = "attempt %d rejected: host contract (%s)" % (
+                    attempt, "; ".join(contract_issues))
+                feedback = (
+                    "\n\nYOUR PREVIOUS ATTEMPT VIOLATED A HOST-OBSERVED "
+                    "METHOD CONTRACT: %s. Rewrite only this body; do not "
+                    "start or end a drawing frame here."
+                    % "; ".join(contract_issues)
+                )
                 continue
 
             candidate = skeleton.splice(before, body_name, body)

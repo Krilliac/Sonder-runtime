@@ -15,6 +15,23 @@ assert _SPEC is not None and _SPEC.loader is not None
 scaffold = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(scaffold)
 
+_BUILDER = (
+    Path(__file__).resolve().parents[1]
+    / "examples" / "codegen-arena-shooter" / "build_skeleton.py"
+)
+_BUILDER_SPEC = importlib.util.spec_from_file_location("arena_skeleton_builder", _BUILDER)
+assert _BUILDER_SPEC is not None and _BUILDER_SPEC.loader is not None
+
+
+def _builder_module():
+    """Load the utility without requiring its runtime-only imports in tests."""
+    source = _BUILDER.read_text(encoding="utf-8")
+    start = source.index("FENCE =")
+    end = source.index("\ndef build_errors")
+    namespace: dict[str, object] = {"re": __import__("re")}
+    exec(source[start:end], namespace)
+    return namespace
+
 
 def test_arena_skeleton_scaffold_creates_verifier_compatible_project_once(tmp_path):
     path = scaffold.ensure_project_file(tmp_path / "FpsGame_Skeleton")
@@ -46,3 +63,17 @@ def test_arena_verifier_loads_the_copied_generated_artifact_explicitly():
     ).read_text(encoding="utf-8")
     assert 'Path.Combine(AppContext.BaseDirectory, "FpsGameSonder.dll")' in verifier
     assert "Assembly.LoadFrom(target)" in verifier
+
+
+def test_arena_builder_rejects_known_runtime_lifecycle_contract_violations():
+    builder = _builder_module()
+    issues = builder["body_contract_issues"](
+        "Program.cs", "StartMatch", "_match = new MatchState();"
+    )
+    assert "must contain _match.AddLocalPlayer(" in issues
+    assert builder["body_contract_issues"](
+        "Program.cs", "DoLobby", "Raylib.BeginDrawing();"
+    ) == ["must not contain Raylib.BeginDrawing"]
+    assert builder["body_contract_issues"](
+        "Program.cs", "DoScoreboard", "Ui.Scoreboard(W, H, _match, out bool back);"
+    ) == []
