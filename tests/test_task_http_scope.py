@@ -73,6 +73,12 @@ def test_account_http_rejects_indirect_global_task_paths(monkeypatch):
     calls = []
     monkeypatch.setattr(server, "workbench_agent", lambda **kwargs: calls.append(kwargs) or "ran")
     monkeypatch.setattr(server, "loop", lambda **kwargs: calls.append(kwargs) or "loop ran")
+    monkeypatch.setattr(server, "master_orchestrate", lambda **kwargs: calls.append(kwargs) or "master ran")
+    monkeypatch.setattr(server, "master_retry", lambda **kwargs: calls.append(kwargs) or "retry ran")
+    monkeypatch.setattr(
+        server, "control_command",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "control ran",
+    )
 
     assert "account-scoped task state" in serve._handle_slash("/work inspect this", context=alice)
     assert not calls
@@ -94,7 +100,34 @@ def test_account_http_rejects_indirect_global_task_paths(monkeypatch):
         serve._LEGACY_STATE, alice,
     )
     assert not calls
+    assert "account-scoped task state" in serve._handle_slash(
+        "/master inline inspect this", context=alice,
+    )
+    assert not calls
+    assert "account-scoped task state" in serve._dispatch_catalogued_tool(
+        "/master_retry agent_id=abc", serve._LEGACY_STATE, alice,
+    )
+    assert not calls
+    assert "account-scoped task state" in serve._handle_slash(
+        "/agentretry abc", context=alice,
+    )
+    assert not calls
+    assert "loop action 'master_retry'" in serve._dispatch_catalogued_tool(
+        '/loop actions_json=[{"type":"master_retry","agent_id":"abc"}]',
+        serve._LEGACY_STATE, alice,
+    )
+    assert not calls
+    assert "loop action 'agent_retry'" in serve._dispatch_catalogued_tool(
+        '/loop actions_json=[{"action":"agent_retry","agent_id":"abc"}]',
+        serve._LEGACY_STATE, alice,
+    )
+    assert not calls
 
     # Local-open/direct operator use remains backward-compatible and global.
     assert serve._handle_slash("/work inspect this") == "ran"
+    assert serve._handle_slash("/master inline inspect this") == "master ran"
+    assert serve._dispatch_catalogued_tool(
+        "/master_retry agent_id=abc", serve._LEGACY_STATE,
+    ) == "retry ran"
+    assert serve._handle_slash("/agentretry abc") == "control ran"
     assert calls
