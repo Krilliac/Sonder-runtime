@@ -192,6 +192,22 @@ def _safe_path(value):
     return leaf or (text if text and not re.search(r"[\\/:]", text) else "<path>")
 
 
+# One vocabulary for "this NAME marks its VALUE as a secret", shared by the
+# dict-key mask (`_safe_args`) and the argv mask (`_safe_command`). JSON and
+# argv rendering split a keyword and its value into separate strings, so
+# `_SECRET_ASSIGNMENT_RE` -- which needs both in one string -- can never see
+# the pair; these name checks are the only line of defence there. They were
+# two ad-hoc lists that had drifted narrower than the free-text regex:
+# `{"pwd": "..."}` survived into the (detail-gated) ledger verbatim while
+# `pwd=...` in prose was stripped. Keep this a superset of the regex's
+# keyword alternation; a conformance test pins the correspondence.
+_SENSITIVE_NAME_MARKERS = (
+    "password", "passwd", "pwd", "token", "secret",
+    "api_key", "api-key", "apikey", "access_key", "access-key", "accesskey",
+    "authorization", "credential", "approval",
+)
+
+
 def _safe_command(value):
     if not value:
         return ""
@@ -212,13 +228,11 @@ def _safe_command(value):
             rendered.append("<redacted>")
             hide_next = False
             continue
-        if lowered in {"password", "passwd", "token", "secret", "api-key", "api_key"}:
+        if lowered in _SENSITIVE_NAME_MARKERS:
             rendered.append(text)
             hide_next = True
             continue
-        if any(lowered.startswith(name + "=") for name in (
-            "password", "passwd", "token", "secret", "api-key", "api_key",
-        )):
+        if any(lowered.startswith(name + "=") for name in _SENSITIVE_NAME_MARKERS):
             rendered.append(text.split("=", 1)[0] + "=<redacted>")
             continue
         rendered.append(_redact_text(text))
@@ -234,7 +248,7 @@ def _safe_args(value, depth=0):
         for key, item in value.items():
             name = str(key)
             lowered = name.lower()
-            if any(part in lowered for part in ("password", "secret", "token", "approval", "api_key")):
+            if any(part in lowered for part in _SENSITIVE_NAME_MARKERS):
                 out[name] = "<redacted>"
             elif lowered in {"content", "code", "files_json", "stdin"}:
                 out[name] = _preview_descriptor(item)

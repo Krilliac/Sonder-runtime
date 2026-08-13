@@ -115,6 +115,10 @@ REQUIRED_FILES = {
     "runtime_policy.py",
     "isolated_runner.py",
     "server.py",
+    # sonder_serve imports it at module level for the HTTP authority gates; a
+    # payload without it dies before binding a port, in a detached process
+    # whose log the GUI never reads.
+    "tool_contract.py",
     "sonder_backup.py",
     "sonder_hardware.py",
     "sonder_runtime/adapters/backup.py",

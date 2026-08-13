@@ -41,6 +41,7 @@ import debug_dump
 import sonder_health
 import sonder_lifecycle
 import sonder_secrets
+import tool_contract
 import unsafe_lab
 
 DEFAULT_PORT = 11435
@@ -442,6 +443,7 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "command_registry",
     "permission_rules",
+    "tool_contract",
     "debug_dump",
 ]
 
@@ -582,6 +584,11 @@ SYSTEM_OPERATION_TOOLS = {
     "update_system_profile": "selfmod_deploy",
     "self_heal_repair": "selfmod_deploy",
     "admin_set_account": "account_management",
+    # Read-only, but it lists every hosted account: the tool's own
+    # `_admin_require(token, "admin")` was the only thing between an ordinary
+    # served account and the account roster. The boundary owns the role
+    # decision; the in-tool check remains as the second lock.
+    "admin_accounts": "account_management",
     "autopilot_start": "automation_lifecycle",
     "autopilot_resume": "automation_lifecycle",
     "autopilot_pause": "automation_lifecycle",
@@ -795,7 +802,7 @@ def _record_chat(role, content, kind="message", state=None):
 
 
 def _maybe_live_reload():
-    global server, grounding, training_tasks, intents, feedback, admin_auth, debug_dump
+    global server, grounding, training_tasks, intents, feedback, admin_auth, debug_dump, tool_contract
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     server = modules.get("server", server)
     grounding = modules.get("grounding", grounding)
@@ -804,6 +811,7 @@ def _maybe_live_reload():
     feedback = modules.get("feedback", feedback)
     admin_auth = modules.get("admin_auth", admin_auth)
     debug_dump = modules.get("debug_dump", debug_dump)
+    tool_contract = modules.get("tool_contract", tool_contract)
 
 
 def _on_off(arg, current):
@@ -1155,21 +1163,23 @@ def _http_slash_refusal(cmd, argument="", context=None):
     return _http_tool_refusal(tools, cmd, context=context)
 
 
-_LOOP_GLOBAL_OPERATION_TYPES = {
-    "emotion_update": "runtime_policy_change",
-    "emotion_tune": "runtime_policy_change",
-    "learn_preference": "runtime_policy_change",
-    "unload": "runtime_policy_change",
-}
-
-
 def _loop_global_operation_refusal(actions_json, context=None):
     """Refuse HTTP loop payloads that would mutate shared runtime state.
 
     ``server.loop`` remains the single parser/executor for validity and
-    bounded-loop semantics.  This shallow inspection only recognizes the
-    known global action types early enough to apply served-account authority;
-    malformed payloads continue to receive the loop tool's normal error.
+    bounded-loop semantics.  This shallow inspection only recognizes global
+    actions early enough to apply served-account authority; malformed
+    payloads continue to receive the loop tool's normal error.
+
+    Derived, not hand-kept: each action resolves to its canonical tool
+    through ``server._loop_action_tool`` -- the same resolution the loop's
+    own permission gate uses -- and then meets exactly the role binding its
+    ``/<tool>`` spelling meets (``tool_contract.system_operation_for``,
+    deny-by-default for a declared system operation with no binding). The
+    hand map this replaces named 4 of the 7 loop-reachable system
+    operations, so ``{"type": "memory_privacy_repair"}`` ran for an
+    ordinary served account while ``/memory_privacy_repair`` required the
+    developer role -- the same work, the other spelling.
     """
     if context is None:
         return ""
@@ -1184,11 +1194,21 @@ def _loop_global_operation_refusal(actions_json, context=None):
         if not isinstance(action, dict):
             continue
         action_type = str(action.get("type") or action.get("action") or "").strip().lower()
-        operation = _LOOP_GLOBAL_OPERATION_TYPES.get(action_type)
-        if operation:
-            authority_error = _system_operation_authority_error(operation, context)
-            if authority_error:
-                return "refused /loop: %s" % authority_error
+        operation = tool_contract.system_operation_for(
+            server._loop_action_tool(action_type)
+        )
+        if not operation:
+            continue
+        if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
+            if not _admin_authorized(context):
+                return (
+                    "refused /loop: administrator authorization is required "
+                    "for an unclassified system operation"
+                )
+            continue
+        authority_error = _system_operation_authority_error(operation, context)
+        if authority_error:
+            return "refused /loop: %s" % authority_error
     return ""
 
 
@@ -1197,13 +1217,39 @@ def _http_tool_refusal(tools, label, context=None):
 
     Only a `deny` can come back under `interactive=False`, so this is a flat
     loop rather than a copy of the console's ask-and-rank gate.
+
+    The operation lookup goes through `tool_contract.system_operation_for`
+    rather than reading `SYSTEM_OPERATION_TOOLS` directly, which buys two
+    things: alias spellings canonicalize before grading, and a tool the
+    runtime declares to be a system operation (`_AGENT_SYSTEM_OPERATOR_TOOLS`)
+    that nobody bound to a role fails CLOSED for served accounts instead of
+    open. `admin_accounts` was the live case: agent-refused, catalogued
+    `ask`, no binding -- an ordinary served account reached the tool body and
+    only its in-tool token check stood between a crafted request and the
+    account list. Boundary drift must not depend on every tool author
+    remembering a second map.
     """
     for tool in tools:
-        operation = SYSTEM_OPERATION_TOOLS.get(tool)
+        operation = tool_contract.system_operation_for(tool)
         if operation and context is not None:
-            authority_error = _system_operation_authority_error(operation, context)
-            if authority_error:
-                return "refused %s: %s" % (label, authority_error)
+            if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
+                # Durable-authority tools are already refused non-interactively
+                # by decide() below -- on every surface, for every role -- and
+                # its refusal names the remedy (the console prompt or an
+                # explicit allow rule). Returning the generic unbound message
+                # here would replace actionable text with a role demand that
+                # even an admin cannot satisfy on this path.
+                if str(tool or "").lstrip("/") in permission_modes.DURABLE_AUTHORITY_TOOLS:
+                    pass
+                elif not _admin_authorized(context):
+                    return (
+                        "refused %s: administrator authorization is required "
+                        "for an unclassified system operation" % label
+                    )
+            else:
+                authority_error = _system_operation_authority_error(operation, context)
+                if authority_error:
+                    return "refused %s: %s" % (label, authority_error)
         decision = permission_modes.decide_for_caller(
             tool, interactive=False, gate_control_exempt=True,
         )
