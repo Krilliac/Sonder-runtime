@@ -373,9 +373,15 @@ def _fanout_nonchat_reason(record):
         return "embedding-only capability"
     if "vision" in capabilities:
         return "vision-only capability"
-    name = str(record.get("name") or record.get("model") or "").strip().casefold()
-    family = name.rsplit("/", 1)[-1].split(":", 1)[0]
-    if family in _KNOWN_VISION_ONLY_MODEL_FAMILIES:
+    # The catalog's family is immutable model metadata; a tag is an
+    # operator-controlled alias.  Prefer any non-empty family declaration so
+    # a renamed LLaVA is still skipped and an unrelated text model named
+    # "llava" is not rejected merely for its display name.
+    families = normalized(details.get("family")) | normalized(details.get("families"))
+    if not families:
+        name = str(record.get("name") or record.get("model") or "").strip().casefold()
+        families = {name.rsplit("/", 1)[-1].split(":", 1)[0]}
+    if families & _KNOWN_VISION_ONLY_MODEL_FAMILIES:
         return "known vision-only model family"
     return ""
 
