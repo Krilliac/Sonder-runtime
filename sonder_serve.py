@@ -17,6 +17,7 @@ import hashlib
 import ipaddress
 import math
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -26,6 +27,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import permission_modes
 import server
@@ -46,6 +48,35 @@ import tool_contract
 import unsafe_lab
 
 DEFAULT_PORT = 11435
+_LOCAL_LOG_TAIL_BYTES = 64 * 1024
+_LOCAL_LOG_SECRET = re.compile(
+    r"(?i)\b(authorization|api[_-]?key|token|password|credential)\s*[:=]\s*(?:bearer\s+)?\S+"
+)
+
+
+def _local_server_log_tail():
+    """Return a bounded, redacted tail for the loopback-only diagnostics page."""
+    path = Path(server.sonder_paths.default_home()) / "run" / "sonder_serve.log"
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - _LOCAL_LOG_TAIL_BYTES))
+            raw = stream.read(_LOCAL_LOG_TAIL_BYTES)
+    except OSError:
+        return "(server log is not available yet)"
+    text = raw.decode("utf-8", errors="replace")
+    if size > len(raw):
+        text = "(showing the latest %d KiB)\n%s" % (_LOCAL_LOG_TAIL_BYTES // 1024, text)
+    return _LOCAL_LOG_SECRET.sub(r"\1=<redacted>", text)
+
+
+_LOCAL_LOG_PAGE = """<!doctype html>
+<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<title>Sonder local server</title>
+<style>body{margin:0;background:#07121f;color:#d9efff;font:14px ui-monospace,Consolas,monospace}header{padding:16px 22px;background:#0b2b4a;color:#75cfff;font-weight:700}main{padding:16px 22px}small{color:#9cb4c8}pre{white-space:pre-wrap;word-break:break-word;background:#050b12;border:1px solid #16466e;padding:14px;min-height:60vh}</style>
+<header>Sonder local server <small id=\"state\">connecting</small></header><main><p>Live, read-only server-log tail. This page is available only from loopback.</p><pre id=\"log\">Loading…</pre></main>
+<script>const log=document.getElementById('log'),state=document.getElementById('state');async function refresh(){try{const r=await fetch('/v1/local/server-log',{cache:'no-store'});const j=await r.json();log.textContent=j.log||'';state.textContent='updated '+new Date().toLocaleTimeString()}catch(e){state.textContent='feed unavailable'}}refresh();setInterval(refresh,1000)</script>"""
 
 
 def _request_route(path) -> str:
@@ -2383,6 +2414,15 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_disallowed_origin():
             return
         path = _request_route(self.path)
+        if path == "/" and self._peer_is_loopback():
+            self._send_local_log_page()
+            return
+        if path == "/v1/local/server-log":
+            if not self._peer_is_loopback():
+                self._send_not_found()
+            else:
+                self._send_json_payload({"log": _local_server_log_tail()})
+            return
         if self._handle_lifecycle_get(path):
             return
         if sonder_health.request_path_matches(self.path):
@@ -2514,6 +2554,16 @@ class Handler(BaseHTTPRequestHandler):
         if self._handle_fanout_get():
             return
         self._send_not_found()
+
+    def _send_local_log_page(self):
+        """Serve the loopback-only browser landing page without auth state."""
+        body = _LOCAL_LOG_PAGE.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_commands_get(self):
         """Command catalog, completion, and help for the app's command bar.
