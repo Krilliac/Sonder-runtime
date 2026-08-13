@@ -2416,24 +2416,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json_payload(self, payload, status=200, headers=None, elapsed_ms=None):
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if getattr(self, "_correlation_id", ""):
-            self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
-        started = getattr(self, "_request_started", None)
-        if elapsed_ms is not None:
-            self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
-        elif started is not None:
-            self.send_header(
-                "X-Sonder-Elapsed-Ms",
-                str(max(0, int((time.monotonic() - started) * 1000))),
-            )
-        for name, value in (headers or {}).items():
-            self.send_header(str(name), str(value))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if getattr(self, "_correlation_id", ""):
+                self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
+            started = getattr(self, "_request_started", None)
+            if elapsed_ms is not None:
+                self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
+            elif started is not None:
+                self.send_header(
+                    "X-Sonder-Elapsed-Ms",
+                    str(max(0, int((time.monotonic() - started) * 1000))),
+                )
+            for name, value in (headers or {}).items():
+                self.send_header(str(name), str(value))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # A browser or terminal client may leave while a model finishes.
+            # This is a delivery failure, not a server traceback.
+            return False
 
     def _record_chat_completion_metric(self, lifecycle, result, started):
         """Record exactly one terminal metric for a chat-completion request."""
