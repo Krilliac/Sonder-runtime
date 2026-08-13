@@ -360,6 +360,8 @@ def recent_run_summaries(*, request_owner: str | None = None,
                COALESCE(SUM(CASE WHEN results.status='answered' THEN 1 ELSE 0 END), 0) AS models_answered,
                COALESCE(SUM(CASE WHEN results.status='failed' THEN 1 ELSE 0 END), 0) AS models_failed,
                COALESCE(SUM(CASE WHEN results.status='unknown' THEN 1 ELSE 0 END), 0) AS models_unknown,
+               COALESCE(SUM(CASE WHEN results.status='pending' THEN 1 ELSE 0 END), 0) AS models_pending,
+               COALESCE(SUM(CASE WHEN results.status='running' THEN 1 ELSE 0 END), 0) AS models_running,
                COALESCE(SUM(CASE WHEN results.status='skipped' THEN 1 ELSE 0 END), 0) AS models_skipped
           FROM selected_runs AS runs
           LEFT JOIN fanout_results AS results ON results.run_id=runs.id
