@@ -537,14 +537,15 @@ def _framed_input_lines(frame: str, buffer: str, width: int, stream,
     labels are clipped to make a reliable terminal rectangle.
     """
     outer = max(8, int(width) - 1)
-    inner = max(1, outer - 3)  # ``│ `` + content + ``│``
+    # Reserve a small prompt marker inside the active chat surface.
+    inner = max(1, outer - 5)
     clean_frame = _ANSI_ESCAPE_RE.sub("", str(frame or "")).strip()
     chars = _frame_chars(stream)
     title = (" " + clean_frame + " ")[: max(0, outer - 4)]
     top = chars["tl"] + chars["h"] + title + chars["h"] * max(0, outer - 2 - len(title) - 1) + chars["tr"]
     text = str(buffer or "")
     content = [text[index:index + inner] for index in range(0, len(text), inner)] or [""]
-    rows = [chars["v"] + " " + line.ljust(inner) + chars["v"] for line in content]
+    rows = [chars["v"] + " > " + line.ljust(inner) + chars["v"] for line in content]
     footer_text = str(footer_hint or " Enter send %s Up/Down history %s Ctrl+L clear " % (
         chars["dot"], chars["dot"],
     ))
@@ -565,7 +566,7 @@ def _composer_footer(state: MenuState, stream) -> str:
 def _framed_cursor_cell(buffer: str, cursor: int, width: int,
                         line_count: int) -> tuple[int, int]:
     outer = max(8, int(width) - 1)
-    columns = max(1, outer - 3)
+    columns = max(1, outer - 5)
     offset = max(0, min(len(str(buffer or "")), int(cursor)))
     row = offset // columns
     if row >= max(1, int(line_count)):
@@ -662,7 +663,7 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
         ))
         input_rows = len(lines) + 2
         cursor_from_start = visible_cursor_row + 1
-        cursor_col += 2  # left border and breathing space
+        cursor_col += 4  # border, breathing space, and prompt marker
     else:
         body = "\n".join(lines)
         input_rows = len(lines)
