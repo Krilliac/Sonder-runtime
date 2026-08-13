@@ -390,10 +390,16 @@ def test_a_broken_completer_yields_an_empty_menu():
     assert state.buffer == "/re"
 
 
-def test_unknown_control_keys_are_ignored():
+def test_unknown_control_keys_are_ignored_except_the_standard_clear_shortcut():
     state = _state("/re")
-    state.handle_key("\x0c")  # Ctrl+L
+    state.handle_key("\x0e")  # Ctrl+N
     assert state.buffer == "/re"
+
+
+def test_ctrl_l_requests_a_clear_without_discarding_input():
+    state = _state("/read notes.txt")
+    assert state.handle_key("\x0c") == slash_menu.CLEAR
+    assert state.buffer == "/read notes.txt"
 
 
 # --- the raw reader, driven through a fake console ------------------------
@@ -498,6 +504,12 @@ def test_raw_reader_ignores_an_unmapped_extended_key(monkeypatch):
 def test_raw_reader_raises_keyboard_interrupt_on_ctrl_c(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         _drive(monkeypatch, list("/re") + ["\x03"])
+
+
+def test_raw_reader_ctrl_l_clears_screen_and_keeps_typed_input(monkeypatch):
+    line, out = _drive(monkeypatch, list("draft") + ["\x0c", "\r"])
+    assert line == "draft"
+    assert slash_menu.CSI + "2J" + slash_menu.CSI + "H" in out.text
 
 
 def test_raw_reader_clears_the_menu_before_returning(monkeypatch):
