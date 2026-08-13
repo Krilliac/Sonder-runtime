@@ -235,31 +235,14 @@ def test_embedding_mutations_require_learning_health_validation():
     ) is False
 
 
-def test_agent_dispatch_can_tune_emotion_vectors(monkeypatch, tmp_path):
-    monkeypatch.setattr(server.emotion_vectors, "workspace_root", lambda: str(tmp_path))
-    monkeypatch.delenv("SONDER_EMOTION_VECTORS", raising=False)
-
-    out = server._agent_dispatch(
-        "tune_emotion_vectors",
-        {"feedback_text": "be warmer and more concise"},
-    )
-
-    assert "Tuned emotion vectors" in out
-    vectors = server.emotion_vectors.read_vectors()
-    assert vectors["warmth"] > server.emotion_vectors.DEFAULT_VECTORS["warmth"]
-    assert vectors["brevity"] > server.emotion_vectors.DEFAULT_VECTORS["brevity"]
-
-
-def test_agent_dispatch_can_learn_preference(monkeypatch, tmp_path):
-    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "prefs.db"))
-
-    out = server._agent_dispatch(
-        "learn_preference",
-        {"text": "User prefers direct answers."},
-    )
-
-    assert "Learned preference" in out
-    assert "User prefers direct answers." in server.preferences_status()
+@pytest.mark.parametrize("tool_name", (
+    "set_context_size", "unload", "update_emotion_vectors",
+    "tune_emotion_vectors", "learn_preference",
+))
+def test_agent_dispatch_refuses_shared_runtime_controls(tool_name):
+    out = server._agent_dispatch(tool_name, {})
+    assert out.startswith("ERROR: HOST POLICY:"), out
+    assert "cannot be called by an agent" in out
 
 
 def test_agent_runs_tool_then_final(monkeypatch, without_standing):
