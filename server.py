@@ -339,8 +339,17 @@ def discovered_model_records():
     return sorted(records, key=lambda row: row[0].casefold())
 
 
+_KNOWN_VISION_ONLY_MODEL_FAMILIES = frozenset({
+    # Ollama's normal /api/tags response often omits capabilities altogether.
+    # These upstream model families are image-conditioned interfaces, not
+    # ordinary text-chat targets, so probing them in a broad fanout wastes a
+    # serial local slot and produces misleading generic prose.
+    "bakllava", "llama3.2-vision", "llava", "minicpm-v", "moondream",
+})
+
+
 def _fanout_nonchat_reason(record):
-    """Return a skip reason only for explicit non-chat catalog capability."""
+    """Return a skip reason for explicit or known non-chat catalog targets."""
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     def normalized(raw):
         if isinstance(raw, str):
@@ -364,6 +373,16 @@ def _fanout_nonchat_reason(record):
         return "embedding-only capability"
     if "vision" in capabilities:
         return "vision-only capability"
+    # The catalog's family is immutable model metadata; a tag is an
+    # operator-controlled alias.  Prefer any non-empty family declaration so
+    # a renamed LLaVA is still skipped and an unrelated text model named
+    # "llava" is not rejected merely for its display name.
+    families = normalized(details.get("family")) | normalized(details.get("families"))
+    if not families:
+        name = str(record.get("name") or record.get("model") or "").strip().casefold()
+        families = {name.rsplit("/", 1)[-1].split(":", 1)[0]}
+    if families & _KNOWN_VISION_ONLY_MODEL_FAMILIES:
+        return "known vision-only model family"
     return ""
 
 
