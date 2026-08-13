@@ -934,6 +934,50 @@ def test_http_fanout_lifecycle_is_owner_scoped(monkeypatch):
     assert json.loads(denied_body)["error"]["type"] == "not_found"
 
 
+def test_http_recent_fanout_summaries_are_owner_scoped(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(
+        ts, "_auth_account",
+        lambda header: {"username": "dev-a" if "a-token" in header else "dev-b", "role": "developer"},
+    )
+    captured = []
+    monkeypatch.setattr(
+        ts.server.fanout_store, "recent_run_summaries",
+        lambda **kwargs: captured.append(kwargs) or [{"run_id": "fan-owned", "status": "completed"}],
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "GET", "/v1/fanout?limit=7&include_finished=false",
+            headers={"Authorization": "Bearer a-token"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["runs"][0]["run_id"] == "fan-owned"
+    assert captured == [{
+        "request_owner": ts._fanout_request_owner({"account": {"username": "dev-a"}, "api_key": False}),
+        "include_finished": False, "limit": 7,
+    }]
+
+
+def test_http_recent_fanout_rejects_oversized_numeric_limit(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(
+        ts.server.fanout_store, "recent_run_summaries",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not query store")),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/fanout?limit=" + "9" * 5000)
+
+    assert status == 400
+    assert "limit must be an integer" in json.loads(body)["error"]["message"]
+
+
 def test_http_fanout_cancel_requires_developer_and_uses_owned_run(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")

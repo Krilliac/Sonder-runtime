@@ -135,7 +135,7 @@ def test_natural_profile_is_forwarded_to_the_public_fanout_boundary(monkeypatch)
 def test_tool_manifest_documents_guarded_model_routes():
     manifest = server.tool_manifest()
 
-    assert "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize" in manifest
+    assert "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize" in manifest
     assert "healthy-local-chat" in manifest
     assert "healthy-cloud-chat" in manifest
     assert "never accept arbitrary selectors" in manifest
@@ -148,6 +148,30 @@ def test_tool_manifest_documents_guarded_model_routes():
     assert "run using phi4:latest: ..." in manifest
     assert "ask with qwen2.5-coder:14b for ..." in manifest
     assert "explicit operator opt-in" in manifest
+
+
+def test_direct_recent_fanout_summaries_keep_shared_developers_owner_scoped(monkeypatch):
+    monkeypatch.setattr(server, "_developer_gate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_deployment_authenticates_callers", lambda: True)
+    monkeypatch.setattr(
+        server, "_direct_fanout_identity",
+        lambda _token: ("fo-developer", {"role": "developer"}),
+    )
+    captured = []
+    monkeypatch.setattr(
+        server.fanout_store, "recent_run_summaries",
+        lambda **kwargs: captured.append(kwargs) or [{"run_id": "fan-own"}],
+    )
+
+    receipt = json.loads(server.model_fanout_recent(
+        limit=3, include_finished=False, token="developer-token",
+    ))
+
+    assert receipt == {"runs": [{"run_id": "fan-own"}]}
+    assert captured == [{
+        "request_owner": "fo-developer", "include_finished": False, "limit": 3,
+    }]
+    assert "must be an integer" in server.model_fanout_recent(limit=True)
 
 
 @pytest.mark.parametrize(
