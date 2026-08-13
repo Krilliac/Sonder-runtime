@@ -1017,7 +1017,8 @@ def _format_fanout_summaries(payload):
         lines.append(
             "  %(run_id)s  %(status)s  %(scope)s  "
             "%(models_answered)s/%(models_selected)s answered  "
-            "%(models_failed)s failed  %(models_unknown)s unknown  %(models_skipped)s skipped" % {
+            "%(models_failed)s failed  %(models_unknown)s unknown  "
+            "%(models_pending)s pending  %(models_running)s running  %(models_skipped)s skipped" % {
                 "run_id": str(row.get("run_id") or "unknown"),
                 "status": str(row.get("status") or "unknown"),
                 "scope": str(row.get("scope") or "unknown"),
@@ -1025,6 +1026,8 @@ def _format_fanout_summaries(payload):
                 "models_selected": int(row.get("models_selected") or 0),
                 "models_failed": int(row.get("models_failed") or 0),
                 "models_unknown": int(row.get("models_unknown") or 0),
+                "models_pending": int(row.get("models_pending") or 0),
+                "models_running": int(row.get("models_running") or 0),
                 "models_skipped": int(row.get("models_skipped") or 0),
             }
         )

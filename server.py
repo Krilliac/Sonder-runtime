@@ -22803,6 +22803,8 @@ def _fanout_receipt(run_id):
     failures = [failure_receipt(row) for row in rows if row["status"] in ("failed", "unknown")]
     failed_rows = [row for row in rows if row["status"] == "failed"]
     unknown_rows = [row for row in rows if row["status"] == "unknown"]
+    pending_rows = [row for row in rows if row["status"] == "pending"]
+    running_rows = [row for row in rows if row["status"] == "running"]
     execution_skips = [{"model": row["model"], "reason": row["error"] or "not executed"}
                        for row in rows if row["status"] == "skipped"]
     ended = run.get("finished_ts") or now
@@ -22831,6 +22833,11 @@ def _fanout_receipt(run_id):
         # so retry_unknown remains an explicit metered replay decision.
         "models_failed": len(failed_rows),
         "models_unknown": len(unknown_rows),
+        # These make an active durable receipt usable as a progress report.
+        # They are scalar-only; model ids and answers remain owner-scoped in
+        # the detailed arrays below.
+        "models_pending": len(pending_rows),
+        "models_running": len(running_rows),
         "models_skipped": len(plan_skips) + len(execution_skips),
         "skipped": plan_skips + execution_skips,
         "resident_before": limits["resident_before"],
