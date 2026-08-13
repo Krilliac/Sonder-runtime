@@ -172,6 +172,16 @@ def test_left_right_home_end_and_delete_edit_in_the_middle_of_input():
     assert state.cursor == len(state.buffer)
 
 
+def test_word_and_suffix_delete_preserve_other_mid_line_text():
+    state = _state("keep this clause and this suffix")
+    state.cursor = len("keep this clause and this")
+    state.handle_key("\x17")  # Ctrl+W
+    assert (state.buffer, state.cursor) == ("keep this clause and  suffix", 21)
+
+    state.handle_key("\x0b")  # Ctrl+K
+    assert (state.buffer, state.cursor) == ("keep this clause and ", 21)
+
+
 def test_slash_opens_the_menu_on_the_popular_set():
     state = _state("/")
     assert state.menu_active is True
