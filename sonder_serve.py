@@ -1943,7 +1943,10 @@ class Handler(BaseHTTPRequestHandler):
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
                 "X-Sonder-Bootstrap-Secret",
             )
-            self.send_header("Access-Control-Expose-Headers", "X-Sonder-Elapsed-Ms")
+            self.send_header(
+                "Access-Control-Expose-Headers",
+                "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id",
+            )
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))

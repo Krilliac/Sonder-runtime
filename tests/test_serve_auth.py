@@ -1116,6 +1116,9 @@ def test_cors_denies_hostile_origin_and_echoes_only_allowlisted(monkeypatch):
         assert status == 204
         assert headers["Access-Control-Allow-Origin"] == "https://allowed.example"
         assert headers["Vary"] == "Origin"
+        assert headers["Access-Control-Expose-Headers"] == (
+            "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id"
+        )
         status, _, _ = _request(
             port,
             "POST",
