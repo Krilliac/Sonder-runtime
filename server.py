@@ -14261,6 +14261,7 @@ def chat_web_response(
         max_steps=5,
         allow_web=True,
         required_tool_names=("web_fetch",),
+        abort_on_tool_failure_names=("web_search",),
         tool_allowlist=(
             "web_search", "web_fetch", "weather_lookup",
             "approximate_location_lookup",
@@ -19300,6 +19301,7 @@ def _agent_turn(
     auto_checklist: bool = False,
     project: str = "",
     required_tool_names=(),
+    abort_on_tool_failure_names=(),
     allow_location: bool = False,
     tool_allowlist=None,
     tool_policy=None,
@@ -19326,6 +19328,7 @@ def _agent_turn(
         require_file_evidence = False
         project = ""
         required_tool_names = ()
+        abort_on_tool_failure_names = ()
         tool_allowlist = None
         tool_policy = None
         auto_checklist = False
@@ -19417,6 +19420,9 @@ def _agent_turn(
     mutations = []
     required_tools = frozenset(
         _canonical_agent_tool_name(name) for name in required_tool_names if name
+    )
+    abort_on_tool_failure = frozenset(
+        _canonical_agent_tool_name(name) for name in abort_on_tool_failure_names if name
     )
     allowed_tools = (
         None if tool_allowlist is None
@@ -20164,6 +20170,19 @@ def _agent_turn(
                 )
         else:
             failed_call_counts[call_signature] = prior_identical_failures + 1
+            # Certain narrow routes cannot answer honestly after a specific
+            # source fails. End immediately instead of consuming further
+            # model/tool turns and risking a prose-only completion.
+            if tool_dispatched and tool_name in abort_on_tool_failure:
+                if auto_checklist:
+                    _agent_checklist_fail(
+                        checklist_id, checklist_states,
+                        "%s failed: %s" % (tool_name, observation_text[:240]),
+                    )
+                return _early_exit(
+                    "ERROR: required %s failed; no answer was produced from "
+                    "unverified sources (%s)." % (tool_name, observation_text[:600])
+                )
             # Multiple required tools are intentionally alternatives.  A
             # singleton is a hard caller contract; evidence-required review
             # likewise needs a successful evidence tool of the failed kind.
