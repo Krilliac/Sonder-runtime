@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 
 # --- key tokens and actions ----------------------------------------------
 
@@ -486,13 +487,74 @@ class HistoryCursor:
         return current
 
 
+def _cell_width(character: str) -> int:
+    """Return the terminal-cell width of one printable character.
+
+    ``len`` is not a layout measurement in a terminal: combining marks occupy
+    no cells and common CJK/emoji characters occupy two.  The raw composer
+    needs a conservative stdlib-only approximation so a pasted project name
+    or natural-language prompt cannot push a border into the next row.
+    """
+    if not character or unicodedata.combining(character):
+        return 0
+    # Variation selectors modify their preceding glyph rather than consuming
+    # a separate terminal cell.
+    if "VARIATION SELECTOR" in unicodedata.name(character, ""):
+        return 0
+    return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+
+
+def _display_width(text: str) -> int:
+    """Return the terminal-cell width of plain text (without ANSI escapes)."""
+    return sum(_cell_width(character) for character in _ANSI_ESCAPE_RE.sub("", str(text or "")))
+
+
+def _clip_cells(text: str, width: int) -> str:
+    """Keep the longest prefix that fits in ``width`` terminal cells."""
+    limit = max(0, int(width))
+    used = 0
+    kept: list[str] = []
+    for character in str(text or ""):
+        cells = _cell_width(character)
+        if cells and used + cells > limit:
+            break
+        kept.append(character)
+        used += cells
+    return "".join(kept)
+
+
+def _pad_cells(text: str, width: int, fill: str = " ") -> str:
+    """Clip then pad text to exactly ``width`` terminal cells."""
+    clipped = _clip_cells(text, width)
+    return clipped + fill * max(0, int(width) - _display_width(clipped))
+
+
+def _wrap_cells(text: str, width: int) -> list[str]:
+    """Wrap text on terminal-cell boundaries without modifying the buffer."""
+    limit = max(1, int(width))
+    rows: list[str] = []
+    row: list[str] = []
+    used = 0
+    for character in str(text or ""):
+        cells = _cell_width(character)
+        if cells and used + cells > limit and row:
+            rows.append("".join(row))
+            row = []
+            used = 0
+        row.append(character)
+        used += cells
+    if row or not rows:
+        rows.append("".join(row))
+    return rows
+
+
 def _truncate(text: str, width: int) -> str:
     # width - 1: writing into the final column makes some terminals wrap
     # eagerly, which corrupts the redraw exactly like an over-long row does.
     limit = max(1, int(width) - 1)
-    if len(text) <= limit:
+    if _display_width(text) <= limit:
         return text
-    return text[: max(1, limit - 1)] + "…"
+    return _clip_cells(text, max(0, limit - 1)) + "…"
 
 
 def _windows_console_size():
@@ -625,15 +687,19 @@ def _framed_input_lines(frame: str, buffer: str, width: int, stream,
     inner = max(1, outer - 5)
     clean_frame = _ANSI_ESCAPE_RE.sub("", str(frame or "")).strip()
     chars = _frame_chars(stream)
-    title = (" " + clean_frame + " ")[: max(0, outer - 4)]
-    top = chars["tl"] + chars["h"] + title + chars["h"] * max(0, outer - 2 - len(title) - 1) + chars["tr"]
+    title = _clip_cells(" " + clean_frame + " ", max(0, outer - 4))
+    top = (chars["tl"] + chars["h"] + title
+           + chars["h"] * max(0, outer - 3 - _display_width(title))
+           + chars["tr"])
     text = str(buffer or "")
-    content = [text[index:index + inner] for index in range(0, len(text), inner)] or [""]
-    rows = [chars["v"] + " > " + line.ljust(inner) + chars["v"] for line in content]
+    content = _wrap_cells(text, inner)
+    rows = [chars["v"] + " > " + _pad_cells(line, inner) + chars["v"] for line in content]
     footer_text = str(footer_hint or " Enter send %s Up/Down history %s Ctrl+L clear " % (
         chars["dot"], chars["dot"],
     ))
-    footer = chars["bl"] + chars["h"] + footer_text[: max(0, outer - 4)].ljust(max(0, outer - 4), chars["h"]) + chars["h"] + chars["br"]
+    footer = (chars["bl"] + chars["h"]
+              + _pad_cells(footer_text, max(0, outer - 4), chars["h"])
+              + chars["h"] + chars["br"])
     return top, rows, footer
 
 
@@ -651,11 +717,13 @@ def _framed_cursor_cell(buffer: str, cursor: int, width: int,
                         line_count: int) -> tuple[int, int]:
     outer = max(8, int(width) - 1)
     columns = max(1, outer - 5)
-    offset = max(0, min(len(str(buffer or "")), int(cursor)))
-    row = offset // columns
+    prefix = str(buffer or "")[:max(0, int(cursor))]
+    rows = _wrap_cells(prefix, columns)
+    row = len(rows) - 1
+    column = _display_width(rows[-1])
     if row >= max(1, int(line_count)):
         return max(0, int(line_count) - 1), columns
-    return row, min(columns, offset % columns)
+    return row, min(columns, column)
 
 
 def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
