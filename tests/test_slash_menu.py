@@ -441,6 +441,23 @@ def test_raw_reader_down_restores_the_unfinished_draft(monkeypatch):
     assert line == "draft"
 
 
+def test_raw_reader_recall_works_for_slash_text_without_palette_matches(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, list("/usr/local/bin") + ["\xe0", "H", "\r"],
+        history=["ordinary history"],
+    )
+    assert line == "ordinary history"
+
+
+def test_raw_reader_editing_recalled_input_keeps_the_saved_draft(monkeypatch):
+    line, _ = _drive(
+        monkeypatch,
+        list("draft") + ["\xe0", "H", "!", "\xe0", "P", "\r"],
+        history=["older"],
+    )
+    assert line == "draft"
+
+
 def test_raw_reader_ignores_an_unmapped_extended_key(monkeypatch):
     # \x00 + 'R' is Insert: it must be consumed whole, not leak an 'R'.
     keys = ["/", "\x00", "R", "h", "\r"]
