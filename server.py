@@ -5524,12 +5524,16 @@ def sonder(
     if command is not None:
         return command
     natural = natural_model_request(prompt)
-    if natural and natural["kind"] == "fanout":
+    if natural and natural["kind"] in ("fanout", "ensemble"):
         if natural["prompt"].lstrip().startswith("/"):
             return _format_model_call_error(ModelCallError(
                 "configuration",
                 "model selection cannot wrap a slash command; issue the command directly.",
             ))
+        if natural["kind"] == "ensemble":
+            return ensemble_answer(
+                natural["prompt"], tiers=natural["tiers"], project=project,
+            )
         return model_fanout(
             natural["prompt"], scope=natural["scope"], profile=natural.get("profile", ""),
             num_predict=num_predict, token=token,
@@ -22151,6 +22155,22 @@ def natural_model_request(text):
     untrusted inputs from spending local compute or cloud budget.
     """
     value = str(text or "").strip()
+    ensemble = re.match(
+        # A small, named local ensemble is useful for an explicit second
+        # opinion without turning broad prose about "reasoning" into an
+        # execution request. Keep the same imperative whole-turn and prompt
+        # delimiter contract as model fanout. Compiler-feedback repair is a
+        # separate, explicitly parameterized codegen_build_loop tool: it must
+        # know the approved root, files, and build command and cannot safely
+        # be inferred from free-form chat.
+        r"^(?:ask|run|try|query|use)\s+(?:a\s+|the\s+)?(?:code\s+(?:and|\+)\s+reasoning|reasoning\s+(?:and|\+)\s+code)\s+(?:models?|ensemble)\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if ensemble:
+        return {
+            "kind": "ensemble", "tiers": "code,reasoning",
+            "prompt": ensemble.group(1).strip(),
+        }
     profiled_fanout = re.match(
         # Keep this whole-turn syntax as constrained as the existing all-model
         # grammar.  In particular, no trailing selector or embedded prose may
