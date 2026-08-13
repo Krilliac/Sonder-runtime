@@ -299,6 +299,19 @@ def _runtime_remote_url(root):
     )
 
 
+def runtime_checkout_commit(root, *, timeout=DEFAULT_TIMEOUT):
+    """Return the commit loaded from a fixed runtime checkout.
+
+    This is intentionally narrower than :func:`runtime_update_status`: it
+    neither inspects a remote ref nor fetches.  The server snapshots it once
+    during import so status can distinguish the bytes Python loaded from a
+    later on-disk fast-forward that still requires a restart.
+    """
+    root = Path(root).resolve()
+    top = _require_repository_root(root, timeout=timeout, max_output=16_384)
+    return _runtime_git_text(top, ["rev-parse", "HEAD"], operation="runtime startup HEAD probe")
+
+
 def _normalise_remote_url(value):
     return str(value or "").strip().rstrip("/").removesuffix(".git").casefold()
 

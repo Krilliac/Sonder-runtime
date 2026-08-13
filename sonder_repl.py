@@ -512,6 +512,7 @@ def _startup_banner(strict, persona, project, tier=None):
     except Exception:
         endpoint, live = os.environ.get("SONDER_API", "http://127.0.0.1:11435"), False
 
+    source = {}
     try:
         # Startup must never wait on a remote Git server.  The cached
         # origin/main ref still shows the installed/newest known revisions;
@@ -528,8 +529,13 @@ def _startup_banner(strict, persona, project, tier=None):
         update = "%s (behind %s)" % (
             source.get("state") or "unknown", source.get("behind", "?"),
         )
+        running_commit = str(source.get("running_commit") or "").strip()
+        running = running_commit[:12] if running_commit else "unavailable"
+        if source.get("restart_required"):
+            update += "; restart required"
     except Exception as exc:
         revision = newest = "unavailable (%s)" % type(exc).__name__
+        running = "unavailable"
         update = "check unavailable"
 
     rows = [
@@ -542,6 +548,7 @@ def _startup_banner(strict, persona, project, tier=None):
         ("persona", str(persona), (_Ansi.cyan,)),
         ("project", str(project or "(none)"), ()),
         ("installed source", revision, ()),
+        ("running source", running, (_Ansi.amber,) if source.get("restart_required") else ()),
         ("newest source", newest, ()),
         ("update", "%s  /updatecheck | /update" % update, (_Ansi.amber,)),
     ]

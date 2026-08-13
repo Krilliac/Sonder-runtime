@@ -137,6 +137,23 @@ import artifact_fetch as artifact_fetch_module
 import process_risk as process_risk_module
 import unsafe_lab
 
+
+def _running_source_commit_at_import():
+    """Best-effort immutable marker for the code this process imported."""
+    try:
+        return git_tools.runtime_checkout_commit(Path(__file__).resolve().parent)
+    except Exception:
+        # Packaged installs and constrained test/import environments can lack
+        # Git metadata. Update status remains useful there; it simply cannot
+        # prove whether a process restart would load different source bytes.
+        return ""
+
+
+# Keep this separate from the mutable on-disk HEAD used by /updatecheck.
+# After a fast-forward, the difference is exactly the restart boundary users
+# need to see before assuming the new source is executing.
+RUNNING_SOURCE_COMMIT = _running_source_commit_at_import()
+
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # Bind-all Ollama server addresses are canonicalized to a numeric loopback
@@ -21939,6 +21956,13 @@ def _runtime_update_format(data, *, updated=None):
         ),
         "  checked: %s" % (data.get("checked_at") or "unknown"),
     ]
+    running = str(data.get("running_commit") or "").strip()
+    if running:
+        lines.insert(2, "  running: %s%s" % (
+            running[:12], " [restart required]" if data.get("restart_required") else "",
+        ))
+    if data.get("restart_required"):
+        lines.append("  restart: required; running source differs from the installed checkout")
     if updated is True:
         lines.append("  update: fast-forwarded; restart Sonder to run the new source")
     elif updated is False:
@@ -21953,9 +21977,14 @@ def runtime_source_update_status_data(refresh: bool = True) -> dict:
     do not parse prose.  This is still read-only: a refresh only fetches the
     fixed canonical ref.
     """
-    return git_tools.runtime_update_status(
+    data = dict(git_tools.runtime_update_status(
         _runtime_source_root(), refresh=bool(refresh),
-    )
+    ))
+    running = str(RUNNING_SOURCE_COMMIT or "").strip()
+    installed = str(data.get("installed_commit") or "").strip()
+    data["running_commit"] = running or None
+    data["restart_required"] = bool(running and installed and running != installed)
+    return data
 
 
 @mcp.tool()
