@@ -20,6 +20,7 @@ def test_completion_timing_uses_a_compact_elapsed_display(monkeypatch):
 
 def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
     monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
 
@@ -35,6 +36,7 @@ def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkey
 
 def test_interactive_error_result_uses_error_tone(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
     monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
 
@@ -55,8 +57,19 @@ def test_piped_chat_result_stays_plain_for_scripts(monkeypatch, capsys):
     assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
 
 
+def test_redirected_stdout_stays_plain_even_when_stdin_is_interactive(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: False)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+
+    sonder_repl._print_chat_result("exact output", 0.0)
+
+    assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
+
+
 def test_interactive_turn_acknowledges_work_without_claiming_progress(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
 
     sonder_repl._begin_chat_turn("Sonder work")

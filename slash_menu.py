@@ -518,7 +518,9 @@ def _framed_cursor_cell(buffer: str, cursor: int, width: int,
     outer = max(8, int(width) - 1)
     columns = max(1, outer - 3)
     offset = max(0, min(len(str(buffer or "")), int(cursor)))
-    row = min(max(0, int(line_count) - 1), offset // columns)
+    row = offset // columns
+    if row >= max(1, int(line_count)):
+        return max(0, int(line_count) - 1), columns
     return row, min(columns, offset % columns)
 
 
@@ -725,7 +727,7 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "") -
 
 
 def read_line(prompt: str = "", *, enabled: bool = True, history=None,
-              frame: str = "") -> str:
+              frame: str = "", fallback_prompt: str | None = None) -> str:
     """Read one line, showing a live command menu while it starts with ``/``.
 
     Falls back to builtin :func:`input` whenever the menu cannot or should not
@@ -734,8 +736,9 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
     ``KeyboardInterrupt`` is deliberately not caught, so Ctrl+C behaves exactly
     as it does under :func:`input`.
     """
+    fallback = prompt if fallback_prompt is None else str(fallback_prompt)
     if not enabled or not available():
-        return input(prompt)
+        return input(fallback)
     try:
         return _read_line_raw(prompt, history=history, frame=frame)
     except KeyboardInterrupt:
@@ -750,4 +753,4 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
             sys.stdout.flush()
         except Exception:
             pass
-        return input(prompt)
+        return input(fallback)

@@ -638,3 +638,8 @@ def test_framed_composer_tracks_a_cursor_in_a_wrapped_buffer(monkeypatch):
 
     assert line == "abcdefghXijkl"
     assert "abcdefgh" in out.text and "Xijkl" in out.text
+
+
+def test_framed_cursor_stays_at_row_end_at_an_exact_wrap_boundary():
+    # 12 terminal columns yield 8 editable cells in the frame.
+    assert slash_menu._framed_cursor_cell("x" * 8, 8, 12, 1) == (0, 8)
