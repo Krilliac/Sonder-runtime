@@ -17,6 +17,38 @@ def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
 
+@pytest.mark.parametrize(
+    "body, headers, expected_result",
+    [
+        (b"{not json", {"Content-Type": "application/json"}, "malformed_request"),
+        (
+            json.dumps({"model": "sonder", "messages": [{"role": "user", "content": "hello"}]}).encode("utf-8"),
+            {"Content-Type": "application/json"},
+            "unauthenticated",
+        ),
+    ],
+)
+def test_early_chat_failures_record_one_terminal_metric(
+    monkeypatch, body, headers, expected_result,
+):
+    recorded = []
+    monkeypatch.setattr(ts, "API_KEY", "required-key")
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(
+        ts.Handler, "_record_chat_completion_metric",
+        lambda _self, _lifecycle, result, _started: recorded.append(result),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, _ = _request(
+            port, "POST", "/v1/chat/completions", body=body, headers=headers,
+        )
+
+    assert status in (400, 401)
+    assert recorded == [expected_result]
+
+
 def test_check_auth_bearer_match():
     assert ts.check_auth("Bearer s3cret", "s3cret") is True
 
