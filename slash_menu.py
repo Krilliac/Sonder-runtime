@@ -57,6 +57,8 @@ _ESC = "\x1b"
 _CTRL_C = "\x03"
 _CTRL_L = "\x0c"
 _CTRL_U = "\x15"
+_CTRL_W = "\x17"
+_CTRL_K = "\x0b"
 
 MAX_ROWS = 8
 HISTORY_LIMIT = 200
@@ -220,6 +222,25 @@ class MenuState:
             self.buffer = ""
             self.cursor = 0
             self.dismissed = False
+            self._reset_selection()
+            return CONTINUE
+        if ch == _CTRL_W:
+            # Match common shell/readline behavior: erase whitespace first,
+            # then the preceding word, while keeping everything after the
+            # cursor untouched for mid-line editing.
+            start = self.cursor
+            while start and self.buffer[start - 1].isspace():
+                start -= 1
+            while start and not self.buffer[start - 1].isspace():
+                start -= 1
+            self.buffer = self.buffer[:start] + self.buffer[self.cursor:]
+            self.cursor = start
+            self._reset_selection()
+            return CONTINUE
+        if ch == _CTRL_K:
+            # Delete only the editable suffix; this is especially useful for
+            # a recalled long prompt where the cursor was moved to a clause.
+            self.buffer = self.buffer[:self.cursor]
             self._reset_selection()
             return CONTINUE
         if ch in _ENTER:
