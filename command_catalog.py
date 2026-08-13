@@ -822,6 +822,17 @@ def _with_unregistered_work(mapped: dict) -> dict:
 # branch of the same name reaches.
 _DELEGATION = "control_command"
 
+# The served task aliases deliberately call the non-MCP scoped dispatcher so
+# an authenticated account cannot choose its storage scope.  Static call
+# discovery cannot follow that dispatcher without either treating its whole
+# dynamic dispatch as every task operation or missing the permission-gate
+# contract entirely.  Keep this narrow, explicit declaration in the catalog
+# that owns the HTTP gate; the HTTP surface supports only these four task
+# operations for the aliases (the richer task API remains catalogued by name).
+_HTTP_SCOPED_TASK_ALIAS_TOOLS = (
+    "task_create", "task_list", "task_show", "task_update",
+)
+
 
 @functools.lru_cache(maxsize=1)
 def http_slash_tools() -> dict:
@@ -863,6 +874,8 @@ def http_slash_tools() -> dict:
             resolved |= set(delegated.get(slash, ()))
         if resolved:
             merged[slash] = tuple(sorted(resolved))
+    for slash in ("/todo", "/task", "/tasks"):
+        merged[slash] = _HTTP_SCOPED_TASK_ALIAS_TOOLS
     return _with_unregistered_work(merged)
 
 

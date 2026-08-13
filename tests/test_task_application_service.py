@@ -104,3 +104,33 @@ def test_legacy_repository_maps_validation_and_storage_errors(tmp_path):
 
     with pytest.raises(DependencyUnavailable):
         repository.list()
+
+
+def test_typed_service_passes_account_scope_through_all_checklist_operations(tmp_path):
+    connection = memory_store.connect(str(tmp_path / "scoped-service.db"))
+    service = TaskService(LegacyTaskRepository(connection), RecordingEvents())
+    try:
+        alpha = service.create_checklist(
+            "alpha", ["inspect", "validate"], account_scope="account:alpha"
+        )
+        beta = service.create_checklist(
+            "beta", ["private"], account_scope="account:beta"
+        )
+
+        assert {task.title for task in service.list_tasks(
+            account_scope="account:alpha"
+        )} == {"inspect", "validate", "alpha"}
+        assert service.show_task(
+            beta.id, account_scope="account:alpha"
+        ).task is None
+        with pytest.raises(NotFound, match="no checklist"):
+            service.checklist(beta.id, account_scope="account:alpha")
+
+        updated = service.update_checklist(
+            alpha.id, "1", "done", account_scope="account:alpha"
+        )
+        assert updated.items[0].status == "done"
+        assert service.checklist(alpha.id, account_scope="account:alpha").summary == "1/2 complete"
+        assert service.task_progress(account_scope="account:alpha")["total"] == 3
+    finally:
+        connection.close()

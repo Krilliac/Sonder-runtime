@@ -176,6 +176,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     project TEXT,
     owner TEXT,
     parent_id TEXT,
+    -- NULL is deliberately the legacy/local-global scope.  A non-null value
+    -- is an account boundary supplied by the authenticated serving layer.
+    account_scope TEXT,
     created_ts TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -453,12 +456,21 @@ def _migrate(conn):
             "owner_pid INTEGER NOT NULL, owner_identity TEXT NOT NULL, "
             "claimed_at REAL NOT NULL)"
         )
+    task_cols = _column_names(conn, "tasks")
+    if "account_scope" not in task_cols:
+        # Do not invent account ownership for durable legacy tasks.  NULL is
+        # the unscoped local/global mode, so old callers retain their exact
+        # visibility while account-scoped callers fail closed.
+        conn.execute("ALTER TABLE tasks ADD COLUMN account_scope TEXT")
+        # The old index cannot serve account-bounded queries.  init_db
+        # recreates this named index immediately after migrations finish.
+        conn.execute("DROP INDEX IF EXISTS idx_tasks_status_project")
 
 
 # Bump when _migrate()/post-migration indexes gain a step that _SCHEMA's own
 # text does not change.
 # Schema-text edits are picked up automatically -- see _schema_stamp().
-_MIGRATION_REVISION = 2
+_MIGRATION_REVISION = 3
 
 
 def _schema_stamp():
@@ -541,7 +553,7 @@ def init_db(conn):
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status_project "
-            "ON tasks(status, project, updated_ts)"
+            "ON tasks(account_scope, status, project, updated_ts)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_task_events_task "
@@ -2622,6 +2634,26 @@ def _normalize_priority(priority):
     return max(0, min(5, value))
 
 
+def _normalize_task_account_scope(account_scope):
+    """Return the explicit account boundary, or ``None`` for legacy mode."""
+    if account_scope is None:
+        return None
+    if not isinstance(account_scope, str):
+        raise ValueError("task account scope must be a string")
+    value = account_scope.strip()
+    if not value:
+        raise ValueError("task account scope must not be empty")
+    if len(value) > 256:
+        raise ValueError("task account scope is too long")
+    return value
+
+
+def _task_scope_predicate(account_scope):
+    """Return a SQL predicate/parameters pair for an optional account scope."""
+    scope = _normalize_task_account_scope(account_scope)
+    return (("account_scope=?", [scope]) if scope is not None else ("", []))
+
+
 def log_task_event(conn, task_id, event, note=""):
     conn.execute(
         "INSERT INTO task_events(id, task_id, event, note) VALUES(?, ?, ?, ?)",
@@ -2631,15 +2663,24 @@ def log_task_event(conn, task_id, event, note=""):
 
 
 def create_task(conn, title, detail="", status="pending", priority=2,
-                project="", owner="", parent_id="", task_id=None):
+                project="", owner="", parent_id="", task_id=None,
+                account_scope=None):
     title = (title or "").strip()
     if not title:
         raise ValueError("task title is required")
     task_id = task_id or new_id()
     normalized = _normalize_task_status(status)
+    scope = _normalize_task_account_scope(account_scope)
+    parent_id = parent_id or ""
+    if scope is not None and parent_id:
+        resolved_parent = resolve_task_id(conn, parent_id, account_scope=scope)
+        if not resolved_parent:
+            raise ValueError("no unique task '%s'" % parent_id)
+        parent_id = resolved_parent
     conn.execute(
-        "INSERT INTO tasks(id, title, detail, status, priority, project, owner, parent_id) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tasks("
+        "id, title, detail, status, priority, project, owner, parent_id, account_scope"
+        ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             task_id,
             title,
@@ -2648,39 +2689,53 @@ def create_task(conn, title, detail="", status="pending", priority=2,
             _normalize_priority(priority),
             project or "",
             owner or "",
-            parent_id or "",
+            parent_id,
+            scope,
         ),
     )
     conn.commit()
     log_task_event(conn, task_id, "created", title)
-    return get_task(conn, task_id)
+    return get_task(conn, task_id, account_scope=scope)
 
 
-def resolve_task_id(conn, task_id):
+def resolve_task_id(conn, task_id, account_scope=None):
     value = (task_id or "").strip()
     if not value:
         return None
-    row = conn.execute("SELECT id FROM tasks WHERE id=?", (value,)).fetchone()
+    scope_predicate, scope_values = _task_scope_predicate(account_scope)
+    where_scope = (" AND " + scope_predicate) if scope_predicate else ""
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE id=?%s" % where_scope,
+        tuple([value] + scope_values),
+    ).fetchone()
     if row:
         return row["id"]
     rows = conn.execute(
-        "SELECT id FROM tasks WHERE id LIKE ? ORDER BY updated_ts DESC, rowid DESC LIMIT 2",
-        (value + "%",),
+        "SELECT id FROM tasks WHERE id LIKE ?%s "
+        "ORDER BY updated_ts DESC, rowid DESC LIMIT 2" % where_scope,
+        tuple([value + "%"] + scope_values),
     ).fetchall()
     if len(rows) == 1:
         return rows[0]["id"]
     return None
 
 
-def get_task(conn, task_id):
-    resolved = resolve_task_id(conn, task_id) or task_id
-    row = conn.execute("SELECT * FROM tasks WHERE id=?", (resolved,)).fetchone()
+def get_task(conn, task_id, account_scope=None):
+    resolved = resolve_task_id(conn, task_id, account_scope=account_scope) or task_id
+    scope_predicate, scope_values = _task_scope_predicate(account_scope)
+    where_scope = (" AND " + scope_predicate) if scope_predicate else ""
+    row = conn.execute(
+        "SELECT * FROM tasks WHERE id=?%s" % where_scope,
+        tuple([resolved] + scope_values),
+    ).fetchone()
     return dict(row) if row else None
 
 
 def update_task(conn, task_id, status=None, title=None, detail=None,
-                priority=None, project=None, owner=None, note=""):
-    resolved = resolve_task_id(conn, task_id)
+                priority=None, project=None, owner=None, note="",
+                account_scope=None):
+    scope = _normalize_task_account_scope(account_scope)
+    resolved = resolve_task_id(conn, task_id, account_scope=scope)
     if not resolved:
         raise ValueError("no unique task '%s'" % task_id)
     fields = []
@@ -2713,16 +2768,22 @@ def update_task(conn, task_id, status=None, title=None, detail=None,
         values.append(owner or "")
         event_bits.append("owner")
     if not fields:
-        return get_task(conn, resolved)
+        return get_task(conn, resolved, account_scope=scope)
     fields.append("updated_ts=CURRENT_TIMESTAMP")
     values.append(resolved)
-    conn.execute("UPDATE tasks SET %s WHERE id=?" % ", ".join(fields), tuple(values))
+    scope_predicate, scope_values = _task_scope_predicate(scope)
+    where_scope = (" AND " + scope_predicate) if scope_predicate else ""
+    conn.execute(
+        "UPDATE tasks SET %s WHERE id=?%s" % (", ".join(fields), where_scope),
+        tuple(values + scope_values),
+    )
     conn.commit()
     log_task_event(conn, resolved, "updated", note or ", ".join(event_bits))
-    return get_task(conn, resolved)
+    return get_task(conn, resolved, account_scope=scope)
 
 
-def list_tasks(conn, status="", project="", owner="", limit=50, include_done=False):
+def list_tasks(conn, status="", project="", owner="", limit=50, include_done=False,
+               account_scope=None):
     limit = max(1, min(int(limit or 50), 200))
     clauses = []
     values = []
@@ -2738,6 +2799,10 @@ def list_tasks(conn, status="", project="", owner="", limit=50, include_done=Fal
     if owner:
         clauses.append("owner=?")
         values.append(owner)
+    scope_predicate, scope_values = _task_scope_predicate(account_scope)
+    if scope_predicate:
+        clauses.append(scope_predicate)
+        values.extend(scope_values)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         "SELECT * FROM tasks%s ORDER BY priority ASC, updated_ts DESC, rowid DESC LIMIT ?"
@@ -2747,8 +2812,27 @@ def list_tasks(conn, status="", project="", owner="", limit=50, include_done=Fal
     return [dict(r) for r in rows]
 
 
-def task_events(conn, task_id, limit=20):
-    resolved = resolve_task_id(conn, task_id)
+def latest_checklist(conn, account_scope=None):
+    """Return the most recently updated checklist parent in one scope."""
+    scope = _normalize_task_account_scope(account_scope)
+    clauses = ["parent.parent_id=''", (
+        "EXISTS (SELECT 1 FROM tasks AS child WHERE child.parent_id=parent.id)"
+    )]
+    values = []
+    if scope is not None:
+        clauses.append("parent.account_scope=?")
+        values.append(scope)
+    row = conn.execute(
+        "SELECT parent.* FROM tasks AS parent WHERE %s "
+        "ORDER BY parent.updated_ts DESC, parent.rowid DESC LIMIT 1"
+        % " AND ".join(clauses),
+        tuple(values),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def task_events(conn, task_id, limit=20, account_scope=None):
+    resolved = resolve_task_id(conn, task_id, account_scope=account_scope)
     if not resolved:
         return []
     rows = conn.execute(
@@ -3240,23 +3324,30 @@ def preferences_for_scope(conn, scope="global", limit=20, include_disabled=False
     return [dict(r) for r in rows]
 
 
-def task_children(conn, task_id):
-    resolved = resolve_task_id(conn, task_id)
+def task_children(conn, task_id, account_scope=None):
+    scope = _normalize_task_account_scope(account_scope)
+    resolved = resolve_task_id(conn, task_id, account_scope=scope)
     if not resolved:
         return []
+    scope_predicate, scope_values = _task_scope_predicate(scope)
+    where_scope = (" AND " + scope_predicate) if scope_predicate else ""
     rows = conn.execute(
-        "SELECT * FROM tasks WHERE parent_id=? ORDER BY rowid ASC",
-        (resolved,),
+        "SELECT * FROM tasks WHERE parent_id=?%s ORDER BY rowid ASC" % where_scope,
+        tuple([resolved] + scope_values),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def delete_task(conn, task_id):
-    resolved = resolve_task_id(conn, task_id)
+def delete_task(conn, task_id, account_scope=None):
+    scope = _normalize_task_account_scope(account_scope)
+    resolved = resolve_task_id(conn, task_id, account_scope=scope)
     if not resolved:
         raise ValueError("no unique task '%s'" % task_id)
+    scope_predicate, scope_values = _task_scope_predicate(scope)
+    where_scope = (" AND " + scope_predicate) if scope_predicate else ""
     children = conn.execute(
-        "SELECT id FROM tasks WHERE parent_id=?", (resolved,)
+        "SELECT id FROM tasks WHERE parent_id=?%s" % where_scope,
+        tuple([resolved] + scope_values),
     ).fetchall()
     child_ids = [r["id"] for r in children]
     all_ids = [resolved] + child_ids
@@ -3270,9 +3361,10 @@ def delete_task(conn, task_id):
     return {"deleted": resolved, "children_removed": len(child_ids)}
 
 
-def add_task_dep(conn, task_id, depends_on):
-    resolved = resolve_task_id(conn, task_id)
-    dep_resolved = resolve_task_id(conn, depends_on)
+def add_task_dep(conn, task_id, depends_on, account_scope=None):
+    scope = _normalize_task_account_scope(account_scope)
+    resolved = resolve_task_id(conn, task_id, account_scope=scope)
+    dep_resolved = resolve_task_id(conn, depends_on, account_scope=scope)
     if not resolved:
         raise ValueError("no unique task '%s'" % task_id)
     if not dep_resolved:
@@ -3288,9 +3380,10 @@ def add_task_dep(conn, task_id, depends_on):
     return {"task_id": resolved, "depends_on": dep_resolved}
 
 
-def remove_task_dep(conn, task_id, depends_on):
-    resolved = resolve_task_id(conn, task_id)
-    dep_resolved = resolve_task_id(conn, depends_on)
+def remove_task_dep(conn, task_id, depends_on, account_scope=None):
+    scope = _normalize_task_account_scope(account_scope)
+    resolved = resolve_task_id(conn, task_id, account_scope=scope)
+    dep_resolved = resolve_task_id(conn, depends_on, account_scope=scope)
     if not resolved or not dep_resolved:
         return {"removed": False}
     conn.execute(
@@ -3301,36 +3394,46 @@ def remove_task_dep(conn, task_id, depends_on):
     return {"removed": True, "task_id": resolved, "depends_on": dep_resolved}
 
 
-def task_dependencies(conn, task_id):
-    resolved = resolve_task_id(conn, task_id)
+def task_dependencies(conn, task_id, account_scope=None):
+    scope = _normalize_task_account_scope(account_scope)
+    resolved = resolve_task_id(conn, task_id, account_scope=scope)
     if not resolved:
         return []
+    scope_predicate, scope_values = _task_scope_predicate(scope)
+    where_scope = (" AND t." + scope_predicate) if scope_predicate else ""
     rows = conn.execute(
         "SELECT t.* FROM tasks t JOIN task_deps d ON t.id=d.depends_on "
-        "WHERE d.task_id=? ORDER BY t.priority ASC, t.rowid ASC",
-        (resolved,),
+        "WHERE d.task_id=?%s ORDER BY t.priority ASC, t.rowid ASC" % where_scope,
+        tuple([resolved] + scope_values),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def task_dependents(conn, task_id):
-    resolved = resolve_task_id(conn, task_id)
+def task_dependents(conn, task_id, account_scope=None):
+    scope = _normalize_task_account_scope(account_scope)
+    resolved = resolve_task_id(conn, task_id, account_scope=scope)
     if not resolved:
         return []
+    scope_predicate, scope_values = _task_scope_predicate(scope)
+    where_scope = (" AND t." + scope_predicate) if scope_predicate else ""
     rows = conn.execute(
         "SELECT t.* FROM tasks t JOIN task_deps d ON t.id=d.task_id "
-        "WHERE d.depends_on=? ORDER BY t.priority ASC, t.rowid ASC",
-        (resolved,),
+        "WHERE d.depends_on=?%s ORDER BY t.priority ASC, t.rowid ASC" % where_scope,
+        tuple([resolved] + scope_values),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def task_progress(conn, project=""):
+def task_progress(conn, project="", account_scope=None):
     clauses = []
     values = []
     if project:
         clauses.append("project=?")
         values.append(project)
+    scope_predicate, scope_values = _task_scope_predicate(account_scope)
+    if scope_predicate:
+        clauses.append(scope_predicate)
+        values.extend(scope_values)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         "SELECT status, COUNT(*) as cnt FROM tasks%s GROUP BY status" % where,
