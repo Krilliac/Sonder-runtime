@@ -17,6 +17,29 @@ def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
 
+@pytest.mark.parametrize("model", [None, 7, True, {}, []])
+def test_chat_rejects_non_string_model_before_selector_routing(monkeypatch, model):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": "model must be a string", "type": "invalid_request",
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
 @pytest.mark.parametrize(
     "body, headers, expected_result",
     [
