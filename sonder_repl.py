@@ -504,7 +504,11 @@ def _startup_banner(strict, persona, project, tier=None):
         import sonder_headless
         host, port = sonder_headless.DEFAULT_HOST, sonder_headless.DEFAULT_PORT
         live = sonder_headless.port_open(host, port)
-        endpoint = "http://%s:%s" % (host, port)
+        # 0.0.0.0/:: are bind addresses, not browser destinations.  The
+        # dashboard remains loopback-only in this presentation, matching the
+        # readiness probe and avoiding a dead OSC-8 link on wildcard binds.
+        display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        endpoint = "http://%s:%s" % (display_host, port)
     except Exception:
         endpoint, live = os.environ.get("SONDER_API", "http://127.0.0.1:11435"), False
 
