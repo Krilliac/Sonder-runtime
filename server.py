@@ -23289,36 +23289,35 @@ def _ensemble_targets(tiers: str = ""):
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 
-def _project_facts_text(project: str) -> str:
-    """Durable facts for a project, as a constraints block.
+def _ensemble_prompt_with_project_facts(task: str, project: str) -> str:
+    """Build an ensemble prompt with the normal retrieved-fact boundary.
 
-    The ensemble builds its prompts directly rather than going through the
-    learning orchestrator, so it never saw the facts sonder_remember_fact
-    stores -- which is precisely where they are most useful, since the failure
-    modes worth recording (wrong-library calls, generics written with
-    parentheses, deleting code to silence a compiler) are all code-generation
-    failures.
+    Ensembles build their prompts directly rather than entering the learning
+    orchestrator.  Stored facts can be stale, wrong, or instruction-shaped, so
+    use the complete ``build_prompt`` boundary: it puts the task directive and
+    ``# Task:`` marker *after* the reference material.  Supplying only
+    ``_facts_block`` would leave a hostile fact as the last instruction before
+    the request.  Keep newest facts first, matching ``_answer``: the bounded
+    renderer otherwise keeps old guidance and drops recent corrections.
     """
     name = (project or "").strip()
     if not name or name.lower() == "none":
-        return ""
+        return task
     conn = _open_db()
     try:
         rows = memory_store.facts_for_project(conn, name)
     except Exception:
-        return ""
+        # A fact-store outage must not erase the caller's task.
+        return task
     finally:
         conn.close()
-    facts = [str(r.get("text", "")).strip() for r in rows or []]
+    # facts_for_project is chronological.  The bounded facts renderer selects
+    # from the front, so reverse before rendering just as _answer does.
+    facts = [str(r.get("text", "")).strip() for r in reversed(rows or [])]
     facts = [f for f in facts if f]
     if not facts:
-        return ""
-    return (
-        "HARD CONSTRAINTS for this project. These are recorded from measured "
-        "past failures; violating one is a known way this goes wrong:\n"
-        + "\n".join("- " + f for f in facts)
-        + "\n\n"
-    )
+        return task
+    return orchestrator.build_prompt(task, [], project_facts=facts)
 
 
 def _ensemble_candidate_references(answers):
@@ -23414,20 +23413,21 @@ def ensemble_answer(
             something that resembles both and compiles as neither, and the
             prose contract's "name the disagreements" rule would emit
             commentary where a file is wanted.
-        project: prepend that project's durable facts (sonder_remember_fact) to
-            every model's prompt as hard constraints. The ensemble builds its
-            prompts directly rather than through the learning orchestrator, so
-            without this it never sees them -- and code generation is exactly
-            where recorded failure modes pay off.
+        project: add that project's durable facts (sonder_remember_fact) as
+            fenced reference material before every model's prompt. The task
+            remains authoritative; the ensemble builds prompts directly rather
+            than through the learning orchestrator, so without this it never
+            sees the facts -- and code generation is exactly where recorded
+            failure modes pay off.
     """
     _maybe_live_reload()
     question = (prompt or "").strip()
     if not question:
         return "ERROR: ensemble_answer needs a prompt."
-    # Prepend the project's durable facts. Every model in the ensemble sees
-    # them, and so does the synthesis pass, since a merge that reintroduces a
-    # constraint violation is as broken as generating one.
-    question = _project_facts_text(project) + question
+    # Every model in the ensemble sees the project's durable facts, and so does
+    # the synthesis pass.  The helper retains the normal post-reference task
+    # boundary, so stored text cannot become a competing instruction.
+    question = _ensemble_prompt_with_project_facts(question, project)
 
     targets, unknown = _ensemble_targets(tiers)
     if not targets:
