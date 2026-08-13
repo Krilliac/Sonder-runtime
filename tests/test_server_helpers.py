@@ -1121,6 +1121,65 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
         server.structured_answer_with_history("return json", [], schema, tier="fast")
 
 
+def test_structured_answer_maps_deep_model_json_to_protocol_error(monkeypatch):
+    schema = {"type": "array"}
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
+    )
+    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *_args, **_kwargs: lambda *_call_args: "[]",
+    )
+
+    # The nesting threshold is implementation-dependent (Linux CI accepts the
+    # formerly-hostile 5000-level input), so simulate the decoder's documented
+    # failure mode instead of depending on a particular CPython build.
+    def deeply_nested_decoder(*_args, **_kwargs):
+        raise RecursionError("maximum recursion depth exceeded while decoding JSON")
+
+    monkeypatch.setattr(server.json, "loads", deeply_nested_decoder)
+
+    with pytest.raises(server.ModelCallError, match="nested too deeply") as raised:
+        server.structured_answer_with_history("return json", [], schema, tier="fast")
+
+    assert raised.value.kind == "protocol"
+
+
+def test_structured_answer_rejects_oversized_unique_array_before_pairwise_comparison(monkeypatch):
+    schema = {
+        "type": "array", "uniqueItems": True,
+        # Direct callers may not have passed HTTP schema admission. The
+        # verifier's host cap must still stop an oversized model response.
+        "maxItems": server._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS + 1,
+    }
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
+    )
+    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *_args, **_kwargs: lambda *_call_args: json.dumps(
+            list(range(server._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS + 1))
+        ),
+    )
+    monkeypatch.setattr(
+        server.json_schema_verifier, "_json_equal",
+        lambda *_args: pytest.fail("uniqueItems pairwise comparison ran"),
+    )
+
+    with pytest.raises(server.ModelCallError, match="host uniqueItems validation cap") as raised:
+        server.structured_answer_with_history("return json", [], schema, tier="fast")
+
+    assert raised.value.kind == "protocol"
+
+
 def test_serve_target_default_is_local_student(monkeypatch):
     monkeypatch.setattr(server, "_get",
                         lambda path: {"models": [{"name": "qwen2.5:3b"}]})
