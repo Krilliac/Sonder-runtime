@@ -628,6 +628,25 @@ def test_fanout_receipt_keeps_unknown_results_distinct_from_failures(monkeypatch
     assert receipt["failures"][0]["status"] == "unknown"
 
 
+def test_fanout_receipt_reports_active_pending_and_running_progress(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    run = server.fanout_store.create_run(
+        prompt="safe prompt", execution_prompt_ciphertext="sealed", scope="local",
+        models=["local-a", "local-b"], cloud_opt_in=False,
+    )
+    pid = server.os.getpid()
+    assert server.fanout_store.claim_run(run["id"], "worker", owner_pid=pid) is not None
+    claimed = server.fanout_store.claim_next_result(run["id"], "worker", owner_pid=pid)
+
+    assert claimed["status"] == "running"
+    receipt = server._fanout_receipt(run["id"])
+
+    assert receipt["models_selected"] == 2
+    assert receipt["models_pending"] == 1
+    assert receipt["models_running"] == 1
+    assert receipt["models_answered"] == receipt["models_failed"] == receipt["models_unknown"] == 0
+
+
 def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
     """Cloud workers do not inherit the response span; local calls do."""
     _isolated_durable_fanout(monkeypatch, tmp_path)
