@@ -1118,6 +1118,26 @@ def test_model_fanout_resume_requires_literal_boolean_flags(
     assert calls == []
 
 
+@pytest.mark.parametrize(("name", "value"), [
+    ("num_predict", True),
+    ("timeout", "45"),
+    ("max_cloud_workers", 1.5),
+])
+def test_model_fanout_rejects_coerced_budget_controls_before_run(monkeypatch, name, value):
+    """Budget controls must not coerce truthy or string values into a run."""
+    calls = []
+    monkeypatch.setattr(
+        server, "_fanout_start",
+        lambda *_args, **_kwargs: calls.append((_args, _kwargs)),
+    )
+    kwargs = {name: value}
+
+    reply = server._model_fanout_authorized("public prompt", **kwargs)
+
+    assert "must be integers" in reply
+    assert calls == []
+
+
 @pytest.mark.parametrize("value", [1, "false"])
 def test_mcp_fanout_resume_rejects_coercible_nonboolean_flags(value):
     """FastMCP must reject before Pydantic can coerce a replay request."""
