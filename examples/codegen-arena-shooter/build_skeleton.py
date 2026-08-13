@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import os
 import re
@@ -44,6 +45,9 @@ SONDER = os.environ.get(
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.join(HERE, "FpsGame_Skeleton")
 
+# The example owns small helper modules (``skeleton``, ``bodynotes`` and the
+# project scaffold). Keep its directory ahead of the runtime root: otherwise
+# a same-named runtime helper can silently shadow an example contract.
 sys.path.insert(0, SONDER)
 sys.path.insert(0, HERE)
 
@@ -52,6 +56,19 @@ import specs  # noqa: E402
 import bodynotes  # noqa: E402
 import codegen_loop  # noqa: E402
 import server  # noqa: E402
+
+# ``server``/``codegen_loop`` may legitimately import the runtime's own
+# project_scaffold module. Load this example-local manifest helper under a
+# distinct module identity so that existing ``sys.modules`` entries cannot
+# redirect a generated game to unrelated runtime scaffolding.
+_SCAFFOLD_SPEC = importlib.util.spec_from_file_location(
+    "arena_shooter_project_scaffold", os.path.join(HERE, "project_scaffold.py"),
+)
+if _SCAFFOLD_SPEC is None or _SCAFFOLD_SPEC.loader is None:
+    raise RuntimeError("arena shooter project scaffold is unavailable")
+_SCAFFOLD_MODULE = importlib.util.module_from_spec(_SCAFFOLD_SPEC)
+_SCAFFOLD_SPEC.loader.exec_module(_SCAFFOLD_MODULE)
+ensure_project_file = _SCAFFOLD_MODULE.ensure_project_file
 
 FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
@@ -158,6 +175,8 @@ def main():
                              "compiler errors before the next try")
     parser.add_argument("--reset", action="store_true",
                         help="rewrite every skeleton before filling")
+    parser.add_argument("--prepare-only", action="store_true",
+                        help="write the deterministic project/skeleton and verify its baseline build; never call a model")
     parser.add_argument("--model", default="",
                         help="override the ollama model behind --tiers, so two "
                              "models can be compared on identical slots")
@@ -172,6 +191,8 @@ def main():
         print("model override: %s -> %s" % (args.tiers, args.model), flush=True)
 
     os.makedirs(PROJECT, exist_ok=True)
+    project_file = ensure_project_file(PROJECT)
+    print("project scaffold: %s" % project_file, flush=True)
     # v1 per-file contracts are deliberately NOT used: they describe a design
     # this skeleton replaced, and carrying both put two contradictory contracts
     # in one prompt. bodynotes.py is the single source now.
@@ -194,6 +215,12 @@ def main():
     print("baseline: %d error(s) across %d skeleton file(s)\n"
           % (len(errors), len(skeleton.FILES)))
     baseline = len(errors)
+    if args.prepare_only:
+        if errors:
+            print("ABORT: harness-owned baseline must compile before model work.")
+            return 1
+        print("baseline build succeeded; no model bodies were requested.")
+        return 0
 
     slots = []
     for name, skel in skeleton.FILES:

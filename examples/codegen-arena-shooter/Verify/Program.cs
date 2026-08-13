@@ -35,7 +35,14 @@ public static class Program
         Assembly asm;
         try
         {
-            asm = Assembly.Load("FpsGameSonder");
+            // The generated game is a plain copied file reference rather than
+            // a project dependency: its source shape changes between runs.
+            // That keeps a broken candidate from breaking the verifier build,
+            // but it also means it is absent from Verify.deps.json and plain
+            // Assembly.Load cannot resolve it. Load the exact copied artifact
+            // instead, so this is a real held-out runtime check.
+            string target = Path.Combine(AppContext.BaseDirectory, "FpsGameSonder.dll");
+            asm = Assembly.LoadFrom(target);
         }
         catch (Exception e)
         {
