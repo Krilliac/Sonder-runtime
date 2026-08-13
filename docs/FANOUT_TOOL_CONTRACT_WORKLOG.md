@@ -219,5 +219,15 @@ plus the final work-log update commit.
 - The three `test_sonder_storage.py` timing budgets fail on this loaded
   16 GB box on pre-change code too; if they persist on a quiet machine,
   they deserve their own issue.
+- One focused seven-file run immediately after a `git commit` showed
+  `3 failed, 145 passed`, including `inspect.getsource(server.diagnostics)`
+  returning a *different function's* source — the signature of the live
+  server module being hot-swapped mid-run. The same selection then passed
+  four consecutive times (148 passed) and the broad suite covered the same
+  files green. Plausible mechanism: git touching CRLF-normalized files
+  changes the on-disk digest the live-reload watcher compares. Not caused
+  by this branch (the watcher predates it); worth its own investigation if
+  it recurs — a test-session guard that pins `SONDER_LIVE_RELOAD=0` would
+  remove the class.
 - `tool_capabilities.py` descriptor completion remains future work by
   design (non-goal).
