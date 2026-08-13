@@ -77,7 +77,7 @@ COMMANDS = [
     },
     {
         "name": "/updatecheck",
-        "category": "system",
+        "category": "repo",
         "risk": "safe",
         "summary": "Fetch and report the installed Sonder Git commit, newest canonical commit, timestamps, and whether this source checkout is behind.",
     },
@@ -86,7 +86,7 @@ COMMANDS = [
         # Fast-forwards the live runtime source checkout.  This is separate
         # from the read-only /updatecheck command so its dangerous risk does
         # not over-gate normal status inspection.
-        "category": "system",
+        "category": "repo",
         "risk": "dangerous",
         "summary": "Safely fast-forward a clean canonical Sonder source checkout; never merges, rebases, or overwrites local work.",
     },

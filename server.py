@@ -16472,6 +16472,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
     "elevate", "permission_mode", "permission_rule_set",
     "runtime_policy_update", "update_system_profile",
+    "runtime_source_update",
     "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
     "self_heal_repair", "memory_export", "memory_privacy_repair",
     "memory_quality_repair", "workflow_save", "workflow_delete", "workflow_run",

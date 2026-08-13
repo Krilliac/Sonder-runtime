@@ -148,6 +148,11 @@ _CATEGORY_BY_TOOL = {
     "system_profile_text": "persona",
     "update_system_profile": "persona",
     "system_improvement_report": "system",
+    # Source updates act on Sonder's repository checkout.  Keeping both the
+    # read-only status and guarded fast-forward in the repo family makes
+    # `/git` completion cohesive rather than surfacing unrelated system rows.
+    "runtime_source_update": "repo",
+    "runtime_source_update_status": "repo",
     "data_convert": "data",
     "elevate": "security",
 }
@@ -227,6 +232,7 @@ _CATEGORY_BY_SLASH = {
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/goal": "system", "/improve": "system", "/append": "filesystem",
+    "/updatecheck": "repo", "/update": "repo", "/updatesource": "repo",
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
