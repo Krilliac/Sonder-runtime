@@ -230,6 +230,15 @@ fresh pytest process while the box sits at 2.1G free RAM of 15.3G
 branch. Same family as the `test_sonder_storage.py` budgets; both belong
 to a machine-load flake backlog, not to this change.
 
+A second full-suite pass on the rebased tree was started and then
+deliberately aborted: a concurrent session began working in this same
+worktree (commit `52d4abf`, uncommitted live-reload/selfmod wiring for
+`tool_contract`, and a parallel pytest), so the run would have measured a
+moving tree. Rebased-tree assurance therefore rests on the 372-test
+focused pass plus the three gates above, with the full-suite green from
+M4 on identical branch content. Next session: run `python -m pytest -q`
+once the tree settles, alongside whatever the concurrent work adds.
+
 ## Residual limitations / next steps
 
 - The authority name-grammar tripwire is a floor, not a proof: a
