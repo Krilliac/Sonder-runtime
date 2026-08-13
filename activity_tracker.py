@@ -592,7 +592,7 @@ def record_model_call(
 
 
 def record_model_fanout(*, cloud_model_calls=0, tokens_in=0, tokens_out=0,
-                        answered=0, failed=0, skipped=0, elapsed_ms=0):
+                        answered=0, failed=0, unknown=0, skipped=0, elapsed_ms=0):
     """Record a bounded aggregate for a durable model fanout.
 
     Local fanout calls execute in the response thread and are already captured
@@ -609,6 +609,7 @@ def record_model_fanout(*, cloud_model_calls=0, tokens_in=0, tokens_out=0,
     tokens_out = max(0, int(tokens_out or 0))
     answered = max(0, int(answered or 0))
     failed = max(0, int(failed or 0))
+    unknown = max(0, int(unknown or 0))
     skipped = max(0, int(skipped or 0))
     elapsed_ms = max(0, int(elapsed_ms or 0))
     with _LOCK:
@@ -623,10 +624,11 @@ def record_model_fanout(*, cloud_model_calls=0, tokens_in=0, tokens_out=0,
             tokens_out=tokens_out,
             answered=answered,
             failed=failed,
+            unknown=unknown,
             skipped=skipped,
             elapsed_ms=elapsed_ms,
-            summary="%d answered, %d failed, %d skipped" % (
-                answered, failed, skipped,
+            summary="%d answered, %d failed, %d unknown, %d skipped" % (
+                answered, failed, unknown, skipped,
             ),
         )
 
@@ -856,7 +858,7 @@ def _public_event(event, *, include_detail=False):
             out[key] = _short(_redact_text(event.get(key)), 160)
     for key in (
         "prompt_chars", "history_messages", "tokens_in", "tokens_out",
-        "cloud_model_calls", "answered", "failed", "skipped",
+        "cloud_model_calls", "answered", "failed", "unknown", "skipped",
         "lines_added", "lines_edited", "lines_deleted", "bytes",
     ):
         if key in event:
@@ -1080,7 +1082,7 @@ def execution_feed(
                 # answers, failure detail, and other sensitive material.
                 row.update({
                     key: event.get(key) for key in (
-                        "cloud_model_calls", "answered", "failed", "skipped",
+                        "cloud_model_calls", "answered", "failed", "unknown", "skipped",
                         "tokens_in", "tokens_out",
                     ) if key in event
                 })
@@ -1191,9 +1193,9 @@ def format_execution_feed(feed):
                 event.get("handler_state", "unknown"),
             )
         elif kind == "model_fanout":
-            detail = "cloud calls=%s answered=%s failed=%s skipped=%s tok=%s/%s" % (
+            detail = "cloud calls=%s answered=%s failed=%s unknown=%s skipped=%s tok=%s/%s" % (
                 event.get("cloud_model_calls", 0), event.get("answered", 0),
-                event.get("failed", 0), event.get("skipped", 0),
+                event.get("failed", 0), event.get("unknown", 0), event.get("skipped", 0),
                 event.get("tokens_in", 0), event.get("tokens_out", 0),
             )
         else:
