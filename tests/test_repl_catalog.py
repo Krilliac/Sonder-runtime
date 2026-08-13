@@ -92,6 +92,26 @@ def test_a_broken_slash_menu_never_costs_the_user_their_prompt(monkeypatch):
     assert sonder_repl._read_input("p> ") == "typed anyway"
 
 
+def test_framed_composer_preserves_its_prompt_when_raw_input_falls_back(monkeypatch):
+    seen = {}
+
+    class _RawFallback:
+        @staticmethod
+        def available():
+            return True
+
+        @staticmethod
+        def read_line(_prompt, **kwargs):
+            seen.update(kwargs)
+            return input(kwargs["fallback_prompt"])
+
+    monkeypatch.setattr(sonder_repl, "slash_menu", _RawFallback)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "typed: " + prompt)
+
+    assert sonder_repl._read_input("sonder > ", composer=True) == "typed: sonder > "
+    assert seen["frame"] == "sonder > "
+
+
 def test_keyboard_interrupt_still_propagates_through_the_menu(monkeypatch):
     class _Interrupting:
         @staticmethod
