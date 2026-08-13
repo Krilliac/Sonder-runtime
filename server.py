@@ -5612,7 +5612,12 @@ def structured_answer_with_history(
         model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
     )(prompt, history or None)
     try:
-        data = json.loads(response)
+        data = json.loads(
+            response,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError("non-standard JSON numeric constant: %s" % value)
+            ),
+        )
     except (TypeError, ValueError) as exc:
         raise ModelCallError(
             "protocol", "response is not valid JSON despite response_format: %s" % exc,

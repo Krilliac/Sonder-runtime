@@ -1072,6 +1072,10 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
     with pytest.raises(server.ModelCallError, match="response_format validation failed"):
         server.structured_answer_with_history("return json", [], schema, tier="fast")
 
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda *_call_args: '{"ok":NaN}')
+    with pytest.raises(server.ModelCallError, match="not valid JSON"):
+        server.structured_answer_with_history("return json", [], schema, tier="fast")
+
 
 def test_serve_target_default_is_local_student(monkeypatch):
     monkeypatch.setattr(server, "_get",
