@@ -33,6 +33,18 @@ def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkey
     assert any(glyph in text for glyph in ("╭", "+"))
 
 
+def test_interactive_error_result_uses_error_tone(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+
+    sonder_repl._print_chat_result("ERROR: refused", 0.0, error=True)
+
+    text = capsys.readouterr().out
+    assert sonder_repl._Ansi.red in text
+    assert "ERROR: refused" in text
+
+
 def test_piped_chat_result_stays_plain_for_scripts(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
     monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
