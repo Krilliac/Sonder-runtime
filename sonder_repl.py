@@ -624,11 +624,11 @@ def _latest_repl_turn_metrics(session_id="", *, surfaces=("terminal/mcp",)):
 
 
 def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
-                    width=None):
+                    width=None, model_override=None):
     """Live model, runtime, context and last-turn status for the composer."""
     resolved_tier = str(tier or "code")
     try:
-        model = str(server.TIERS.get(resolved_tier) or "unknown")
+        model = str(model_override or server.TIERS.get(resolved_tier) or "unknown")
     except Exception:
         model = "unknown"
     # This is intentionally the live table rather than a cached launch value:
@@ -1142,6 +1142,10 @@ def main():
     project = server.DEFAULT_PROJECT
     # None = whatever the runtime resolves by default; /model pins one.
     active_tier = None
+    # Exact discovered model selected by /model <tag>.  Keep it separately
+    # from TIERS: live config reload intentionally rebuilds that process-wide
+    # mapping, but it must not silently undo this REPL session's choice.
+    active_model = None
     # Keep raw-palette recall local to this REPL process. Prompts can include
     # private repository context, so terminal convenience must not create a
     # durable prompt log.
@@ -1169,20 +1173,17 @@ def main():
     def do_model(arg):
         """Show what is installed and switch the model for the rest of the session.
 
-        Switching rebinds the ACTIVE TIER's entry in server.TIERS rather than
-        threading a model name through every call: the tier table is the single
-        place the runtime resolves a model from, so a rebind is picked up by
-        anything that asks -- including the identity block that tells the model
-        what it is running as. Changing only this REPL's calls would leave that
-        block naming the old model.
+        A named tier selects its live binding. An exact installed tag pins this
+        REPL session to that discovered model without mutating the process-wide
+        tier table, which live reload is allowed to rebuild.
         """
-        nonlocal active_tier
+        nonlocal active_tier, active_model
         arg = (arg or "").strip()
         tier = active_tier or "code"
         installed = _installed_models()
 
         if not arg:
-            current = str(server.TIERS.get(tier) or "?")
+            current = str(active_model or server.TIERS.get(tier) or "?")
             print("active tier: %s  ->  %s" % (
                 _paint(tier, _Ansi.cyan), _paint(current, _Ansi.cyan, _Ansi.bold)))
             print()
@@ -1194,7 +1195,7 @@ def main():
             if installed:
                 print(_paint("installed models (ollama)", _Ansi.muted))
                 for name, size in installed:
-                    mark = "*" if name == server.TIERS.get(tier) else " "
+                    mark = "*" if name == current else " "
                     print("  %s %-40s %s" % (mark, name, size))
             else:
                 print(_paint("installed models: (ollama did not answer)", _Ansi.amber))
@@ -1204,6 +1205,7 @@ def main():
 
         if arg in server.TIERS:
             active_tier = arg
+            active_model = None
             print("active tier: %s  ->  %s" % (arg, server.TIERS.get(arg)))
             return
 
@@ -1220,8 +1222,9 @@ def main():
                 print("run /model with no argument to list what is installed")
             return
 
-        server.TIERS[tier] = arg
-        print("%s tier -> %s" % (tier, _paint(arg, _Ansi.cyan, _Ansi.bold)))
+        active_tier = tier
+        active_model = arg
+        print("%s session model -> %s" % (tier, _paint(arg, _Ansi.cyan, _Ansi.bold)))
 
     def do_run(timeout=grounding.DEFAULT_TIMEOUT):
         block = grounding.extract_runnable_code_block(last_run_source or last_response)
@@ -1370,6 +1373,7 @@ def main():
                 context=_composer_context(session_id, project),
                 last_turn=last_turn_metrics,
                 width=_composer_frame_width(),
+                model_override=active_model,
             ),
                                history=input_history, composer=True)
         except (EOFError, KeyboardInterrupt):
@@ -1898,7 +1902,7 @@ def main():
         try:
             out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                                 session=session_id, project=project,
-                                tier=active_tier or "",
+                                tier=active_model or active_tier or "",
                                 location_consent=location_consent)
         except BaseException:
             if indicator is not None:
