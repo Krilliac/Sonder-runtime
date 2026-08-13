@@ -246,16 +246,16 @@ def test_public_activity_keeps_scalar_fanout_metrics_without_content():
     with at.response_span("chat", "prompt-canary"):
         at.record_model_fanout(
             cloud_model_calls=4, tokens_in=321, tokens_out=123,
-            answered=2, failed=1, skipped=1, elapsed_ms=456,
+            answered=2, failed=1, unknown=1, skipped=1, elapsed_ms=456,
         )
 
     public = at.public_snapshot(include_detail=False)
     event = next(row for row in public["latest"]["events"] if row["kind"] == "model_fanout")
     assert {key: event[key] for key in (
-        "cloud_model_calls", "tokens_in", "tokens_out", "answered", "failed", "skipped",
+        "cloud_model_calls", "tokens_in", "tokens_out", "answered", "failed", "unknown", "skipped",
     )} == {
         "cloud_model_calls": 4, "tokens_in": 321, "tokens_out": 123,
-        "answered": 2, "failed": 1, "skipped": 1,
+        "answered": 2, "failed": 1, "unknown": 1, "skipped": 1,
     }
     encoded = json.dumps(public)
     assert "prompt-canary" not in encoded
@@ -266,7 +266,7 @@ def test_public_activity_keeps_scalar_fanout_metrics_without_content():
     row = next(row for row in feed["events"] if row["kind"] == "model_fanout")
     assert row["cloud_model_calls"] == 4
     assert row["tokens_in"] == 321 and row["tokens_out"] == 123
-    assert "cloud calls=4 answered=2 failed=1 skipped=1 tok=321/123" in at.format_execution_feed(feed)
+    assert "cloud calls=4 answered=2 failed=1 unknown=1 skipped=1 tok=321/123" in at.format_execution_feed(feed)
 
 
 def test_detailed_execution_feed_is_bounded_redacted_and_versioned(monkeypatch):

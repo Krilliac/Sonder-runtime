@@ -611,6 +611,23 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert unloads == []
 
 
+def test_fanout_receipt_keeps_unknown_results_distinct_from_failures(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    run = server.fanout_store.create_run("private prompt", ["uncertain"], scope="local")
+    assert server.fanout_store.claim_run(run["id"], "worker", owner_pid=1)
+    assert server.fanout_store.claim_next_result(run["id"], "worker", owner_pid=1)
+    assert server.fanout_store.record_result(
+        run["id"], "uncertain", "worker", "unknown",
+        error="worker lease ended; request was not replayed",
+    )
+
+    receipt = server._fanout_receipt(run["id"])
+
+    assert receipt["models_failed"] == 0
+    assert receipt["models_unknown"] == 1
+    assert receipt["failures"][0]["status"] == "unknown"
+
+
 def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
     """Cloud workers do not inherit the response span; local calls do."""
     _isolated_durable_fanout(monkeypatch, tmp_path)
@@ -654,6 +671,7 @@ def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
     assert event["tokens_out"] == 5
     assert event["answered"] == 1
     assert event["failed"] == 1
+    assert event["unknown"] == 0
     assert event["skipped"] == 0
 
 
