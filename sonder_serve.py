@@ -2595,7 +2595,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             limit_text = (query.get("limit") or ["20"])[0]
             finished_text = (query.get("include_finished") or ["true"])[0].casefold()
-            if not limit_text.isdigit() or not 1 <= int(limit_text) <= 100:
+            try:
+                limit = int(limit_text)
+            except (TypeError, ValueError):
+                self._send_json_payload({"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}}, status=400)
+                return True
+            if not 1 <= limit <= 100:
                 self._send_json_payload({"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}}, status=400)
                 return True
             if finished_text not in ("true", "false"):
@@ -2607,7 +2612,7 @@ class Handler(BaseHTTPRequestHandler):
                 request_owner = _fanout_request_owner(context)
             self._send_json_payload({"runs": server.fanout_store.recent_run_summaries(
                 request_owner=request_owner, include_finished=finished_text == "true",
-                limit=int(limit_text),
+                limit=limit,
             )})
             return True
         prefix = "/v1/fanout/"
