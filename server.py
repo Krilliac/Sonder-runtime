@@ -18958,8 +18958,9 @@ def _agent_turn(
     repeated_inspection_counts = {}
     failed_call_counts = {}
     # A later unrelated success must not turn a failed required/evidence call
-    # into a host-approved completion.  Keep only the tool name and a bounded
-    # diagnostic; a successful retry of that same tool is explicit recovery.
+    # into a host-approved completion. Key by the canonical call signature so
+    # only a successful retry of that exact host observation can recover it.
+    # Values retain the tool name for the bounded final diagnostic.
     completion_blocking_failures = {}
     # Paths this run itself created via file_write mode=create. Re-creating one
     # of them is unambiguous intent to replace the run's own file, so the host
@@ -19092,11 +19093,13 @@ def _agent_turn(
         if completion_blocking_failures:
             failures = "; ".join(
                 "%s: %s" % (name, detail[:240])
-                for name, detail in sorted(completion_blocking_failures.items())
+                for _signature, (name, detail) in sorted(
+                    completion_blocking_failures.items()
+                )
             )
             evidence_failure = any(
                 name in _AGENT_FILE_EVIDENCE_TOOLS
-                for name in completion_blocking_failures
+                for name, _detail in completion_blocking_failures.values()
             )
             prefix = "EVIDENCE_REQUIRED" if evidence_failure else "ERROR"
             return "%s: required host evidence did not recover (%s)." % (
@@ -19375,7 +19378,10 @@ def _agent_turn(
                         "HOST REQUIREMENT: retry and successfully complete the failed "
                         "evidence tool(s): %s. An unrelated successful tool does not "
                         "recover this failure."
-                        % ", ".join(sorted(completion_blocking_failures))
+                        % ", ".join(sorted({
+                            name for name, _detail
+                            in completion_blocking_failures.values()
+                        }))
                     )
                     continue
                 return finish_final(final)
@@ -19661,7 +19667,7 @@ def _agent_turn(
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
-            completion_blocking_failures.pop(tool_name, None)
+            completion_blocking_failures.pop(call_signature, None)
             if tool_name == "file_write":
                 run_created_paths.add(
                     _agent_created_path_key(policy_tool_args.get("path"))
@@ -19696,11 +19702,19 @@ def _agent_turn(
                         and tool_name in _AGENT_FILE_EVIDENCE_TOOLS)
                 )
             ):
-                completion_blocking_failures[tool_name] = observation_text[:600]
-            recovery = (
-                "HOST RECOVERY: do not repeat this exact failed call unchanged. "
-                "Inspect the error and change the target, arguments, or tool."
-            )
+                completion_blocking_failures[call_signature] = (
+                    tool_name, observation_text[:600],
+                )
+            if call_signature in completion_blocking_failures:
+                recovery = (
+                    "HOST RECOVERY: this required host observation blocks "
+                    "completion until you retry this exact call and it succeeds."
+                )
+            else:
+                recovery = (
+                    "HOST RECOVERY: do not repeat this exact failed call unchanged. "
+                    "Inspect the error and change the target, arguments, or tool."
+                )
             if tool_name == "script_run":
                 recovery += (
                     " Use script_search/file_find to locate a real script, or use "
