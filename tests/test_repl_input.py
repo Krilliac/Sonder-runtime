@@ -1,5 +1,6 @@
 import re
 
+import sonder_headless
 import sonder_repl
 
 
@@ -240,6 +241,18 @@ def test_terminal_endpoint_link_stays_plain_when_ansi_is_disabled(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
 
     assert sonder_repl._terminal_link("http://127.0.0.1:11435") == "http://127.0.0.1:11435"
+
+
+def test_startup_banner_normalizes_wildcard_bind_for_dashboard_link(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_headless, "DEFAULT_HOST", "0.0.0.0")
+    monkeypatch.setattr(sonder_headless, "DEFAULT_PORT", 11435)
+    monkeypatch.setattr(sonder_headless, "port_open", lambda *_args: True)
+
+    banner = sonder_repl._startup_banner(None, "coder", "default")
+
+    assert "http://127.0.0.1:11435" in banner
+    assert "http://0.0.0.0:11435" not in banner
 
 
 def test_execution_prompt_shows_live_lanes_running_and_queued_agents(monkeypatch):
