@@ -7394,6 +7394,64 @@ def permission_policy(tool_name: str = "") -> str:
 
 
 @mcp.tool()
+def policy_explain(tool_name: str) -> str:
+    """Preflight the direct-MCP permission gate for one registered tool without running it."""
+    _maybe_live_reload()
+    name = str(tool_name or "").strip().lstrip("/")
+    if not name:
+        raise ValueError("tool_name must name a registered MCP tool")
+    try:
+        registered = {
+            str(tool.name) for tool in mcp._tool_manager.list_tools()
+        }
+    except Exception as exc:
+        # A policy answer for a name the live registry cannot establish is a
+        # false assurance.  Match the catalog's fail-closed posture instead.
+        raise RuntimeError("the MCP tool registry could not be read: %s" % exc) from exc
+    if name not in registered:
+        raise ValueError("unknown registered MCP tool: %s" % name)
+
+    # This mirrors reloadable_mcp._refuse_if_gated(), the actual direct-MCP
+    # choke point.  It deliberately does not call the target, inspect target
+    # arguments, or echo operator-authored rule notes (which are not needed to
+    # explain the governing policy and could carry sensitive prose).
+    decision = permission_modes.decide_for_caller(
+        name, interactive=False, gate_control_exempt=True,
+    )
+    if decision is None:
+        return "\n".join([
+            "policy preflight: %s" % name,
+            "  registered: yes",
+            "  caller: direct MCP (non-interactive)",
+            "  gate result: allow (operator control exemption)",
+            "  will execute: no",
+            "  scope: this reports only the permission-mode gate; target-specific "
+            "authorization and argument validation still run on a real call.",
+        ])
+
+    source = {
+        "rule": "an explicit permission rule governs this result",
+        "mode": "the active permission mode governs this result",
+        "privilege": "elevation is required and is currently off",
+        "unclassified": "the tool could not be classified for an unattended caller",
+        "durable-authority": "unattended durable authority is refused without an explicit rule",
+        "non-interactive": "the non-interactive caller policy governs this result",
+    }.get(decision.source, "the active permission policy governs this result")
+    return "\n".join([
+        "policy preflight: %s" % name,
+        "  registered: yes",
+        "  caller: direct MCP (non-interactive)",
+        "  mode: %s" % decision.mode,
+        "  risk: %s" % decision.risk,
+        "  gate result: %s" % decision.action,
+        "  governed by: %s" % source,
+        "  will execute: no",
+        "  scope: this reports only the permission-mode gate; target-specific "
+        "authorization and argument validation still run on a real call.",
+    ])
+
+
+@mcp.tool()
 def permission_rule_set(
     pattern: str,
     action: str,
