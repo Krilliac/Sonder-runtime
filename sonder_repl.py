@@ -516,6 +516,20 @@ def _execution_prompt(status=None):
     return _paint("[lanes %s | agents %s]" % (lanes, agents), colour)
 
 
+def _composer_title(tier=None, status=None):
+    """Compact, live identity for the terminal composer title edge."""
+    resolved_tier = str(tier or "code")
+    try:
+        model = str(server.TIERS.get(resolved_tier) or "unknown")
+    except Exception:
+        model = "unknown"
+    # This is intentionally the live table rather than a cached launch value:
+    # /model changes should be visible before the very next submitted turn.
+    return "Sonder %s (%s)  %s" % (
+        resolved_tier, model, _execution_prompt(status),
+    )
+
+
 def _watch_activity(poll_seconds=1.0):
     """Blocking feed tail; never interleaves with the normal input prompt."""
     last_seq = -1
@@ -1094,8 +1108,7 @@ def main():
 
     while True:
         try:
-            line = _read_input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
-                               _execution_prompt() + _paint(" > ", _Ansi.muted),
+            line = _read_input(_composer_title(active_tier),
                                history=input_history, composer=True)
         except (EOFError, KeyboardInterrupt):
             print()
