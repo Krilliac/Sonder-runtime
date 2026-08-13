@@ -245,6 +245,36 @@ def _state_principal(context):
     return "local-open"
 
 
+def _task_account_scope(context):
+    """Return an opaque durable task boundary for an authenticated account.
+
+    Local-open and direct MCP remain deliberately global.  Account names must
+    not become task-store data: callers can choose them, and retaining a
+    domain-separated digest gives the store only a stable authorization key.
+    """
+    account = (context or {}).get("account") or {}
+    if not account:
+        return None
+    material = "task-account-scope\0" + _state_principal(context)
+    return "ta-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+_SCOPED_TASK_TOOLS = frozenset((
+    "task_create", "task_list", "task_update", "task_show", "task_delete",
+    "task_plan", "task_progress", "task_depend", "checklist_create",
+    "checklist_show", "checklist_update",
+))
+
+
+def _served_task_tool(tool_name, kwargs, context):
+    """Run account-scoped task operations without exposing a scope argument."""
+    scope = _task_account_scope(context)
+    if scope is not None:
+        return server.scoped_task_tool_dispatch(tool_name, kwargs, account_scope=scope)
+    handler = getattr(server, tool_name)
+    return str(handler(**kwargs))
+
+
 def _fanout_request_owner(context):
     """Stable, non-secret receipt owner key for durable fanout state.
 
@@ -1207,27 +1237,27 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/todo", "/task", "/tasks"):
         text = arg.strip()
         if not text or text.lower() in ("list", "ls"):
-            return server.task_list()
+            return _served_task_tool("task_list", {}, context)
         action, _, rest = text.partition(" ")
         action = action.lower()
         if action in ("add", "create", "new"):
-            return server.task_create(title=rest.strip())
+            return _served_task_tool("task_create", {"title": rest.strip()}, context)
         if action in ("done", "complete", "finish"):
             if not rest.strip():
                 return "usage: /todo done <task-id>"
-            return server.task_update(task_id=rest.strip(), status="done")
+            return _served_task_tool("task_update", {"task_id": rest.strip(), "status": "done"}, context)
         if action in ("start", "doing"):
             if not rest.strip():
                 return "usage: /todo start <task-id>"
-            return server.task_update(task_id=rest.strip(), status="in_progress")
+            return _served_task_tool("task_update", {"task_id": rest.strip(), "status": "in_progress"}, context)
         if action in ("block", "blocked"):
             if not rest.strip():
                 return "usage: /todo block <task-id>"
-            return server.task_update(task_id=rest.strip(), status="blocked")
+            return _served_task_tool("task_update", {"task_id": rest.strip(), "status": "blocked"}, context)
         if action in ("show", "view"):
             if not rest.strip():
                 return "usage: /todo show <task-id>"
-            return server.task_show(rest.strip())
+            return _served_task_tool("task_show", {"task_id": rest.strip()}, context)
         return (
             "usage: /todo [list] | /todo add <title> | /todo start <id> | "
             "/todo done <id> | /todo block <id> | /todo show <id>"
@@ -1283,6 +1313,13 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
         "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
         "/artifactcheck", "/verifyartifact", "/groundartifact",
     ):
+        scope = _task_account_scope(context)
+        if scope is not None and cmd in ("/checklist", "/plan"):
+            if arg.strip():
+                return server.scoped_task_tool_dispatch(
+                    "checklist_show", {"checklist_id": arg.strip()}, account_scope=scope,
+                )
+            return server.scoped_latest_checklist(scope)
         return server.control_command(stripped, project=project)
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         parts2 = arg.strip().split(None, 1)
@@ -1512,6 +1549,8 @@ def _dispatch_catalogued_tool(line, state, context=None):
         if command and any(p.name == "token" for p in command.params):
             kwargs["token"] = state.token
     try:
+        if tool_name in _SCOPED_TASK_TOOLS and _task_account_scope(context) is not None:
+            return _served_task_tool(tool_name, kwargs, context)
         return str(handler(**kwargs))
     except TypeError as error:
         return "%s: %s" % (tool_name, error)

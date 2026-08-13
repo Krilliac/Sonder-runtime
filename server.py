@@ -7149,6 +7149,121 @@ def task_depend(
         conn.close()
 
 
+def scoped_task_tool_dispatch(tool_name: str, kwargs: dict, *, account_scope: str) -> str:
+    """Dispatch a task tool inside a serving-layer account boundary.
+
+    This is deliberately not an MCP tool.  The public task tools retain their
+    local/global contract, while the HTTP proxy supplies an opaque scope that
+    an HTTP caller cannot replace through a tool argument.
+    """
+    _maybe_live_reload()
+    values = dict(kwargs or {})
+    conn = _open_db()
+    try:
+        service = _task_service(conn)
+        if tool_name == "task_create":
+            row = service.create_task(account_scope=account_scope, **values)
+            return "task created\n  " + _format_task(row.to_dict())
+        if tool_name == "task_list":
+            rows = service.list_tasks(account_scope=account_scope, **values)
+            lines = ["sonder tasks"]
+            lines.extend("  " + _format_task(row.to_dict()) for row in rows)
+            return "\n".join(lines) if rows else "\n".join(lines + ["  (no matching tasks)"])
+        if tool_name == "task_update":
+            task_id = values.pop("task_id")
+            row = service.update_task(task_id, account_scope=account_scope, **values)
+            return "task updated\n  " + _format_task(row.to_dict())
+        if tool_name == "task_show":
+            task_id = values.pop("task_id")
+            detail = service.show_task(task_id, account_scope=account_scope, **values)
+            if not detail.task:
+                return "ERROR: no task '%s'." % task_id
+            lines = ["task", "  " + _format_task(detail.task.to_dict())]
+            if detail.events:
+                lines.append("events:")
+                lines.extend("  %(ts)s  %(event)s  %(note)s" % event for event in detail.events)
+            return "\n".join(lines)
+        if tool_name == "task_delete":
+            result = service.delete_task(values.pop("task_id"), account_scope=account_scope)
+            return "deleted task %s (removed %d children)" % (
+                result["deleted"][:8], result["children_removed"]
+            )
+        if tool_name == "task_plan":
+            raw_steps = values.pop("steps")
+            steps = json.loads(raw_steps) if isinstance(raw_steps, str) else raw_steps
+            checklist = service.plan_tasks(account_scope=account_scope, steps=steps, **values)
+            return _format_checklist(checklist.to_dict())
+        if tool_name == "task_progress":
+            stats = service.task_progress(account_scope=account_scope, **values)
+            bar_len = 20
+            filled = round(bar_len * stats["progress_pct"] / 100)
+            bar = "#" * filled + "-" * (bar_len - filled)
+            project = values.get("project", "")
+            return "\n".join([
+                "sonder task progress%s" % (" [%s]" % project if project else ""),
+                "  [%s] %.1f%%" % (bar, stats["progress_pct"]),
+                "  total: %d | pending: %d | in_progress: %d | blocked: %d | done: %d | canceled: %d"
+                % (stats["total"], stats["pending"], stats["in_progress"], stats["blocked"],
+                   stats["done"], stats["canceled"]),
+            ])
+        if tool_name == "task_depend":
+            task_id = values.pop("task_id")
+            depends_on = values.pop("depends_on")
+            if values.pop("remove", False):
+                result = service.remove_dependency(task_id, depends_on, account_scope=account_scope)
+                if not result.get("removed"):
+                    return "no dependency found"
+                return "removed dependency: %s no longer depends on %s" % (
+                    result["task_id"][:8], result["depends_on"][:8]
+                )
+            result = service.add_dependency(task_id, depends_on, account_scope=account_scope)
+            return "dependency added: %s depends on %s" % (
+                result["task_id"][:8], result["depends_on"][:8]
+            )
+        if tool_name == "checklist_create":
+            raw_items = values.pop("items_json")
+            normalized = task_use_cases.normalize_checklist_items(raw_items)
+            checklist = service.create_checklist(
+                values.pop("title"),
+                [{"title": title, "detail": detail} for title, detail in normalized],
+                account_scope=account_scope, **values,
+            )
+            return _format_checklist(checklist.to_dict())
+        if tool_name == "checklist_show":
+            checklist = service.checklist(values.pop("checklist_id"), account_scope=account_scope)
+            return _format_checklist(checklist.to_dict())
+        if tool_name == "checklist_update":
+            checklist = service.update_checklist(
+                values.pop("checklist_id"), values.pop("item"), values.pop("status"),
+                account_scope=account_scope, **values,
+            )
+            return _format_checklist(checklist.to_dict())
+        return "ERROR: unsupported scoped task tool '%s'" % tool_name
+    except Exception as exc:
+        return "ERROR: %s" % exc
+    finally:
+        conn.close()
+
+
+def scoped_latest_checklist(account_scope: str) -> str:
+    """Return the newest checklist in one account, never global activity state."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        service = _task_service(conn)
+        for row in service.list_tasks(account_scope=account_scope, include_done=True, limit=200):
+            if row.parent_id:
+                continue
+            checklist = service.checklist(row.id, account_scope=account_scope)
+            if checklist.items:
+                return _format_checklist(checklist.to_dict())
+    except Exception as exc:
+        return "ERROR: %s" % exc
+    finally:
+        conn.close()
+    return "(no checklist yet; use /work <task>)"
+
+
 def context_compaction_plan_data(session: str = "", project: str = "") -> dict:
     data = context_health_data(session=session, project=project)
     actions = []
