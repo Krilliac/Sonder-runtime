@@ -742,7 +742,7 @@ def _begin_chat_turn(label="Sonder"):
 
 
 def _print_chat_result(text, started_at, *, offer_feedback=False,
-                       label="Sonder"):
+                       label="Sonder", error=False):
     """Present one completed turn with lightweight terminal chrome.
 
     The result itself is printed verbatim: the bars are separate lines, never
@@ -760,7 +760,8 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
 
     box = _box_chars()
     title = "%s %s " % (box["tl"], label)
-    print(_paint(title + box["h"] * 8, _Ansi.teal, _Ansi.bold))
+    tone = _Ansi.red if error else _Ansi.teal
+    print(_paint(title + box["h"] * 8, tone, _Ansi.bold))
     print(answer)
     footer = "%s %s  %s" % (box["bl"], timing, "(/pass or /fail)" if offer_feedback else "")
     print(_paint(footer, _Ansi.muted))
@@ -1628,7 +1629,7 @@ def main():
                             tier=active_tier or "",
                             location_consent=location_consent)
         if out.startswith("ERROR"):
-            _print_chat_result(out, started_at, label="Sonder error")
+            _print_chat_result(out, started_at, label="Sonder error", error=True)
             continue
 
         last_iid = server.parse_interaction_id(out)
