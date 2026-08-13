@@ -13239,14 +13239,23 @@ def _loop_permission_refusal(action_type):
 
 def _loop_dispatch(action):
     action_type = (action.get("type") or action.get("action") or "code").strip().lower()
-    activity_tracker.record_tool_call(
-        "loop:%s" % action_type,
-        {k: v for k, v in (action or {}).items() if k not in {"code", "content", "files"}},
-        summary="loop action queued",
-    )
+    activity_args = {
+        k: v for k, v in (action or {}).items()
+        if k not in {"code", "content", "files"}
+    }
     refusal = _loop_permission_refusal(action_type)
     if refusal is not None:
+        # A refused action never entered the queue.  Recording it as a normal
+        # successful tool call made activity consumers report it as completed
+        # even though the host gate prevented dispatch.
+        activity_tracker.record_tool_call(
+            "loop:%s" % action_type, activity_args, ok=False,
+            summary="loop action refused by permission gate",
+        )
         return refusal
+    activity_tracker.record_tool_call(
+        "loop:%s" % action_type, activity_args, summary="loop action queued",
+    )
     if action_type in ("code", "run_code"):
         result = code_runner.run_code(
             code=action.get("code", ""),

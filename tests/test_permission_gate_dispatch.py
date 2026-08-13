@@ -267,6 +267,23 @@ def test_plan_refuses_a_loop_action_and_never_runs_it(monkeypatch):
     assert "mode=plan" in result["output"]
 
 
+def test_refused_loop_action_is_recorded_as_failed_activity(monkeypatch):
+    import activity_tracker
+
+    activity_tracker.reset_for_tests()
+    monkeypatch.setattr(server.code_runner, "run_code", _never_runs)
+    pm.set_mode(pm.PLAN)
+    with activity_tracker.response_span("loop-policy", "private"):
+        result = server._loop_dispatch({"type": "code", "code": "print(1)"})
+
+    assert result["ok"] is False
+    public = activity_tracker.public_snapshot(include_detail=False)
+    event = next(item for item in public["latest"]["events"] if item["kind"] == "tool_call")
+    assert event["tool"] == "loop:code"
+    assert event["ok"] is False
+    assert event["phase"] == "failed"
+
+
 def test_a_loop_action_alias_is_gated_as_the_tool_it_runs():
     """`type: "code"` runs `run_code`; the gate must decide on that, not "code"."""
     assert server._loop_action_tool("code") == "run_code"
