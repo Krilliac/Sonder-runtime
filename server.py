@@ -5347,7 +5347,8 @@ def sonder(
     natural = natural_model_request(prompt)
     if natural and natural["kind"] == "fanout":
         return model_fanout(
-            natural["prompt"], scope=natural["scope"], num_predict=num_predict, token=token,
+            natural["prompt"], scope=natural["scope"], profile=natural.get("profile", ""),
+            num_predict=num_predict, token=token,
         )
     if natural and natural["kind"] == "model":
         if natural["prompt"].lstrip().startswith("/"):
@@ -14827,7 +14828,7 @@ def tool_manifest() -> str:
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; inspect its owner-scoped receipt, cancel it, or explicitly retry finished results. Natural chat supports `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, and `ask with qwen2.5-coder:14b model to ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
+        "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; inspect its owner-scoped receipt, cancel it, or explicitly retry finished results. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, and `healthy-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. Natural chat supports `ask healthy local chat models: ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, and `ask with qwen2.5-coder:14b model to ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
         "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
@@ -21632,6 +21633,35 @@ ENSEMBLE_MAX_MODELS = 4
 ENSEMBLE_SKIP_TIERS = ("vision",)
 
 
+# Selection profiles deliberately describe a small, host-defined set of
+# target classes.  They are *not* a filtering language: accepting arbitrary
+# tag, provider, or capability selectors here would let prompt-derived text
+# widen an expensive fanout beyond the reviewed catalog policy.
+#
+# "healthy" means the model has no active fanout health cooldown.  Unknown
+# models remain eligible so a newly discovered chat model is not silently
+# starved of its first probe; non-chat targets are always excluded below.
+FANOUT_SELECTION_PROFILES = {
+    "healthy-local-chat": "local",
+    "healthy-cloud-chat": "cloud",
+    "healthy-chat": "all",
+}
+
+
+def _fanout_profile_scope(profile):
+    """Return a reviewed profile's scope, rejecting arbitrary selectors."""
+    name = str(profile or "").strip().lower()
+    if not name:
+        return None, None
+    scope = FANOUT_SELECTION_PROFILES.get(name)
+    if scope is None:
+        return None, ModelCallError(
+            "configuration",
+            "unknown fanout profile; use healthy-local-chat, healthy-cloud-chat, or healthy-chat",
+        )
+    return scope, None
+
+
 def natural_model_request(text):
     """Recognize explicit user requests for a model or bounded model fanout.
 
@@ -21640,6 +21670,21 @@ def natural_model_request(text):
     untrusted inputs from spending local compute or cloud budget.
     """
     value = str(text or "").strip()
+    profiled_fanout = re.match(
+        # Keep this whole-turn syntax as constrained as the existing all-model
+        # grammar.  In particular, no trailing selector or embedded prose may
+        # become a profile request.
+        r"^(?:ask|run|try|query)\s+(healthy\s+(?:local|cloud)?\s*chat)\s+models?\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if profiled_fanout:
+        profile = "-".join(profiled_fanout.group(1).lower().split())
+        scope, error = _fanout_profile_scope(profile)
+        if error is None:
+            return {
+                "kind": "fanout", "scope": scope, "profile": profile,
+                "prompt": profiled_fanout.group(2).strip(),
+            }
     fanout = re.match(
         # Keep this an imperative whole-turn grammar: it is deliberately not
         # a classifier over retrieved prose.  ``available`` describes the
@@ -21734,7 +21779,24 @@ def natural_model_request(text):
     return None
 
 
-def _fanout_plan(scope, *, include_unhealthy=False):
+def _fanout_plan(scope, *, profile="", include_unhealthy=False):
+    selected_profile = str(profile or "").strip().lower()
+    if selected_profile:
+        profile_scope, profile_error = _fanout_profile_scope(selected_profile)
+        if profile_error:
+            return {"scope": str(scope or "local"), "selected": [], "skipped": []}, profile_error
+        # A profile is a fixed, reviewed selector.  Reject a contradictory
+        # caller-supplied scope rather than quietly broadening or narrowing it.
+        # An omitted scope lets the fixed profile choose its own reviewed
+        # scope.  An explicit scope must agree exactly; treating the legacy
+        # ``local`` default as omitted would silently broaden a direct caller
+        # to cloud/all targets.
+        requested_scope = str(scope or "").strip().lower()
+        if requested_scope not in ("", profile_scope):
+            return {"scope": requested_scope, "selected": [], "skipped": []}, ModelCallError(
+                "configuration", "fanout profile %s requires scope %s" % (selected_profile, profile_scope),
+            )
+        scope = profile_scope
     scope = str(scope or "local").strip().lower()
     if scope not in ("local", "cloud", "all", "available"):
         return {"selected": [], "skipped": []}, ModelCallError("configuration", "scope must be local, cloud, or all")
@@ -21934,7 +21996,7 @@ def _fanout_redact_prompt_echo(value, prompt):
     return "".join(parts)
 
 
-def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers,
+def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile="",
                   request_owner="", request_role=""):
     """Seal a fanout request and persist its immutable target snapshot.
 
@@ -21944,7 +22006,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers,
     """
     if len(str(prompt or "")) > fanout_store.MAX_PROMPT_CHARS:
         raise ModelCallError("configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS)
-    plan, error = _fanout_plan(scope)
+    plan, error = _fanout_plan(scope, profile=profile)
     if error:
         raise error
     targets = plan["selected"]
@@ -21971,6 +22033,9 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers,
         "cloud_workers": cloud_workers,
         "resident_before": resident_before,
         "plan_skipped": plan["skipped"],
+        # Preserve the reviewed profile name with the durable snapshot.  The
+        # immutable models_json remains the execution authority.
+        "selection_profile": str(profile or "").strip().lower(),
     }
     try:
         run = fanout_store.create_run(
@@ -21994,6 +22059,7 @@ def _fanout_limits(run):
         "cloud_workers": max(1, min(int(raw.get("cloud_workers", 2)), 2)),
         "resident_before": [str(name) for name in raw.get("resident_before", []) if str(name)],
         "plan_skipped": list(raw.get("plan_skipped", [])),
+        "selection_profile": str(raw.get("selection_profile") or "").strip().lower(),
     }
 
 
@@ -22130,6 +22196,7 @@ def _fanout_receipt(run_id):
         "run_id": run["id"],
         "status": run["status"],
         "scope": run["scope"],
+        "selection_profile": limits["selection_profile"] or None,
         "models_selected": len(rows),
         "models_answered": len(answers),
         "models_failed": len(failures),
@@ -22319,9 +22386,10 @@ def _execute_fanout_run(run_id):
     return receipt
 
 
-def _model_fanout_authorized(prompt: str, scope: str = "local", num_predict: int = 512,
+def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 512,
                              timeout: int = 45, max_cloud_workers: int = 2,
-                             request_owner: str = "", request_role: str = "") -> str:
+                             request_owner: str = "", request_role: str = "",
+                             profile: str = "") -> str:
     """Execute fanout after the caller's authority was established upstream.
 
     This is intentionally private.  HTTP has an authenticated principal and
@@ -22348,7 +22416,7 @@ def _model_fanout_authorized(prompt: str, scope: str = "local", num_predict: int
         ))
     try:
         run = _fanout_start(
-            question, scope, cap=cap, request_timeout=request_timeout,
+            question, scope, profile=profile, cap=cap, request_timeout=request_timeout,
             cloud_workers=cloud_workers, request_owner=request_owner,
             request_role=request_role,
         )
@@ -22361,14 +22429,17 @@ def _model_fanout_authorized(prompt: str, scope: str = "local", num_predict: int
 
 
 @mcp.tool()
-def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
-                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "") -> str:
+def model_fanout(prompt: str, scope: str = "", num_predict: int = 512,
+                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "",
+                 profile: str = "") -> str:
     """Ask every discovered local, cloud, or all model the same prompt.
 
     Local models are serial to avoid GPU/VRAM contention.  Cloud calls require
     SONDER_ALLOW_CLOUD=1 and are bounded to two concurrent requests by default;
     no failed cloud call is retried automatically.  The JSON receipt reports
     selected, answered, failed, resident-before, and total elapsed metrics.
+    ``profile`` is optional but exact: healthy-local-chat,
+    healthy-cloud-chat, or healthy-chat.  It cannot accept a user selector.
     """
     started = time.time()
     refusal = _developer_gate("model_fanout", token, started)
@@ -22376,7 +22447,7 @@ def model_fanout(prompt: str, scope: str = "local", num_predict: int = 512,
         return refusal
     request_owner, account = _direct_fanout_identity(token)
     return _model_fanout_authorized(
-        prompt, scope=scope, num_predict=num_predict, timeout=timeout,
+        prompt, scope=scope, profile=profile, num_predict=num_predict, timeout=timeout,
         max_cloud_workers=max_cloud_workers,
         request_owner=request_owner,
         request_role=str((account or {}).get("role") or "local-open"),
