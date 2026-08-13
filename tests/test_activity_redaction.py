@@ -75,6 +75,25 @@ def test_unrelated_flags_after_a_secret_are_kept():
     assert "--verbose" in out and "us-east-1" in out
 
 
+def test_program_prefixed_json_argv_masks_secret_pairs():
+    """Agent activity renders command argv as ``program [..]``."""
+    secret = "json-argv-secret"
+    out = at._safe_command(
+        'python ["build.py", "--token", "json-argv-secret", "--verbose"]'
+    )
+
+    assert secret not in out
+    assert 'python ["build.py", "--token", "<redacted>", "--verbose"]' == out
+
+
+def test_program_prefixed_json_argv_keeps_non_json_text_as_text():
+    value = "runner [not JSON --token still-redacted]"
+    out = at._safe_command(value)
+
+    assert "still-redacted" not in out
+    assert "runner [not JSON" in out
+
+
 def test_redactor_failure_fails_closed():
     class BrokenText:
         def __str__(self):

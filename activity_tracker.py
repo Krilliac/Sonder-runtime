@@ -217,6 +217,23 @@ def _safe_command(value):
             parsed = json.loads(value)
         except (TypeError, ValueError):
             parsed = value
+    # Agent activity renders argv as ``program ["--flag", "value"]`` so
+    # humans can distinguish the executable from its arguments.  That shape
+    # is neither a plain argv list nor ordinary free text: redacting it as
+    # text misses a secret flag whose name and value are separate JSON items.
+    # Reuse the list handling below while preserving the safe program prefix.
+    prefix = ""
+    if isinstance(parsed, str):
+        bracket = parsed.find("[")
+        if bracket > 0:
+            candidate = parsed[bracket:].strip()
+            try:
+                argv = json.loads(candidate)
+            except (TypeError, ValueError):
+                argv = None
+            if isinstance(argv, list):
+                prefix = parsed[:bracket].strip()
+                parsed = argv
     if not isinstance(parsed, (list, tuple)):
         return _block(_redact_text(parsed), 2400)
     rendered = []
@@ -236,7 +253,10 @@ def _safe_command(value):
             rendered.append(text.split("=", 1)[0] + "=<redacted>")
             continue
         rendered.append(_redact_text(text))
-    return _block(json.dumps(rendered, ensure_ascii=False), 2400)
+    command = json.dumps(rendered, ensure_ascii=False)
+    if prefix:
+        command = _redact_text(prefix) + " " + command
+    return _block(command, 2400)
 
 
 def _safe_args(value, depth=0):
