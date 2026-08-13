@@ -21969,7 +21969,8 @@ def _fanout_safe_answer(value, prompt):
     """
     rendered = _fanout_redact_prompt_echo(value, prompt)
     rendered = re.sub(
-        r"(?im)^\s*(?:authorization|proxy-authorization)\s*:\s*[^\r\n]*",
+        r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*"
+        r"(?:(?:bearer|basic)\s+)?[^\s\"',;}\]]+",
         "Authorization: <redacted>",
         rendered,
     )
@@ -21979,9 +21980,9 @@ def _fanout_safe_answer(value, prompt):
         rendered,
     )
     rendered = re.sub(
-        r"(?i)\b(password|passwd|secret|token|api[-_]?key|credential)\b"
+        r"(?i)(^|[\s,{])([\"']?(?:password|passwd|secret|token|api[-_]?key|credential)[\"']?)"
         r"\s*[:=]\s*(?!<(?:redacted|nested)>)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)",
-        r"\1=<redacted>",
+        r"\1\2=<redacted>",
         rendered,
     )
     return rendered

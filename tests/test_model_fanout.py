@@ -960,6 +960,8 @@ def test_fanout_answer_receipt_scrubs_prompt_echo_and_secret_markers(monkeypatch
         "private request with distinctive ending 78421\n"
         "Authorization: Bearer very-secret-provider-token\n"
         "api_key=also-secret\n"
+        '{"token":"quoted-json-secret"}\n'
+        'curl -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" https://example.test\n'
         "normal answer"
     )
 
@@ -975,6 +977,8 @@ def test_fanout_answer_receipt_scrubs_prompt_echo_and_secret_markers(monkeypatch
     assert prompt not in json.dumps(receipt)
     assert "very-secret-provider-token" not in json.dumps(receipt)
     assert "also-secret" not in json.dumps(receipt)
+    assert "quoted-json-secret" not in json.dumps(receipt)
+    assert "dXNlcjpwYXNzd29yZA==" not in json.dumps(receipt)
     assert "normal answer" in rendered
 
 
