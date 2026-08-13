@@ -148,6 +148,12 @@ class TurnResult:
     # Model reasoning for this turn, when the deployment exposes it. Empty
     # otherwise, which is the default.
     thinking: str = ""
+    # The target recorded here is reported by server.py at the point it is
+    # actually selected for generation.  Do not derive this from the caller's
+    # OpenAI ``model`` field: aliases and dynamic catalogs can make that value
+    # misleading.
+    resolved_model: str = ""
+    resolved_tier: str = ""
 
 
 class _LegacyConversationState:
@@ -1771,11 +1777,19 @@ def _run_prompt(
 ):
     """Call Sonder Runtime's learning loop with the UI's prior turns; returns UI text."""
     state = _state_or_legacy(state)
+    resolved_target = {}
+
+    def record_target(model, tier_label, _cloud):
+        # This callback is invoked by the generation path after it has accepted
+        # the route.  Model/tier names are catalog/config values, but still
+        # constrain them before presenting a receipt to an HTTP caller.
+        resolved_target["model"] = _receipt_text(model)
+        resolved_target["tier"] = _receipt_text(tier_label)
 
     out = server.answer_with_history(
         prompt, history, trace=state.trace, strict=state.strict, tier=tier,
         context_size=context_size, session=session, project=project,
-        raise_model_errors=True,
+        raise_model_errors=True, target_observer=record_target,
     )
     if out.startswith("ERROR"):
         result = TurnResult(out, None, "")
@@ -1785,11 +1799,31 @@ def _run_prompt(
     state.last_iid = iid
     state.last_response = out
     state.last_run_source = run_source
-    result = TurnResult(_strip_footer(out), iid, run_source, _turn_reasoning())
+    result = TurnResult(
+        _strip_footer(out), iid, run_source, _turn_reasoning(),
+        resolved_target.get("model", ""), resolved_target.get("tier", ""),
+    )
     return result if return_result else result.content
 
 
-def _chat_completion_object(content, model="sonder", iid=None, reasoning="", elapsed_ms=None):
+def _receipt_text(value):
+    """Bound a provider/configuration label for response metadata.
+
+    The receipt never contains model output, prompt text, tokens, history, or
+    provider diagnostics.  Replacing controls also prevents a malicious or
+    malformed catalog label from smuggling a response header-looking value into
+    terminal/SSE consumers.
+    """
+    return "".join(
+        char if char >= " " and char != "\x7f" else "?"
+        for char in str(value or "")[:256]
+    )
+
+
+def _chat_completion_object(
+    content, model="sonder", iid=None, reasoning="", elapsed_ms=None,
+    receipt=None,
+):
     iid = iid or uuid.uuid4().hex[:12]
     obj = {
         "id": "chatcmpl-%s" % iid,
@@ -1814,10 +1848,12 @@ def _chat_completion_object(content, model="sonder", iid=None, reasoning="", ela
         # Vendor extension: monotonic wall duration for the complete HTTP
         # request, including routing/tool work, not just model generation.
         obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
+    if receipt:
+        obj["sonder_receipt"] = receipt
     return obj
 
 
-def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None):
+def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
@@ -1827,6 +1863,8 @@ def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None):
     }
     if elapsed_ms is not None:
         obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
+    if receipt:
+        obj["sonder_receipt"] = receipt
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -1905,7 +1943,10 @@ class Handler(BaseHTTPRequestHandler):
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
                 "X-Sonder-Bootstrap-Secret",
             )
-            self.send_header("Access-Control-Expose-Headers", "X-Sonder-Elapsed-Ms")
+            self.send_header(
+                "Access-Control-Expose-Headers",
+                "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id",
+            )
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))
@@ -2709,6 +2750,8 @@ class Handler(BaseHTTPRequestHandler):
         turn = None
         response_iid = None
         response_reasoning = ""
+        response_model = ""
+        response_tier = ""
         activity_response = None
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
@@ -2784,6 +2827,8 @@ class Handler(BaseHTTPRequestHandler):
                         content = turn.content
                         response_iid = turn.iid
                         response_reasoning = turn.thinking
+                        response_model = turn.resolved_model
+                        response_tier = turn.resolved_tier
                 content = server._append_activity(
                     content, response=activity_response, replace=True,
                 )
@@ -2874,8 +2919,20 @@ class Handler(BaseHTTPRequestHandler):
         if not _reasoning_visible_to(context):
             response_reasoning = ""
         elapsed_ms = int((time.monotonic() - request_started) * 1000)
+        receipt = {
+            "request_id": self._correlation(),
+            "elapsed_ms": max(0, elapsed_ms),
+        }
+        # Slash, web, and locally synthesized responses do not have a model
+        # target.  Omit it instead of reflecting the request selector as fact.
+        if response_model and response_tier:
+            receipt["model"] = response_model
+            receipt["tier"] = response_tier
         if stream:
-            streamed = self._send_stream(content, model, iid=response_iid, elapsed_ms=elapsed_ms)
+            streamed = self._send_stream(
+                content, model, iid=response_iid, elapsed_ms=elapsed_ms,
+                receipt=receipt,
+            )
             self._record_chat_completion_metric(
                 _lifecycle, "ok" if streamed else "cancelled", request_started,
             )
@@ -2885,6 +2942,7 @@ class Handler(BaseHTTPRequestHandler):
                     _chat_completion_object(
                         content, model, iid=response_iid,
                         reasoning=response_reasoning, elapsed_ms=elapsed_ms,
+                        receipt=receipt,
                     ), elapsed_ms=elapsed_ms,
                 )
             finally:
@@ -2902,7 +2960,7 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, elapsed_ms=None):
         self._send_json_payload(obj, elapsed_ms=elapsed_ms)
 
-    def _send_stream(self, content, model, iid=None, elapsed_ms=None):
+    def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None):
         iid = iid or uuid.uuid4().hex[:12]
         self.send_response(200)
         self._cors()
@@ -2912,6 +2970,8 @@ class Handler(BaseHTTPRequestHandler):
             started = getattr(self, "_request_started", None)
             elapsed_ms = int((time.monotonic() - started) * 1000) if started else 0
         self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
+        if getattr(self, "_correlation_id", ""):
+            self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
         # No Content-Length on an SSE body — signal end-of-response by closing the
         # connection, otherwise HTTP/1.1 keep-alive leaves clients blocked on read().
         self.send_header("Connection", "close")
@@ -2921,6 +2981,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
             self.wfile.write(_chunk(
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
+                receipt=receipt,
             ).encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
             return True
