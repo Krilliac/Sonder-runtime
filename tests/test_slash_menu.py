@@ -588,6 +588,17 @@ def test_framed_raw_reader_draws_a_full_composer_and_keeps_the_line(monkeypatch)
     assert any(token in out.text for token in ("╭", "+"))
 
 
+def test_framed_palette_sits_above_composer_with_its_own_controls(monkeypatch):
+    _line, out = _drive(monkeypatch, list("/re") + ["\r"], prompt="", frame="sonder")
+
+    text = out.text
+    # The menu is presented before the composer top edge, not below its
+    # footer, and its controls describe selection rather than generic send.
+    assert text.rfind("> /read") < text.rfind("╭")
+    assert "Tab complete" in text
+    assert "Up/Down select" in text
+
+
 def test_framed_composer_uses_a_stable_rectangle_without_content_truncation():
     out = _FakeStdout()
     top, rows, footer = slash_menu._framed_input_lines(

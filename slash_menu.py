@@ -454,7 +454,8 @@ def _frame_chars(stream) -> dict[str, str]:
         return {"tl": "+", "tr": "+", "bl": "+", "br": "+", "v": "|", "h": "-", "dot": "."}
 
 
-def _framed_input_lines(frame: str, buffer: str, width: int, stream) -> tuple[str, list[str], str]:
+def _framed_input_lines(frame: str, buffer: str, width: int, stream,
+                        footer_hint: str = "") -> tuple[str, list[str], str]:
     """Build a compact composer title, full-width editable rows, and footer.
 
     The content buffer itself is never shortened. Only the fixed title/footer
@@ -469,9 +470,21 @@ def _framed_input_lines(frame: str, buffer: str, width: int, stream) -> tuple[st
     text = str(buffer or "")
     content = [text[index:index + inner] for index in range(0, len(text), inner)] or [""]
     rows = [chars["v"] + " " + line.ljust(inner) + chars["v"] for line in content]
-    footer_text = " Enter send %s Up/Down history %s Ctrl+L clear " % (chars["dot"], chars["dot"])
+    footer_text = str(footer_hint or " Enter send %s Up/Down history %s Ctrl+L clear " % (
+        chars["dot"], chars["dot"],
+    ))
     footer = chars["bl"] + chars["h"] + footer_text[: max(0, outer - 4)].ljust(max(0, outer - 4), chars["h"]) + chars["h"] + chars["br"]
     return top, rows, footer
+
+
+def _composer_footer(state: MenuState, stream) -> str:
+    """Return terse controls that match the current interaction mode."""
+    dot = _frame_chars(stream)["dot"]
+    if state.menu_active and state.has_palette_matches():
+        return " Tab complete %s Up/Down select %s Esc dismiss " % (dot, dot)
+    if state.argument_context:
+        return " Enter run %s Up/Down history %s Ctrl+L clear " % (dot, dot)
+    return " Enter send %s Up/Down history %s Ctrl+L clear " % (dot, dot)
 
 
 def _framed_cursor_cell(buffer: str, cursor: int, width: int,
@@ -542,7 +555,8 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
     framed = bool(state.frame)
     if framed:
         top, all_lines, footer = _framed_input_lines(
-            state.frame, state.buffer, cols, stream)
+            state.frame, state.buffer, cols, stream,
+            footer_hint=_composer_footer(state, stream))
         cursor_row, cursor_col = _framed_cursor_cell(
             state.buffer, state.cursor, cols, len(all_lines))
         lines, start = _visible_input_lines(
@@ -567,12 +581,17 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
         body = "\n".join(lines)
         input_rows = len(lines)
         cursor_from_start = visible_cursor_row
-    parts = [_cursor_to_input_start(state), CSI + "0J", body]
+    # Command choices belong immediately above the composer, like a chat
+    # autocomplete panel. Keeping them below the box made the footer read as
+    # a separator instead of the bottom edge of the active input surface.
+    prefix = ("\n".join(rows) + "\n") if framed and rows else ""
+    parts = [_cursor_to_input_start(state), CSI + "0J", prefix, body]
     state._drawn_input_rows = input_rows
-    state._drawn_cursor_row = cursor_from_start
-    if rows:
+    state._drawn_cursor_row = cursor_from_start + (len(rows) if framed else 0)
+    if rows and not framed:
         parts.append("\n" + "\n".join(rows))
-    up = len(rows) + input_rows - 1 - cursor_from_start
+    up = (input_rows - 1 - cursor_from_start) if framed else (
+        len(rows) + input_rows - 1 - cursor_from_start)
     if up:
         parts.append(CSI + "%dA" % up)
     parts.append("\r")
@@ -586,7 +605,9 @@ def _finish(state: MenuState, prompt: str, stream) -> None:
     """Clear the menu and leave only the accepted line on screen."""
     cols, _ = _terminal_size()
     if state.frame:
-        top, lines, footer = _framed_input_lines(state.frame, state.buffer, cols, stream)
+        top, lines, footer = _framed_input_lines(
+            state.frame, state.buffer, cols, stream,
+            footer_hint=_composer_footer(state, stream))
         rendered = top + "\n" + "\n".join(lines) + "\n" + footer
     else:
         rendered = "\n".join(_input_lines(prompt, state.buffer, cols))
