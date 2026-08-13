@@ -210,6 +210,21 @@ def test_resume_requires_explicit_unknown_retry():
     assert store.list_results(run["id"])[0]["status"] == "pending"
 
 
+def test_resume_requeues_unclaimed_pending_targets_without_retrying_unknown():
+    run = store.create_run("question", ["claimed", "unclaimed"])
+    store.claim_run(run["id"], "dead", owner_pid=2_147_483_647)
+    store.claim_next_result(run["id"], "dead", owner_pid=2_147_483_647)
+    store.reconcile_stale_runs(now=time.time() + 301)
+
+    resumed = store.resume_run(run["id"])
+
+    assert resumed["status"] == "queued"
+    statuses = {result["model"]: result["status"] for result in store.list_results(run["id"])}
+    assert statuses == {"claimed": "unknown", "unclaimed": "pending"}
+    store.claim_run(run["id"], "next", owner_pid=os.getpid())
+    assert store.claim_next_result(run["id"], "next", owner_pid=os.getpid())["model"] == "unclaimed"
+
+
 def test_lease_transfer_marks_old_inflight_result_unknown(monkeypatch):
     now = [1_000.0]
     monkeypatch.setattr(store.time, "time", lambda: now[0])
