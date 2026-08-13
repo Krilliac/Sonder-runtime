@@ -1,3 +1,5 @@
+import re
+
 import sonder_repl
 
 
@@ -85,6 +87,35 @@ def test_piped_turn_acknowledgement_stays_silent(monkeypatch, capsys):
     sonder_repl._begin_chat_turn()
 
     assert capsys.readouterr().out == ""
+
+
+def test_working_indicator_uses_a_moving_highlight_and_animated_ellipsis(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+    indicator = sonder_repl._WorkingIndicator("Sonder")
+
+    first = indicator._render(0)
+    later = indicator._render(2)
+
+    plain_first = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", first)
+    plain_later = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", later)
+    assert "Sonder is working." in plain_first
+    assert "Sonder is working..." in plain_later
+    assert sonder_repl._Ansi.cyan in first
+    assert first != later
+
+
+def test_chat_result_stops_a_live_working_indicator(monkeypatch, capsys):
+    class _Indicator:
+        stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+    indicator = _Indicator()
+    sonder_repl._print_chat_result("done", 0.0, indicator=indicator)
+
+    assert indicator.stopped is True
 
 
 def test_fanout_recent_display_is_content_free_and_reports_recovery_ids():
