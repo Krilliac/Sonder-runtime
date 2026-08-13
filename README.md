@@ -130,12 +130,38 @@ python -m venv venv
 
 # Windows PowerShell
 venv\Scripts\pip.exe install -r requirements-dev.txt
-venv\Scripts\python.exe sonder_repl.py
+venv\Scripts\python.exe -m sonder_runtime repl
 ```
 
 Desktop packages can also run `bootstrap-engine.cmd` on Windows,
 `./bootstrap-engine.sh` on Linux/macOS, or **Setup engine** in the app. Setup
 detects available memory, starts Ollama, and selects a compatible local model.
+
+### Launch and use
+
+Start the interactive terminal and ask normally; type `/help` for guarded
+commands and use the visible composer shortcuts for history and editing.
+
+```bash
+python -m sonder_runtime repl
+# sonder > explain this repository's test layout
+```
+
+Start the loopback OpenAI-compatible API when another client needs it:
+
+```bash
+python -m sonder_runtime serve
+curl http://127.0.0.1:11435/v1/chat/completions \
+  -H "Authorization: Bearer $SONDER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"sonder","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+For an MCP client, run `python -m sonder_runtime mcp`. See the
+[getting-started guide](docs/wiki/02-getting-started.md),
+[HTTP API reference](docs/wiki/05-http-api-and-lifecycle.md), and
+[CLI reference](docs/wiki/04-cli-and-entrypoint.md) for configuration,
+authentication, hosting, and full command details.
 
 ## What you get
 
