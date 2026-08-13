@@ -1961,7 +1961,10 @@ def _validate_structured_schema(schema, depth=0):
         if keyword in schema and (
             isinstance(schema[keyword], bool)
             or not isinstance(schema[keyword], (int, float))
-            or not math.isfinite(schema[keyword])
+            # Python integers are exact and inherently finite; converting an
+            # enormous valid JSON integer to a C double solely to test it can
+            # raise OverflowError. Only floats need a finiteness check.
+            or (isinstance(schema[keyword], float) and not math.isfinite(schema[keyword]))
         ):
             raise _response_format_error("%s must be a number" % keyword)
     if "multipleOf" in schema and schema["multipleOf"] <= 0:

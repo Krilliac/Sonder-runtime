@@ -124,6 +124,19 @@ def test_chat_rejects_invalid_response_format_before_routing(monkeypatch, respon
     assert calls == []
 
 
+def test_response_format_accepts_an_arbitrarily_large_finite_integer_bound():
+    schema = ts._response_format_schema({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "large_integer",
+            "strict": True,
+            "schema": {"type": "integer", "minimum": 10 ** 400},
+        },
+    })
+
+    assert schema["minimum"] == 10 ** 400
+
+
 def test_chat_response_format_uses_isolated_direct_model_path(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
