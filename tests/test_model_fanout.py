@@ -43,6 +43,18 @@ def test_explicit_nonchat_catalog_records_are_rejected_everywhere(monkeypatch, r
     assert server._serve_target(record["name"], False) == (None, False, False, None)
 
 
+@pytest.mark.parametrize("name", ["llava:7b", "moondream:latest", "acme/minicpm-v:8b"])
+def test_known_vision_families_are_skipped_when_catalog_omits_capabilities(monkeypatch, name):
+    monkeypatch.setattr(server, "_get", lambda _path: {"models": [{"name": name}]})
+
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan["selected"] == []
+    assert plan["skipped"] == [{"model": name, "reason": "known vision-only model family"}]
+    assert server._serve_target(name, False) == (None, False, False, None)
+
+
 def test_direct_cloud_model_still_requires_opt_in(monkeypatch):
     monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     monkeypatch.setattr(server, "_get", lambda _path: {"models": [{"name": "kimi:cloud"}]})
