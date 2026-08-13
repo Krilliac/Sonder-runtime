@@ -21961,17 +21961,48 @@ def _fanout_admission(run, rows, limits):
     so the receipt gives callers concrete request and scheduling ceilings
     instead of a misleading currency estimate.
     """
+    # The persisted snapshot, not mutable result rows, is the admission
+    # authority.  A fenced worker must never make an inconsistent row look
+    # like a selected target in the caller-visible privacy/budget record.
+    try:
+        raw_snapshot = json.loads(run.get("models_json") or "[]")
+    except (TypeError, ValueError):
+        raw_snapshot = []
     selected = sorted(
-        {str(row.get("model") or "").strip() for row in rows if str(row.get("model") or "").strip()},
+        {str(name).strip() for name in raw_snapshot if str(name).strip()},
         key=str.casefold,
     )
     cloud_targets = [name for name in selected if _is_cloud_model_name(name)]
+    # A K3 402 can make one bounded automatic retry through the documented
+    # K2.7 fallback.  It is still the same logical result, but it is a second
+    # provider request and receives the prompt, so admission must include it.
+    fallback_targets = sorted({
+        CLOUD_EXTRA_USAGE_FALLBACK_MODEL for name in cloud_targets
+        if str(name).casefold().startswith("kimi-k3:")
+    }, key=str.casefold)
+    disclosed_cloud_targets = sorted(set(cloud_targets + fallback_targets), key=str.casefold)
+    fallback_attempts = sum(
+        1 for name in cloud_targets if str(name).casefold().startswith("kimi-k3:")
+    )
+    effective_num_predict = max([
+        int(limits["num_predict"]),
+        *[
+            max(int(limits["num_predict"]), 4096)
+            for name in cloud_targets
+            if str(name).casefold().startswith(("kimi-k3:", "glm-5.2:", "kimi-k2.7-code:"))
+        ],
+        *[
+            max(int(limits["num_predict"]), LOCAL_THINKING_MIN_NUM_PREDICT)
+            for name in selected
+            if not _is_cloud_model_name(name) and _known_thinking_model(name)
+        ],
+    ])
     local_count = len(selected) - len(cloud_targets)
     cloud_workers = limits["cloud_workers"]
     # Locals execute serially to protect shared VRAM/RAM. Cloud rows use the
     # bounded worker pool. This deliberately excludes setup/queue/retry costs.
     request_phase_seconds = limits["timeout"] * (
-        local_count + math.ceil(len(cloud_targets) / cloud_workers)
+        local_count + math.ceil((len(cloud_targets) + fallback_attempts) / cloud_workers)
     )
     return {
         "selected_models": selected,
@@ -21979,14 +22010,15 @@ def _fanout_admission(run, rows, limits):
             "total": len(selected), "local": local_count, "cloud": len(cloud_targets),
         },
         "execution": {
-            "num_predict": limits["num_predict"],
+            "num_predict": effective_num_predict,
+            "requested_num_predict": limits["num_predict"],
             "request_timeout_s": limits["timeout"],
             "local_concurrency": 1,
             "cloud_concurrency": cloud_workers,
         },
         "upper_bounds": {
-            "initial_request_attempts_total": len(selected),
-            "initial_cloud_request_attempts": len(cloud_targets),
+            "initial_request_attempts_total": len(selected) + fallback_attempts,
+            "initial_cloud_request_attempts": len(cloud_targets) + fallback_attempts,
             "scheduled_request_phase_wall_ms": int(request_phase_seconds * 1000),
             "excludes": [
                 "catalog discovery", "queue or lease wait", "model load or unload",
@@ -21999,11 +22031,11 @@ def _fanout_admission(run, rows, limits):
         },
         "privacy": {
             "cloud_opt_in": bool(run.get("cloud_opt_in")),
-            "cloud_targets": cloud_targets,
-            "prompt_leaves_machine": bool(cloud_targets),
+            "cloud_targets": disclosed_cloud_targets,
+            "prompt_leaves_machine": bool(disclosed_cloud_targets),
             "notice": (
                 "selected cloud targets receive the prompt; cloud calls require explicit operator opt-in"
-                if cloud_targets else "no selected cloud target receives the prompt"
+                if disclosed_cloud_targets else "no selected cloud target receives the prompt"
             ),
         },
     }
