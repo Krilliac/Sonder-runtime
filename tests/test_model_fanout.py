@@ -534,6 +534,40 @@ def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
     assert event["skipped"] == 0
 
 
+def test_fanout_activity_resume_counts_only_current_cloud_attempts(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "cloud-a:cloud"}, {"name": "cloud-b:cloud"}]}
+        if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+    attempts = {"cloud-a:cloud": 0, "cloud-b:cloud": 0}
+
+    def fake_make(model, *_args, **_kwargs):
+        def generate(_prompt):
+            attempts[model] += 1
+            if model == "cloud-b:cloud" and attempts[model] == 1:
+                raise server.ModelCallError("timeout", "provider timed out", cloud=True)
+            return "answer from " + model
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+    first = json.loads(server.model_fanout("public question", scope="cloud"))
+    resumed = server.fanout_store.resume_run(first["run_id"], include_failed=True)
+    assert resumed is not None
+
+    with server.activity_tracker.response_span("chat", "resume") as activity:
+        second = server._execute_fanout_run(first["run_id"])
+
+    assert second["models_answered"] == 2
+    assert attempts == {"cloud-a:cloud": 1, "cloud-b:cloud": 2}
+    # cloud-a is historical on the resumed receipt; only cloud-b ran now.
+    assert activity["model_calls"] == 1
+    event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
+    assert event["cloud_model_calls"] == 1
+
+
 def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monkeypatch, tmp_path):
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (

@@ -22963,6 +22963,10 @@ def _execute_fanout_run(run_id):
 
     resident_at_start = {name.casefold() for name in limits["resident_before"]}
     cloud_usage = {"tokens_in": 0, "tokens_out": 0}
+    # This execution can resume a durable run containing terminal rows from
+    # earlier workers. Keep activity scoped to the rows this worker actually
+    # persisted now, rather than recounting historical receipt state.
+    cloud_attempts = 0
 
     def invoke(row):
         model = row["model"]
@@ -23009,6 +23013,7 @@ def _execute_fanout_run(run_id):
                     _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
     def persist(result):
+        nonlocal cloud_attempts
         row, status, answer, error, elapsed, exc, metadata = result
         if _is_cloud_model_name(row["model"]):
             for key in ("tokens_in", "tokens_out"):
@@ -23031,6 +23036,9 @@ def _execute_fanout_run(run_id):
                                               thinking_chars=metadata.get("thinking_chars"),
                                               done_reason=metadata.get("done_reason", ""))
         if recorded is not None:
+            if (_is_cloud_model_name(row["model"])
+                    and status in ("answered", "failed", "unknown")):
+                cloud_attempts += 1
             with contextlib.suppress(Exception):
                 if status == "answered":
                     _fanout_health(row["model"], None, question)
@@ -23079,11 +23087,6 @@ def _execute_fanout_run(run_id):
         # Local calls are recorded by _make_generate in this response thread.
         # Cloud calls use worker threads, whose activity context is purposely
         # not inherited; account for their terminal attempts once here.
-        cloud_attempts = sum(
-            1 for row in fanout_store.list_results(run_id)
-            if _is_cloud_model_name(row.get("model", ""))
-            and row.get("status") in ("answered", "failed", "unknown")
-        )
         activity_tracker.record_model_fanout(
             cloud_model_calls=cloud_attempts,
             tokens_in=cloud_usage["tokens_in"],
