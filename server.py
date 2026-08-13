@@ -22060,6 +22060,35 @@ def _is_interpreter_like_bare_model_selector(selector):
     return bool(separator) and prefix.casefold() in _INTERPRETER_LIKE_MODEL_SELECTOR_PREFIXES
 
 
+def _bare_tagged_model_request(selector, prompt):
+    """Return a safe terse-tag request, or preserve ordinary work prose.
+
+    Bare version-shaped words occur in ordinary developer requests (for
+    example ``ubuntu:24.04``).  The explicit ``model <tag>`` forms are an
+    intentional request to select a model and may report a normal selector
+    error downstream.  The shorter forms are only routing syntax when the
+    tag is currently in Ollama's catalog; otherwise preserving the original
+    request is safer and more useful than discarding its work instruction.
+    """
+    question = str(prompt or "").strip()
+    if _is_interpreter_like_bare_model_selector(selector):
+        return None
+    try:
+        resolved = resolve_discovered_model(selector)
+    except Exception:
+        # Discovery is best-effort at this recognition boundary.  A catalog
+        # outage must not turn ordinary versioned work into a model error.
+        resolved = None
+    if resolved is not None:
+        return {"kind": "model", "model": resolved, "prompt": question}
+    # Keep the model-wrapper slash fence authoritative even during a catalog
+    # outage.  This is not a model-selection success: the caller is routed to
+    # the shared wrapper refusal before a tool/control command can run.
+    if question.startswith("/"):
+        return {"kind": "model", "model": str(selector).strip(), "prompt": question}
+    return None
+
+
 def natural_model_request(text):
     """Recognize explicit user requests for a model or bounded model fanout.
 
@@ -22122,9 +22151,10 @@ def natural_model_request(text):
     )
     if named_tag:
         selector = named_tag.group(1).strip()
-        if _is_interpreter_like_bare_model_selector(selector):
+        request = _bare_tagged_model_request(selector, named_tag.group(2))
+        if request is None:
             return None
-        return {"kind": "model", "model": selector, "prompt": named_tag.group(2).strip()}
+        return request
     named_tag_to = re.match(
         # A tagged selector plus an explicit ``to`` is as unambiguous as the
         # existing ``with/using <tag> to`` form. Keep the internal colon so
@@ -22134,24 +22164,15 @@ def natural_model_request(text):
     )
     if named_tag_to:
         selector = named_tag_to.group(1).strip()
-        if _is_interpreter_like_bare_model_selector(selector):
-            return None
         # Unlike the ``model <tag>`` forms, this is deliberately terse enough
         # to resemble ordinary version-tagged work (for example
         # ``ubuntu:24.04 to reproduce ...``). Only consume it after an exact
         # live-catalog match; an unavailable/unknown tag stays ordinary prose
         # rather than losing its work instruction to an unknown-tier error.
-        try:
-            resolved = resolve_discovered_model(selector)
-        except Exception:
+        request = _bare_tagged_model_request(selector, named_tag_to.group(2))
+        if request is None:
             return None
-        if resolved is None:
-            return None
-        return {
-            "kind": "model",
-            "model": resolved,
-            "prompt": named_tag_to.group(2).strip(),
-        }
+        return request
     using_model = re.match(
         # This provides an explicit natural-language counterpart to the
         # established ``use model X: prompt`` form without attempting to
@@ -22181,13 +22202,10 @@ def natural_model_request(text):
         # coincidence.  Let ordinary work such as ``run using python:3.12 to
         # reproduce this`` reach the normal agent path; a user who really
         # means a model can use the unambiguous ``using model <tag>`` form.
-        if _is_interpreter_like_bare_model_selector(selector):
+        request = _bare_tagged_model_request(selector, using_tag.group(2))
+        if request is None:
             return None
-        return {
-            "kind": "model",
-            "model": selector,
-            "prompt": using_tag.group(2).strip(),
-        }
+        return request
     # A colon in a model tag is common, which is why the legacy form above
     # requires ``: ``.  This alternate has a constrained selector and an
     # explicit ``to`` delimiter, so it remains unambiguous and cannot make
