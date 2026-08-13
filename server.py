@@ -7177,7 +7177,7 @@ def scoped_task_tool_dispatch(tool_name: str, kwargs: dict, *, account_scope: st
             task_id = values.pop("task_id")
             detail = service.show_task(task_id, account_scope=account_scope, **values)
             if not detail.task:
-                return "ERROR: no task '%s'." % task_id
+                return "no task '%s'." % task_id
             lines = ["task", "  " + _format_task(detail.task.to_dict())]
             if detail.events:
                 lines.append("events:")
@@ -7238,9 +7238,12 @@ def scoped_task_tool_dispatch(tool_name: str, kwargs: dict, *, account_scope: st
                 account_scope=account_scope, **values,
             )
             return _format_checklist(checklist.to_dict())
-        return "ERROR: unsupported scoped task tool '%s'" % tool_name
+        return "unsupported scoped task tool '%s'" % tool_name
     except Exception as exc:
-        return "ERROR: %s" % exc
+        # This bridge is an HTTP presentation boundary, not an in-process
+        # exception contract.  Keep the useful diagnostic while avoiding a
+        # new stringly ``ERROR:`` protocol that callers would have to parse.
+        return "task operation failed: %s" % exc
     finally:
         conn.close()
 
@@ -7258,7 +7261,7 @@ def scoped_latest_checklist(account_scope: str) -> str:
             if checklist.items:
                 return _format_checklist(checklist.to_dict())
     except Exception as exc:
-        return "ERROR: %s" % exc
+        return "task lookup failed: %s" % exc
     finally:
         conn.close()
     return "(no checklist yet; use /work <task>)"
