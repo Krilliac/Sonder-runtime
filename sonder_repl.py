@@ -1305,11 +1305,16 @@ def main():
         if not question:
             print("usage: /consult <question>")
             return
-        # Two local models plus a cloud model when cloud is enabled; the active
-        # /model tier (if any) leads and judges. de-dup is handled inside
-        # consult, so prepending a tier already in the default is safe.
+        # Two local models plus a cloud model when cloud is enabled. An exact
+        # session pin substitutes for its logical tier, so it is genuinely
+        # consulted and used as the judge instead of the old tier binding.
         tiers = consult_flow.default_tiers()
-        if active_tier and active_tier not in tiers:
+        if active_model:
+            if active_tier in tiers:
+                tiers = [active_model if item == active_tier else item for item in tiers]
+            else:
+                tiers = [active_model] + tiers
+        elif active_tier and active_tier not in tiers:
             tiers = [active_tier] + tiers
         result = consult_flow.consult(question, tiers)
         for answer in result["answers"]:
@@ -1902,7 +1907,7 @@ def main():
         try:
             out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                                 session=session_id, project=project,
-                                tier=active_model or active_tier or "",
+                                tier=active_tier or "", model_override=active_model or "",
                                 location_consent=location_consent)
         except BaseException:
             if indicator is not None:

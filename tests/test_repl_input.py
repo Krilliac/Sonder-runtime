@@ -416,7 +416,7 @@ def test_activity_formatter_explains_npu_fallback_without_raw_diagnostics():
     assert "\x1b" not in output
 
 
-def test_model_tag_selection_pins_the_next_chat_to_rebound_tier(monkeypatch):
+def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monkeypatch):
     lines = iter(("/model gemma3:12b", "hello", "/exit"))
     seen = []
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
@@ -437,4 +437,27 @@ def test_model_tag_selection_pins_the_next_chat_to_rebound_tier(monkeypatch):
 
     assert sonder_repl.server.TIERS["code"] != "gemma3:12b"
     assert len(seen) == 1
-    assert seen[0]["tier"] == "gemma3:12b"
+    assert seen[0]["tier"] == "code"
+    assert seen[0]["model_override"] == "gemma3:12b"
+
+
+def test_model_tag_selection_is_used_by_consult(monkeypatch):
+    lines = iter(("/model gemma3:12b", "/consult compare this", "/exit"))
+    seen = {}
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl.consult_flow, "default_tiers", lambda: ["code", "reasoning"])
+    monkeypatch.setattr(
+        sonder_repl.consult_flow, "consult",
+        lambda question, tiers: seen.update(question=question, tiers=tiers) or {
+            "answers": [], "agree": None, "confidence": "unknown", "note": "",
+        },
+    )
+
+    sonder_repl.main()
+
+    assert seen == {"question": "compare this", "tiers": ["gemma3:12b", "reasoning"]}

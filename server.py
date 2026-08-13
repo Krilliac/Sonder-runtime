@@ -5218,6 +5218,7 @@ def _sonder_impl_serialized(
     session: str = "",
     project: str = "",
     tier: str = "",
+    model_override: str = "",
     location_consent: bool = None,
 ) -> str:
     """Ask through Sonder Runtime's local learning loop.
@@ -5284,6 +5285,25 @@ def _sonder_impl_serialized(
     if tgt_model is None:
         return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
+    # The terminal's `/model <exact tag>` is a model pin, not a different
+    # logical route.  Resolve its *route* first so a code-session pin keeps
+    # code's facts/preferences/lessons/recall augmentation.  Do not let a
+    # local route turn into a cloud route here: that would change the privacy
+    # contract by sending its augmented project context remotely.
+    if model_override:
+        try:
+            found = resolve_discovered_model_record(model_override)
+        except Exception:
+            found = None
+        if found is None or _fanout_nonchat_reason(found[1]):
+            return "ERROR: unavailable chat model pin '%s'." % model_override
+        pinned_model, _record = found
+        if _is_cloud_model_name(pinned_model) != cloud:
+            return (
+                "ERROR: model pin '%s' is incompatible with the selected %s route."
+                % (pinned_model, "cloud" if cloud else "local")
+            )
+        tgt_model = pinned_model
     internal_generate = _internal_generate_for_route(tgt_model, cloud)
     effective_system = _build_system(
         system, trace, persona, model=tgt_model, cloud=cloud)
@@ -5404,6 +5424,7 @@ def _sonder_impl(
     session: str = "",
     project: str = "",
     tier: str = "",
+    model_override: str = "",
     location_consent: bool = None,
 ) -> str:
     session_id = _resolve_session(session)
@@ -5427,6 +5448,7 @@ def _sonder_impl(
                 session=session,
                 project=project,
                 tier=tier,
+                model_override=model_override,
                 location_consent=location_consent,
             )
         finally:
@@ -5447,6 +5469,7 @@ def sonder(
     session: str = "",
     project: str = "",
     tier: str = "",
+    model_override: str = "",
     location_consent: bool = None,
     token: str = "",
 ) -> str:
@@ -5495,6 +5518,7 @@ def sonder(
             session=session,
             project=project,
             tier=tier,
+            model_override=model_override,
             location_consent=location_consent,
         )
     return _append_activity(result, response=response, replace=True)
