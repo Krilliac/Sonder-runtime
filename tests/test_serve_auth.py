@@ -1034,6 +1034,128 @@ def test_http_fanout_resume_requires_literal_boolean(monkeypatch):
     assert "retry_unknown must be a boolean" in json.loads(body)["error"]["message"]
 
 
+def test_http_fanout_synthesis_requires_owned_developer_receipt(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(
+        ts, "_auth_account",
+        lambda header: {"username": "dev-a" if "a-token" in header else "dev-b", "role": "developer"},
+    )
+    owner = ts._fanout_request_owner({"account": {"username": "dev-a"}, "api_key": False})
+    run = {"id": "fan-owned", "request_owner": owner}
+    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: run)
+    calls = []
+    monkeypatch.setattr(
+        ts.server, "_fanout_synthesize_run",
+        lambda received, model: calls.append((received, model)) or {
+            "run_id": received["id"], "synth_model": model or "local-code", "answer": "local synthesis",
+        },
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/fanout/fan-owned/synthesize",
+            body=json.dumps({"synth_model": "local-code"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer a-token"},
+        )
+        denied, _, denied_body = _request(
+            port, "POST", "/v1/fanout/fan-owned/synthesize", body=b"{}",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer b-token"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["answer"] == "local synthesis"
+    assert calls == [(run, "local-code")]
+    assert denied == 404
+    assert json.loads(denied_body)["error"]["type"] == "not_found"
+
+
+def test_http_fanout_synthesis_rejects_untyped_or_extra_payload_before_generation(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-local"})
+    monkeypatch.setattr(
+        ts.server, "_fanout_synthesize_run",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("generation must not run")),
+    )
+
+    with _http_server(monkeypatch) as port:
+        wrong_type, _, wrong_body = _request(
+            port, "POST", "/v1/fanout/fan-local/synthesize",
+            body=json.dumps({"synth_model": ["not-a-model"]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        extra, _, extra_body = _request(
+            port, "POST", "/v1/fanout/fan-local/synthesize",
+            body=json.dumps({"synth_model": "local", "retry_unknown": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert wrong_type == 400
+    assert "synth_model must be a string" in json.loads(wrong_body)["error"]["message"]
+    assert extra == 400
+    assert "accepts only synth_model" in json.loads(extra_body)["error"]["message"]
+
+
+def test_http_fanout_synthesis_maps_safe_model_failures(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server.fanout_store, "get_run", lambda _run_id: {"id": "fan-local"})
+    monkeypatch.setattr(
+        ts.server, "_fanout_synthesize_run",
+        lambda *_args: (_ for _ in ()).throw(ts.server.ModelCallError(
+            "timeout", "local synthesis timed out", retry_after_seconds=0,
+        )),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/fanout/fan-local/synthesize", body=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 504
+    assert headers["Retry-After"] == "0"
+    assert json.loads(body)["error"] == {
+        "message": "local synthesis timed out", "type": "server_error",
+    }
+
+
+def test_http_fanout_synthesis_applies_account_rate_limit(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    account = {"username": "dev", "role": "developer"}
+    monkeypatch.setattr(ts, "_auth_account", lambda _header: account)
+    owner = ts._fanout_request_owner({"account": account, "api_key": False})
+    monkeypatch.setattr(
+        ts.server.fanout_store, "get_run",
+        lambda _run_id: {"id": "fan-owned", "request_owner": owner},
+    )
+    rate_calls = []
+    monkeypatch.setattr(
+        ts.admin_auth, "rate_limit",
+        lambda _conn, received: rate_calls.append(received) or (False, "rate limit exceeded"),
+    )
+    monkeypatch.setattr(
+        ts.server, "_fanout_synthesize_run",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("generation must not run")),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/fanout/fan-owned/synthesize", body=b"{}",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer dev-token"},
+        )
+
+    assert status == 429
+    assert json.loads(body)["error"] == {"message": "rate limit exceeded", "type": "rate_limit"}
+    assert rate_calls == [account]
+
+
 def test_http_todo_command_preserves_task_text_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
