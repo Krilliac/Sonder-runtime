@@ -62,6 +62,17 @@ def test_non_recency_queries_are_returned_verbatim():
     ) == "python asyncio.TaskGroup cancellation semantics"
 
 
+def test_explicit_local_search_drops_only_conversational_wrapper():
+    query = "web search to find computer repair shops near 67215"
+    assert web_tools.build_search_query(query) == query
+    assert web_tools._provider_search_query(
+        "web search to find computer repair shops near 67215"
+    ) == "computer repair shops near 67215"
+    assert web_tools._provider_search_query(
+        "Search the web for coffee shops in Wichita KS"
+    ) == "coffee shops in Wichita KS"
+
+
 def test_non_research_intents_are_never_rewritten():
     assert web_tools.build_search_query(
         "current news headline", intent_kind="weather",
