@@ -346,18 +346,24 @@ def recent_run_summaries(*, request_owner: str | None = None,
         clauses.append("runs.status NOT IN ('completed','cancelled','interrupted')")
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     query = """
+        WITH selected_runs AS (
+            SELECT runs.id, runs.status, runs.scope, runs.created_ts,
+                   runs.updated_ts, runs.finished_ts
+              FROM fanout_runs AS runs
+    """ + where + """
+             ORDER BY runs.updated_ts DESC
+             LIMIT ?
+        )
         SELECT runs.id AS run_id, runs.status, runs.scope, runs.created_ts,
                runs.updated_ts, runs.finished_ts,
                COUNT(results.model) AS models_selected,
                COALESCE(SUM(CASE WHEN results.status='answered' THEN 1 ELSE 0 END), 0) AS models_answered,
                COALESCE(SUM(CASE WHEN results.status='failed' THEN 1 ELSE 0 END), 0) AS models_failed,
                COALESCE(SUM(CASE WHEN results.status='skipped' THEN 1 ELSE 0 END), 0) AS models_skipped
-          FROM fanout_runs AS runs
+          FROM selected_runs AS runs
           LEFT JOIN fanout_results AS results ON results.run_id=runs.id
-    """ + where + """
          GROUP BY runs.id
          ORDER BY runs.updated_ts DESC
-         LIMIT ?
     """
     conn = _connect()
     try:

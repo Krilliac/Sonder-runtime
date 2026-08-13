@@ -962,6 +962,22 @@ def test_http_recent_fanout_summaries_are_owner_scoped(monkeypatch):
     }]
 
 
+def test_http_recent_fanout_rejects_oversized_numeric_limit(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(
+        ts.server.fanout_store, "recent_run_summaries",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not query store")),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/fanout?limit=" + "9" * 5000)
+
+    assert status == 400
+    assert "limit must be an integer" in json.loads(body)["error"]["message"]
+
+
 def test_http_fanout_cancel_requires_developer_and_uses_owned_run(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")
