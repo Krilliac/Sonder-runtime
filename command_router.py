@@ -153,7 +153,7 @@ _RULES = [
           r"(?:are|do\s+you\s+have)\s+(?:installed|available)\s*\??$", _fixed("/env")),
     _rule(r"^(?:show|inspect|check)\s+(?:me\s+)?(?:my\s+|this\s+|the\s+)?"
           r"(?:(?:gpu|graphics(?:\s+card)?)\s+)?hardware\b\s*\??$", _fixed("/hardware")),
-    _rule(r"^what(?:'s|\s+is)\s+(?:my\s+|this\s+|your\s+)?"
+    _rule(r"^what(?:'s|\s+is)\s+(?:my\s+|this\s+|your\s+)"
           r"(?:gpu|graphics(?:\s+card)?|hardware|(?:gpu\s+)?compute\s+capability)\b\s*\??$",
           _fixed("/hardware")),
     _rule(r"^what\s+(?:gpu|graphics\s+card)\s+(?:do\s+i|does\s+this|do\s+you)\s+have\s*\??$",
