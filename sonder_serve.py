@@ -1881,6 +1881,14 @@ _STRUCTURED_TYPES = frozenset({
     "object", "array", "string", "integer", "number", "boolean", "null",
 })
 _STRUCTURED_SCHEMA_MAX_DEPTH = 16
+# ``json_schema_verifier`` intentionally compares arbitrary JSON values for
+# ``uniqueItems`` rather than relying on hashing. That is the correct JSON
+# equality semantics, but is quadratic in the array length. HTTP structured
+# output therefore needs an explicit finite host bound before asking a model to
+# produce such an array.
+# Keep HTTP admission and server-side verification on the same host bound. A
+# model can still return more elements than its decoder schema requested.
+_STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS = server._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS
 
 
 def _response_format_error(message):
@@ -1957,6 +1965,18 @@ def _validate_structured_schema(schema, depth=0):
             raise _response_format_error("%s must be a non-negative integer" % keyword)
     if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
         raise _response_format_error("uniqueItems must be a boolean")
+    if schema.get("uniqueItems") is True:
+        maximum = schema.get("maxItems")
+        if isinstance(maximum, bool) or not isinstance(maximum, int):
+            raise _response_format_error(
+                "uniqueItems=true requires an integer maxItems no greater than %d"
+                % _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS,
+            )
+        if maximum > _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS:
+            raise _response_format_error(
+                "uniqueItems=true requires maxItems no greater than %d"
+                % _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS,
+            )
     for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
         if keyword in schema and (
             isinstance(schema[keyword], bool)

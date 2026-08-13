@@ -151,14 +151,17 @@ class _Ctx(object):
     root to resolve against, and the refs currently being expanded (so a cycle
     that consumes no data terminates instead of recursing forever)."""
 
-    __slots__ = ("errors", "unchecked", "root", "active_refs", "depth")
+    __slots__ = ("errors", "unchecked", "root", "active_refs", "depth",
+                 "max_unique_items")
 
-    def __init__(self, root, active_refs=None, depth=0):
+    def __init__(self, root, active_refs=None, depth=0,
+                 max_unique_items=None):
         self.errors = []
         self.unchecked = []
         self.root = root
         self.active_refs = set() if active_refs is None else set(active_refs)
         self.depth = depth
+        self.max_unique_items = max_unique_items
 
 
 def _show(value):
@@ -304,7 +307,7 @@ def _validate_ref(value, ref, path, ctx):
 def _subcheck(value, subschema, path, ctx):
     """Validate against a subschema in isolation, so a combinator can inspect
     the outcome rather than leaking a branch's errors into the parent."""
-    sub = _Ctx(ctx.root, ctx.active_refs, ctx.depth)
+    sub = _Ctx(ctx.root, ctx.active_refs, ctx.depth, ctx.max_unique_items)
     _validate(value, subschema, path, sub)
     return sub
 
@@ -445,6 +448,31 @@ def _validate_object(value, schema, path, ctx):
 
 
 def _validate_array(value, schema, path, ctx):
+    # Check array cardinality before descending into item schemas or comparing
+    # every pair for ``uniqueItems``. A model can ignore a bounded response
+    # schema, and continuing after a known bound violation turns one rejected
+    # response into unbounded recursive work or O(n^2) equality checks.
+    minimum = _count_bound(ctx, path, schema, "minItems")
+    if minimum is not None and len(value) < minimum:
+        ctx.errors.append('%s: has %d items, "minItems" is %d' % (path, len(value), minimum))
+    maximum = _count_bound(ctx, path, schema, "maxItems")
+    if maximum is not None and len(value) > maximum:
+        ctx.errors.append('%s: has %d items, "maxItems" is %d'
+                          % (path, len(value), maximum))
+        return
+
+    unique = schema.get("uniqueItems", _MISSING)
+    if unique is not _MISSING and not isinstance(unique, bool):
+        _malformed(ctx, path, "uniqueItems", "must be a boolean, got %s" % _show(unique))
+    elif unique:
+        host_cap = ctx.max_unique_items
+        if host_cap is not None and len(value) > host_cap:
+            ctx.errors.append(
+                '%s: has %d items, host uniqueItems validation cap is %d'
+                % (path, len(value), host_cap)
+            )
+            return
+
     if "items" in schema:
         items_schema = schema["items"]
         if isinstance(items_schema, list):
@@ -463,24 +491,13 @@ def _validate_array(value, schema, path, ctx):
             _malformed(ctx, path, "items",
                        "must be a schema or an array of schemas, got %s" % _show(items_schema))
 
-    minimum = _count_bound(ctx, path, schema, "minItems")
-    if minimum is not None and len(value) < minimum:
-        ctx.errors.append('%s: has %d items, "minItems" is %d' % (path, len(value), minimum))
-    maximum = _count_bound(ctx, path, schema, "maxItems")
-    if maximum is not None and len(value) > maximum:
-        ctx.errors.append('%s: has %d items, "maxItems" is %d' % (path, len(value), maximum))
-
-    if "uniqueItems" in schema:
-        unique = schema["uniqueItems"]
-        if not isinstance(unique, bool):
-            _malformed(ctx, path, "uniqueItems", "must be a boolean, got %s" % _show(unique))
-        elif unique:
-            for i, item in enumerate(value):
-                for j in range(i + 1, len(value)):
-                    if _json_equal(item, value[j]):
-                        ctx.errors.append('%s: items %d and %d are equal, '
-                                          '"uniqueItems" is true' % (path, i, j))
-                        return
+    if unique is True:
+        for i, item in enumerate(value):
+            for j in range(i + 1, len(value)):
+                if _json_equal(item, value[j]):
+                    ctx.errors.append('%s: items %d and %d are equal, '
+                                      '"uniqueItems" is true' % (path, i, j))
+                    return
 
 
 def _validate_string(value, schema, path, ctx):
@@ -644,12 +661,17 @@ def _validate_node(value, schema, path, ctx):
                    % (", ".join(sorted(inapplicable)), _kind(value))))
 
 
-def check(data, schema):
+def check(data, schema, *, max_unique_items=None):
     """Validate an already-parsed JSON value, returning both channels:
     CheckResult(errors, unchecked). `errors` are violations; `unchecked` is
     [(path, reason), ...] naming everything this module could not evaluate.
     Pure function, no I/O."""
-    ctx = _Ctx(schema)
+    if (max_unique_items is not None and
+            (isinstance(max_unique_items, bool)
+             or not isinstance(max_unique_items, int)
+             or max_unique_items < 0)):
+        raise ValueError("max_unique_items must be a non-negative integer or None")
+    ctx = _Ctx(schema, max_unique_items=max_unique_items)
     try:
         _validate(data, schema, "$", ctx)
     except RecursionError:
