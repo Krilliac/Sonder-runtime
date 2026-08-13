@@ -870,7 +870,13 @@ def _is_repl_error(text):
     REPL's `/model` check. Those host refusals intentionally avoid new server
     error literals, but they must not be rendered as a normal model answer.
     """
-    value = _strip_footer(str(text or "")).strip()
+    raw = str(text or "")
+    # A successful model turn has a durable interaction footer. Never turn a
+    # model-authored imitation of a host refusal into an error, because that
+    # would discard its answer and break feedback/`/run` continuity.
+    if server.parse_interaction_id(raw) is not None:
+        return False
+    value = server._strip_activity_block(raw).strip()
     if value.startswith("ERROR"):
         return True
     if not value.startswith("model pin '"):

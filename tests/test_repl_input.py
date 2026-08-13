@@ -167,6 +167,14 @@ def test_repl_error_classifier_does_not_treat_model_text_as_a_pin_refusal():
     assert sonder_repl._is_repl_error(text) is False
 
 
+def test_repl_error_classifier_preserves_footered_model_pin_shaped_answers():
+    text = (
+        "model pin 'gemma3:12b' is unavailable or is not chat-capable."
+        + sonder_repl.server.FOOTER_PREFIX + "deadbeef]"
+    )
+    assert sonder_repl._is_repl_error(text) is False
+
+
 def test_catalogued_fanout_status_reuses_the_logged_in_repl_token(monkeypatch):
     captured = {}
     monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "developer-session-token")
