@@ -1728,6 +1728,14 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is None or origin in CORS_ORIGINS:
             return False
+        if (
+            self.command == "POST"
+            and self.path.rstrip("/") == "/v1/chat/completions"
+        ):
+            self._record_chat_completion_metric(
+                sonder_lifecycle.get(), "cors_rejected",
+                getattr(self, "_request_started", time.monotonic()),
+            )
         self._send_json_payload(
             {"error": {"message": "origin is not allowed", "type": "cors"}},
             status=403,
@@ -1760,6 +1768,14 @@ class Handler(BaseHTTPRequestHandler):
         """Token-bucket authentication-failure limiter (admission step 3)."""
         if sonder_lifecycle.get().auth_attempt_allowed(self._peer()):
             return False
+        if (
+            self.command == "POST"
+            and self.path.rstrip("/") == "/v1/chat/completions"
+        ):
+            self._record_chat_completion_metric(
+                sonder_lifecycle.get(), "auth_rate_limited",
+                getattr(self, "_request_started", time.monotonic()),
+            )
         self._send_json_payload(
             sonder_lifecycle.error_envelope(
                 "AUTH_RATE_LIMITED",
@@ -2217,6 +2233,14 @@ class Handler(BaseHTTPRequestHandler):
         # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive
         # requests. The terminal-metric latch is per request, never per socket.
         self._chat_completion_metrics_recorded = False
+        is_chat_completion = self.path.rstrip("/") == "/v1/chat/completions"
+
+        def record_early_chat_metric(result):
+            if is_chat_completion:
+                self._record_chat_completion_metric(
+                    sonder_lifecycle.get(), result, self._request_started,
+                )
+
         if self._reject_disallowed_origin():
             return
         _maybe_live_reload()
@@ -2230,6 +2254,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             req = self._read_json()
         except HTTPRequestError as error:
+            record_early_chat_metric("malformed_request")
             self._send_json_payload(
                 {"error": {"message": error.message, "type": error.error_type}},
                 status=error.status,
@@ -2335,12 +2360,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if not context["authorized"]:
+            record_early_chat_metric("unauthenticated")
             self._send_auth_error()
             return
         account = context["account"]
         try:
             messages = _validate_chat_messages(req.get("messages"))
         except HTTPRequestError as error:
+            record_early_chat_metric("invalid_messages")
             self._send_json_payload(
                 {"error": {"message": error.message, "type": error.error_type}},
                 status=error.status,
@@ -2354,12 +2381,14 @@ class Handler(BaseHTTPRequestHandler):
         if natural_model and natural_model["kind"] == "model":
             prompt = natural_model["prompt"]
             if prompt.lstrip().startswith("/"):
+                record_early_chat_metric("wrapped_slash_command")
                 self._send_json_payload(
                     {"error": {"message": "model selection cannot wrap a slash command; issue the command directly.", "type": "invalid_request"}},
                     status=400,
                 )
                 return
         if _dangerous_http_slash(prompt) and not _developer_authorized(context):
+            record_early_chat_metric("forbidden_command")
             self._send_json_payload(
                 {
                     "error": {
@@ -2376,6 +2405,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         if not ok:
+            record_early_chat_metric("rate_limited")
             self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)
             return
 
@@ -2386,6 +2416,7 @@ class Handler(BaseHTTPRequestHandler):
             # keeps its single-user/full-tool behavior; shared deployments
             # require the same developer authority as /ensemble.
             if not _developer_authorized(context):
+                record_early_chat_metric("fanout_forbidden")
                 self._send_json_payload(
                     {"error": {"message": "developer or admin authentication is required for model fanout", "type": "forbidden_command"}},
                     status=403,
@@ -2405,6 +2436,7 @@ class Handler(BaseHTTPRequestHandler):
         location_consent = req.get("location_consent") is True
         location_hint = req.get("location_hint")
         if location_hint is not None and not isinstance(location_hint, dict):
+            record_early_chat_metric("invalid_location_hint")
             self._send_json_payload(
                 {
                     "error": {
@@ -2421,6 +2453,7 @@ class Handler(BaseHTTPRequestHandler):
             storage_session = _hosted_storage_id(context, session, "session")
             storage_project = _hosted_storage_id(context, project, "project")
         except HTTPRequestError as error:
+            record_early_chat_metric("invalid_scope")
             self._send_json_payload(
                 {"error": {"message": error.message, "type": error.error_type}},
                 status=error.status,
