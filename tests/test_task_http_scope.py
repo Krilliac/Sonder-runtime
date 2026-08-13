@@ -66,3 +66,35 @@ def test_task_scope_is_opaque_and_only_accounts_receive_one():
     assert scope == serve._task_account_scope(_account("alice"))
     assert scope != serve._task_account_scope(_account("bob"))
     assert serve._task_account_scope({}) is None
+
+
+def test_account_http_rejects_indirect_global_task_paths(monkeypatch):
+    alice = _account("alice")
+    calls = []
+    monkeypatch.setattr(server, "workbench_agent", lambda **kwargs: calls.append(kwargs) or "ran")
+    monkeypatch.setattr(server, "loop", lambda **kwargs: calls.append(kwargs) or "loop ran")
+
+    assert "account-scoped task state" in serve._handle_slash("/work inspect this", context=alice)
+    assert not calls
+    assert "account-scoped task state" in serve._dispatch_catalogued_tool(
+        "/workbench_agent prompt=inspect", serve._LEGACY_STATE, alice,
+    )
+    assert not calls
+    assert "account-scoped task state" in serve._dispatch_catalogued_tool(
+        "/agent prompt=inspect", serve._LEGACY_STATE, alice,
+    )
+    assert not calls
+    assert "loop action 'checklist_create'" in serve._dispatch_catalogued_tool(
+        '/loop actions_json=[{"type":"checklist_create","title":"x"}]',
+        serve._LEGACY_STATE, alice,
+    )
+    assert not calls
+    assert "loop action 'workbench_agent'" in serve._dispatch_catalogued_tool(
+        '/loop actions_json=[{"type":"workbench_agent","prompt":"inspect"}]',
+        serve._LEGACY_STATE, alice,
+    )
+    assert not calls
+
+    # Local-open/direct operator use remains backward-compatible and global.
+    assert serve._handle_slash("/work inspect this") == "ran"
+    assert calls
