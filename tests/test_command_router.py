@@ -35,6 +35,8 @@ def test_memory_phrasings():
 
 def test_agent_and_orchestration_phrasings():
     assert cr.resolve("show agents") == "/agents"
+    assert cr.resolve("show recent fanouts") == "/fanouts"
+    assert cr.resolve("list active fanouts") == "/fanouts active"
     assert cr.resolve("agent capacity") == "/capacity"
     assert cr.resolve("cancel all agents") == "/agentcancel"
     assert cr.resolve("orchestrate fix the parser and add tests") == \

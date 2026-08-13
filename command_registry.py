@@ -251,6 +251,12 @@ COMMANDS = [
         "summary": "Inspect live and recent agent activity.",
     },
     {
+        "name": "/fanouts",
+        "category": "agents",
+        "risk": "safe",
+        "summary": "List safe recent durable model-fanout summaries for restart recovery.",
+    },
+    {
         "name": "/capacity",
         "category": "agents",
         "risk": "safe",

@@ -87,6 +87,57 @@ def test_piped_turn_acknowledgement_stays_silent(monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_fanout_recent_display_is_content_free_and_reports_recovery_ids():
+    text = sonder_repl._format_fanout_summaries({"runs": [{
+        "run_id": "fan-123", "status": "completed", "scope": "cloud",
+        "models_selected": 4, "models_answered": 3,
+        "models_failed": 1, "models_skipped": 0,
+        "prompt": "must not appear", "answer": "must not appear",
+    }]})
+
+    assert "fan-123" in text and "3/4 answered" in text
+    assert "must not appear" not in text
+    assert "model_fanout_status" in text
+
+
+def test_fanout_recent_uses_the_logged_in_repl_token(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "developer-session-token")
+    monkeypatch.setattr(
+        sonder_repl.server, "model_fanout_recent",
+        lambda **kwargs: captured.update(kwargs) or '{"runs": []}',
+    )
+
+    assert sonder_repl._fanout_recent_command("") == "no durable fanout runs"
+    assert captured == {
+        "limit": 20, "include_finished": True,
+        "token": "developer-session-token",
+    }
+
+
+def test_fanout_recent_renders_a_refusal_instead_of_an_empty_history():
+    assert sonder_repl._format_fanout_summaries({"error": "developer role required"}) == (
+        "fanout history refused: developer role required"
+    )
+
+
+def test_catalogued_fanout_status_reuses_the_logged_in_repl_token(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "developer-session-token")
+    monkeypatch.setattr(
+        sonder_repl.command_catalog, "parse_invocation",
+        lambda _line: ("model_fanout_status", {"run_id": "fan-123"}),
+    )
+    monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool: (True, ""))
+    monkeypatch.setattr(
+        sonder_repl.server, "model_fanout_status",
+        lambda run_id, token="": captured.update(run_id=run_id, token=token) or "receipt",
+    )
+
+    assert sonder_repl._run_catalogued("/model_fanout_status run_id=fan-123", "/model_fanout_status") == "receipt"
+    assert captured == {"run_id": "fan-123", "token": "developer-session-token"}
+
+
 def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/runtime" in sonder_repl.HELP
     assert "/mcp" in sonder_repl.HELP
