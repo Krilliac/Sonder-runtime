@@ -135,7 +135,7 @@ def test_natural_profile_is_forwarded_to_the_public_fanout_boundary(monkeypatch)
 def test_tool_manifest_documents_guarded_model_routes():
     manifest = server.tool_manifest()
 
-    assert "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume" in manifest
+    assert "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize" in manifest
     assert "healthy-local-chat" in manifest
     assert "healthy-cloud-chat" in manifest
     assert "never accept arbitrary selectors" in manifest
@@ -749,6 +749,181 @@ def test_model_fanout_lifecycle_tools_work_in_local_open_mode(monkeypatch, tmp_p
 
     assert status["run_id"] == receipt["run_id"]
     assert cancelled["status"] == "completed"
+
+
+def test_model_fanout_synthesize_uses_exact_complete_previews_without_persistence(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [
+            {"name": "candidate-a", "capabilities": ["chat"]},
+            {"name": "candidate-b", "capabilities": ["completion"]},
+            {"name": "synth-local", "capabilities": ["generate"]},
+        ]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda model, *_args, **_kwargs: lambda _prompt: "candidate answer from " + model,
+    )
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+    receipt = json.loads(server.model_fanout("original private question", scope="local"))
+    captured = {}
+
+    def fake_post_model(path, payload, **kwargs):
+        captured.update(path=path, payload=payload, kwargs=kwargs)
+        return {"message": {"content": "synthesis answer", "thinking": "must not be returned"}}, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    result = json.loads(server.model_fanout_synthesize(receipt["run_id"], "synth-local"))
+
+    assert result["run_id"] == receipt["run_id"]
+    assert result["synth_model"] == "synth-local"
+    assert result["answer"] == "synthesis answer"
+    assert result["provenance"]["source_count"] == 3
+    assert "source_bundle_sha256" not in result["provenance"]
+    assert {item["model"] for item in result["provenance"]["source_previews"]} == {
+        "candidate-a", "candidate-b", "synth-local",
+    }
+    assert captured["path"] == "/api/chat"
+    assert captured["kwargs"]["cloud"] is False
+    assert captured["payload"]["messages"] and len(captured["payload"]["messages"]) == 1
+    assert "tools" not in captured["payload"]
+    assert "history" not in captured["payload"]
+    assert "original private question" in captured["payload"]["messages"][0]["content"]
+    assert "candidate answer from candidate-a" in captured["payload"]["messages"][0]["content"]
+    with sqlite3.connect(database) as conn:
+        stored = "\n".join(str(value) for row in conn.execute(
+            "SELECT prompt, answer, error FROM fanout_runs LEFT JOIN fanout_results "
+            "ON fanout_runs.id=fanout_results.run_id"
+        ) for value in row)
+    assert "synthesis answer" not in stored
+    assert "must not be returned" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("status", ["queued", "cancelled", "interrupted"])
+def test_fanout_synthesis_requires_completed_run_before_vault_or_model(monkeypatch, status):
+    run = {"id": "fan-test", "status": status}
+    monkeypatch.setattr(server, "_direct_fanout_access", lambda *_args: (run, None))
+    monkeypatch.setattr(server, "_fanout_synthesis_model", lambda *_args: "synth-local")
+    monkeypatch.setattr(
+        server.fanout_prompt_vault, "decrypt_prompt",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("vault must not run")),
+    )
+
+    assert "must be completed" in server.model_fanout_synthesize("fan-test", "synth-local")
+
+
+@pytest.mark.parametrize("field, value, expected", [
+    ("answer_truncation_known", 0, "unknown truncation"),
+    ("answer_truncated", 1, "truncated answer previews"),
+])
+def test_fanout_synthesis_refuses_incomplete_source_previews(monkeypatch, field, value, expected):
+    run = {"id": "fan-test", "status": "completed"}
+    rows = [
+        {"model": "a", "status": "answered", "answer": "one", "answer_truncation_known": 1,
+         "answer_truncated": 0},
+        {"model": "b", "status": "answered", "answer": "two", "answer_truncation_known": 1,
+         "answer_truncated": 0},
+    ]
+    rows[0][field] = value
+    monkeypatch.setattr(server, "_direct_fanout_access", lambda *_args: (run, None))
+    monkeypatch.setattr(server, "_fanout_synthesis_model", lambda *_args: "synth-local")
+    monkeypatch.setattr(server.fanout_store, "list_results", lambda _run_id: rows)
+    monkeypatch.setattr(
+        server.fanout_prompt_vault, "decrypt_prompt",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("vault must not run")),
+    )
+
+    assert expected in server.model_fanout_synthesize("fan-test", "synth-local")
+
+
+def test_fanout_synthesis_rejects_cloud_before_vault_or_source_construction(monkeypatch):
+    monkeypatch.setattr(server, "_direct_fanout_access", lambda *_args: ({"id": "fan-test", "status": "completed"}, None))
+    monkeypatch.setattr(
+        server, "_fanout_synthesis_sources",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("sources must not be constructed")),
+    )
+
+    assert "local models only" in server.model_fanout_synthesize("fan-test", "provider:cloud")
+
+
+def test_fanout_synthesis_rejects_remote_ollama_before_vault_or_generation(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setattr(server, "_direct_fanout_access", lambda *_args: ({"id": "fan-test", "status": "completed"}, None))
+    monkeypatch.setattr(
+        server, "_fanout_synthesis_sources",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("vault/source construction must not run")),
+    )
+    monkeypatch.setattr(
+        server, "_fanout_synthesis_generate",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("generation must not run")),
+    )
+
+    assert "requires a loopback Ollama endpoint" in server.model_fanout_synthesize("fan-test", "synth-local")
+
+
+def test_fanout_synthesis_default_is_fixed_configured_local_generative_model(monkeypatch):
+    monkeypatch.setattr(server, "LOCAL_CODE_MODEL", "fixed-local")
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("candidate-a", {"name": "candidate-a", "capabilities": ["chat"]}),
+        ("fixed-local", {"name": "fixed-local", "capabilities": ["completion"]}),
+    ])
+
+    assert server._fanout_synthesis_model("") == "fixed-local"
+
+
+def test_fanout_synthesis_requires_a_declared_generative_capability(monkeypatch):
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("unknown-local", {"name": "unknown-local"}),
+    ])
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    with pytest.raises(server.ModelCallError, match="declare a generative"):
+        server._fanout_synthesis_model("unknown-local")
+
+
+def test_fanout_synthesis_uses_local_model_show_metadata_when_tags_omit_capability(monkeypatch):
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("ordinary-ollama", {"name": "ordinary-ollama"}),
+    ])
+    seen = []
+    monkeypatch.setattr(
+        server, "_post",
+        lambda path, payload, **_kwargs: seen.append((path, payload)) or {"capabilities": ["completion"]},
+    )
+
+    assert server._fanout_synthesis_model("ordinary-ollama") == "ordinary-ollama"
+    assert seen == [("/api/show", {"name": "ordinary-ollama"})]
+
+
+def test_fanout_synthesis_source_bound_fails_without_dropping_answers(monkeypatch):
+    run = {"id": "fan-test", "status": "completed"}
+    rows = [
+        {"model": "a", "status": "answered", "answer": "one", "answer_truncation_known": 1,
+         "answer_truncated": 0, "elapsed_ms": 1, "answer_chars": 3, "thinking_chars": 0, "done_reason": "stop"},
+        {"model": "b", "status": "answered", "answer": "two", "answer_truncation_known": 1,
+         "answer_truncated": 0, "elapsed_ms": 1, "answer_chars": 3, "thinking_chars": 0, "done_reason": "stop"},
+    ]
+    monkeypatch.setattr(server.fanout_store, "list_results", lambda _run_id: rows)
+    monkeypatch.setattr(server.fanout_store, "execution_prompt_ciphertext", lambda _run_id: "sealed")
+    monkeypatch.setattr(server.fanout_prompt_vault, "decrypt_prompt", lambda _sealed: "question")
+    monkeypatch.setattr(server, "FANOUT_SYNTHESIS_MAX_SOURCE_CHARS", 1)
+
+    with pytest.raises(server.ModelCallError, match="no sources were dropped"):
+        server._fanout_synthesis_sources(run)
+
+
+def test_fanout_synthesis_rejects_accepted_bundle_that_cannot_fit_output_reserve(monkeypatch):
+    monkeypatch.setattr(server.context_policy, "native", lambda _value: 4096)
+    bundle = "x" * 3000
+
+    with pytest.raises(server.ModelCallError, match="configured local context"):
+        server._fanout_synthesis_prompt(bundle)
+
+
+def test_synthesis_prose_has_no_natural_language_model_route():
+    assert server.natural_model_request("synthesize fanout run fan-test with local model") is None
 
 
 @pytest.mark.parametrize(("name", "value"), [
