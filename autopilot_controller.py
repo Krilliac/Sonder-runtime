@@ -839,6 +839,12 @@ def execute_run(
                     run["id"], owner_id, "cancelled",
                     summary="cancelled during final review",
                 ) or run
+            if flags.get("pause"):
+                return autopilot_store.finish_run(
+                    run["id"], owner_id, "paused",
+                    summary="paused during final review",
+                    final_report=format_report(run, review["reason"]),
+                ) or run
             if review["decision"] == "complete" and gate_ok:
                 return autopilot_store.finish_run(
                     run["id"], owner_id, "completed",
