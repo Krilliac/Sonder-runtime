@@ -32,12 +32,12 @@ continue without re-deriving anything; update it at every milestone with
       `_LOOP_GLOBAL_OPERATION_TYPES`.
 - [x] E3: activity-ledger sensitive-key vocabulary aligned with the text
       regex.
-- [ ] Focused suites green; architecture / error-signal / privacy gates
-      green; broad relevant suite green — record the actual commands and
-      counts here when they have run.
-- [ ] Adversarial self-review of the diff (privilege widening, endpoint
-      drift, data exposure, races, test-only enforcement).
-- [ ] Final DoD evidence recorded here; branch committed and clean.
+- [x] Focused suites green; architecture / error-signal / privacy gates
+      green; broad suite green apart from three pre-existing
+      machine-timing failures (evidence in M4).
+- [x] Adversarial self-review of the diff (privilege widening, endpoint
+      drift, data exposure, races, test-only enforcement) — notes in M4.
+- [x] Final DoD evidence recorded here; branch committed and clean.
 
 ## Milestones
 
@@ -115,7 +115,109 @@ worktree:
   (socket `TimeoutError`; passes in isolation in 6.10s — load flake on this
   16 GB box, route untouched by this diff; re-checked in the broad run).
 
-## Next steps (for a resumed session)
+### M3 — diagnostics visibility + packaged payload (verified)
 
-1. Run the three gate scripts + the broad suite; record real counts here.
-2. Adversarial diff review; final DoD evidence section here.
+RED first: `test_tool_contract_ships_in_the_packaged_payload` and
+`test_diagnostics_reports_contract_drift_without_enforcement` both failed
+(`tool_contract.py` absent from `REQUIRED_FILES`; no
+`tool_contract_report()` in `diagnostics`). GREEN after
+`server.tool_contract_report()` + the diagnostics line + the packager
+entry: conformance + tool-capabilities files → **64 passed**; packager
+tests (`-k "required or payload or manifest"`) → **7 passed**;
+`-k diagnostics` across the tree → **10 passed, 1 skipped**.
+
+### M4 — final verification (2026-08-13)
+
+Commands run from this worktree with
+`C:/Users/natew/.claude/mcp-servers/sonder-runtime/venv/Scripts/python.exe`:
+
+- `scripts/check_architecture.py` → rc=0.
+- `scripts/check_error_signals.py` → rc=0 (no new `ERROR:`-literal returns;
+  the drift report's `ERROR …` form matches the shadow report's shape).
+- `scripts/check_history_privacy.py` → rc=0 ("known debt only (7
+  object/path pair(s))" — pre-existing).
+- Broad suite `python -m pytest -q` (tests + proposals) →
+  **3 failed, 7226 passed, 43 skipped, 15 warnings in 1431s (23:51)**.
+  The three failures are wall-clock timing assertions in
+  `tests/test_sonder_storage.py` (probe-kill latency budgets of 0.5s/1.0s
+  vs ~1.2–2.4s measured). They are environmental, not from this branch:
+  the branch's diff touches no storage file, the failing test file is
+  byte-identical to the pre-change `policy-explain-preflight` worktree,
+  and the same three tests fail there identically under today's load.
+  The `test_serve_auth` query-string timeout flake seen in one focused
+  run did not recur in the broad run.
+- `git diff --check ab071fa..HEAD` → clean. All commits DCO-signed.
+
+Adversarial diff review (privilege widening / endpoint drift / exposure /
+races / test-only enforcement):
+
+- The classifier canonicalizes spellings before lookup; no
+  `SYSTEM_OPERATION_TOOLS` key appears as an alias key, so canonicalization
+  can only find MORE bindings, never fewer. The derived loop closure
+  refuses a strict superset of the old hand map (all four old entries
+  still resolve to the same admin operation).
+- New refusals apply only to served non-admin auth contexts;
+  `context=None`, `local-open`, owner api-key, console, and direct MCP
+  paths are byte-for-byte unchanged in behavior (pinned by tests).
+- Durable-authority tools keep `decide()`'s actionable refusal rather than
+  gaining a role wall (message quality, not a widening; explicit operator
+  allow-rules keep their documented effect).
+- Redaction change only widens masking (observability cost, never a
+  privacy cost), matching the module's own stated failure direction.
+- All new checks are pure dict/frozenset reads before dispatch — no state
+  writes, no timing dependence, no TOCTOU pair.
+- Enforcement lives in the production gates; only the authority
+  name-grammar tripwire is test-only, by design and documented.
+
+## Definition-of-Done evidence map
+
+- Contract source + enforcement points documented/traceable → design doc
+  surfaces table; `tool_contract.py` docstrings name the exact call sites
+  (`_http_tool_refusal`, `_loop_global_operation_refusal`); diagnostics
+  line makes drift operator-visible.
+- Every registered/reachable tool classified or deliberately rejected →
+  `contracts()` covers registered ∪ declared ∪ loop-canonical names;
+  `risk_of` grades every catalogued spelling; unknown names are refused on
+  MCP (`ToolError`), agent (`ERROR: unknown tool`), HTTP catalogued
+  (`None` → never dispatched), and non-interactive `decide()`
+  (`UNCLASSIFIED` → deny) — all pinned in the conformance file.
+- Shared accounts cannot reach privileged actions through synonyms /
+  workflows / indirect / catalog routes → P1 sweep over
+  `_AGENT_SYSTEM_OPERATOR_TOOLS` at the real boundary; loop-action
+  spelling closure; fully-bound slash-alias sweep; saved-workflow replay
+  probe; role matrix per bound tool.
+- Local-open usable where intended → role boundaries stay silent for
+  local-open/api-key on every system tool (bound and unbound); plan and
+  deny rules still bind there.
+- Malformed/unknown input fails before effectful dispatch → unknown-kwarg
+  ValueError with sentinel handler, non-dict agent args, MCP schema
+  validation, unknown-name refusals.
+- Suites/gates → M4 numbers above.
+- `git diff --check` clean; DCO on every commit; this log records the
+  verified commands, results, limitations, and next steps.
+
+Branch left committed and clean; not merged. Commits:
+`97fb227` (design), `8fd2943` (harness + E1/E2/E3), `02a0591`
+(workflow-store test isolation), `6d88084` (diagnostics + packager),
+plus the final work-log update commit.
+
+## Residual limitations / next steps
+
+- The authority name-grammar tripwire is a floor, not a proof: a
+  privileged tool named entirely outside the vocabulary
+  (`admin_*`, `permission_*`, `runtime_policy_*`, `autopilot_*`,
+  `workflow_*`, `memory_privacy_*`, `memory_quality_*`, plus the exact
+  names in `_AUTHORITY_GRAMMAR_NAMES`) and left out of every declared set
+  still needs a human to classify it.
+- `workspace_run`/`script_run` render `"%s %s" % (program, json.dumps(args))`
+  into the (detail-gated) command field; a secret VALUE inside that JSON
+  array form can survive `_safe_command`'s argv rule. Needs a rendering
+  change, not a vocabulary change; not taken here.
+- `_loop_dispatch` records a refused action into the in-memory activity
+  ledger before the gate refuses it (shows `ok=True` "queued"). Cosmetic;
+  follow-up candidate.
+- The three `test_sonder_storage.py` timing budgets fail on this loaded
+  16 GB box on pre-change code too; if they persist on a quiet machine,
+  they deserve their own issue.
+- `tool_capabilities.py` descriptor completion remains future work by
+  design (non-goal).
