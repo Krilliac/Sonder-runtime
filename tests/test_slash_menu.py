@@ -588,6 +588,16 @@ def test_framed_raw_reader_draws_a_full_composer_and_keeps_the_line(monkeypatch)
     assert any(token in out.text for token in ("╭", "+"))
 
 
+def test_framed_composer_uses_a_stable_rectangle_without_content_truncation():
+    out = _FakeStdout()
+    top, rows, footer = slash_menu._framed_input_lines(
+        "sonder [lanes 2 | agents 1]", "x" * 60, 20, out)
+
+    assert len(top) == len(footer) == 19
+    assert all(len(row) == 19 for row in rows)
+    assert "".join(row[2:-1].rstrip() for row in rows) == "x" * 60
+
+
 def test_framed_composer_tracks_a_cursor_in_a_wrapped_buffer(monkeypatch):
     monkeypatch.setattr(slash_menu, "_terminal_size", lambda: (12, 12))
     # 8 editable cells per row in the 11-column visual frame. Move left into
