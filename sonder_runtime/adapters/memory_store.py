@@ -2812,6 +2812,25 @@ def list_tasks(conn, status="", project="", owner="", limit=50, include_done=Fal
     return [dict(r) for r in rows]
 
 
+def latest_checklist(conn, account_scope=None):
+    """Return the most recently updated checklist parent in one scope."""
+    scope = _normalize_task_account_scope(account_scope)
+    clauses = ["parent.parent_id=''", (
+        "EXISTS (SELECT 1 FROM tasks AS child WHERE child.parent_id=parent.id)"
+    )]
+    values = []
+    if scope is not None:
+        clauses.append("parent.account_scope=?")
+        values.append(scope)
+    row = conn.execute(
+        "SELECT parent.* FROM tasks AS parent WHERE %s "
+        "ORDER BY parent.updated_ts DESC, parent.rowid DESC LIMIT 1"
+        % " AND ".join(clauses),
+        tuple(values),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def task_events(conn, task_id, limit=20, account_scope=None):
     resolved = resolve_task_id(conn, task_id, account_scope=account_scope)
     if not resolved:

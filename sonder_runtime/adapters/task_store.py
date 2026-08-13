@@ -41,6 +41,14 @@ class LegacyTaskRepository:
             **filters,
         )
 
+    def latest_checklist(self, *, account_scope: str | None = None) -> dict | None:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(
+            memory_store.latest_checklist,
+            self._connection,
+            account_scope=account_scope,
+        )
+
     def update(
         self, task_id: str, *, account_scope: str | None = None, **changes
     ) -> dict:
