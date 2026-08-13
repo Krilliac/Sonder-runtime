@@ -99,7 +99,7 @@ def test_keyboard_interrupt_still_propagates_through_the_menu(monkeypatch):
             return True
 
         @staticmethod
-        def read_line(_prompt):
+        def read_line(_prompt, **_kwargs):
             raise KeyboardInterrupt
 
     monkeypatch.setattr(sonder_repl, "slash_menu", _Interrupting)
