@@ -70,6 +70,7 @@ def _read_input(prompt, *, history=None, composer=False):
                 return slash_menu.read_line(
                     "" if composer else prompt,
                     history=history, frame=prompt if composer else "",
+                    fallback_prompt=prompt,
                 )
         except (EOFError, KeyboardInterrupt):
             raise
@@ -114,6 +115,22 @@ def _console_has_operator():
         return bool(stream.isatty())
     except Exception:
         # A stream that cannot answer is not evidence of an operator.
+        return False
+
+
+def _stdout_is_interactive():
+    """Whether presentation can safely add terminal-only chrome.
+
+    An operator may type at a terminal while redirecting stdout to a file.
+    That is still interactive for permission prompts, but result decoration
+    belongs only on an actual terminal so redirected output stays script-safe.
+    """
+    stream = getattr(sys, "stdout", None)
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:
         return False
 
 
@@ -735,7 +752,7 @@ def _begin_chat_turn(label="Sonder"):
     wait visible without adding a second worker, polling loop, or fake
     progress claim; scripts retain their historical silent behavior.
     """
-    if not _console_has_operator():
+    if not (_console_has_operator() and _stdout_is_interactive()):
         return
     box = _box_chars()
     print(_paint("%s %s is working..." % (box["dot"], label), _Ansi.muted))
@@ -751,7 +768,7 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
     """
     answer = str(text or "")
     timing = _completion_timing(started_at)
-    if not _console_has_operator():
+    if not (_console_has_operator() and _stdout_is_interactive()):
         print(answer)
         print(_paint("[%s]" % timing, _Ansi.muted))
         if offer_feedback:
