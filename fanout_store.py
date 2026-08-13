@@ -27,6 +27,10 @@ MAX_ERROR_CHARS = 4_000
 MAX_EVENT_CHARS = 1_000
 MAX_MODELS = 128
 DEFAULT_LEASE_SECONDS = 300
+# A queued receipt should normally be claimed immediately by its caller.  If a
+# process dies in that narrow handoff window, leave enough time for ordinary
+# scheduling then make the never-started run explicitly recoverable.
+QUEUED_DISPATCH_GRACE_SECONDS = DEFAULT_LEASE_SECONDS
 ACTIVE_RUNS = frozenset(("queued", "running", "cancelling"))
 TERMINAL_RUNS = frozenset(("completed", "cancelled", "interrupted"))
 RESULT_STATUSES = frozenset(("pending", "running", "answered", "failed", "skipped", "unknown"))
@@ -400,11 +404,24 @@ def reconcile_stale_runs(now: float | None = None) -> int:
     with _write_transaction() as conn:
         runs = conn.execute("SELECT * FROM fanout_runs WHERE status IN ('queued','running','cancelling')").fetchall()
         for run in runs:
-            stale = run["status"] != "queued" and (run["lease_until"] is None or run["lease_until"] < current or (run["owner_host"] == host and not _process_pid_alive(run["owner_pid"])))
+            queued_without_worker = (
+                run["status"] == "queued"
+                and not run["owner_id"]
+                and current - float(run["updated_ts"] or run["created_ts"]) >= QUEUED_DISPATCH_GRACE_SECONDS
+            )
+            stale = queued_without_worker or (
+                run["status"] != "queued"
+                and (run["lease_until"] is None or run["lease_until"] < current or (run["owner_host"] == host and not _process_pid_alive(run["owner_pid"])))
+            )
             if not stale: continue
-            conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease ended; request was not replayed',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (current, current, run["id"]))
+            if queued_without_worker:
+                conn.execute("UPDATE fanout_results SET status='skipped',error='worker did not begin; safe explicit resume required',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='pending'", (current, current, run["id"]))
+                message = "worker did not begin; safe explicit resume is required"
+            else:
+                conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease ended; request was not replayed',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (current, current, run["id"]))
+                message = "worker lease ended; explicit resume is required"
             conn.execute("UPDATE fanout_runs SET status='interrupted',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? WHERE id=?", (current, current, run["id"]))
-            _event(conn, run["id"], "interrupted", "worker lease ended; explicit resume is required", current); changed += 1
+            _event(conn, run["id"], "interrupted", message, current); changed += 1
     return changed
 
 
