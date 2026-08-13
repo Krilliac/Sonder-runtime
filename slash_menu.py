@@ -312,6 +312,26 @@ def _cursor_to_input_start(state: MenuState) -> str:
     return "\r" + (CSI + "%dA" % (rows - 1) if rows > 1 else "")
 
 
+def _visible_input_lines(lines: list[str], *, height: int, menu_rows: int) -> list[str]:
+    """Keep an interactive redraw inside the terminal viewport.
+
+    The input buffer is never shortened: :func:`_finish` writes every line on
+    acceptance.  While editing, a raw console cannot move its cursor into
+    scrollback to erase prior rows, so redraw only the newest rows that fit
+    above the command palette.  This is deliberately a viewport policy, not
+    a content cap and does not add an ellipsis that could look like model/user
+    text was modified.
+    """
+    budget = max(1, int(height) - max(0, int(menu_rows)) - 1)
+    return lines[-budget:] or [""]
+
+
+def _clear_raw_input(state: MenuState, stream) -> None:
+    """Erase every currently drawn raw-input row before a fallback redraw."""
+    stream.write(_cursor_to_input_start(state) + CSI + "0J")
+    stream.flush()
+
+
 def _paint(state: MenuState, prompt: str, stream) -> None:
     """Redraw the input line and the menu, leaving the cursor where typing is.
 
@@ -321,8 +341,11 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
     scrollback is consumed because nothing is ever printed past the last row.
     """
     rows = state.render_rows()
-    cols, _ = _terminal_size()
-    lines = _input_lines(prompt, state.buffer, cols)
+    cols, height = _terminal_size()
+    lines = _visible_input_lines(
+        _input_lines(prompt, state.buffer, cols),
+        height=height, menu_rows=len(rows),
+    )
     parts = [_cursor_to_input_start(state), CSI + "0J", "\n".join(lines)]
     state._drawn_input_rows = len(lines)
     if rows:
@@ -347,25 +370,36 @@ def _read_line_raw(prompt: str, completer=None) -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
     state = MenuState(completer=completer)
-    _paint(state, prompt, stream)
-    while True:
-        ch = msvcrt.getwch()
-        if ch in ("\x00", "\xe0"):
-            # Windows delivers arrows as a prefix byte plus a scan code.
-            second = msvcrt.getwch()
-            key = {"H": KEY_UP, "P": KEY_DOWN}.get(second)
-            if key is None:
-                continue
-            action = state.handle_key(key)
-        else:
-            action = state.handle_key(ch)
-        if action == ACCEPT:
-            _finish(state, prompt, stream)
-            return state.buffer
-        if action == INTERRUPT:
-            _finish(state, prompt, stream)
-            raise KeyboardInterrupt
+    try:
         _paint(state, prompt, stream)
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):
+                # Windows delivers arrows as a prefix byte plus a scan code.
+                second = msvcrt.getwch()
+                key = {"H": KEY_UP, "P": KEY_DOWN}.get(second)
+                if key is None:
+                    continue
+                action = state.handle_key(key)
+            else:
+                action = state.handle_key(ch)
+            if action == ACCEPT:
+                _finish(state, prompt, stream)
+                return state.buffer
+            if action == INTERRUPT:
+                _finish(state, prompt, stream)
+                raise KeyboardInterrupt
+            _paint(state, prompt, stream)
+    except (KeyboardInterrupt, EOFError):
+        raise
+    except Exception:
+        # The raw path is allowed to fail, but it must clear every wrapped
+        # line before read_line's ordinary input() fallback draws a prompt.
+        try:
+            _clear_raw_input(state, stream)
+        except Exception:
+            pass
+        raise
 
 
 def read_line(prompt: str = "", *, enabled: bool = True) -> str:
