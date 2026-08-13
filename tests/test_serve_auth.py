@@ -670,6 +670,43 @@ def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     assert json.loads(body)["choices"][0]["message"]["content"].startswith('{"models_answered": 1}')
 
 
+def test_http_fanout_wrapper_is_not_reclassified_as_work_or_feedback(monkeypatch):
+    """The extracted fanout question is data, not an independent control turn."""
+    api_key = "k" * 32
+    monkeypatch.setattr(ts, "API_KEY", api_key)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("fanout must not reach feedback")))
+    monkeypatch.setattr(ts, "_handle_intent", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("fanout must not reach work intent")))
+    calls = []
+    monkeypatch.setattr(
+        ts.server, "_model_fanout_authorized",
+        lambda prompt, scope, **_kwargs: calls.append((prompt, scope)) or '{"models_answered": 1}',
+    )
+    request = json.dumps({
+        "model": "sonder",
+        "messages": [{"role": "user", "content": "ask all available models to run this code"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, _ = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key},
+        )
+
+    assert status == 200
+    assert calls == [("run this code", "all")]
+
+
 def test_http_fanout_lifecycle_is_owner_scoped(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")

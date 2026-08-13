@@ -2676,14 +2676,20 @@ class Handler(BaseHTTPRequestHandler):
         # initial slash-command gate and execute after the rewrite below.
         natural_model = server.natural_model_request(prompt)
         if natural_model:
-            prompt = natural_model["prompt"]
-            if prompt.lstrip().startswith("/"):
+            selected_prompt = natural_model["prompt"]
+            if selected_prompt.lstrip().startswith("/"):
                 record_early_chat_metric("wrapped_slash_command")
                 self._send_json_payload(
                     {"error": {"message": "model selection cannot wrap a slash command; issue the command directly.", "type": "invalid_request"}},
                     status=400,
                 )
                 return
+            # A single selected model rewrites the ordinary model prompt. A
+            # fanout wrapper must remain intact until its dedicated dispatch
+            # below; otherwise its extracted text could be misclassified by
+            # feedback/work-intent handlers and execute before fanout gating.
+            if natural_model["kind"] == "model":
+                prompt = selected_prompt
         if _dangerous_http_slash(prompt) and not _developer_authorized(context):
             record_early_chat_metric("forbidden_command")
             self._send_json_payload(
@@ -2818,9 +2824,10 @@ class Handler(BaseHTTPRequestHandler):
                         prompt, messages=messages, state=state,
                         project=storage_project, context=context,
                     )
-                    if reply is None:
+                    if reply is None and not (natural_model and natural_model["kind"] == "fanout"):
                         reply = _handle_feedback(prompt, state=state)
-                    if reply is None and _developer_authorized(context):
+                    if (reply is None and _developer_authorized(context)
+                            and not (natural_model and natural_model["kind"] == "fanout")):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state
                         )
