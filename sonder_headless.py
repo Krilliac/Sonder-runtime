@@ -530,7 +530,17 @@ def main(argv=None) -> int:
     started = start_sonder(args.host, args.port, env=env)
     print(started)
     print(status(args.host, args.port))
-    return 0 if _start_succeeded(started) else 1
+    # A cold Python process can bind just after ``start_sonder`` exhausts its
+    # bounded readiness window.  ``status`` above probes the same endpoint
+    # immediately afterward, so preserve a successful exit when that probe
+    # can verify the listener belongs to our managed Sonder process.  Do not
+    # treat an arbitrary unmanaged listener as success.
+    managed = _managed_pid("sonder_serve", args.host, args.port)
+    # ``_managed_pid`` can identify a child which is alive but has not yet
+    # successfully bound its port.  Ownership alone is not readiness: require
+    # a listener as well so a hung/pre-bind child still returns a failure to
+    # launchers and the desktop shell.
+    return 0 if _start_succeeded(started) or (managed and port_open(args.host, args.port)) else 1
 
 
 if __name__ == "__main__":
