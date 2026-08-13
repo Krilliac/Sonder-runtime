@@ -178,6 +178,7 @@ def test_tool_manifest_documents_guarded_model_routes():
     assert "ask all available models for ..." in manifest
     assert "ask all local and cloud models: ..." in manifest
     assert "ask all local models and cloud models: ..." in manifest
+    assert "ask all Sonder models + cloud: ..." in manifest
     assert "ask the phi4:latest model to ..." in manifest
     assert "run using model phi4:latest: ..." in manifest
     assert "run using phi4:latest: ..." in manifest
