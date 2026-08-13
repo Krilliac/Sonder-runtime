@@ -265,6 +265,61 @@ _SCOPED_TASK_TOOLS = frozenset((
     "checklist_show", "checklist_update",
 ))
 
+# These tools may create or update checklists *inside* server.py after the
+# HTTP dispatcher has handed off control.  The public MCP variants deliberately
+# remain global for a local operator, but an account-backed HTTP request has an
+# opaque task boundary and must never silently escape it.  There is not yet a
+# first-class task-scope argument on the agent/master/workflow internals, so
+# fail closed here rather than create durable state in the shared namespace.
+_ACCOUNT_UNSCOPED_TASK_TOOLS = frozenset((
+    "agent", "workbench_agent", "master_orchestrate", "workflow_run",
+    "self_heal_repair",
+))
+_ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
+    "checklist_create", "checklist_update", "checklist_show",
+    "work", "agent", "workbench_agent", "master", "master_orchestrate",
+    "self_heal_repair",
+))
+
+
+def _account_task_boundary_refusal(tool_name, kwargs, context):
+    """Reject account requests whose internal task writes cannot be scoped.
+
+    This is intentionally an HTTP-only choke point.  Direct MCP and
+    local-open operation are the single-user/operator surface and retain their
+    historical global task/checklist behavior.  A malformed loop payload is
+    left to ``server.loop`` so callers still receive its useful JSON contract;
+    only a recognizable action that can touch the global task namespace is
+    refused here.
+    """
+    if _task_account_scope(context) is None:
+        return ""
+    name = str(tool_name or "").strip().lower()
+    if name in _ACCOUNT_UNSCOPED_TASK_TOOLS:
+        return (
+            "refused /%s: account-scoped task state is not available for "
+            "this autonomous tool; use the scoped task/checklist commands."
+        ) % name
+    if name != "loop":
+        return ""
+    try:
+        parsed = json.loads((kwargs or {}).get("actions_json", ""))
+    except (TypeError, ValueError):
+        return ""
+    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
+    if not isinstance(actions, list):
+        return ""
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_type = str(action.get("type") or action.get("action") or "").strip().lower()
+        if action_type in _ACCOUNT_UNSCOPED_LOOP_ACTIONS:
+            return (
+                "refused /loop: account-scoped task state is not available "
+                "for loop action '%s'; use scoped task/checklist commands."
+            ) % action_type
+    return ""
+
 
 def _served_task_tool(tool_name, kwargs, context):
     """Run account-scoped task operations without exposing a scope argument."""
@@ -1302,6 +1357,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/work", "/agent"):
         if not arg.strip():
             return "usage: /work <task>"
+        task_boundary_error = _account_task_boundary_refusal(
+            "workbench_agent", {}, context,
+        )
+        if task_boundary_error:
+            return task_boundary_error
         return server.workbench_agent(
             prompt=arg.strip(), tier="auto", max_steps=12, project=project,
         )
@@ -1538,6 +1598,9 @@ def _dispatch_catalogued_tool(line, state, context=None):
         refusal = _loop_global_operation_refusal(kwargs.get("actions_json"), context)
         if refusal:
             return refusal
+    task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context)
+    if task_boundary_error:
+        return task_boundary_error
     # Guarded tools take the caller's own token exactly as the explicit
     # branches pass it (/read, /files, /delete); the tool still enforces its
     # own permission rules with it.
