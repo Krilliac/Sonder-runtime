@@ -2743,6 +2743,7 @@ class Handler(BaseHTTPRequestHandler):
                         # developer account a second time.
                         reply = server._model_fanout_authorized(
                             natural_model["prompt"], scope=natural_model["scope"],
+                            profile=natural_model.get("profile", ""),
                             request_owner=_fanout_request_owner(context),
                             request_role=_fanout_request_role(context),
                         )
