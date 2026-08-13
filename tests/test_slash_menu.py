@@ -385,6 +385,7 @@ def test_live_redraw_keeps_only_a_viewport_sized_tail_of_wrapped_input():
 def test_raw_cleanup_returns_to_first_wrapped_row_before_erasing():
     state = slash_menu.MenuState(buffer="/" + "x" * 80)
     state._drawn_input_rows = 4
+    state._drawn_cursor_row = 3
     out = _FakeStdout()
 
     slash_menu._clear_raw_input(state, out)
@@ -469,13 +470,13 @@ class _FakeStdout:
         return "".join(self.chunks)
 
 
-def _drive(monkeypatch, keys, prompt="> ", history=None):
+def _drive(monkeypatch, keys, prompt="> ", history=None, frame=""):
     console = _FakeConsole(keys)
     out = _FakeStdout()
     monkeypatch.setattr(slash_menu, "_msvcrt", lambda: console)
     monkeypatch.setattr(slash_menu.sys, "stdout", out)
     return slash_menu._read_line_raw(
-        prompt, completer=_completer, history=history), out
+        prompt, completer=_completer, history=history, frame=frame), out
 
 
 def test_raw_reader_accepts_a_typed_line(monkeypatch):
@@ -572,3 +573,27 @@ def test_raw_reader_moves_the_cursor_back_onto_the_input_line(monkeypatch):
     assert rows, "expected the fixture to produce a menu"
     assert slash_menu.CSI + "%dA" % len(rows) in text
     assert slash_menu.CSI + "%dC" % len("> /re") in text
+
+
+def test_framed_raw_reader_draws_a_full_composer_and_keeps_the_line(monkeypatch):
+    line, out = _drive(
+        monkeypatch, list("hello") + ["\r"], prompt="", frame="sonder [lanes 2 | agents 1]")
+
+    assert line == "hello"
+    # Frame punctuation is deliberately presentation only: the accepted
+    # buffer is exactly the text typed by the user.
+    assert "sonder [lanes 2 | agents 1]" in out.text
+    assert "Enter send" in out.text
+    assert "hello" in out.text
+    assert any(token in out.text for token in ("╭", "+"))
+
+
+def test_framed_composer_tracks_a_cursor_in_a_wrapped_buffer(monkeypatch):
+    monkeypatch.setattr(slash_menu, "_terminal_size", lambda: (12, 12))
+    # 8 editable cells per row in the 11-column visual frame. Move left into
+    # the earlier row, insert there, and prove redraw keeps the entire value.
+    keys = list("abcdefghijkl") + ["\xe0", "K", "\xe0", "K", "\xe0", "K", "\xe0", "K", "X", "\r"]
+    line, out = _drive(monkeypatch, keys, prompt="", frame="sonder")
+
+    assert line == "abcdefghXijkl"
+    assert "abcdefgh" in out.text and "Xijkl" in out.text

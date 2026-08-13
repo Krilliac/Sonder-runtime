@@ -18,6 +18,31 @@ def test_completion_timing_uses_a_compact_elapsed_display(monkeypatch):
     assert sonder_repl._completion_timing(12.0) == "Sonder completed in 2.50s"
 
 
+def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    answer = "first very long line\nsecond line"
+    sonder_repl._print_chat_result(answer, 0.0, offer_feedback=True)
+
+    text = capsys.readouterr().out
+    assert answer in text
+    assert "Sonder completed in 1.00s" in text
+    assert "/pass or /fail" in text
+    assert any(glyph in text for glyph in ("╭", "+"))
+
+
+def test_piped_chat_result_stays_plain_for_scripts(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    sonder_repl._print_chat_result("exact output", 0.0)
+
+    assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
+
+
 def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/runtime" in sonder_repl.HELP
     assert "/mcp" in sonder_repl.HELP
