@@ -465,6 +465,30 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     assert seen[0]["model_override"] == "gemma3:12b"
 
 
+def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):
+    lines = iter(("/model CODE", "/model Gemma3:12B", "hello", "/exit"))
+    seen = []
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda _prompt, **kwargs: seen.append(kwargs) or "answer",
+    )
+
+    sonder_repl.main()
+
+    assert len(seen) == 1
+    assert seen[0]["tier"] == "code"
+    assert seen[0]["model_override"] == "gemma3:12b"
+
+
 def test_model_tag_selection_is_used_by_consult(monkeypatch):
     lines = iter(("/model gemma3:12b", "/consult compare this", "/exit"))
     seen = {}
