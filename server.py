@@ -725,6 +725,10 @@ DEFAULT_PROJECT = os.environ.get("SONDER_DEFAULT_PROJECT", "default")
 # last MAX_TURNS turns live; older turns are rolled into a summary.
 SESSION_NUM_CTX = context_policy.default_requested()
 MAX_TURNS = int(os.environ.get("SONDER_MAX_TURNS", "12"))
+# A model can ignore the decoder schema. Keep server-side ``uniqueItems``
+# validation bounded even for direct callers that did not pass through HTTP
+# schema admission first.
+_STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS = 256
 
 _DB_PATH = sonder_paths.memory_db_path()
 
@@ -5693,11 +5697,23 @@ def structured_answer_with_history(
                 ValueError("non-standard JSON numeric constant: %s" % value)
             ),
         )
+    except RecursionError as exc:
+        raise ModelCallError(
+            "protocol", "response is nested too deeply for response_format validation",
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise ModelCallError(
             "protocol", "response is not valid JSON despite response_format: %s" % exc,
         ) from exc
-    checked = json_schema_verifier.check(data, schema)
+    try:
+        checked = json_schema_verifier.check(
+            data, schema,
+            max_unique_items=_STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS,
+        )
+    except RecursionError as exc:
+        raise ModelCallError(
+            "protocol", "response is nested too deeply for response_format validation",
+        ) from exc
     if checked.errors or checked.unchecked:
         detail = "; ".join(checked.errors or [
             "host validator could not verify: %s" % _format_schema_gaps(checked.unchecked)

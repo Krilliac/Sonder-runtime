@@ -251,6 +251,23 @@ def test_unique_items_compares_unhashable_elements():
     assert _errors([{"a": 1}, {"a": 2}], {"type": "array", "uniqueItems": True}) == []
 
 
+def test_unique_items_excess_over_declared_or_host_bound_skips_pairwise_comparison(monkeypatch):
+    def should_not_compare(*_args):
+        raise AssertionError("uniqueItems pairwise comparison ran")
+
+    monkeypatch.setattr(J, "_json_equal", should_not_compare)
+
+    declared = J.check([1, 2, 3], {
+        "type": "array", "maxItems": 2, "uniqueItems": True,
+    })
+    host_bounded = J.check([1, 2, 3], {
+        "type": "array", "uniqueItems": True,
+    }, max_unique_items=2)
+
+    assert '"maxItems" is 2' in declared.errors[0]
+    assert "host uniqueItems validation cap is 2" in host_bounded.errors[0]
+
+
 # --- object constraints -------------------------------------------------------
 
 def test_additional_properties_false_rejects_an_extra_key():
