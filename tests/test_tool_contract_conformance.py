@@ -512,20 +512,25 @@ def test_the_mcp_surface_validates_argument_types_before_running():
 # --- the indirect path: a saved workflow replays through the same gate -----
 
 
-def test_a_saved_workflow_replay_meets_the_same_per_action_gate(monkeypatch):
+def test_a_saved_workflow_replay_meets_the_same_per_action_gate(monkeypatch, tmp_path):
     """workflow_run replays saved actions through `_loop_dispatch`, so the
     per-action permission gate must hold on replay exactly as it does for a
-    live `/loop` payload: `plan` refuses the dangerous-class action."""
+    live `/loop` payload: `plan` refuses the dangerous-class action.
+
+    The store is rehomed to tmp the way `test_workflows.py` does it -- the
+    default store is the workspace root's `workflows.json`, a tracked file
+    this test must not touch.
+    """
+    import workflow_store
+
+    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     saved = server.workflow_save(
         "contract_probe_flow",
         json.dumps([{"type": "memory_privacy_repair"}]),
         "conformance probe",
     )
     assert "contract_probe_flow" in saved
-    try:
-        monkeypatch.setitem(pm._STATE, "mode", pm.PLAN)
-        out = server.workflow_run("contract_probe_flow")
-        assert "refused by the permission gate" in out or "HOST POLICY" in out
-    finally:
-        monkeypatch.setitem(pm._STATE, "mode", pm.MANUAL)
-        server.workflow_delete("contract_probe_flow")
+    monkeypatch.setitem(pm._STATE, "mode", pm.PLAN)
+    out = server.workflow_run("contract_probe_flow")
+    assert "refused by the permission gate" in out or "HOST POLICY" in out
