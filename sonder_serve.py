@@ -1831,6 +1831,63 @@ def _request_model_selector(model):
     return raw
 
 
+def _chat_model_selection_error(selector):
+    """Return a safe HTTP error for an explicit selector that cannot chat.
+
+    ``server._serve_target`` is the shared allowlist/capability authority for
+    every surface.  The HTTP endpoint must translate its ``None`` result into
+    a protocol error rather than returning a successful completion whose text
+    happens to start with ``ERROR:``.
+    """
+    if not selector:
+        return ""
+    try:
+        _target, _cloud, _augment, tier_label = server._serve_target(selector, None)
+        if tier_label is not None:
+            return ""
+        found = server.resolve_discovered_model_record(selector)
+    except Exception:
+        # The regular serving route will surface an operational failure with
+        # its existing typed error handling.  Do not claim a model is invalid
+        # merely because catalog discovery is temporarily unavailable.
+        return ""
+    if found:
+        _name, record = found
+        reason = server._fanout_nonchat_reason(record)
+        if reason:
+            return "model is not chat-capable (%s)" % reason
+    return "unknown model '%s'" % selector
+
+
+def _openai_model_rows():
+    """Return stable, safe OpenAI-shaped model metadata for chat clients."""
+    rows, seen = [], set()
+
+    def add(identifier, owned_by):
+        identifier = str(identifier or "").strip()
+        key = identifier.casefold()
+        if not identifier or key in seen:
+            return
+        seen.add(key)
+        rows.append({"id": identifier, "object": "model", "owned_by": owned_by})
+
+    # ``sonder`` is a runtime route ID, not weights.  Tier IDs are retained for
+    # compatibility, then exact live catalog names make valid installed models
+    # discoverable to standard OpenAI clients.
+    add("sonder", "local")
+    for tier_name, model in server.available_tiers().items():
+        add(tier_name, "cloud" if server._is_cloud_tier(tier_name, model) else "local")
+    try:
+        records = server.discovered_model_records()
+    except Exception:
+        records = ()
+    for name, record in records:
+        if server._fanout_nonchat_reason(record):
+            continue
+        add(name, "cloud" if server._is_cloud_model_name(name) else "local")
+    return rows
+
+
 def _reasoning_audience():
     """Who may receive model reasoning over HTTP: 'developer' or 'all'.
 
@@ -2450,18 +2507,7 @@ class Handler(BaseHTTPRequestHandler):
             if not context["authorized"]:
                 self._send_auth_error()
                 return
-            # OpenAI calls these entries "models", but `sonder` is a runtime route ID,
-            # not model weights. Other entries expose configured inference tiers.
-            data = [{"id": "sonder", "object": "model", "owned_by": "local"}]
-            for tier_name, model in server.available_tiers().items():
-                data.append({
-                    "id": tier_name,
-                    "object": "model",
-                    "owned_by": "cloud"
-                    if server._is_cloud_tier(tier_name, model)
-                    else "local",
-                })
-            self._send_json_payload({"object": "list", "data": data})
+            self._send_json_payload({"object": "list", "data": _openai_model_rows()})
             return
         if path == "/v1/admin/updates/status":
             # Durable update state for the System page (SPEC-4 R-M19).
@@ -3041,6 +3087,14 @@ class Handler(BaseHTTPRequestHandler):
         if natural_model and natural_model["kind"] == "model":
             model = natural_model["model"]
         model_selector = _request_model_selector(model)
+        model_error = _chat_model_selection_error(model_selector)
+        if model_error:
+            record_early_chat_metric("invalid_model")
+            self._send_json_payload(
+                {"error": {"message": model_error, "type": "invalid_request"}},
+                status=400,
+            )
+            return
         # Speculatively load the target model now, overlapping its cold-load
         # cost with the history assembly, scope resolution, and memory work
         # below. Best-effort and local-only (see server.prewarm_model).
