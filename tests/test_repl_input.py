@@ -226,6 +226,22 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     assert "/help" in text
 
 
+def test_terminal_endpoint_link_is_clickable_without_affecting_layout(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+
+    link = sonder_repl._terminal_link("http://127.0.0.1:11435")
+
+    assert link.startswith("\x1b]8;;http://127.0.0.1:11435\x1b\\")
+    assert link.endswith("\x1b]8;;\x1b\\")
+    assert sonder_repl._visible_len(link) == len("http://127.0.0.1:11435")
+
+
+def test_terminal_endpoint_link_stays_plain_when_ansi_is_disabled(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    assert sonder_repl._terminal_link("http://127.0.0.1:11435") == "http://127.0.0.1:11435"
+
+
 def test_execution_prompt_shows_live_lanes_running_and_queued_agents(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
     text = sonder_repl._execution_prompt({

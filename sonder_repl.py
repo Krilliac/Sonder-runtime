@@ -363,7 +363,22 @@ def _rule(char="─", width=56):
 def _result_tag(ok):
     return _paint("PASS" if ok else "FAIL", _Ansi.green if ok else _Ansi.red, _Ansi.bold)
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*(?:\x1b\\|\x07)")
+
+
+def _terminal_link(url, label=None):
+    """Return an OSC 8 link for an interactive terminal, or plain text.
+
+    Windows Terminal recognizes OSC 8 as a real clickable link, so the REPL's
+    loopback endpoint can open the local live-log dashboard directly.  The
+    escape sequence is omitted when colour is disabled: copied/piped output
+    must remain the literal URL and layout width must stay stable.
+    """
+    target = str(url or "")
+    text = str(label if label is not None else target)
+    if not _Ansi.enabled or not target.startswith(("http://", "https://")):
+        return text
+    return "\x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\" % (target, text)
 
 
 def _visible_len(text):
@@ -516,8 +531,8 @@ def _startup_banner(strict, persona, project, tier=None):
     rows = [
         ("model", "%s  %s" % (model, _paint("(%s tier)" % tier, _Ansi.muted)),
          (_Ansi.cyan,)),
-        ("endpoint", endpoint if live else
-         "%s  %s" % (endpoint, _paint("(not listening)", _Ansi.amber)),
+        ("endpoint", _terminal_link(endpoint) if live else
+         "%s  %s" % (_terminal_link(endpoint), _paint("(not listening)", _Ansi.amber)),
          (_Ansi.green,) if live else (_Ansi.muted,)),
         ("directory", _home_relative(os.getcwd()), ()),
         ("persona", str(persona), (_Ansi.cyan,)),
