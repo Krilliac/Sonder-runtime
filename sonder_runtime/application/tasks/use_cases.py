@@ -119,6 +119,12 @@ class TaskService:
             **filters, **self._scope_kwargs(account_scope)
         ))
 
+    def latest_checklist(self, *, account_scope: str | None = None) -> ChecklistView | None:
+        parent = self._repository.latest_checklist(**self._scope_kwargs(account_scope))
+        if not parent:
+            return None
+        return self.checklist(parent["id"], account_scope=account_scope)
+
     def update_task(
         self, task_id: str, *, account_scope: str | None = None, **changes
     ) -> TaskView:

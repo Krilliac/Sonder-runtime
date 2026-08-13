@@ -59,6 +59,32 @@ def test_catalogued_task_and_checklist_tools_cannot_cross_account_or_leak_latest
     assert "no checklist yet" in serve._handle_slash("/checklist", context=bob)
 
 
+def test_scoped_task_show_events_alias_and_latest_checklist_use_updated_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    alice = _account("alice")
+    scope = serve._task_account_scope(alice)
+    task_id = _task_id(server.scoped_task_tool_dispatch(
+        "task_create", {"title": "private"}, account_scope=scope,
+    ))
+    assert "events:" not in server.scoped_task_tool_dispatch(
+        "task_show", {"task_id": task_id, "events": False}, account_scope=scope,
+    )
+
+    older = server.scoped_task_tool_dispatch(
+        "checklist_create", {"title": "older", "items_json": '["one"]', "priority": 1},
+        account_scope=scope,
+    )
+    newer = server.scoped_task_tool_dispatch(
+        "checklist_create", {"title": "newer", "items_json": '["two"]', "priority": 2},
+        account_scope=scope,
+    )
+    assert "older" in older and "newer" in newer
+    # Priority sorting puts "older" first in a normal task list; the bare
+    # checklist command must instead choose its newest durable parent.
+    assert "newer" in serve._handle_slash("/checklist", context=alice)
+
+
 def test_task_scope_is_opaque_and_only_accounts_receive_one():
     scope = serve._task_account_scope(_account("alice"))
     assert scope.startswith("ta-")

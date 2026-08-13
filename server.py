@@ -7175,7 +7175,11 @@ def scoped_task_tool_dispatch(tool_name: str, kwargs: dict, *, account_scope: st
             return "task updated\n  " + _format_task(row.to_dict())
         if tool_name == "task_show":
             task_id = values.pop("task_id")
-            detail = service.show_task(task_id, account_scope=account_scope, **values)
+            include_events = values.pop("events", True)
+            detail = service.show_task(
+                task_id, include_events=bool(include_events),
+                account_scope=account_scope, **values,
+            )
             if not detail.task:
                 return "no task '%s'." % task_id
             lines = ["task", "  " + _format_task(detail.task.to_dict())]
@@ -7254,12 +7258,9 @@ def scoped_latest_checklist(account_scope: str) -> str:
     conn = _open_db()
     try:
         service = _task_service(conn)
-        for row in service.list_tasks(account_scope=account_scope, include_done=True, limit=200):
-            if row.parent_id:
-                continue
-            checklist = service.checklist(row.id, account_scope=account_scope)
-            if checklist.items:
-                return _format_checklist(checklist.to_dict())
+        checklist = service.latest_checklist(account_scope=account_scope)
+        if checklist and checklist.items:
+            return _format_checklist(checklist.to_dict())
     except Exception as exc:
         return "task lookup failed: %s" % exc
     finally:
