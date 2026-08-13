@@ -960,6 +960,100 @@ def test_fanout_receipt_derives_remaining_cooldown_at_read_time(monkeypatch):
     assert "retry_after_ts" not in receipt["skipped"][0]
 
 
+def test_failed_result_exposes_only_closed_class_and_live_provider_retry_hint(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    raw_provider_detail = "provider body: private prompt should never persist"
+    calls = []
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+    ))
+
+    def fail(_prompt):
+        calls.append(1)
+        raise server.ModelCallError(
+            "http", raw_provider_detail, status=429, cloud=True,
+            retry_after_seconds=99_999,
+        )
+
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: fail)
+    receipt = json.loads(server.model_fanout("private prompt", scope="cloud"))
+
+    assert calls == [1]  # A provider hint is never an automatic replay.
+    assert receipt["status"] == "completed"
+    failure = receipt["failures"][0]
+    assert failure["failure_class"] == "throttled"
+    assert 3_599_000 <= failure["retry_after_ms"] <= 3_600_000
+    assert "retry_after_ts" not in failure
+    rendered = json.dumps(receipt)
+    assert raw_provider_detail not in rendered
+    assert "private prompt" not in rendered
+
+
+def test_fanout_receipt_keeps_an_expired_provider_hint_as_zero(monkeypatch):
+    monkeypatch.setattr(server.fanout_store, "get_run", lambda _run_id: {
+        "id": "fan-test", "status": "completed", "scope": "cloud",
+        "created_ts": 100.0, "finished_ts": 110.0, "limits_json": "{}",
+    })
+    monkeypatch.setattr(server.fanout_store, "list_results", lambda _run_id: [{
+        "model": "remote:cloud", "status": "failed", "answer": "", "error": "safe failure",
+        "elapsed_ms": 10, "answer_chars": 0, "answer_truncation_known": 1,
+        "answer_truncated": 0, "thinking_chars": 0, "done_reason": "",
+        "failure_class": "throttled", "retry_after_ts": 199.0,
+    }])
+    monkeypatch.setattr(server.time, "time", lambda: 200.0)
+
+    receipt = server._fanout_receipt("fan-test")
+
+    assert receipt["failures"][0]["retry_after_ms"] == 0
+    assert "retry_after_ts" not in receipt["failures"][0]
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (server.ModelCallError("configuration", "x"), "configuration"),
+        (server.ModelCallError("request", "x", status=400), "request_rejected"),
+        (server.ModelCallError("timeout", "x"), "timeout"),
+        (server.ModelCallError("transport", "x"), "transport"),
+        (server.ModelCallError("protocol", "x"), "protocol"),
+        (server.ModelCallError("empty_response", "x"), "empty_response"),
+        (server.ModelCallError("budget", "x"), "budget_exhausted"),
+        (server.ModelCallError("http", "x", status=408), "timeout"),
+        (server.ModelCallError("http", "x", status=410), "unavailable"),
+        (server.ModelCallError("unrecognized-provider-kind", "x"), "unknown"),
+    ],
+)
+def test_fanout_failure_class_is_closed_and_content_free(error, expected):
+    assert server._fanout_failure_class(error) == expected
+    assert server._fanout_failure_class(RuntimeError("provider says secret")) == "unknown"
+
+
+def test_vault_unavailable_fanout_result_is_configuration_failure(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    run = server._fanout_start("private prompt", "local", cap=32, request_timeout=5, cloud_workers=1)
+    monkeypatch.setattr(
+        server.fanout_prompt_vault, "decrypt_prompt",
+        lambda _ciphertext: (_ for _ in ()).throw(
+            server.fanout_prompt_vault.PromptVaultError("private vault body"),
+        ),
+    )
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert receipt["failures"] == [
+        {
+            "model": "local-a", "error": "sealed prompt unavailable", "elapsed_ms": 0,
+            "status": "failed", "failure_class": "configuration", "answer_chars": 0,
+            "stored_answer_chars": 0, "answer_truncation_known": True,
+            "answer_truncated": False, "thinking_chars": 0, "done_reason": None,
+        },
+    ]
+
+
 def test_interrupted_fanout_receipt_duration_is_terminal(monkeypatch, tmp_path):
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server.time, "time", lambda: 1_000.0)

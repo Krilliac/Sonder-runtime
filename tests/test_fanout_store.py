@@ -108,7 +108,35 @@ def test_result_usage_columns_migrate_and_store_only_bounded_scalars(tmp_path, m
     conn = sqlite3.connect(database)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(fanout_results)")}
     conn.close()
-    assert {"answer_chars", "answer_truncated", "answer_truncation_known", "thinking_chars", "done_reason"} <= columns
+    assert {
+        "answer_chars", "answer_truncated", "answer_truncation_known",
+        "thinking_chars", "done_reason", "failure_class",
+    } <= columns
+    assert recorded["failure_class"] is None
+
+
+def test_failure_class_migration_keeps_legacy_receipts_unclassified(tmp_path, monkeypatch):
+    database = tmp_path / "legacy-fanout.db"
+    conn = sqlite3.connect(database)
+    conn.executescript(store._SCHEMA.replace(" failure_class TEXT,", ""))
+    conn.execute(
+        "INSERT INTO fanout_runs(id,prompt,prompt_sha256,models_json,status,created_ts,updated_ts) VALUES(?,?,?,?,?,?,?)",
+        ("legacy", "legacy", "", '["model"]', "completed", 1.0, 1.0),
+    )
+    conn.execute(
+        "INSERT INTO fanout_results(run_id,model,status,error,updated_ts) VALUES(?,?,?,?,?)",
+        ("legacy", "model", "failed", "historic failure", 1.0),
+    )
+    conn.commit(); conn.close()
+    monkeypatch.setattr(store, "database_path", lambda: str(database))
+    store.reset_schema_cache_for_tests()
+
+    result = store.list_results("legacy")[0]
+
+    assert result["failure_class"] is None
+    with sqlite3.connect(database) as migrated:
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(fanout_results)")}
+    assert "failure_class" in columns
 
 
 def test_legacy_answer_receipt_does_not_guess_truncation_from_exact_storage_limit(tmp_path, monkeypatch):
@@ -159,7 +187,10 @@ def test_stale_claim_becomes_unknown_and_is_not_replayed():
     store.claim_next_result(run["id"], "dead", owner_pid=2_147_483_647, lease_seconds=30)
     assert store.reconcile_stale_runs(now=time.time() + 31) == 1
     assert store.get_run(run["id"])["status"] == "interrupted"
-    assert store.list_results(run["id"])[0]["status"] == "unknown"
+    result = store.list_results(run["id"])[0]
+    assert result["status"] == "unknown"
+    assert result["failure_class"] == "execution_uncertain"
+    assert result["retry_after_ts"] is None
 
 
 def test_stale_queued_run_becomes_resumable_without_replaying_any_call():
@@ -286,6 +317,40 @@ def test_resume_requires_explicit_unknown_retry():
     assert store.list_results(run["id"])[0]["status"] == "pending"
 
 
+def test_resume_clears_failure_class_and_provider_retry_hint():
+    run = store.create_run("question", ["a"])
+    assert store.claim_run(run["id"], "worker", owner_pid=os.getpid())
+    claim = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid())
+    assert store.record_result(
+        run["id"], claim["model"], "worker", "failed", error="safe failure",
+        failure_class="throttled", retry_after_ts=time.time() + 60,
+    )
+
+    assert store.resume_run(run["id"], include_failed=True)
+    resumed = store.list_results(run["id"])[0]
+
+    assert resumed["status"] == "pending"
+    assert resumed["failure_class"] is None
+    assert resumed["retry_after_ts"] is None
+
+
+def test_failure_class_is_closed_and_retry_expiry_is_bounded(monkeypatch):
+    now = [1_000.0]
+    monkeypatch.setattr(store.time, "time", lambda: now[0])
+    run = store.create_run("question", ["a"])
+    assert store.claim_run(run["id"], "worker", owner_pid=os.getpid())
+    claim = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid())
+
+    result = store.record_result(
+        run["id"], claim["model"], "worker", "failed", error="safe failure",
+        failure_class="provider body should not become a class", retry_after_ts=99_999.0,
+    )
+
+    assert result["failure_class"] == "unknown"
+    assert result["retry_after_ts"] == now[0] + store.MAX_PROVIDER_RETRY_SECONDS
+    assert store.retry_after_timestamp(99_999.0, now=now[0]) == now[0] + store.MAX_PROVIDER_RETRY_SECONDS
+
+
 def test_resume_requeues_unclaimed_pending_targets_without_retrying_unknown():
     run = store.create_run("question", ["claimed", "unclaimed"])
     store.claim_run(run["id"], "dead", owner_pid=2_147_483_647)
@@ -310,7 +375,9 @@ def test_lease_transfer_marks_old_inflight_result_unknown(monkeypatch):
     now[0] += 31
 
     assert store.claim_run(run["id"], "new", owner_pid=os.getpid())
-    assert store.list_results(run["id"])[0]["status"] == "unknown"
+    result = store.list_results(run["id"])[0]
+    assert result["status"] == "unknown"
+    assert result["failure_class"] == "execution_uncertain"
     assert store.record_result(run["id"], "a", "old", "answered", answer="late") is None
 
 
