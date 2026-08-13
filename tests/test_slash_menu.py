@@ -404,12 +404,13 @@ class _FakeStdout:
         return "".join(self.chunks)
 
 
-def _drive(monkeypatch, keys, prompt="> "):
+def _drive(monkeypatch, keys, prompt="> ", history=None):
     console = _FakeConsole(keys)
     out = _FakeStdout()
     monkeypatch.setattr(slash_menu, "_msvcrt", lambda: console)
     monkeypatch.setattr(slash_menu.sys, "stdout", out)
-    return slash_menu._read_line_raw(prompt, completer=_completer), out
+    return slash_menu._read_line_raw(
+        prompt, completer=_completer, history=history), out
 
 
 def test_raw_reader_accepts_a_typed_line(monkeypatch):
@@ -423,6 +424,21 @@ def test_raw_reader_decodes_the_arrow_prefix_and_completes_with_tab(monkeypatch)
     keys = list("/re") + ["\xe0", "P", "\t", "\r"]
     line, _ = _drive(monkeypatch, keys)
     assert line == "/report"
+
+
+def test_raw_reader_recalls_session_history_outside_the_slash_palette(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, ["\xe0", "H", "\r"], history=["one", "two"])
+    assert line == "two"
+
+
+def test_raw_reader_down_restores_the_unfinished_draft(monkeypatch):
+    line, _ = _drive(
+        monkeypatch,
+        list("draft") + ["\xe0", "H", "\xe0", "P", "\r"],
+        history=["older"],
+    )
+    assert line == "draft"
 
 
 def test_raw_reader_ignores_an_unmapped_extended_key(monkeypatch):
