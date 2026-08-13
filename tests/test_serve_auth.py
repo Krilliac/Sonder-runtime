@@ -65,6 +65,76 @@ def test_chat_rejects_non_string_model_before_selector_routing(monkeypatch, mode
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
+@pytest.mark.parametrize("stream", ["false", 1, {}, []])
+def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, stream):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = json.dumps({
+        "model": "sonder",
+        "stream": stream,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": "stream must be a boolean", "type": "invalid_request",
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
+def test_chat_false_stream_returns_json_not_sse(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: "answer")
+    request = json.dumps({
+        "model": "sonder",
+        "stream": False,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith("answer")
+
+
+def test_chat_null_stream_uses_non_streaming_default(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: "answer")
+    request = json.dumps({
+        "model": "sonder",
+        "stream": None,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith("answer")
+
+
 @pytest.mark.parametrize(
     "body, headers, expected_result",
     [

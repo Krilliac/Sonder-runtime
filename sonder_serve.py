@@ -2414,7 +2414,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)
             return
 
-        stream = bool(req.get("stream", False))
+        stream = req.get("stream", False)
+        if stream is None:
+            stream = False
+        elif not isinstance(stream, bool):
+            record_early_chat_metric("invalid_stream")
+            self._send_json_payload(
+                {"error": {
+                    "message": "stream must be a boolean",
+                    "type": "invalid_request",
+                }},
+                status=400,
+            )
+            return
         model = req.get("model", "sonder")
         if not isinstance(model, str):
             record_early_chat_metric("invalid_model")
