@@ -76,6 +76,21 @@ COMMANDS = [
         "summary": "Inspect or guarded-edit shared local model mappings and execution-lane tiers; cloud remains separate.",
     },
     {
+        "name": "/updatecheck",
+        "category": "repo",
+        "risk": "safe",
+        "summary": "Fetch and report the installed Sonder Git commit, newest canonical commit, timestamps, and whether this source checkout is behind.",
+    },
+    {
+        "name": "/update",
+        # Fast-forwards the live runtime source checkout.  This is separate
+        # from the read-only /updatecheck command so its dangerous risk does
+        # not over-gate normal status inspection.
+        "category": "repo",
+        "risk": "dangerous",
+        "summary": "Safely fast-forward a clean canonical Sonder source checkout; never merges, rebases, or overwrites local work.",
+    },
+    {
         "name": "/hardware",
         "category": "system",
         "risk": "safe",

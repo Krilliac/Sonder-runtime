@@ -148,6 +148,11 @@ _CATEGORY_BY_TOOL = {
     "system_profile_text": "persona",
     "update_system_profile": "persona",
     "system_improvement_report": "system",
+    # Source updates act on Sonder's repository checkout.  Keeping both the
+    # read-only status and guarded fast-forward in the repo family makes
+    # `/git` completion cohesive rather than surfacing unrelated system rows.
+    "runtime_source_update": "repo",
+    "runtime_source_update_status": "repo",
     "data_convert": "data",
     "elevate": "security",
 }
@@ -227,6 +232,7 @@ _CATEGORY_BY_SLASH = {
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/goal": "system", "/improve": "system", "/append": "filesystem",
+    "/updatecheck": "repo", "/update": "repo", "/updatesource": "repo",
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
@@ -249,6 +255,9 @@ _DANGEROUS = frozenset({
     # shape of decision -- it widens what every later privileged call is
     # allowed to do -- so it gets the same treatment.
     "runtime_policy_update", "permission_rule_set", "elevate",
+    # Fast-forwarding the source tree changes the bytes enforcing every later
+    # request.  The paired status tool is separately marked read-only below.
+    "runtime_source_update",
     # `admin_login` is the console's elevation primitive by that same
     # definition, and was missing from this set because it looks like a read:
     # the login call mutates nothing itself. What it *returns* does. It is the
@@ -283,6 +292,7 @@ _READ_ONLY = frozenset({
     "live_reload_status", "mcp_runtime_status", "reasoning_show",
     "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
     "memory_export", "policy_explain",
+    "runtime_source_update_status",
 })
 
 # Branches whose real work is done by module-level functions that front no

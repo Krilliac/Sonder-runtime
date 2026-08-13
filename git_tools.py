@@ -15,6 +15,7 @@ import signal
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 
 import file_ops
 import sonder_logging
@@ -25,6 +26,17 @@ MAX_TIMEOUT = 30
 DEFAULT_OUTPUT_BYTES = 128_000
 MAX_OUTPUT_BYTES = 256_000
 MAX_DIFF_CONTEXT = 20
+
+# Updating the running source tree is deliberately narrower than ordinary Git
+# project tools.  It is a local-developer convenience for this repository, not
+# a general "pull whatever remote the model names" capability.
+RUNTIME_UPDATE_REMOTE = "origin"
+RUNTIME_UPDATE_BRANCH = "main"
+_TRUSTED_RUNTIME_ORIGINS = frozenset({
+    "https://github.com/krilliac/sonder-runtime",
+    "git@github.com:krilliac/sonder-runtime",
+    "ssh://git@github.com/krilliac/sonder-runtime",
+})
 
 
 def _bounded_int(value, default, minimum, maximum):
@@ -274,6 +286,134 @@ def repo_status(root=".", *, timeout=DEFAULT_TIMEOUT,
     return parsed
 
 
+def _runtime_git_text(root, arguments, *, operation, timeout=DEFAULT_TIMEOUT):
+    return _checked_git(
+        root, arguments, timeout=timeout, max_output=16_384, operation=operation,
+    )["stdout"].strip()
+
+
+def _runtime_remote_url(root):
+    return _runtime_git_text(
+        root, ["remote", "get-url", RUNTIME_UPDATE_REMOTE],
+        operation="remote URL probe",
+    )
+
+
+def _normalise_remote_url(value):
+    return str(value or "").strip().rstrip("/").removesuffix(".git").casefold()
+
+
+def _trusted_runtime_origin(value):
+    return _normalise_remote_url(value) in _TRUSTED_RUNTIME_ORIGINS
+
+
+def runtime_update_status(root, *, refresh=False, timeout=DEFAULT_TIMEOUT):
+    """Return bounded source-tree update evidence for Sonder itself.
+
+    Unlike :func:`repo_status`, this accepts only an already-selected runtime
+    source root supplied by the host.  ``refresh`` fetches only ``origin/main``
+    and never changes the worktree.
+    """
+    root = Path(root).resolve()
+    top = _require_repository_root(root, timeout=timeout, max_output=16_384)
+    remote_url = _runtime_remote_url(top)
+    if refresh and not _trusted_runtime_origin(remote_url):
+        raise PermissionError("runtime update check requires the canonical Sonder origin remote")
+    if refresh:
+        _checked_git(
+            top,
+            [
+                "-c", "remote.%s.uploadpack=" % RUNTIME_UPDATE_REMOTE,
+                "-c", "core.sshCommand=",
+                "fetch", "--no-tags", "--prune", RUNTIME_UPDATE_REMOTE,
+                "+refs/heads/%s:refs/remotes/%s/%s" % (
+                    RUNTIME_UPDATE_BRANCH, RUNTIME_UPDATE_REMOTE, RUNTIME_UPDATE_BRANCH,
+                ),
+            ],
+            timeout=timeout, max_output=16_384, operation="update fetch",
+        )
+    local = _runtime_git_text(top, ["rev-parse", "HEAD"], operation="HEAD probe")
+    remote_ref = "%s/%s" % (RUNTIME_UPDATE_REMOTE, RUNTIME_UPDATE_BRANCH)
+    newest_commit = _runtime_git_text(
+        top, ["rev-parse", "--verify", remote_ref], operation="remote HEAD probe",
+    )
+    counts = _runtime_git_text(
+        top, ["rev-list", "--left-right", "--count", "HEAD...%s" % remote_ref],
+        operation="update distance",
+    ).split()
+    if len(counts) != 2:
+        raise ValueError("git update distance returned malformed output")
+    try:
+        ahead, behind = (int(counts[0]), int(counts[1]))
+    except ValueError as exc:
+        raise ValueError("git update distance returned non-numeric output") from exc
+    status = repo_status(top, timeout=timeout, max_output=16_384, bypass=True)
+    branch = status.get("branch") or ""
+    if ahead and behind:
+        state = "diverged"
+    elif ahead:
+        state = "ahead"
+    elif behind:
+        state = "behind"
+    else:
+        state = "current"
+    return {
+        "root": str(top),
+        "branch": branch,
+        "installed_commit": local,
+        "installed_commit_time": _runtime_git_text(
+            top, ["show", "-s", "--format=%cI", "HEAD"], operation="installed commit time",
+        ),
+        "newest_commit": newest_commit,
+        "newest_commit_time": _runtime_git_text(
+            top, ["show", "-s", "--format=%cI", remote_ref], operation="remote commit time",
+        ),
+        "ahead": ahead,
+        "behind": behind,
+        "state": state,
+        "clean": status.get("clean") is True,
+        "remote": remote_url,
+        "trusted_remote": _trusted_runtime_origin(remote_url),
+        "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def runtime_update(root, *, timeout=MAX_TIMEOUT):
+    """Fast-forward this verified clean source checkout to ``origin/main``.
+
+    Hooks are disabled and no merge/rebase/conflict resolution is attempted.
+    Callers must restart the running process after a successful update.
+    """
+    root = Path(root).resolve()
+    top = _require_repository_root(root, timeout=timeout, max_output=16_384)
+    if not _trusted_runtime_origin(_runtime_remote_url(top)):
+        raise PermissionError("runtime update requires the canonical Sonder origin remote")
+    before = runtime_update_status(top, refresh=True, timeout=timeout)
+    if before["branch"] != RUNTIME_UPDATE_BRANCH:
+        raise PermissionError("runtime update requires branch %r" % RUNTIME_UPDATE_BRANCH)
+    if not before["clean"]:
+        raise PermissionError("runtime update refuses a dirty source checkout")
+    if before["ahead"]:
+        raise PermissionError("runtime update refuses local commits; reconcile them manually")
+    if before["state"] == "current":
+        return {"updated": False, "before": before, "after": before}
+    hooks_path = str(Path(before["root"]) / ".sonder-disabled-git-hooks")
+    _checked_git(
+        Path(before["root"]),
+        [
+         *_neutralized_filter_arguments(
+             Path(before["root"]), timeout=timeout, max_output=65_536,
+         ),
+         "-c", "core.hooksPath=" + hooks_path,
+         "-c", "core.sshCommand=",
+         "merge", "--ff-only", "--no-edit", "--no-overwrite-ignore",
+         "%s/%s" % (RUNTIME_UPDATE_REMOTE, RUNTIME_UPDATE_BRANCH)],
+        timeout=timeout, max_output=64_000, operation="fast-forward update",
+    )
+    after = runtime_update_status(root, refresh=False, timeout=timeout)
+    return {"updated": True, "before": before, "after": after}
+
+
 def _resolve_diff_path(root, path, *, extra_roots):
     raw = str(path or "").strip()
     if not raw:
@@ -311,14 +451,14 @@ def _resolve_diff_path(root, path, *, extra_roots):
     return relative.as_posix()
 
 
-_FILTER_COMMAND_RE = re.compile(r"^(filter\..*)\.(?:clean|process)$", re.IGNORECASE)
+_FILTER_COMMAND_RE = re.compile(r"^(filter\..*)\.(?:clean|smudge|process)$", re.IGNORECASE)
 
 
 def _neutralized_filter_arguments(root, *, timeout, max_output):
-    """Return command-line overrides for every configured clean/process driver."""
+    """Return command-line overrides for every configured checkout filter."""
     result = _run_git(
         root,
-        ["config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process)$"],
+        ["config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"],
         timeout=timeout, max_output=min(max_output, 65_536),
     )
     if result["timed_out"]:
@@ -339,11 +479,12 @@ def _neutralized_filter_arguments(root, *, timeout, max_output):
         drivers.add(match.group(1))
     overrides = []
     for driver in sorted(drivers, key=lambda value: (value.casefold(), value)):
-        # `process=` disables the long-running protocol; the constant passthrough
-        # clean command replaces any repository-controlled shell command.
+        # `process=` disables the long-running protocol; fixed passthrough
+        # commands replace repository-controlled clean/smudge programs.
         overrides.extend([
             "-c", "%s.process=" % driver,
             "-c", "%s.clean=cat" % driver,
+            "-c", "%s.smudge=cat" % driver,
             "-c", "%s.required=false" % driver,
         ])
     return overrides
