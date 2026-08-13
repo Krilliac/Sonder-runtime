@@ -22049,6 +22049,16 @@ def natural_model_request(text):
                 "kind": "fanout", "scope": scope, "profile": profile,
                 "prompt": profiled_fanout.group(2).strip(),
             }
+    sonder_cloud_fanout = re.match(
+        # Preserve the same whole-turn imperative/delimiter boundary as the
+        # general fanout grammar below.  This covers the user-facing runtime
+        # name without treating a retrieved mention of Sonder as authority to
+        # spend local/cloud compute.
+        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:the\s+)?sonder\s+models?\s*(?:and|\+)\s+cloud(?:\s+models?)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if sonder_cloud_fanout:
+        return {"kind": "fanout", "scope": "all", "prompt": sonder_cloud_fanout.group(1).strip()}
     fanout = re.match(
         # Keep this an imperative whole-turn grammar: it is deliberately not
         # a classifier over retrieved prose.  ``available`` describes the
