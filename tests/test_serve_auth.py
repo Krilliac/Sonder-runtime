@@ -978,6 +978,50 @@ def test_http_recent_fanout_rejects_oversized_numeric_limit(monkeypatch):
     assert "limit must be an integer" in json.loads(body)["error"]["message"]
 
 
+@pytest.mark.parametrize("query, message", [
+    ("limit=1&limit=2", "limit must be supplied at most once"),
+    ("include_finished=true&include_finished=false", "include_finished must be supplied at most once"),
+])
+def test_http_recent_fanout_rejects_duplicate_query_parameters(monkeypatch, query, message):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(
+        ts.server.fanout_store, "recent_run_summaries",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not query store")),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/fanout?" + query)
+
+    assert status == 400
+    assert json.loads(body)["error"]["message"] == message
+
+
+def test_http_recent_fanout_admin_and_local_open_are_unscoped(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        ts.server.fanout_store, "recent_run_summaries",
+        lambda **kwargs: captured.append(kwargs) or [{"run_id": "fan-operational"}],
+    )
+
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts, "_auth_account", lambda _header: {"username": "admin", "role": "admin"})
+    with _http_server(monkeypatch) as port:
+        status, _, _ = _request(port, "GET", "/v1/fanout", headers={"Authorization": "Bearer admin-token"})
+    assert status == 200
+    assert captured.pop() == {"request_owner": None, "include_finished": True, "limit": 20}
+
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    with _http_server(monkeypatch) as port:
+        status, _, _ = _request(port, "GET", "/v1/fanout")
+    assert status == 200
+    assert captured.pop() == {"request_owner": None, "include_finished": True, "limit": 20}
+
+
 def test_http_fanout_cancel_requires_developer_and_uses_owned_run(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")
