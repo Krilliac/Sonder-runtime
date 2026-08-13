@@ -2711,6 +2711,21 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(synth_model, str):
                 self._send_json_payload({"error": {"message": "synth_model must be a string", "type": "invalid_request"}}, status=400)
                 return True
+            # Synthesis starts a fresh bounded local generation.  In shared
+            # deployments it must consume the same per-account admission
+            # budget as chat completions, otherwise callers can bypass the
+            # inference rate limit by repeatedly synthesizing one receipt.
+            conn = server._open_db()
+            try:
+                ok, message = admin_auth.rate_limit(conn, context.get("account"))
+            finally:
+                conn.close()
+            if not ok:
+                self._send_json_payload(
+                    {"error": {"message": message, "type": "rate_limit"}},
+                    status=429,
+                )
+                return True
             try:
                 self._send_json_payload(server._fanout_synthesize_run(_run, synth_model))
             except server.ModelCallError as exc:

@@ -1124,6 +1124,38 @@ def test_http_fanout_synthesis_maps_safe_model_failures(monkeypatch):
     }
 
 
+def test_http_fanout_synthesis_applies_account_rate_limit(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    account = {"username": "dev", "role": "developer"}
+    monkeypatch.setattr(ts, "_auth_account", lambda _header: account)
+    owner = ts._fanout_request_owner({"account": account, "api_key": False})
+    monkeypatch.setattr(
+        ts.server.fanout_store, "get_run",
+        lambda _run_id: {"id": "fan-owned", "request_owner": owner},
+    )
+    rate_calls = []
+    monkeypatch.setattr(
+        ts.admin_auth, "rate_limit",
+        lambda _conn, received: rate_calls.append(received) or (False, "rate limit exceeded"),
+    )
+    monkeypatch.setattr(
+        ts.server, "_fanout_synthesize_run",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("generation must not run")),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/fanout/fan-owned/synthesize", body=b"{}",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer dev-token"},
+        )
+
+    assert status == 429
+    assert json.loads(body)["error"] == {"message": "rate limit exceeded", "type": "rate_limit"}
+    assert rate_calls == [account]
+
+
 def test_http_todo_command_preserves_task_text_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
