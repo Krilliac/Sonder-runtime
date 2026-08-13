@@ -23,57 +23,129 @@ class LegacyTaskRepository:
     def __init__(self, connection) -> None:
         self._connection = connection
 
-    def create(self, **fields) -> dict:
-        import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.create_task, self._connection, **fields)
-
-    def list(self, **filters) -> list[dict]:
-        import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.list_tasks, self._connection, **filters)
-
-    def update(self, task_id: str, **changes) -> dict:
+    def create(self, *, account_scope: str | None = None, **fields) -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
         return _store_call(
-            memory_store.update_task, self._connection, task_id, **changes
+            memory_store.create_task,
+            self._connection,
+            account_scope=account_scope,
+            **fields,
         )
 
-    def get(self, task_id: str) -> dict | None:
-        import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.get_task, self._connection, task_id)
-
-    def events(self, task_id: str, limit: int = 20) -> list[dict]:
+    def list(self, *, account_scope: str | None = None, **filters) -> list[dict]:
         import sonder_runtime.adapters.memory_store as memory_store
         return _store_call(
-            memory_store.task_events, self._connection, task_id, limit=limit
+            memory_store.list_tasks,
+            self._connection,
+            account_scope=account_scope,
+            **filters,
         )
 
-    def children(self, task_id: str) -> list[dict]:
+    def update(
+        self, task_id: str, *, account_scope: str | None = None, **changes
+    ) -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.task_children, self._connection, task_id)
+        return _store_call(
+            memory_store.update_task,
+            self._connection,
+            task_id,
+            account_scope=account_scope,
+            **changes,
+        )
 
-    def delete(self, task_id: str) -> dict:
+    def get(self, task_id: str, *, account_scope: str | None = None) -> dict | None:
         import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.delete_task, self._connection, task_id)
+        return _store_call(
+            memory_store.get_task,
+            self._connection,
+            task_id,
+            account_scope=account_scope,
+        )
 
-    def add_dependency(self, task_id: str, depends_on: str) -> dict:
+    def events(
+        self, task_id: str, limit: int = 20, *, account_scope: str | None = None
+    ) -> list[dict]:
         import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.add_task_dep, self._connection, task_id, depends_on)
+        return _store_call(
+            memory_store.task_events,
+            self._connection,
+            task_id,
+            limit=limit,
+            account_scope=account_scope,
+        )
 
-    def remove_dependency(self, task_id: str, depends_on: str) -> dict:
+    def children(self, task_id: str, *, account_scope: str | None = None) -> list[dict]:
         import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.remove_task_dep, self._connection, task_id, depends_on)
+        return _store_call(
+            memory_store.task_children,
+            self._connection,
+            task_id,
+            account_scope=account_scope,
+        )
 
-    def dependencies(self, task_id: str) -> list[dict]:
+    def delete(self, task_id: str, *, account_scope: str | None = None) -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.task_dependencies, self._connection, task_id)
+        return _store_call(
+            memory_store.delete_task,
+            self._connection,
+            task_id,
+            account_scope=account_scope,
+        )
 
-    def dependents(self, task_id: str) -> list[dict]:
+    def add_dependency(
+        self, task_id: str, depends_on: str, *, account_scope: str | None = None
+    ) -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.task_dependents, self._connection, task_id)
+        return _store_call(
+            memory_store.add_task_dep,
+            self._connection,
+            task_id,
+            depends_on,
+            account_scope=account_scope,
+        )
 
-    def progress(self, project: str = "") -> dict:
+    def remove_dependency(
+        self, task_id: str, depends_on: str, *, account_scope: str | None = None
+    ) -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
-        return _store_call(memory_store.task_progress, self._connection, project=project)
+        return _store_call(
+            memory_store.remove_task_dep,
+            self._connection,
+            task_id,
+            depends_on,
+            account_scope=account_scope,
+        )
+
+    def dependencies(
+        self, task_id: str, *, account_scope: str | None = None
+    ) -> list[dict]:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(
+            memory_store.task_dependencies,
+            self._connection,
+            task_id,
+            account_scope=account_scope,
+        )
+
+    def dependents(
+        self, task_id: str, *, account_scope: str | None = None
+    ) -> list[dict]:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(
+            memory_store.task_dependents,
+            self._connection,
+            task_id,
+            account_scope=account_scope,
+        )
+
+    def progress(self, project: str = "", *, account_scope: str | None = None) -> dict:
+        import sonder_runtime.adapters.memory_store as memory_store
+        return _store_call(
+            memory_store.task_progress,
+            self._connection,
+            project=project,
+            account_scope=account_scope,
+        )
 
 
 class LegacyChecklistEventSink:

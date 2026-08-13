@@ -1,5 +1,8 @@
 import memory_store
 import server
+import sqlite3
+
+import pytest
 
 
 def test_task_create_list_update_and_events():
@@ -52,3 +55,106 @@ def test_task_list_accepts_pipe_delimited_status_filter():
 def test_task_list_contract_documents_multi_status_filtering():
     assert "pipe-delimited set" in server.task_list.__doc__
     assert "pending|blocked" in server.task_list.__doc__
+
+
+def test_account_scoped_task_operations_are_isolated_but_local_default_is_global():
+    conn = memory_store.connect(":memory:")
+    alpha_parent = memory_store.create_task(
+        conn, "alpha plan", task_id="alpha-parent", account_scope="account:alpha"
+    )
+    alpha_child = memory_store.create_task(
+        conn,
+        "alpha child",
+        parent_id=alpha_parent["id"],
+        task_id="alpha-child",
+        account_scope="account:alpha",
+    )
+    beta = memory_store.create_task(
+        conn, "beta task", task_id="beta-task", account_scope="account:beta"
+    )
+    legacy = memory_store.create_task(conn, "local task", task_id="local-task")
+
+    assert [row["id"] for row in memory_store.list_tasks(
+        conn, account_scope="account:alpha"
+    )] == [alpha_child["id"], alpha_parent["id"]]
+    assert memory_store.get_task(
+        conn, beta["id"], account_scope="account:alpha"
+    ) is None
+    assert memory_store.task_events(
+        conn, beta["id"], account_scope="account:alpha"
+    ) == []
+    assert [row["id"] for row in memory_store.task_children(
+        conn, alpha_parent["id"], account_scope="account:alpha"
+    )] == [alpha_child["id"]]
+    assert memory_store.task_progress(conn, account_scope="account:alpha")["total"] == 2
+
+    with pytest.raises(ValueError, match="no unique task 'beta-task'"):
+        memory_store.update_task(
+            conn, beta["id"], status="done", account_scope="account:alpha"
+        )
+    with pytest.raises(ValueError, match="no unique task 'beta-task'"):
+        memory_store.add_task_dep(
+            conn, alpha_child["id"], beta["id"], account_scope="account:alpha"
+        )
+    dependency = memory_store.add_task_dep(
+        conn, alpha_child["id"], alpha_parent["id"], account_scope="account:alpha"
+    )
+    assert dependency["depends_on"] == alpha_parent["id"]
+    assert [row["id"] for row in memory_store.task_dependencies(
+        conn, alpha_child["id"], account_scope="account:alpha"
+    )] == [alpha_parent["id"]]
+    assert [row["id"] for row in memory_store.task_dependents(
+        conn, alpha_parent["id"], account_scope="account:alpha"
+    )] == [alpha_child["id"]]
+    assert memory_store.remove_task_dep(
+        conn, alpha_child["id"], alpha_parent["id"], account_scope="account:alpha"
+    )["removed"] is True
+    with pytest.raises(ValueError, match="no unique task 'beta-task'"):
+        memory_store.delete_task(conn, beta["id"], account_scope="account:alpha")
+
+    disposable = memory_store.create_task(
+        conn, "alpha disposable", account_scope="account:alpha"
+    )
+    assert memory_store.delete_task(
+        conn, disposable["id"], account_scope="account:alpha"
+    )["deleted"] == disposable["id"]
+
+    # Calls without a scope retain local-single-user behavior and can see the
+    # old unscoped rows as well as all scoped rows.
+    assert {row["id"] for row in memory_store.list_tasks(conn)} == {
+        alpha_parent["id"], alpha_child["id"], beta["id"], legacy["id"],
+    }
+
+
+def test_task_account_scope_migrates_without_assigning_legacy_ownership(tmp_path):
+    path = tmp_path / "legacy-tasks.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "CREATE TABLE tasks ("
+            "id TEXT PRIMARY KEY, title TEXT NOT NULL, detail TEXT, "
+            "status TEXT DEFAULT 'pending', priority INTEGER DEFAULT 2, "
+            "project TEXT, owner TEXT, parent_id TEXT, "
+            "created_ts TEXT DEFAULT CURRENT_TIMESTAMP, "
+            "updated_ts TEXT DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.execute("INSERT INTO tasks(id, title) VALUES('legacy-id', 'legacy')")
+        conn.commit()
+        memory_store.init_db(conn)
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+        assert "account_scope" in columns
+        assert conn.execute(
+            "SELECT account_scope FROM tasks WHERE id='legacy-id'"
+        ).fetchone()[0] is None
+        assert memory_store.get_task(conn, "legacy-id")["title"] == "legacy"
+        assert memory_store.get_task(
+            conn, "legacy-id", account_scope="account:alpha"
+        ) is None
+        index_columns = [row[2] for row in conn.execute(
+            "PRAGMA index_info(idx_tasks_status_project)"
+        )]
+        assert index_columns[:2] == ["account_scope", "status"]
+    finally:
+        conn.close()
