@@ -22136,9 +22136,20 @@ def natural_model_request(text):
         selector = named_tag_to.group(1).strip()
         if _is_interpreter_like_bare_model_selector(selector):
             return None
+        # Unlike the ``model <tag>`` forms, this is deliberately terse enough
+        # to resemble ordinary version-tagged work (for example
+        # ``ubuntu:24.04 to reproduce ...``). Only consume it after an exact
+        # live-catalog match; an unavailable/unknown tag stays ordinary prose
+        # rather than losing its work instruction to an unknown-tier error.
+        try:
+            resolved = resolve_discovered_model(selector)
+        except Exception:
+            return None
+        if resolved is None:
+            return None
         return {
             "kind": "model",
-            "model": selector,
+            "model": resolved,
             "prompt": named_tag_to.group(2).strip(),
         }
     using_model = re.match(
