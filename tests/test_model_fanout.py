@@ -291,6 +291,14 @@ def test_natural_model_request_never_matches_embedded_or_non_imperative_prose(un
     "run using python:3.12 to reproduce this issue",
     "run using powershell:7 for reproduce this issue",
     "run powershell:7 for reproduce this issue",
+    "run ruby:3.3: reproduce this issue",
+    "run php:8.3 model to lint this issue",
+    "run using java:21 for test this issue",
+    "run deno:2.0: reproduce this issue",
+    "run bun:1.1 model to test this issue",
+    "run go:1.23: test this issue",
+    "run dotnet:8.0: test this issue",
+    "run cargo:1.82: test this issue",
 ])
 def test_natural_model_request_leaves_bare_interpreter_tags_as_work_prose(phrase):
     assert server.natural_model_request(phrase) is None
