@@ -225,6 +225,31 @@ def test_chat_false_stream_returns_json_not_sse(monkeypatch):
     assert json.loads(body)["choices"][0]["message"]["content"].startswith("answer")
 
 
+def test_chat_normal_assistant_content_is_not_character_truncated(monkeypatch):
+    """Receipt previews must not collapse a normal OpenAI response to `...`."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    answer = "begin:" + ("x" * 32_000) + ":end"
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: answer)
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "long reply"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    # The normal conversation surface may append the configured activity
+    # footer, but it must preserve the full assistant content before it.
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith(answer)
+
+
 def test_chat_null_stream_uses_non_streaming_default(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
@@ -1014,6 +1039,39 @@ def test_stream_exposes_same_elapsed_header_as_terminal_chunk():
     assert '"sonder_elapsed_ms": 37' in body
     assert '"sonder_receipt": {"request_id": "req_stream"' in body
     assert body.endswith("data: [DONE]\n\n")
+
+
+def test_stream_preserves_long_normal_assistant_content():
+    class StreamProbe:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = io.BytesIO()
+            self.close_connection = False
+
+        def send_response(self, status):
+            assert status == 200
+
+        def _cors(self):
+            pass
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            pass
+
+    answer = "begin:" + ("x" * 200_000) + ":end"
+    probe = StreamProbe()
+    probe._correlation_id = "req_stream_long"
+
+    assert ts.Handler._send_stream(probe, answer, "sonder", iid="stream-long")
+
+    payloads = [
+        json.loads(line[6:])
+        for line in probe.wfile.getvalue().decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert payloads[0]["choices"][0]["delta"]["content"] == answer
 
 
 def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):

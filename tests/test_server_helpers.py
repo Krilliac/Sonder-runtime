@@ -794,6 +794,27 @@ def test_make_generate_retains_only_content_free_backend_measurements(monkeypatc
     }
 
 
+def test_make_generate_retains_sanitized_empty_response_metadata(monkeypatch):
+    secret_thinking = "private reasoning must never be retained"
+
+    def fake_post(path, payload):
+        return {
+            "message": {"content": "", "thinking": secret_thinking},
+            "done_reason": " LENGTH ",
+        }
+
+    monkeypatch.setattr(server, "_post", fake_post)
+    gen = server._make_generate("local-model", "", 0.1, 20, 2048)
+
+    with pytest.raises(server.ModelCallError, match="no assistant content"):
+        gen("hello")
+
+    assert gen.last_response_meta == {
+        "thinking_chars": len(secret_thinking), "done_reason": "length",
+    }
+    assert secret_thinking not in json.dumps(gen.last_response_meta)
+
+
 def test_serve_target_cloud_tier_requires_opt_in(monkeypatch):
     monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     model, cloud, augment, label = server._serve_target("cloud-code", None)

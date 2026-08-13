@@ -19,12 +19,17 @@ def isolated(monkeypatch, tmp_path):
     store.reset_schema_cache_for_tests()
 
 
-def test_receipt_lifecycle_is_wal_foreign_key_and_bounded(isolated):
+def test_receipt_lifecycle_is_wal_foreign_key_and_explicitly_bounded(isolated):
     run = store.create_run("Bearer abcdefghijklmnop and api_key=secret", ["local", "cloud"], request_owner="user")
     assert "secret" not in run["prompt"] and "<redacted>" in run["prompt"]
     assert store.claim_run(run["id"], "worker", owner_pid=os.getpid())
     first = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid())
-    assert store.record_result(run["id"], first["model"], "worker", "answered", answer="x" * 100_000)["answer"] == "x" * store.MAX_ANSWER_CHARS
+    result = store.record_result(run["id"], first["model"], "worker", "answered", answer="x" * 100_000)
+    assert result["answer"] == "x" * store.MAX_ANSWER_CHARS
+    assert result["answer_chars"] == 100_000
+    assert result["answer_truncation_known"] == 1
+    assert result["answer_truncated"] == 1
+    assert not result["answer"].endswith("...")
     second = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid())
     store.record_result(run["id"], second["model"], "worker", "failed", error="timeout", elapsed_ms=12)
     assert store.get_run(run["id"])["status"] == "completed"
@@ -60,6 +65,77 @@ def test_schema_migration_scrubs_pre_vault_prompt_and_digest(isolated):
     raw = conn.execute("SELECT prompt, prompt_sha256 FROM fanout_runs WHERE id=?", (run["id"],)).fetchone()
     conn.close()
     assert raw == ("legacy-fanout-prompt:redacted", "")
+
+
+def test_result_usage_columns_migrate_and_store_only_bounded_scalars(tmp_path, monkeypatch):
+    database = tmp_path / "legacy-fanout.db"
+    conn = sqlite3.connect(database)
+    conn.executescript("""
+        CREATE TABLE fanout_runs (
+            id TEXT PRIMARY KEY, request_owner TEXT NOT NULL DEFAULT '', request_role TEXT NOT NULL DEFAULT '',
+            prompt TEXT NOT NULL, prompt_sha256 TEXT NOT NULL, models_json TEXT NOT NULL,
+            execution_prompt_ciphertext TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT 'local',
+            cloud_opt_in INTEGER NOT NULL DEFAULT 0, limits_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, owner_id TEXT NOT NULL DEFAULT '',
+            owner_pid INTEGER NOT NULL DEFAULT 0, owner_host TEXT NOT NULL DEFAULT '', lease_until REAL,
+            created_ts REAL NOT NULL, updated_ts REAL NOT NULL, finished_ts REAL
+        );
+        CREATE TABLE fanout_results (
+            run_id TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+            owner_id TEXT NOT NULL DEFAULT '', owner_pid INTEGER NOT NULL DEFAULT 0,
+            owner_host TEXT NOT NULL DEFAULT '', lease_until REAL, answer TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '', elapsed_ms INTEGER, retry_after_ts REAL, started_ts REAL,
+            finished_ts REAL, updated_ts REAL NOT NULL, PRIMARY KEY(run_id, model)
+        );
+    """)
+    conn.commit(); conn.close()
+    monkeypatch.setattr(store, "database_path", lambda: str(database))
+    store.reset_schema_cache_for_tests()
+
+    run = store.create_run("question", ["model"])
+    assert store.claim_run(run["id"], "worker", owner_pid=os.getpid())
+    claimed = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid())
+    recorded = store.record_result(
+        run["id"], claimed["model"], "worker", "answered", answer="answer",
+        answer_chars=999_999, thinking_chars="42", done_reason="provider-specific-value",
+    )
+
+    assert recorded["answer_chars"] == 999_999
+    assert recorded["answer_truncation_known"] == 1
+    assert recorded["answer_truncated"] == 0
+    assert recorded["thinking_chars"] == 42
+    assert recorded["done_reason"] == "other"
+    conn = sqlite3.connect(database)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fanout_results)")}
+    conn.close()
+    assert {"answer_chars", "answer_truncated", "answer_truncation_known", "thinking_chars", "done_reason"} <= columns
+
+
+def test_legacy_answer_receipt_does_not_guess_truncation_from_exact_storage_limit(tmp_path, monkeypatch):
+    database = tmp_path / "legacy-fanout.db"
+    conn = sqlite3.connect(database)
+    conn.executescript(store._SCHEMA.replace(
+        "answer_chars INTEGER NOT NULL DEFAULT 0, answer_truncated INTEGER NOT NULL DEFAULT 0,\n answer_truncation_known INTEGER NOT NULL DEFAULT 0, thinking_chars INTEGER NOT NULL DEFAULT 0,\n done_reason TEXT NOT NULL DEFAULT '',\n ",
+        "",
+    ))
+    conn.execute(
+        "INSERT INTO fanout_runs(id,prompt,prompt_sha256,models_json,status,created_ts,updated_ts) VALUES(?,?,?,?,?,?,?)",
+        ("legacy", "legacy", "", '["model"]', "completed", 1.0, 1.0),
+    )
+    conn.execute(
+        "INSERT INTO fanout_results(run_id,model,status,answer,updated_ts) VALUES(?,?,?,?,?)",
+        ("legacy", "model", "answered", "x" * store.MAX_ANSWER_CHARS, 1.0),
+    )
+    conn.commit(); conn.close()
+    monkeypatch.setattr(store, "database_path", lambda: str(database))
+    store.reset_schema_cache_for_tests()
+
+    result = store.list_results("legacy")[0]
+
+    assert result["answer"] == "x" * store.MAX_ANSWER_CHARS
+    assert result["answer_chars"] == store.MAX_ANSWER_CHARS
+    assert result["answer_truncation_known"] == 0
+    assert result["answer_truncated"] == 0
 
 
 def test_execution_ciphertext_is_bounded_without_truncation():
