@@ -2582,6 +2582,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_fanout_get(self):
         route = urllib.parse.urlsplit(self.path).path.rstrip("/")
+        if route == "/v1/fanout":
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return True
+            if not _developer_authorized(context):
+                self._send_json_payload({"error": {"message": "developer or admin authentication is required for model fanout", "type": "forbidden"}}, status=403)
+                return True
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
+            )
+            limit_text = (query.get("limit") or ["20"])[0]
+            finished_text = (query.get("include_finished") or ["true"])[0].casefold()
+            if not limit_text.isdigit() or not 1 <= int(limit_text) <= 100:
+                self._send_json_payload({"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}}, status=400)
+                return True
+            if finished_text not in ("true", "false"):
+                self._send_json_payload({"error": {"message": "include_finished must be true or false", "type": "invalid_request"}}, status=400)
+                return True
+            account = context.get("account") or {}
+            request_owner = None
+            if context.get("mode") != "local-open" and account.get("role") != "admin":
+                request_owner = _fanout_request_owner(context)
+            self._send_json_payload({"runs": server.fanout_store.recent_run_summaries(
+                request_owner=request_owner, include_finished=finished_text == "true",
+                limit=int(limit_text),
+            )})
+            return True
         prefix = "/v1/fanout/"
         if not route.startswith(prefix) or "/" in route[len(prefix):]:
             return False
