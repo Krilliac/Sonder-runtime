@@ -1063,6 +1063,48 @@ def test_serve_target_local_general_tier_answers_clean():
     assert label == "general"
 
 
+def test_exact_model_pin_keeps_the_selected_code_route_augmentation(monkeypatch):
+    """A REPL pin changes the backend, not the code route's memory policy."""
+    captured = {}
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_route_chat_web", lambda *_args: None)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda _tier, _strict: ("code-default:7b", False, True, "code"),
+    )
+    monkeypatch.setattr(
+        server, "resolve_discovered_model_record",
+        lambda selector: ("gemma3:12b", {"capabilities": ["chat"]}),
+    )
+    monkeypatch.setattr(server, "_fanout_nonchat_reason", lambda _record: "")
+    monkeypatch.setattr(server, "_is_cloud_model_name", lambda _model: False)
+    monkeypatch.setattr(server, "_internal_generate_for_route", lambda *_args: None)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+    monkeypatch.setattr(server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(
+        server, "_answer",
+        lambda _conn, _prompt, model, *_args, **kwargs: (
+            captured.update(model=model, augment=kwargs["augment"]) or "answer",
+            None,
+            {},
+        ),
+    )
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+
+    out = server._sonder_impl_serialized(
+        "hello", session="none", project="none", tier="code",
+        model_override="gemma3:12b",
+    )
+
+    assert out == "answer"
+    assert captured == {"model": "gemma3:12b", "augment": True}
+
+
 def test_serve_target_unknown_model_is_rejected():
     model, cloud, augment, label = server._serve_target("gpt-4o", None)
     assert label is None
