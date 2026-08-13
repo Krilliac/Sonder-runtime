@@ -17,6 +17,31 @@ def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
 
+def test_query_string_does_not_change_openai_route_or_terminal_metric(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: "answer")
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions?trace=example", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+        models_status, _, models_body = _request(port, "GET", "/v1/models?trace=example")
+
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith("answer")
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+    assert models_status == 200
+    assert json.loads(models_body)["object"] == "list"
+
+
 @pytest.mark.parametrize("model", [None, 7, True, {}, []])
 def test_chat_rejects_non_string_model_before_selector_routing(monkeypatch, model):
     monkeypatch.setattr(ts, "API_KEY", "")
