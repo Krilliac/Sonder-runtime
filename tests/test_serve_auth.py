@@ -90,13 +90,12 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
 
 
 @pytest.mark.parametrize("response_format", [
-    {"type": "json_object"},
     {"type": "json_schema", "json_schema": {"name": "result", "schema": {"type": "object"}}},
     None,
     "json_object",
     [],
 ])
-def test_chat_rejects_unsupported_response_format_before_routing(monkeypatch, response_format):
+def test_chat_rejects_invalid_response_format_before_routing(monkeypatch, response_format):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
@@ -116,12 +115,74 @@ def test_chat_rejects_unsupported_response_format_before_routing(monkeypatch, re
         )
 
     assert status == 400
-    assert json.loads(body)["error"] == {
-        "message": "response_format is not supported by this endpoint",
-        "type": "invalid_request",
-    }
+    assert json.loads(body)["error"]["type"] == "invalid_request"
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
     assert calls == []
+
+
+def test_chat_response_format_uses_isolated_direct_model_path(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    seen = {}
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts.server, "structured_answer_with_history", lambda prompt, history, schema, **kwargs: (
+        seen.update(prompt=prompt, history=history, schema=schema, kwargs=kwargs) or '{"ok":true}'
+    ))
+    monkeypatch.setattr(ts, "_handle_slash", lambda *_args, **_kwargs: pytest.fail("control path ran"))
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: pytest.fail("web path ran"))
+    request = json.dumps({
+        "model": "sonder", "response_format": {"type": "json_object"},
+        "messages": [{"role": "user", "content": "return json"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, "POST", "/v1/chat/completions", body=request, headers={"Content-Type": "application/json"})
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    assert json.loads(body)["choices"][0]["message"]["content"] == '{"ok":true}'
+    assert seen["schema"] == {"type": "object"}
+
+
+def test_chat_response_format_rejects_slash_route_without_model_call(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: pytest.fail("prewarm ran"))
+    request = json.dumps({
+        "model": "sonder", "response_format": {"type": "json_object"},
+        "messages": [{"role": "user", "content": "/status"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "POST", "/v1/chat/completions", body=request, headers={"Content-Type": "application/json"})
+
+    assert status == 400
+    assert json.loads(body)["error"]["message"] == "response_format is unavailable for slash/tool/control routes"
+
+
+def test_chat_response_format_streams_the_validated_direct_model_content(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts.server, "structured_answer_with_history", lambda *_args, **_kwargs: '{"answer":"yes"}')
+    request = json.dumps({
+        "model": "sonder", "stream": True,
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "answer", "strict": True,
+            "schema": {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "string"}}, "additionalProperties": False},
+        }},
+        "messages": [{"role": "user", "content": "return json"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, "POST", "/v1/chat/completions", body=request, headers={"Content-Type": "application/json"})
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/event-stream")
+    assert '"content": "{\\"answer\\":\\"yes\\"}"' in body.decode("utf-8")
 
 
 def test_chat_false_stream_returns_json_not_sse(monkeypatch):
