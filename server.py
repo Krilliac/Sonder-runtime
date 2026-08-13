@@ -776,6 +776,9 @@ LIVE_RELOAD_MODULES = [
     "runtime_policy",
     "sonder_hardware",
     "tool_capabilities",
+    # Authority classification is load-bearing for served dispatch. Include it
+    # in deploy/reload coverage even though its diagnostics import is lazy.
+    "tool_contract",
     # NPU accelerator host modules reload in dependency order; the broker and
     # service keep live worker/process state behind reload guards.
     "npu_contract",

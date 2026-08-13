@@ -359,6 +359,26 @@ def test_tool_contract_ships_in_the_packaged_payload():
     assert "tool_contract.py" in package.REQUIRED_FILES
 
 
+def test_tool_contract_is_reloaded_with_the_served_authority_gate(monkeypatch):
+    """A deployed authority-policy edit must replace the HTTP process module."""
+    import sonder_serve
+
+    original = sonder_serve.tool_contract
+    replacement = object()
+    monkeypatch.setattr(
+        sonder_serve.live_reload,
+        "reload_changed_modules",
+        lambda names: {"tool_contract": replacement},
+    )
+    try:
+        sonder_serve._maybe_live_reload()
+        assert sonder_serve.tool_contract is replacement
+        assert "tool_contract" in sonder_serve.LIVE_RELOAD_MODULES
+        assert "tool_contract" in server.LIVE_RELOAD_MODULES
+    finally:
+        sonder_serve.tool_contract = original
+
+
 def test_diagnostics_reports_contract_drift_without_enforcement():
     """Drift must be operator-visible in the same place the shadow registry's
     is, and the clean verdict must say what deny-by-default covers."""
