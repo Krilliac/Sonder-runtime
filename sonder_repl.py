@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - the REPL must never hard-depend on it
     slash_menu = None
 
 CURRENT_TOKEN = ""
+REPL_HISTORY_LIMIT = 200
 
 
 class _Ansi:
@@ -58,12 +59,12 @@ def _paint(text, *styles):
     return "".join(styles) + str(text) + _Ansi.reset
 
 
-def _read_input(prompt):
+def _read_input(prompt, *, history=None):
     """Prompt for a line, with the live "/" menu when the terminal allows it."""
     if slash_menu is not None:
         try:
             if slash_menu.available():
-                return slash_menu.read_line(prompt)
+                return slash_menu.read_line(prompt, history=history)
         except (EOFError, KeyboardInterrupt):
             raise
         except Exception:
@@ -692,6 +693,19 @@ def _answer_only(text):
     return _strip_trace(_strip_footer(text or "")).rstrip()
 
 
+def _completion_timing(started_at):
+    """A user-facing duration for one REPL model/work turn.
+
+    The server's internal footer is intentionally stripped before printing an
+    answer, so keep the terminal's timing signal separate, stable, and free of
+    request content.  ``monotonic`` makes wall-clock adjustments irrelevant.
+    """
+    elapsed_ms = max(0, int((time.monotonic() - float(started_at)) * 1000))
+    if elapsed_ms < 1000:
+        return "Sonder completed in %dms" % elapsed_ms
+    return "Sonder completed in %.2fs" % (elapsed_ms / 1000.0)
+
+
 def _print_lessons():
     conn = server._open_db()
     try:
@@ -811,6 +825,10 @@ def main():
     project = server.DEFAULT_PROJECT
     # None = whatever the runtime resolves by default; /model pins one.
     active_tier = None
+    # Keep raw-palette recall local to this REPL process. Prompts can include
+    # private repository context, so terminal convenience must not create a
+    # durable prompt log.
+    input_history = []
 
     def apply_trace(val):
         nonlocal trace
@@ -1031,7 +1049,8 @@ def main():
     while True:
         try:
             line = _read_input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
-                               _execution_prompt() + _paint(" > ", _Ansi.muted))
+                               _execution_prompt() + _paint(" > ", _Ansi.muted),
+                               history=input_history)
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1041,6 +1060,10 @@ def main():
         line = _normalize_input_line(line)
         if not line:
             continue
+        if not input_history or input_history[-1] != line:
+            input_history.append(line)
+            if len(input_history) > REPL_HISTORY_LIMIT:
+                del input_history[:-REPL_HISTORY_LIMIT]
         _maybe_live_reload()
 
         # Natural-language command resolution: "show me your stats" -> /stats,
@@ -1528,6 +1551,7 @@ def main():
         # answer is backed by real inspection, file changes, validation, and a
         # persistent checklist instead of being a prose-only suggestion.
         if intents.classify_work(line):
+            started_at = time.monotonic()
             out = server.workbench_agent(
                 prompt=line, tier="auto", max_steps=12, project=project,
             )
@@ -1535,14 +1559,17 @@ def main():
             last_response = out
             last_run_source = _answer_only(out)
             print(out)
+            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
             continue
 
+        started_at = time.monotonic()
         out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                             session=session_id, project=project,
                             tier=active_tier or "",
                             location_consent=location_consent)
         if out.startswith("ERROR"):
             print(out)
+            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
             continue
 
         last_iid = server.parse_interaction_id(out)
@@ -1550,6 +1577,7 @@ def main():
         last_run_source = _answer_only(out)
         cleaned = _strip_footer(out)
         print(cleaned)
+        print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
         if last_iid:
             print("(/pass or /fail to teach Sonder Runtime)")
 
