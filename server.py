@@ -1245,6 +1245,7 @@ def _make_generate(
             # Keep only the backend's bounded, non-content inference metadata.
             # Gateways can expose measured phase timing without retaining prompts,
             # responses, or arbitrary provider fields.
+            thinking = out.get("message", {}).get("thinking", "") if isinstance(out.get("message"), dict) else ""
             gen.last_response_meta = {
                 "done_reason": str(out.get("done_reason") or "").strip().casefold(),
                 **{
@@ -1257,8 +1258,19 @@ def _make_generate(
                     )
                     if key in out
                 },
+                # Preserve the historical empty-metadata contract.  A positive
+                # scalar lets fanout explain output budgets without retaining
+                # private reasoning text.
+                **({"thinking_chars": len(thinking)} if isinstance(thinking, str) and thinking else {}),
             }
             ok = True
+        except ModelCallError as error:
+            # Empty responses can carry sanitized transport observations (for
+            # example, a thinking-only length-capped completion).  Preserve
+            # only those scalar fields for callers such as durable fanout;
+            # provider text and thinking content never enter this metadata.
+            gen.last_response_meta = _response_error_metadata(error)
+            raise
         finally:
             activity_tracker.record_model_call(
                 model=used_model,
@@ -4237,6 +4249,38 @@ def _empty_model_response_detail(out, message):
     if metadata:
         detail += "; metadata=" + json.dumps(metadata, sort_keys=True)
     return detail
+
+
+def _response_error_metadata(error) -> dict:
+    """Extract the scalar-safe metadata embedded in an empty-response error.
+
+    ``_empty_model_response_detail`` deliberately serializes a small
+    allowlisted JSON object.  This parser treats all other errors/details as
+    opaque and returns no metadata, preventing provider bodies or reasoning
+    text from becoming durable observations.
+    """
+    if not isinstance(error, ModelCallError) or error.kind != "empty_response":
+        return {}
+    prefix = "Ollama returned no assistant content; metadata="
+    detail = str(error.detail or "")
+    if not detail.startswith(prefix):
+        return {}
+    try:
+        source = json.loads(detail[len(prefix):])
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    if not isinstance(source, dict):
+        return {}
+    metadata = {}
+    thinking_chars = _model_usage_count(source.get("thinking_chars"))
+    if thinking_chars is not None and thinking_chars > 0:
+        metadata["thinking_chars"] = thinking_chars
+    done_reason = source.get("done_reason")
+    if isinstance(done_reason, str):
+        normalized = done_reason.strip().casefold()
+        if normalized:
+            metadata["done_reason"] = normalized if normalized in {"stop", "length"} else "other"
+    return metadata
 
 
 def _format_model_call_error(error: ModelCallError) -> str:
@@ -22320,10 +22364,24 @@ def _fanout_receipt(run_id):
         return None
     limits = _fanout_limits(run)
     rows = fanout_store.list_results(run_id)
-    answers = [{"model": row["model"], "answer": row["answer"], "elapsed_ms": row["elapsed_ms"]}
+    def result_usage(row):
+        truncation_known = bool(row.get("answer_truncation_known"))
+        return {
+            # Legacy receipts never recorded source size.  Do not infer that a
+            # 64k prefix was complete: callers get an explicit unknown instead.
+            "answer_chars": max(0, int(row.get("answer_chars") or 0)) if truncation_known else None,
+            "stored_answer_chars": len(row.get("answer") or ""),
+            "answer_truncation_known": truncation_known,
+            "answer_truncated": bool(row.get("answer_truncated")) if truncation_known else None,
+            "thinking_chars": max(0, int(row.get("thinking_chars") or 0)),
+            "done_reason": row.get("done_reason") or None,
+        }
+
+    answers = [{"model": row["model"], "answer": row["answer"], "elapsed_ms": row["elapsed_ms"],
+                **result_usage(row)}
                for row in rows if row["status"] == "answered"]
     failures = [{"model": row["model"], "error": row["error"], "elapsed_ms": row["elapsed_ms"],
-                 "status": row["status"]}
+                 "status": row["status"], **result_usage(row)}
                 for row in rows if row["status"] in ("failed", "unknown")]
     execution_skips = [{"model": row["model"], "reason": row["error"] or "not executed"}
                        for row in rows if row["status"] == "skipped"]
@@ -22340,6 +22398,8 @@ def _fanout_receipt(run_id):
         if remaining_ms > 0:
             item["retry_after_ms"] = remaining_ms
         plan_skips.append(item)
+    answered_rows = [row for row in rows if row["status"] == "answered"]
+    known_answer_rows = [row for row in answered_rows if row.get("answer_truncation_known")]
     return {
         "run_id": run["id"],
         "status": run["status"],
@@ -22353,6 +22413,20 @@ def _fanout_receipt(run_id):
         "resident_before": limits["resident_before"],
         "total_elapsed_ms": max(0, int((float(ended) - float(run["created_ts"])) * 1000)),
         "cloud_workers": limits["cloud_workers"],
+        "usage": {
+            # Total source output is exact only if every answered receipt was
+            # recorded after the metric migration.
+            "answer_chars": (
+                sum(max(0, int(row.get("answer_chars") or 0)) for row in known_answer_rows)
+                if len(known_answer_rows) == len(answered_rows) else None
+            ),
+            "stored_answer_chars": sum(len(row.get("answer") or "") for row in answered_rows),
+            "answer_chars_known_models": len(known_answer_rows),
+            "thinking_chars": sum(max(0, int(row.get("thinking_chars") or 0)) for row in rows),
+            "models_with_observed_thinking": sum(
+                1 for row in rows if int(row.get("thinking_chars") or 0) > 0
+            ),
+        },
         "admission": _fanout_admission(run, rows, limits),
         "answers": sorted(answers, key=lambda row: row["model"].casefold()),
         "failures": sorted(failures, key=lambda row: row["model"].casefold()),
@@ -22455,31 +22529,43 @@ def _execute_fanout_run(run_id):
         model = row["model"]
         started = time.monotonic()
         if not _fanout_snapshot_allows(run, model):
-            return row, "skipped", "", "model is outside immutable fanout target snapshot", 0, None
+            return row, "skipped", "", "model is outside immutable fanout target snapshot", 0, None, {}
         if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not cloud_allowed()):
-            return row, "skipped", "", "cloud access disabled before execution", 0, None
+            return row, "skipped", "", "cloud access disabled before execution", 0, None, {}
         exc = None
+        generate = None
         try:
-            answer = (_make_generate(model, "", 0.2, limits["num_predict"], 4096,
-                                     timeout=limits["timeout"],
-                                     cancel_check=lambda: not fanout_store.worker_can_dispatch(
-                                         run_id, owner_id,
-                                     ))(question) or "").strip()
-            if not answer:
+            generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
+                                      timeout=limits["timeout"],
+                                      cancel_check=lambda: not fanout_store.worker_can_dispatch(
+                                          run_id, owner_id,
+                                      ))
+            raw_answer = str(generate(question) or "")
+            if not raw_answer.strip():
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
-            return row, "answered", _fanout_safe_answer(answer, question), "", int((time.monotonic() - started) * 1000), None
+            metadata = getattr(generate, "last_response_meta", {}) or {}
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            # Preserve the raw provider count before trim/redaction while the
+            # durable payload remains the prompt-safe version below.
+            metadata["answer_chars"] = len(raw_answer)
+            return row, "answered", _fanout_safe_answer(raw_answer, question), "", int((time.monotonic() - started) * 1000), None, metadata
         except Exception as caught:
             exc = caught
-            return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc
+            metadata = getattr(generate, "last_response_meta", {}) if generate is not None else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
             if not _is_cloud_model_name(model) and model.casefold() not in resident_at_start:
                 with contextlib.suppress(Exception):
                     _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
     def persist(result):
-        row, status, answer, error, elapsed, exc = result
+        row, status, answer, error, elapsed, exc, metadata = result
         recorded = fanout_store.record_result(run_id, row["model"], owner_id, status,
-                                              answer=answer, error=error, elapsed_ms=elapsed)
+                                              answer=answer, error=error, elapsed_ms=elapsed,
+                                              answer_chars=metadata.get("answer_chars"),
+                                              thinking_chars=metadata.get("thinking_chars"),
+                                              done_reason=metadata.get("done_reason", ""))
         if recorded is not None:
             with contextlib.suppress(Exception):
                 if status == "answered":

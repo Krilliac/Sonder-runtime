@@ -395,6 +395,138 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert unloads == []
 
 
+def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+
+    def fake_make(*_args, **_kwargs):
+        def generate(_prompt):
+            generate.last_response_meta = {
+                "done_reason": " STOP ",
+                "thinking_chars": 37,
+                # A transport/generator must never make reasoning text durable.
+                "thinking": "private chain of thought must not be stored",
+            }
+            return "short answer"
+        generate.last_response_meta = {}
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout("private fanout prompt", scope="local"))
+
+    assert receipt["answers"] == [{
+        "model": "local-a", "answer": "short answer", "elapsed_ms": receipt["answers"][0]["elapsed_ms"],
+        "answer_chars": 12, "stored_answer_chars": 12,
+        "answer_truncation_known": True, "answer_truncated": False,
+        "thinking_chars": 37, "done_reason": "stop",
+    }]
+    assert receipt["usage"] == {
+        "answer_chars": 12, "stored_answer_chars": 12, "answer_chars_known_models": 1,
+        "thinking_chars": 37, "models_with_observed_thinking": 1,
+    }
+    with sqlite3.connect(database) as conn:
+        stored = "\n".join(str(value) for row in conn.execute(
+            "SELECT answer, answer_chars, thinking_chars, done_reason FROM fanout_results"
+        ) for value in row)
+    assert "private chain of thought" not in stored
+    assert "37" in stored
+
+
+def test_model_fanout_usage_metadata_defaults_when_generator_has_none(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+
+    assert receipt["answers"][0]["answer_chars"] == len("answer")
+    assert receipt["answers"][0]["stored_answer_chars"] == len("answer")
+    assert receipt["answers"][0]["answer_truncation_known"] is True
+    assert receipt["answers"][0]["answer_truncated"] is False
+    assert receipt["answers"][0]["thinking_chars"] == 0
+    assert receipt["answers"][0]["done_reason"] is None
+    assert receipt["usage"] == {
+        "answer_chars": len("answer"), "stored_answer_chars": len("answer"),
+        "answer_chars_known_models": 1, "thinking_chars": 0,
+        "models_with_observed_thinking": 0,
+    }
+
+
+def test_model_fanout_persists_thinking_only_failure_metadata(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    secret_thinking = "private provider reasoning must not persist"
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_post", lambda path, payload, **_kwargs: (
+        {"message": {"content": "", "thinking": secret_thinking}, "done_reason": "length"}
+        if path == "/api/chat" else {}
+    ))
+
+    receipt = json.loads(server.model_fanout("private prompt", scope="local"))
+
+    failure = receipt["failures"][0]
+    assert failure["thinking_chars"] == len(secret_thinking)
+    assert failure["done_reason"] == "length"
+    with sqlite3.connect(database) as conn:
+        stored = "\n".join(str(value) for row in conn.execute(
+            "SELECT answer, error, thinking_chars, done_reason FROM fanout_results"
+        ) for value in row)
+    assert secret_thinking not in stored
+
+
+def test_model_fanout_retains_bounded_prefix_but_reports_raw_provider_size(monkeypatch, tmp_path):
+    database = _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    raw_answer = " " + ("x" * 100_000) + " "
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: raw_answer)
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+
+    answer = receipt["answers"][0]
+    assert answer["answer_chars"] == len(raw_answer)
+    assert answer["stored_answer_chars"] == server.fanout_store.MAX_ANSWER_CHARS
+    assert answer["answer_truncation_known"] is True
+    assert answer["answer_truncated"] is True
+    assert not answer["answer"].endswith("...")
+    with sqlite3.connect(database) as conn:
+        persisted = conn.execute(
+            "SELECT answer_chars, answer_truncated, answer_truncation_known FROM fanout_results"
+        ).fetchone()
+    assert persisted == (len(raw_answer), 1, 1)
+
+
+def test_fanout_receipt_marks_legacy_answer_size_and_truncation_as_unknown(monkeypatch):
+    monkeypatch.setattr(server.fanout_store, "get_run", lambda _run_id: {
+        "id": "fan-test", "status": "completed", "scope": "local",
+        "created_ts": 100.0, "finished_ts": 110.0, "limits_json": "{}",
+    })
+    monkeypatch.setattr(server.fanout_store, "list_results", lambda _run_id: [{
+        "model": "local-a", "status": "answered", "answer": "x" * 64_000,
+        "answer_chars": 0, "answer_truncated": 0, "answer_truncation_known": 0,
+        "elapsed_ms": 12,
+    }])
+
+    receipt = server._fanout_receipt("fan-test")
+
+    assert receipt["answers"][0]["answer_chars"] is None
+    assert receipt["answers"][0]["stored_answer_chars"] == 64_000
+    assert receipt["answers"][0]["answer_truncation_known"] is False
+    assert receipt["answers"][0]["answer_truncated"] is None
+    assert receipt["usage"]["answer_chars"] is None
+    assert receipt["usage"]["answer_chars_known_models"] == 0
+
+
 def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
     unloads = []
     monkeypatch.setattr(server, "_get", lambda path: (
