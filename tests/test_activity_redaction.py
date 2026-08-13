@@ -86,6 +86,16 @@ def test_program_prefixed_json_argv_masks_secret_pairs():
     assert 'python ["build.py", "--token", "<redacted>", "--verbose"]' == out
 
 
+def test_program_prefixed_json_argv_handles_a_bracket_in_the_program_path():
+    secret = "bracketed-path-secret"
+    out = at._safe_command(
+        'tools/tool[debug ["--token", "bracketed-path-secret", "--verbose"]'
+    )
+
+    assert secret not in out
+    assert out == 'tools/tool[debug ["--token", "<redacted>", "--verbose"]'
+
+
 def test_program_prefixed_json_argv_keeps_non_json_text_as_text():
     value = "runner [not JSON --token still-redacted]"
     out = at._safe_command(value)

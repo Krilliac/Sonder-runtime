@@ -224,16 +224,21 @@ def _safe_command(value):
     # Reuse the list handling below while preserving the safe program prefix.
     prefix = ""
     if isinstance(parsed, str):
-        bracket = parsed.find("[")
-        if bracket > 0:
+        # The program/path itself can contain ``[``.  Try every possible JSON
+        # array start and accept only one that parses through the *end* of the
+        # command text; the first bracket is not necessarily the argv array.
+        for bracket, char in enumerate(parsed):
+            if char != "[" or bracket == 0:
+                continue
             candidate = parsed[bracket:].strip()
             try:
                 argv = json.loads(candidate)
             except (TypeError, ValueError):
-                argv = None
+                continue
             if isinstance(argv, list):
                 prefix = parsed[:bracket].strip()
                 parsed = argv
+                break
     if not isinstance(parsed, (list, tuple)):
         return _block(_redact_text(parsed), 2400)
     rendered = []
