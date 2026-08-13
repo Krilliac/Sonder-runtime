@@ -193,6 +193,7 @@ def test_tool_manifest_documents_guarded_model_routes():
     assert "ask all local and cloud models: ..." in manifest
     assert "ask all local models and cloud models: ..." in manifest
     assert "ask all Sonder models + cloud: ..." in manifest
+    assert "run phi4:latest to ..." in manifest
     assert "ask the phi4:latest model to ..." in manifest
     assert "run using model phi4:latest: ..." in manifest
     assert "run using phi4:latest: ..." in manifest
@@ -260,6 +261,7 @@ def test_direct_recent_fanout_summaries_keep_shared_developers_owner_scoped(monk
         ("ask the phi4:latest model to explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
         ("use qwen2.5-coder:14b model to review this function", {"kind": "model", "model": "qwen2.5-coder:14b", "prompt": "review this function"}),
         ("run qwen2.5-coder:14b: review this function", {"kind": "model", "model": "qwen2.5-coder:14b", "prompt": "review this function"}),
+        ("run qwen2.5-coder:14b to review this function", {"kind": "model", "model": "qwen2.5-coder:14b", "prompt": "review this function"}),
         ("ask phi4:latest: explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
     ],
 )
@@ -301,6 +303,7 @@ def test_natural_model_request_never_matches_embedded_or_non_imperative_prose(un
 
 @pytest.mark.parametrize("phrase", [
     "run python:3.12: reproduce this issue",
+    "run python:3.12 to reproduce this issue",
     "run python:3.12 model to reproduce this issue",
     "run using python:3.12 to reproduce this issue",
     "run using powershell:7 for reproduce this issue",
