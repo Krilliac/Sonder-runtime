@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - the REPL must never hard-depend on it
     slash_menu = None
 
 CURRENT_TOKEN = ""
+REPL_HISTORY_LIMIT = 200
 
 
 class _Ansi:
@@ -58,12 +59,12 @@ def _paint(text, *styles):
     return "".join(styles) + str(text) + _Ansi.reset
 
 
-def _read_input(prompt):
+def _read_input(prompt, *, history=None):
     """Prompt for a line, with the live "/" menu when the terminal allows it."""
     if slash_menu is not None:
         try:
             if slash_menu.available():
-                return slash_menu.read_line(prompt)
+                return slash_menu.read_line(prompt, history=history)
         except (EOFError, KeyboardInterrupt):
             raise
         except Exception:
@@ -811,6 +812,10 @@ def main():
     project = server.DEFAULT_PROJECT
     # None = whatever the runtime resolves by default; /model pins one.
     active_tier = None
+    # Keep raw-palette recall local to this REPL process. Prompts can include
+    # private repository context, so terminal convenience must not create a
+    # durable prompt log.
+    input_history = []
 
     def apply_trace(val):
         nonlocal trace
@@ -1031,7 +1036,8 @@ def main():
     while True:
         try:
             line = _read_input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
-                               _execution_prompt() + _paint(" > ", _Ansi.muted))
+                               _execution_prompt() + _paint(" > ", _Ansi.muted),
+                               history=input_history)
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1041,6 +1047,10 @@ def main():
         line = _normalize_input_line(line)
         if not line:
             continue
+        if not input_history or input_history[-1] != line:
+            input_history.append(line)
+            if len(input_history) > REPL_HISTORY_LIMIT:
+                del input_history[:-REPL_HISTORY_LIMIT]
         _maybe_live_reload()
 
         # Natural-language command resolution: "show me your stats" -> /stats,

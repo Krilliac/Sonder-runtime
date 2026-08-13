@@ -52,6 +52,7 @@ _CTRL_C = "\x03"
 _CTRL_U = "\x15"
 
 MAX_ROWS = 8
+HISTORY_LIMIT = 200
 
 CSI = "\x1b["
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -233,6 +234,41 @@ class MenuState:
         return rows
 
 
+class HistoryCursor:
+    """Session-local command recall for the raw Windows reader.
+
+    The menu owns arrows while a slash palette is visible. Everywhere else
+    Up walks prior submitted lines and Down returns through them to the draft.
+    History is supplied by the caller and is never written to disk.
+    """
+
+    def __init__(self, entries=None):
+        self.entries = [str(entry) for entry in (entries or []) if str(entry)]
+        self.index = len(self.entries)
+        self.draft = ""
+
+    def up(self, current: str) -> str:
+        if not self.entries:
+            return current
+        if self.index == len(self.entries):
+            self.draft = str(current)
+        if self.index > 0:
+            self.index -= 1
+        return self.entries[self.index]
+
+    def down(self, current: str) -> str:
+        if not self.entries or self.index == len(self.entries):
+            return current
+        self.index += 1
+        if self.index == len(self.entries):
+            return self.draft
+        return self.entries[self.index]
+
+    def reset(self) -> None:
+        self.index = len(self.entries)
+        self.draft = ""
+
+
 def _truncate(text: str, width: int) -> str:
     # width - 1: writing into the final column makes some terminals wrap
     # eagerly, which corrupts the redraw exactly like an over-long row does.
@@ -366,10 +402,11 @@ def _finish(state: MenuState, prompt: str, stream) -> None:
     stream.flush()
 
 
-def _read_line_raw(prompt: str, completer=None) -> str:
+def _read_line_raw(prompt: str, completer=None, history=None) -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
     state = MenuState(completer=completer)
+    recalled = HistoryCursor(history)
     try:
         _paint(state, prompt, stream)
         while True:
@@ -380,9 +417,21 @@ def _read_line_raw(prompt: str, completer=None) -> str:
                 key = {"H": KEY_UP, "P": KEY_DOWN}.get(second)
                 if key is None:
                     continue
-                action = state.handle_key(key)
+                if state.menu_active:
+                    action = state.handle_key(key)
+                elif key == KEY_UP:
+                    state.buffer = recalled.up(state.buffer)
+                    state.dismissed = False
+                    state._reset_selection()
+                    action = CONTINUE
+                else:
+                    state.buffer = recalled.down(state.buffer)
+                    state.dismissed = False
+                    state._reset_selection()
+                    action = CONTINUE
             else:
                 action = state.handle_key(ch)
+                recalled.reset()
             if action == ACCEPT:
                 _finish(state, prompt, stream)
                 return state.buffer
@@ -402,7 +451,7 @@ def _read_line_raw(prompt: str, completer=None) -> str:
         raise
 
 
-def read_line(prompt: str = "", *, enabled: bool = True) -> str:
+def read_line(prompt: str = "", *, enabled: bool = True, history=None) -> str:
     """Read one line, showing a live command menu while it starts with ``/``.
 
     Falls back to builtin :func:`input` whenever the menu cannot or should not
@@ -414,7 +463,7 @@ def read_line(prompt: str = "", *, enabled: bool = True) -> str:
     if not enabled or not available():
         return input(prompt)
     try:
-        return _read_line_raw(prompt)
+        return _read_line_raw(prompt, history=history)
     except KeyboardInterrupt:
         raise
     except EOFError:
