@@ -55,6 +55,29 @@ def test_known_vision_families_are_skipped_when_catalog_omits_capabilities(monke
     assert server._serve_target(name, False) == (None, False, False, None)
 
 
+def test_vision_family_metadata_beats_a_renamed_catalog_tag(monkeypatch):
+    record = {"name": "vision-a:latest", "details": {"family": "llava"}}
+    monkeypatch.setattr(server, "_get", lambda _path: {"models": [record]})
+
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan["selected"] == []
+    assert plan["skipped"] == [{"model": "vision-a:latest", "reason": "known vision-only model family"}]
+    assert server._serve_target("vision-a:latest", False) == (None, False, False, None)
+
+
+def test_nonvision_family_metadata_preserves_a_text_model_with_vision_alias(monkeypatch):
+    record = {"name": "llava:latest", "details": {"families": ["qwen2"]}}
+    monkeypatch.setattr(server, "_get", lambda _path: {"models": [record]})
+
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan["selected"] == ["llava:latest"]
+    assert server._serve_target("llava:latest", False)[0] == "llava:latest"
+
+
 def test_direct_cloud_model_still_requires_opt_in(monkeypatch):
     monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     monkeypatch.setattr(server, "_get", lambda _path: {"models": [{"name": "kimi:cloud"}]})
