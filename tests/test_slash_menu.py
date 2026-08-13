@@ -304,6 +304,16 @@ def test_rows_are_truncated_to_the_terminal_width():
     assert any(row.endswith("…") for row in rows)
 
 
+def test_long_input_is_wrapped_without_a_display_cap():
+    message = "x" * 200
+
+    lines = slash_menu._input_lines("sonder > ", message, width=20)
+
+    assert "".join(lines) == "sonder > " + message
+    assert all(len(line) <= 19 for line in lines)
+    assert "..." not in "".join(lines)
+
+
 def test_rows_never_exceed_the_terminal_height():
     entries = [_Entry("/c%d" % i, "summary %d" % i) for i in range(40)]
     state = slash_menu.MenuState(completer=lambda p, limit=8: entries[:limit])
