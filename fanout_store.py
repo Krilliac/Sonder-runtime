@@ -23,6 +23,8 @@ from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_a
 
 MAX_PROMPT_CHARS = 16_000
 MAX_ANSWER_CHARS = 64_000
+MAX_RAW_ANSWER_CHARS = 2_147_483_647
+MAX_THINKING_CHARS = 1_000_000
 MAX_ERROR_CHARS = 4_000
 MAX_EVENT_CHARS = 1_000
 MAX_MODELS = 128
@@ -63,6 +65,9 @@ CREATE TABLE IF NOT EXISTS fanout_results (
  run_id TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
  owner_id TEXT NOT NULL DEFAULT '', owner_pid INTEGER NOT NULL DEFAULT 0, owner_host TEXT NOT NULL DEFAULT '',
  lease_until REAL, answer TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', elapsed_ms INTEGER,
+ answer_chars INTEGER NOT NULL DEFAULT 0, answer_truncated INTEGER NOT NULL DEFAULT 0,
+ answer_truncation_known INTEGER NOT NULL DEFAULT 0, thinking_chars INTEGER NOT NULL DEFAULT 0,
+ done_reason TEXT NOT NULL DEFAULT '',
  retry_after_ts REAL, started_ts REAL, finished_ts REAL, updated_ts REAL NOT NULL,
  PRIMARY KEY(run_id, model), FOREIGN KEY(run_id) REFERENCES fanout_runs(id) ON DELETE CASCADE
 );
@@ -147,6 +152,29 @@ def _ensure_schema(path: str) -> None:
                     conn.execute(
                         "ALTER TABLE model_health ADD COLUMN availability_failure_count INTEGER NOT NULL DEFAULT 0"
                     )
+                result_columns = {row[1] for row in conn.execute("PRAGMA table_info(fanout_results)")}
+                for column, declaration in (
+                    ("answer_chars", "INTEGER NOT NULL DEFAULT 0"),
+                    ("answer_truncated", "INTEGER NOT NULL DEFAULT 0"),
+                    # Existing rows have no exact source length or historical
+                    # truncation decision.  Keep the default unknown rather
+                    # than guessing from a 64k retained prefix.
+                    ("answer_truncation_known", "INTEGER NOT NULL DEFAULT 0"),
+                    ("thinking_chars", "INTEGER NOT NULL DEFAULT 0"),
+                    ("done_reason", "TEXT NOT NULL DEFAULT ''"),
+                ):
+                    if column not in result_columns:
+                        conn.execute(
+                            "ALTER TABLE fanout_results ADD COLUMN %s %s" % (column, declaration)
+                        )
+                # Legacy receipts only retained a bounded answer preview.  Its
+                # length is still useful, but it is not the raw provider size;
+                # keep ``answer_truncation_known`` false so readers never
+                # mistake this conservative backfill for a complete answer.
+                conn.execute(
+                    "UPDATE fanout_results SET answer_chars=length(answer) "
+                    "WHERE answer_truncation_known=0 AND answer_chars=0 AND answer<>''"
+                )
                 # Before sealed prompts existed this database retained a best-effort
                 # redacted copy plus a stable digest.  That is not an acceptable
                 # durable prompt store: a redactor cannot safely classify arbitrary
@@ -288,7 +316,7 @@ def list_runs(*, include_finished: bool = True, limit: int = 20) -> list[dict]:
 def list_results(run_id: str, *, include_answers: bool = True) -> list[dict]:
     conn = _connect()
     try:
-        columns = "*" if include_answers else "run_id,model,status,attempts,elapsed_ms,retry_after_ts,started_ts,finished_ts,updated_ts"
+        columns = "*" if include_answers else "run_id,model,status,attempts,elapsed_ms,answer_chars,answer_truncated,answer_truncation_known,thinking_chars,done_reason,retry_after_ts,started_ts,finished_ts,updated_ts"
         return [_row(r) for r in conn.execute("SELECT %s FROM fanout_results WHERE run_id=? ORDER BY model" % columns, (str(run_id),))]
     finally: conn.close()
 
@@ -359,17 +387,62 @@ def worker_can_dispatch(run_id: str, owner_id: str) -> bool:
         conn.close()
 
 
-def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer: str = "", error: str = "", elapsed_ms: int | None = None, retry_after_ts: float | None = None) -> dict | None:
+def _metric_count(value, maximum: int) -> int:
+    """Return one bounded receipt metric without accepting bools or junk."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, min(parsed, maximum))
+
+
+def _safe_answer(value) -> tuple[str, bool]:
+    """Redact a durable answer and report whether its retained prefix was cut.
+
+    This deliberately omits an ellipsis: a marker would become model content,
+    while the independent receipt flag describes storage truncation exactly.
+    """
+    sanitized = _safe_text(value, MAX_RAW_ANSWER_CHARS)
+    return sanitized[:MAX_ANSWER_CHARS], len(sanitized) > MAX_ANSWER_CHARS
+
+
+def _done_reason(value) -> str:
+    """Keep the durable receipt vocabulary small and non-content-bearing."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip().casefold()
+    if not value:
+        return ""
+    return value if value in ("stop", "length") else "other"
+
+
+def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer: str = "", error: str = "", elapsed_ms: int | None = None, retry_after_ts: float | None = None, answer_chars: int | None = None, thinking_chars: int | None = None, done_reason: str = "") -> dict | None:
     if status not in ("answered", "failed", "skipped", "unknown"): raise ValueError("invalid fanout result status: %s" % status)
     now = time.time(); elapsed = None if elapsed_ms is None else max(0, min(int(elapsed_ms), 86_400_000))
+    raw_answer = str(answer or "")
+    safe_answer, answer_truncated = _safe_answer(raw_answer)
+    safe_error = _safe_text(error, MAX_ERROR_CHARS)
+    # ``answer_chars`` measures the model's raw content before whitespace
+    # normalization/redaction/storage bounds.  It is a scalar receipt metric,
+    # not a claim about how much model text remains in the preview.
+    persisted_answer_chars = (
+        len(raw_answer) if answer_chars is None
+        else _metric_count(answer_chars, MAX_RAW_ANSWER_CHARS)
+    )
+    persisted_thinking_chars = _metric_count(thinking_chars, MAX_THINKING_CHARS)
+    persisted_done_reason = _done_reason(done_reason)
     with _write_transaction() as conn:
         run = conn.execute("SELECT cancel_requested,owner_id,status,lease_until FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if (run is None or run["cancel_requested"] or run["owner_id"] != owner_id
                 or run["status"] != "running" or run["lease_until"] is None
                 or run["lease_until"] < now): return None
-        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
+        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,answer_chars=?,answer_truncated=?,answer_truncation_known=1,thinking_chars=?,done_reason=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
                                WHERE run_id=? AND model=? AND owner_id=? AND status='running'""",
-                               (status, _safe_text(answer, MAX_ANSWER_CHARS), _safe_text(error, MAX_ERROR_CHARS), elapsed, retry_after_ts, now, now, str(run_id), str(model), str(owner_id))).rowcount
+                               (status, safe_answer, safe_error, elapsed, persisted_answer_chars,
+                                int(answer_truncated), persisted_thinking_chars, persisted_done_reason, retry_after_ts, now,
+                                now, str(run_id), str(model), str(owner_id))).rowcount
         if not changed: return None
         _event(conn, str(run_id), status, "%s: %s" % (model, error or status), now)
         _finish_if_done(conn, str(run_id), now)
@@ -415,7 +488,7 @@ def resume_run(run_id: str, *, include_failed: bool = False, retry_unknown: bool
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None or row["status"] not in TERMINAL_RUNS:
             return None
-        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',error='',elapsed_ms=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
+        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',error='',elapsed_ms=NULL,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
         if not changed:
             return None
         conn.execute("UPDATE fanout_runs SET status='queued',cancel_requested=0,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=NULL,updated_ts=? WHERE id=?", (now, str(run_id)))
