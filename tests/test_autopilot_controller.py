@@ -386,3 +386,23 @@ def test_per_invocation_cycle_budget_pauses_with_progress():
     assert result["status"] == "paused"
     assert result["cycles"] == 1
     assert "cycle budget" in result["summary"]
+
+
+def test_final_cycle_budget_review_honors_operator_pause():
+    run = autopilot_store.create_run(
+        "pause before final completion", adaptive=False,
+    )
+
+    def review(current, _issue):
+        autopilot_store.request_pause(current["id"])
+        return {"decision": "complete", "reason": "would otherwise complete"}
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(), work_fn=lambda _run, task, _prior: _task_evidence(task),
+        review_fn=review, max_cycles=2,
+    )
+
+    assert result["status"] == "paused"
+    assert result["cycles"] == 2
+    assert result["summary"] == "paused during final review"
