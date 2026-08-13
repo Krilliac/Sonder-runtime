@@ -78,6 +78,27 @@ def _summary_of(entry) -> str:
     return str(getattr(entry, "summary", "") or "")
 
 
+def _default_argument_hint(buffer: str) -> str:
+    """Return a compact usage hint once a complete command has an argument.
+
+    Kept lazy for the same reason as the completion catalog: a terminal
+    convenience must never make importing the REPL expensive or fragile.
+    """
+    try:
+        command_name = str(buffer or "").split(None, 1)[0]
+        if not command_name or command_name == "/":
+            return ""
+        import command_catalog
+        command = command_catalog.by_name(command_name)
+        if command is None:
+            return ""
+        usage = command.usage()
+        summary = command.summary or ""
+        return "%s  %s" % (usage, summary)
+    except Exception:
+        return ""
+
+
 class MenuState:
     """Buffer + highlight for one input line.  No terminal, no I/O.
 
@@ -89,8 +110,10 @@ class MenuState:
     terminal.
     """
 
-    def __init__(self, completer=None, limit: int = MAX_ROWS, buffer: str = ""):
+    def __init__(self, completer=None, limit: int = MAX_ROWS, buffer: str = "",
+                 hint_provider=None):
         self.completer = completer or _default_completer
+        self.hint_provider = hint_provider or _default_argument_hint
         self.limit = max(1, int(limit))
         self.buffer = str(buffer or "")
         self.selected = 0
@@ -128,10 +151,24 @@ class MenuState:
 
     def selection(self):
         """The highlighted entry, or None when nothing is highlighted."""
+        if self.argument_context:
+            return None
         rows = self.matches()
         if not rows:
             return None
         return rows[max(0, min(self.selected, len(rows) - 1))]
+
+    @property
+    def argument_context(self) -> bool:
+        """Whether the buffer is past a known command's name boundary."""
+        text = self.buffer
+        if not text.startswith("/") or text == "/":
+            return False
+        return any(ch.isspace() for ch in text)
+
+    def has_palette_matches(self) -> bool:
+        """Whether arrows should select a completion instead of recall history."""
+        return not self.argument_context and bool(self.matches())
 
     # -- transitions ------------------------------------------------------
 
@@ -140,14 +177,14 @@ class MenuState:
 
     def handle_key(self, ch: str) -> str:
         if ch == KEY_UP:
-            if self.menu_active and self.matches():
+            if self.menu_active and self.has_palette_matches():
                 # Clamps rather than wrapping: wrapping from the first entry to
                 # the last is a surprise when the list is being retyped under
                 # you, and the top entry is the one you usually want.
                 self.selected = max(0, self.selected - 1)
             return CONTINUE
         if ch == KEY_DOWN:
-            rows = self.matches() if self.menu_active else []
+            rows = self.matches() if self.menu_active and not self.argument_context else []
             if rows:
                 self.selected = min(len(rows) - 1, self.selected + 1)
             return CONTINUE
@@ -205,11 +242,20 @@ class MenuState:
         wrong place and eat the prompt.
         """
         if prefix is not None and prefix != self.buffer:
-            probe = MenuState(self.completer, self.limit, buffer=str(prefix))
+            probe = MenuState(
+                self.completer, self.limit, buffer=str(prefix),
+                hint_provider=self.hint_provider,
+            )
             probe.selected = self.selected
             return probe.render_rows(width=width, height=height)
         if not self.menu_active:
             return []
+        if self.argument_context:
+            try:
+                hint = str(self.hint_provider(self.buffer) or "")
+            except Exception:
+                hint = ""
+            return [_truncate("  " + hint, width)] if hint else []
         entries = self.matches()
         if not entries:
             return []
@@ -420,7 +466,7 @@ def _read_line_raw(prompt: str, completer=None, history=None) -> str:
                 # A slash prefix alone is not enough to reserve arrows: paths
                 # and other ordinary slash-looking prose can have no palette
                 # matches and should retain normal terminal history recall.
-                if state.menu_active and state.matches():
+                if state.menu_active and state.has_palette_matches():
                     action = state.handle_key(key)
                 elif key == KEY_UP:
                     state.buffer = recalled.up(state.buffer)
