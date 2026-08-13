@@ -40,6 +40,7 @@ TERMINAL_PHASES = {"rejected", "restored", "cancelled"}
 SENSITIVE_PREFIXES = (
     "permission_rules.py", "admin_auth.py", "file_ops.py", "safe_update.py",
     "selfmod.py", "selfmod_recover.py", "server.py", "reloadable_mcp.py",
+    "tool_contract.py",
     "model_transport.py", "sonder_runtime/adapters/model_transport.py",
     "context_overflow.py",
     "ollama_endpoint.py",

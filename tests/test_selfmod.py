@@ -199,6 +199,7 @@ def test_protected_paths_and_backup_policy_require_maintenance(isolated):
     (root / "selfmod.py").write_text("unsafe=True\n")
     (root / "process_liveness.py").write_text("unsafe=True\n")
     (root / "model_transport.py").write_text("unsafe=True\n")
+    (root / "tool_contract.py").write_text("unsafe=True\n")
     packaged_transport = root / "sonder_runtime" / "adapters" / "model_transport.py"
     packaged_transport.parent.mkdir(parents=True, exist_ok=True)
     packaged_transport.write_text("unsafe=True\n")
@@ -206,6 +207,7 @@ def test_protected_paths_and_backup_policy_require_maintenance(isolated):
     for path in (
         "permission_rules.py", "selfmod.py", "process_liveness.py",
         "model_transport.py",
+        "tool_contract.py",
         "sonder_runtime/adapters/model_transport.py",
         "ollama_endpoint.py",
     ):
