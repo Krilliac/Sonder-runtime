@@ -266,9 +266,13 @@ def test_direct_recent_fanout_summaries_keep_shared_developers_owner_scoped(monk
     ],
 )
 def test_natural_model_request_accepts_explicit_safe_variants(monkeypatch, phrase, expected):
+    available = {
+        "phi4:latest",
+        "qwen2.5-coder:14b",
+    }
     monkeypatch.setattr(
         server, "resolve_discovered_model",
-        lambda selector: selector if selector == "qwen2.5-coder:14b" else None,
+        lambda selector: selector if selector in available else None,
     )
     assert server.natural_model_request(phrase) == expected
 
@@ -328,6 +332,8 @@ def test_natural_model_request_leaves_bare_interpreter_tags_as_work_prose(phrase
 @pytest.mark.parametrize("phrase", [
     "run ubuntu:24.04 to reproduce this issue",
     "run terraform:1.9 to validate this configuration",
+    "run ubuntu:24.04: reproduce this issue",
+    "ask with terraform:1.9 to validate this configuration",
 ])
 def test_natural_model_request_leaves_unknown_version_tags_as_work_prose(monkeypatch, phrase):
     monkeypatch.setattr(server, "resolve_discovered_model", lambda _selector: None)
