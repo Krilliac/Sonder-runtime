@@ -39,9 +39,46 @@ work. The reply carries an activity footer of observable actions.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
 `session`, `project`, `context_size`, and the consented location fields.
-`response_format` is rejected with `400 invalid_request` rather than silently
-returning unconstrained text. Structured-output support needs an end-to-end
-contract for model, tool-route, streaming, and activity-footer behavior.
+
+`response_format` is available only for an isolated direct-model turn:
+
+```json
+{ "response_format": { "type": "json_object" } }
+```
+
+or a deliberately small strict-schema contract:
+
+```json
+{ "response_format": {
+  "type": "json_schema",
+  "json_schema": {
+    "name": "result",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "required": ["ok"],
+      "properties": {"ok": {"type": "boolean"}},
+      "additionalProperties": false
+    }
+  }
+} }
+```
+
+The runtime sends that schema as Ollama's decoder-side `format`, then parses
+and fully post-validates the direct model text before returning it. It supports
+only typed object/array/scalar nodes plus `enum`, `const`, properties/items,
+additional-properties, length/count, uniqueness, and numeric-bound keywords;
+references, combinators, patterns, annotations, and untyped nodes are rejected
+with `400 invalid_request`. `json_schema` must contain exactly `name`,
+`schema`, and `strict: true`.
+
+Structured turns do not use slash commands, natural model selectors, feedback,
+web, execution, tool, code-repair, activity-footer, or history-learning paths;
+an apparent control route is rejected with `400 invalid_request`. This keeps
+the returned assistant content exactly the validated model output. Normal model
+selection, cloud opt-in/privacy checks, and `stream: true` SSE framing remain
+unchanged; the whole validated JSON document is emitted in the normal final
+assistant SSE chunk (not token-streamed).
 
 ## Process & dependency state
 
