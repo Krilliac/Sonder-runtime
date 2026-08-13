@@ -1118,6 +1118,40 @@ def test_model_fanout_resume_requires_literal_boolean_flags(
     assert calls == []
 
 
+@pytest.mark.parametrize(("name", "value"), [
+    ("num_predict", True),
+    ("timeout", "45"),
+    ("max_cloud_workers", 1.5),
+])
+def test_model_fanout_rejects_coerced_budget_controls_before_run(monkeypatch, name, value):
+    """Budget controls must not coerce truthy or string values into a run."""
+    calls = []
+    monkeypatch.setattr(
+        server, "_fanout_start",
+        lambda *_args, **_kwargs: calls.append((_args, _kwargs)),
+    )
+    kwargs = {name: value}
+
+    reply = server._model_fanout_authorized("public prompt", **kwargs)
+
+    assert "must be integers" in reply
+    assert calls == []
+
+
+@pytest.mark.parametrize(("tool_name", "arguments"), [
+    ("model_fanout", {"prompt": "public question", "timeout": "45"}),
+    ("model_fanout", {"prompt": "public question", "num_predict": True}),
+    ("model_fanout", {"prompt": "public question", "max_cloud_workers": 1.5}),
+    ("sonder", {"prompt": "ask all local models: public question", "num_predict": "512"}),
+])
+def test_mcp_fanout_rejects_coerced_budget_controls(tool_name, arguments):
+    """FastMCP must reject before Pydantic can turn a value into an integer."""
+    with pytest.raises(Exception) as raised:
+        asyncio.run(server.mcp.call_tool(tool_name, arguments))
+
+    assert "integer" in str(raised.value).lower()
+
+
 @pytest.mark.parametrize("value", [1, "false"])
 def test_mcp_fanout_resume_rejects_coercible_nonboolean_flags(value):
     """FastMCP must reject before Pydantic can coerce a replay request."""
