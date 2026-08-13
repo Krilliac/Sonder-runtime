@@ -77,6 +77,17 @@ def test_recent_run_summaries_are_owner_scoped_and_never_return_sensitive_rows()
     assert second["id"] not in rendered
 
 
+def test_recent_run_summaries_reconcile_stale_receipts_before_projecting(monkeypatch):
+    run = store.create_run("private prompt", ["local"], request_owner="owner-a")
+    reconciled = []
+    monkeypatch.setattr(store, "reconcile_stale_runs", lambda: reconciled.append(True) or 0)
+
+    summaries = store.recent_run_summaries(request_owner="owner-a", limit=1)
+
+    assert reconciled == [True]
+    assert summaries[0]["run_id"] == run["id"]
+
+
 def test_schema_migration_scrubs_pre_vault_prompt_and_digest(isolated):
     run = store.create_run("private legacy prompt", ["local"])
     conn = sqlite3.connect(isolated)
