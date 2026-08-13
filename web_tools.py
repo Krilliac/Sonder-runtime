@@ -774,8 +774,16 @@ def web_search(query, limit=5, timeout=10):
                     )
                 )
                 break
-    if best_results:
+    # Do not turn a weak provider fallback into a plausible-looking answer.
+    # In particular, a local-intent query such as "computer repair shops near
+    # 67215" can overlap generic pages on just "computer". Returning those
+    # pages is worse than a typed no-result: the agent may claim it searched
+    # for nearby businesses when it did not obtain any relevant evidence.
+    _best, required = _search_relevance(query, best_results)
+    if best_results and best_relevance >= required:
         return best_results
+    if best_results:
+        raise RuntimeError("search providers returned no sufficiently relevant results")
     if failures and len(failures) == len(endpoints):
         raise RuntimeError("search providers unavailable: %s" % ", ".join(failures))
     return []

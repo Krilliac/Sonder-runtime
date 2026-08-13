@@ -285,6 +285,15 @@ def test_web_tools_can_be_disabled(monkeypatch):
         web_tools.web_search("x")
 
 
+def test_web_search_rejects_weak_generic_fallback_for_local_intent(monkeypatch):
+    """One matching word is not evidence for a nearby-service query."""
+    generic = b'<a class="result__a" href="https://example.com/computer">Computer</a>'
+    monkeypatch.setattr(web_tools, "_request", lambda *_args, **_kwargs: (generic, "text/html"))
+
+    with pytest.raises(RuntimeError, match="sufficiently relevant"):
+        web_tools.web_search("computer repair shops near 67215")
+
+
 def test_format_search_results_empty():
     assert web_tools.format_search_results([]) == "(no results)"
 
