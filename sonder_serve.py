@@ -2475,9 +2475,19 @@ class Handler(BaseHTTPRequestHandler):
         ).observe(max(0.0, time.monotonic() - started))
 
     def _read_json(self):
-        if self.headers.get("Transfer-Encoding"):
+        # HTTP framing must be unambiguous before this handler reads a body.
+        # BaseHTTPRequestHandler preserves duplicate fields, but ``get()``
+        # returns only one of them. Accepting that value would let a proxy and
+        # this server disagree about where the request ends. We deliberately
+        # support neither transfer coding nor duplicate content lengths, so
+        # reject the fields by presence/count rather than their first value.
+        transfer_encodings = self.headers.get_all("Transfer-Encoding") or ()
+        if transfer_encodings:
             raise HTTPRequestError(400, "transfer encoding is not supported")
-        raw_length = self.headers.get("Content-Length")
+        content_lengths = self.headers.get_all("Content-Length") or ()
+        if len(content_lengths) > 1:
+            raise HTTPRequestError(400, "multiple Content-Length headers are not supported")
+        raw_length = content_lengths[0] if content_lengths else None
         if raw_length is None:
             raise HTTPRequestError(411, "Content-Length is required")
         if not raw_length.strip().isdigit():
