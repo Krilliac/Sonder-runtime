@@ -141,6 +141,14 @@ def test_natural_model_requests_are_explicit_only():
             "kind": "fanout", "scope": "local", "profile": "loaded-local-chat",
             "prompt": "summarize this",
         }),
+        ("ask all healthy local chat models: summarize this", {
+            "kind": "fanout", "scope": "local", "profile": "healthy-local-chat",
+            "prompt": "summarize this",
+        }),
+        ("query every loaded local chat model for a concise summary", {
+            "kind": "fanout", "scope": "local", "profile": "loaded-local-chat",
+            "prompt": "a concise summary",
+        }),
     ],
 )
 def test_natural_fanout_profiles_are_fixed_whole_turn_requests(phrase, expected):
@@ -178,6 +186,7 @@ def test_tool_manifest_documents_guarded_model_routes():
     assert "healthy-local-chat" in manifest
     assert "healthy-cloud-chat" in manifest
     assert "loaded-local-chat" in manifest
+    assert "ask all loaded local chat models: ..." in manifest
     assert "never accept arbitrary selectors" in manifest
     assert "ask all available local models: ..." in manifest
     assert "ask all available models for ..." in manifest
