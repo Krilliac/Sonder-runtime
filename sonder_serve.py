@@ -2411,6 +2411,16 @@ class Handler(BaseHTTPRequestHandler):
 
         stream = bool(req.get("stream", False))
         model = req.get("model", "sonder")
+        if not isinstance(model, str):
+            record_early_chat_metric("invalid_model")
+            self._send_json_payload(
+                {"error": {
+                    "message": "model must be a string",
+                    "type": "invalid_request",
+                }},
+                status=400,
+            )
+            return
         if natural_model and natural_model["kind"] == "fanout":
             # A whole-catalog request spends several model calls.  Local-open
             # keeps its single-user/full-tool behavior; shared deployments
