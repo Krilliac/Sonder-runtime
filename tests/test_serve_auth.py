@@ -1177,7 +1177,14 @@ def test_dangerous_slash_denied_before_handler(monkeypatch):
     assert called == []
 
 
-def test_wrapped_dangerous_slash_is_denied_before_handler(monkeypatch):
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "use model phi4: /run",
+        "run using phi4:latest: /run",
+    ],
+)
+def test_wrapped_dangerous_slash_is_denied_before_handler(monkeypatch, prompt):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")
     monkeypatch.setattr(
@@ -1187,7 +1194,7 @@ def test_wrapped_dangerous_slash_is_denied_before_handler(monkeypatch):
     monkeypatch.setattr(ts, "_handle_slash", lambda *args, **kwargs: called.append(True))
     request = json.dumps({
         "model": "sonder",
-        "messages": [{"role": "user", "content": "use model phi4: /run"}],
+        "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
     with _http_server(monkeypatch) as port:
         status, _, _ = _request(
