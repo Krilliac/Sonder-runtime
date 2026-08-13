@@ -2675,7 +2675,7 @@ class Handler(BaseHTTPRequestHandler):
         # policy checks.  Otherwise ``use model x: /run ...`` could evade the
         # initial slash-command gate and execute after the rewrite below.
         natural_model = server.natural_model_request(prompt)
-        if natural_model and natural_model["kind"] == "model":
+        if natural_model:
             prompt = natural_model["prompt"]
             if prompt.lstrip().startswith("/"):
                 record_early_chat_metric("wrapped_slash_command")
