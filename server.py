@@ -348,8 +348,33 @@ _KNOWN_VISION_ONLY_MODEL_FAMILIES = frozenset({
 })
 
 
+def _fanout_capabilities(record):
+    """Normalize capability metadata with the catalog's documented fallback.
+
+    Ollama-compatible catalogs vary between scalar, list, and nested metadata.
+    An empty top-level declaration is not authoritative when the nested record
+    positively describes the model, so every fanout consumer uses the same
+    non-empty-first rule.
+    """
+    record = record if isinstance(record, dict) else {}
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+
+    def normalized(raw):
+        if isinstance(raw, str):
+            values = (raw,)
+        elif isinstance(raw, (list, tuple, set)):
+            values = raw
+        else:
+            return set()
+        return {str(value).strip().casefold() for value in values if str(value).strip()}
+
+    capabilities = normalized(record.get("capabilities"))
+    return capabilities or normalized(details.get("capabilities"))
+
+
 def _fanout_nonchat_reason(record):
     """Return a skip reason for explicit or known non-chat catalog targets."""
+    record = record if isinstance(record, dict) else {}
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     def normalized(raw):
         if isinstance(raw, str):
@@ -363,9 +388,7 @@ def _fanout_nonchat_reason(record):
     # Some Ollama-compatible catalogs expose a scalar capability, while others
     # nest it under details.  Prefer a meaningful top-level declaration, but
     # do not mistake null/empty metadata for an authoritative "unknown".
-    capabilities = normalized(record.get("capabilities"))
-    if not capabilities:
-        capabilities = normalized(details.get("capabilities"))
+    capabilities = _fanout_capabilities(record)
     generative = {"completion", "chat", "generate", "text-generation"}
     if capabilities & generative:
         return ""
@@ -393,17 +416,9 @@ def _fanout_declares_generative_capability(record):
     bounded probe. Synthesis instead puts multiple durable answer previews in
     one new prompt, so require a positive local chat/completion declaration.
     """
-    details = record.get("details") if isinstance(record.get("details"), dict) else {}
-    raw = record.get("capabilities")
-    if raw is None:
-        raw = details.get("capabilities")
-    if isinstance(raw, str):
-        capabilities = {raw.strip().casefold()}
-    elif isinstance(raw, (list, tuple, set)):
-        capabilities = {str(value).strip().casefold() for value in raw if str(value).strip()}
-    else:
-        capabilities = set()
-    return bool(capabilities & {"completion", "chat", "generate", "text-generation"})
+    return bool(_fanout_capabilities(record) & {
+        "completion", "chat", "generate", "text-generation",
+    })
 
 
 def resolve_discovered_model_record(selector):

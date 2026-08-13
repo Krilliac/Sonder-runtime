@@ -961,6 +961,25 @@ def test_fanout_synthesis_uses_local_model_show_metadata_when_tags_omit_capabili
     assert seen == [("/api/show", {"name": "ordinary-ollama"})]
 
 
+def test_fanout_synthesis_uses_nested_tag_capability_without_show(monkeypatch):
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("nested-chat", {
+            "name": "nested-chat", "capabilities": [],
+            "details": {"capabilities": ["completion"]},
+        }),
+    ])
+    monkeypatch.setattr(
+        server, "_post",
+        lambda *_args, **_kwargs: pytest.fail("positively declared nested capability must avoid /api/show"),
+    )
+
+    assert server._fanout_nonchat_reason({
+        "name": "nested-chat", "capabilities": [],
+        "details": {"capabilities": ["completion"]},
+    }) == ""
+    assert server._fanout_synthesis_model("nested-chat") == "nested-chat"
+
+
 def test_fanout_synthesis_source_bound_fails_without_dropping_answers(monkeypatch):
     run = {"id": "fan-test", "status": "completed"}
     rows = [
