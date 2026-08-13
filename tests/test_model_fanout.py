@@ -190,6 +190,34 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert receipt["models_failed"] == 1
     assert receipt["resident_before"] == ["local-a"]
     assert receipt["total_elapsed_ms"] >= 0
+    assert receipt["admission"] == {
+        "selected_models": ["local-a", "remote:cloud"],
+        "targets": {"total": 2, "local": 1, "cloud": 1},
+        "execution": {
+            "num_predict": 512, "request_timeout_s": 45,
+            "requested_num_predict": 512,
+            "local_concurrency": 1, "cloud_concurrency": 2,
+        },
+        "upper_bounds": {
+            "initial_request_attempts_total": 2,
+            "initial_cloud_request_attempts": 1,
+            "scheduled_request_phase_wall_ms": 90_000,
+            "excludes": [
+                "catalog discovery", "queue or lease wait", "model load or unload",
+                "provider retry or throttle beyond a request timeout", "explicit later resume attempts",
+            ],
+        },
+        "cost": {
+            "provider_pricing": "not_estimated",
+            "reason": "the runtime has no trustworthy provider price schedule",
+        },
+        "privacy": {
+            "cloud_opt_in": True,
+            "cloud_targets": ["remote:cloud"],
+            "prompt_leaves_machine": True,
+            "notice": "selected cloud targets receive the prompt; cloud calls require explicit operator opt-in",
+        },
+    }
     assert receipt["answers"][0]["answer"] == "answer from local-a"
     assert "timeout" in receipt["failures"][0]["error"]
     assert unloads == []
@@ -206,7 +234,36 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
     receipt = json.loads(server.model_fanout("hello", scope="local"))
 
     assert receipt["models_answered"] == 1
+    assert receipt["admission"]["targets"] == {"total": 1, "local": 1, "cloud": 0}
+    assert receipt["admission"]["upper_bounds"]["scheduled_request_phase_wall_ms"] == 45_000
+    assert receipt["admission"]["privacy"] == {
+        "cloud_opt_in": False,
+        "cloud_targets": [],
+        "prompt_leaves_machine": False,
+        "notice": "no selected cloud target receives the prompt",
+    }
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
+
+
+def test_fanout_admission_uses_snapshot_and_covers_k3_fallback(monkeypatch):
+    run = {
+        "models_json": json.dumps(["kimi-k3:cloud", "local-thinking"]),
+        "cloud_opt_in": True,
+    }
+    limits = {"num_predict": 512, "timeout": 10, "cloud_workers": 2}
+    monkeypatch.setattr(server, "_known_thinking_model", lambda name: name == "local-thinking")
+
+    admission = server._fanout_admission(run, [{"model": "injected:cloud"}], limits)
+
+    assert admission["selected_models"] == ["kimi-k3:cloud", "local-thinking"]
+    assert admission["execution"]["requested_num_predict"] == 512
+    assert admission["execution"]["num_predict"] == 4096
+    assert admission["upper_bounds"]["initial_request_attempts_total"] == 3
+    assert admission["upper_bounds"]["initial_cloud_request_attempts"] == 2
+    assert admission["upper_bounds"]["scheduled_request_phase_wall_ms"] == 20_000
+    assert admission["privacy"]["cloud_targets"] == [
+        server.CLOUD_EXTRA_USAGE_FALLBACK_MODEL, "kimi-k3:cloud",
+    ]
 
 
 def test_model_fanout_persists_a_sealed_prompt_and_durable_receipt(monkeypatch, tmp_path):
