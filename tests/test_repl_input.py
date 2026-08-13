@@ -135,6 +135,18 @@ def test_execution_prompt_reports_unknown_instead_of_zero(monkeypatch):
     assert sonder_repl._execution_prompt({"known": False}) == "[lanes ? | agents ?]"
 
 
+def test_composer_title_uses_live_tier_and_execution_status(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+
+    title = sonder_repl._composer_title("code", {
+        "known": True, "running_lanes": 1, "running_agents": 0,
+        "queued_agents": 0,
+    })
+
+    assert title == "Sonder code (coder:14b)  [lanes 1 | agents 0]"
+
+
 def test_activity_watch_prints_each_sequence_once_and_stops_cleanly(
     monkeypatch, capsys,
 ):
