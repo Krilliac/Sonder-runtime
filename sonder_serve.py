@@ -443,6 +443,7 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "command_registry",
     "permission_rules",
+    "tool_contract",
     "debug_dump",
 ]
 
@@ -801,7 +802,7 @@ def _record_chat(role, content, kind="message", state=None):
 
 
 def _maybe_live_reload():
-    global server, grounding, training_tasks, intents, feedback, admin_auth, debug_dump
+    global server, grounding, training_tasks, intents, feedback, admin_auth, debug_dump, tool_contract
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     server = modules.get("server", server)
     grounding = modules.get("grounding", grounding)
@@ -810,6 +811,7 @@ def _maybe_live_reload():
     feedback = modules.get("feedback", feedback)
     admin_auth = modules.get("admin_auth", admin_auth)
     debug_dump = modules.get("debug_dump", debug_dump)
+    tool_contract = modules.get("tool_contract", tool_contract)
 
 
 def _on_off(arg, current):
