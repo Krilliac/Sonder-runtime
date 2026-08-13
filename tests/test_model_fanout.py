@@ -813,6 +813,27 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
 
 
+def test_model_fanout_preserves_models_when_residency_snapshot_is_unavailable(monkeypatch):
+    """An unavailable /api/ps is unknown, never proof that nothing was loaded."""
+    unloads = []
+
+    def fake_get(path):
+        if path == "/api/tags":
+            return {"models": [{"name": "local-a"}]}
+        assert path == "/api/ps"
+        raise RuntimeError("Ollama residency unavailable")
+
+    monkeypatch.setattr(server, "_get", fake_get)
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda *args, **kwargs: unloads.append(args) or {})
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+
+    assert receipt["resident_before"] == []
+    assert receipt["resident_snapshot_known"] is False
+    assert unloads == []
+
+
 def test_fanout_admission_uses_only_its_immutable_k3_target(monkeypatch):
     run = {
         "models_json": json.dumps(["kimi-k3:cloud", "local-thinking"]),

@@ -22522,12 +22522,17 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
     targets = plan["selected"]
     if not targets:
         raise _fanout_no_eligible_models_error(plan, scope)
+    resident_snapshot_known = False
     try:
         resident_before = [
             str(row.get("name")) for row in _get("/api/ps").get("models", [])
             if row.get("name")
         ]
+        resident_snapshot_known = True
     except Exception:
+        # An unavailable snapshot is not evidence that no model was resident.
+        # Keep all models loaded rather than evicting an active caller's
+        # pre-existing model in the execution cleanup below.
         resident_before = []
     try:
         sealed = fanout_prompt_vault.encrypt_prompt(prompt)
@@ -22542,6 +22547,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
         "timeout": request_timeout,
         "cloud_workers": cloud_workers,
         "resident_before": resident_before,
+        "resident_snapshot_known": resident_snapshot_known,
         "plan_skipped": plan["skipped"],
         # Preserve the reviewed profile name with the durable snapshot.  The
         # immutable models_json remains the execution authority.
@@ -22568,6 +22574,10 @@ def _fanout_limits(run):
         "timeout": max(5, min(int(raw.get("timeout", 45)), 300)),
         "cloud_workers": max(1, min(int(raw.get("cloud_workers", 2)), 2)),
         "resident_before": [str(name) for name in raw.get("resident_before", []) if str(name)],
+        # Legacy receipts have no trustworthy snapshot provenance.  Conserving
+        # a model is safe; evicting one based on an unknown empty snapshot is
+        # not, so the backwards-compatible default is deliberately false.
+        "resident_snapshot_known": raw.get("resident_snapshot_known") is True,
         "plan_skipped": list(raw.get("plan_skipped", [])),
         "selection_profile": str(raw.get("selection_profile") or "").strip().lower(),
     }
@@ -22773,6 +22783,7 @@ def _fanout_receipt(run_id):
         "models_skipped": len(plan_skips) + len(execution_skips),
         "skipped": plan_skips + execution_skips,
         "resident_before": limits["resident_before"],
+        "resident_snapshot_known": limits["resident_snapshot_known"],
         "total_elapsed_ms": max(0, int((float(ended) - float(run["created_ts"])) * 1000)),
         "cloud_workers": limits["cloud_workers"],
         "usage": {
@@ -23043,6 +23054,7 @@ def _execute_fanout_run(run_id):
         return _fanout_receipt(run_id)
 
     resident_at_start = {name.casefold() for name in limits["resident_before"]}
+    resident_snapshot_known = limits["resident_snapshot_known"]
     cloud_usage = {"tokens_in": 0, "tokens_out": 0}
     # This execution can resume a durable run containing terminal rows from
     # earlier workers. Keep activity scoped to the rows this worker actually
@@ -23092,7 +23104,11 @@ def _execute_fanout_run(run_id):
                 metadata["tokens_out"] = usage.get("tokens_out", 0)
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
-            if not _is_cloud_model_name(model) and model.casefold() not in resident_at_start:
+            if (
+                resident_snapshot_known
+                and not _is_cloud_model_name(model)
+                and model.casefold() not in resident_at_start
+            ):
                 with contextlib.suppress(Exception):
                     _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
