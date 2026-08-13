@@ -153,6 +153,20 @@ def test_fanout_recent_renders_a_refusal_instead_of_an_empty_history():
     )
 
 
+def test_repl_error_classifier_marks_model_pin_refusals_as_errors():
+    for text in (
+        "ERROR: ordinary host refusal",
+        "model pin 'gemma3:12b' is unavailable or is not chat-capable.",
+        "model pin 'cloud:latest' is incompatible with the selected local route.",
+    ):
+        assert sonder_repl._is_repl_error(text) is True
+
+
+def test_repl_error_classifier_does_not_treat_model_text_as_a_pin_refusal():
+    text = "The model pin 'gemma3:12b' is unavailable or is not chat-capable."
+    assert sonder_repl._is_repl_error(text) is False
+
+
 def test_catalogued_fanout_status_reuses_the_logged_in_repl_token(monkeypatch):
     captured = {}
     monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "developer-session-token")
