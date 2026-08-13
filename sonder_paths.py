@@ -11,10 +11,15 @@ import ntpath
 import platform
 import re
 import shutil
+import time
+import uuid
 from pathlib import Path
 
 
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
+_LEGACY_DB_MIGRATION_WAIT_SECONDS = 10.0
+_LEGACY_DB_MIGRATION_POLL_SECONDS = 0.02
+_LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS = 30.0
 
 
 def windows_system_drive(env=None) -> str:
@@ -157,9 +162,111 @@ def memory_db_path() -> str:
     target = ensure_home() / "memory.db"
     legacy = Path(__file__).resolve().with_name("memory.db")
     if not target.exists() and legacy.exists() and legacy.resolve() != target.resolve():
-        shutil.copy2(legacy, target)
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(legacy) + suffix)
-            if sidecar.exists():
-                shutil.copy2(sidecar, Path(str(target) + suffix))
+        _migrate_legacy_memory_db(legacy, target)
     return str(target)
+
+
+def _migration_lock_owner(lock: Path) -> tuple[int | None, float | None]:
+    """Read the advisory owner record without trusting a partial crash write."""
+    try:
+        lines = lock.read_text(encoding="ascii").splitlines()
+        return int(lines[0]), float(lines[1])
+    except (OSError, ValueError, IndexError):
+        return None, None
+
+
+def _migration_owner_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        # A process we cannot inspect is still a live owner; never steal it.
+        return True
+    except OSError:
+        return False
+
+
+def _reclaim_abandoned_migration_lock(lock: Path) -> bool:
+    """Remove a dead or long-abandoned migration lock, never a live owner."""
+    pid, started = _migration_lock_owner(lock)
+    if _migration_owner_alive(pid):
+        return False
+    try:
+        age = max(0.0, time.time() - (started or lock.stat().st_mtime))
+    except OSError:
+        return False
+    if age < _LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS:
+        return False
+    try:
+        # Verify the record once more before unlinking so a writer that won the
+        # race and published a live PID is never reclaimed as the old owner.
+        verify_pid, _ = _migration_lock_owner(lock)
+        if _migration_owner_alive(verify_pid):
+            return False
+        lock.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _migrate_legacy_memory_db(legacy: Path, target: Path) -> None:
+    """Copy one legacy SQLite store without racing another startup process.
+
+    The REPL and loopback server can start at the same time.  Publishing a
+    direct ``copy2`` to the final destination lets both writers collide on
+    Windows and can expose a database before its WAL sidecars.  An exclusive
+    lock elects one migrator; it stages all files in the destination directory,
+    publishes sidecars first, then atomically publishes the database last.
+    """
+    lock = target.with_name(".%s.legacy-migrate.lock" % target.name)
+    stage_paths: list[Path] = []
+    while not target.exists():
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            # A live owner is allowed to complete at its own pace: a large WAL
+            # on a slow disk is still a healthy migration. A crash/power loss
+            # leaves a dead owner record, which this path reclaims safely.
+            if _reclaim_abandoned_migration_lock(lock):
+                continue
+            time.sleep(_LEGACY_DB_MIGRATION_POLL_SECONDS)
+            continue
+        try:
+            record = "%d\n%.6f\n%s\n" % (os.getpid(), time.time(), uuid.uuid4().hex)
+            os.write(fd, record.encode("ascii"))
+            os.fsync(fd)
+            if target.exists():
+                return
+            nonce = uuid.uuid4().hex
+            staged_db = target.with_name(".%s.%s.tmp" % (target.name, nonce))
+            shutil.copy2(legacy, staged_db)
+            stage_paths.append(staged_db)
+            staged_sidecars: list[tuple[Path, Path]] = []
+            for suffix in ("-shm", "-wal"):
+                source = Path(str(legacy) + suffix)
+                if source.exists():
+                    staged = target.with_name(".%s%s.%s.tmp" % (target.name, suffix, nonce))
+                    shutil.copy2(source, staged)
+                    stage_paths.append(staged)
+                    staged_sidecars.append((staged, Path(str(target) + suffix)))
+            # A consumer only sees the database after all available SQLite
+            # sidecars have reached their final paths.
+            for staged, destination in staged_sidecars:
+                os.replace(staged, destination)
+                stage_paths.remove(staged)
+            os.replace(staged_db, target)
+            stage_paths.remove(staged_db)
+            return
+        finally:
+            for staged in stage_paths:
+                try:
+                    staged.unlink()
+                except OSError:
+                    pass
+            os.close(fd)
+            try:
+                lock.unlink()
+            except OSError:
+                pass
