@@ -22113,6 +22113,42 @@ def _fanout_safe_error(exc, prompt):
     return _fanout_redact_prompt_echo(rendered, prompt)[:4000]
 
 
+def _fanout_failure_class(exc):
+    """Map a transport failure into the durable, non-content receipt enum."""
+    if not isinstance(exc, ModelCallError):
+        return "unknown"
+    kind = str(exc.kind or "").casefold()
+    direct = {
+        "configuration": "configuration",
+        "request": "request_rejected",
+        "timeout": "timeout",
+        "transport": "transport",
+        "protocol": "protocol",
+        "empty_response": "empty_response",
+        "budget": "budget_exhausted",
+        "cancelled": "cancelled",
+    }
+    if kind in direct:
+        return direct[kind]
+    if kind == "http":
+        if exc.status == 429:
+            return "throttled"
+        if exc.status == 408:
+            return "timeout"
+        if exc.status in (402, 404, 410) or (exc.status is not None and exc.status >= 500):
+            return "unavailable"
+        if exc.status is not None and 400 <= exc.status < 500:
+            return "request_rejected"
+    return "unknown"
+
+
+def _fanout_provider_retry_after_ts(exc):
+    """Persist a bounded provider hint for display, never for replay/scheduling."""
+    if not isinstance(exc, ModelCallError):
+        return None
+    return fanout_store.retry_after_timestamp(exc.retry_after_seconds)
+
+
 def _fanout_safe_answer(value, prompt):
     """Return receipt-safe model output without retaining obvious credentials.
 
@@ -22392,6 +22428,7 @@ def _fanout_receipt(run_id):
         return None
     limits = _fanout_limits(run)
     rows = fanout_store.list_results(run_id)
+    now = time.time()
     def result_usage(row):
         truncation_known = bool(row.get("answer_truncation_known"))
         return {
@@ -22408,13 +22445,36 @@ def _fanout_receipt(run_id):
     answers = [{"model": row["model"], "answer": row["answer"], "elapsed_ms": row["elapsed_ms"],
                 **result_usage(row)}
                for row in rows if row["status"] == "answered"]
-    failures = [{"model": row["model"], "error": row["error"], "elapsed_ms": row["elapsed_ms"],
-                 "status": row["status"], **result_usage(row)}
-                for row in rows if row["status"] in ("failed", "unknown")]
+    def failure_receipt(row):
+        item = {
+            "model": row["model"],
+            "error": row["error"],
+            "elapsed_ms": row["elapsed_ms"],
+            "status": row["status"],
+            # Null means a legacy receipt predates the closed vocabulary.
+            "failure_class": fanout_store.normalize_failure_class(row.get("failure_class")),
+            **result_usage(row),
+        }
+        # The database stores an absolute expiry so a process restart cannot
+        # turn a provider hint into a longer wait.  The public receipt gets
+        # only a live relative delay; it is informative and never causes an
+        # automatic replay of this terminal failed row.
+        try:
+            expiry = float(row.get("retry_after_ts"))
+            # A past-but-valid provider hint remains observable as zero.  This
+            # distinguishes it from no provider hint at all without exposing
+            # the absolute timestamp.
+            remaining_ms = max(0, int((expiry - now) * 1000))
+        except (TypeError, ValueError, OverflowError):
+            remaining_ms = None
+        if remaining_ms is not None:
+            item["retry_after_ms"] = remaining_ms
+        return item
+
+    failures = [failure_receipt(row) for row in rows if row["status"] in ("failed", "unknown")]
     execution_skips = [{"model": row["model"], "reason": row["error"] or "not executed"}
                        for row in rows if row["status"] == "skipped"]
-    ended = run.get("finished_ts") or time.time()
-    now = time.time()
+    ended = run.get("finished_ts") or now
     plan_skips = []
     for row in limits["plan_skipped"]:
         item = dict(row) if isinstance(row, dict) else {"reason": str(row or "not eligible")}
@@ -22548,7 +22608,8 @@ def _execute_fanout_run(run_id):
             if row is None:
                 break
             fanout_store.record_result(run_id, row["model"], owner_id, "failed",
-                                       error="sealed prompt unavailable", elapsed_ms=0)
+                                       error="sealed prompt unavailable", elapsed_ms=0,
+                                       failure_class="configuration")
         return _fanout_receipt(run_id)
 
     resident_at_start = {name.casefold() for name in limits["resident_before"]}
@@ -22592,6 +22653,14 @@ def _execute_fanout_run(run_id):
         row, status, answer, error, elapsed, exc, metadata = result
         recorded = fanout_store.record_result(run_id, row["model"], owner_id, status,
                                               answer=answer, error=error, elapsed_ms=elapsed,
+                                              failure_class=(
+                                                  _fanout_failure_class(exc)
+                                                  if status == "failed" else None
+                                              ),
+                                              retry_after_ts=(
+                                                  _fanout_provider_retry_after_ts(exc)
+                                                  if status == "failed" else None
+                                              ),
                                               answer_chars=metadata.get("answer_chars"),
                                               thinking_chars=metadata.get("thinking_chars"),
                                               done_reason=metadata.get("done_reason", ""))
