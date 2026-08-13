@@ -450,6 +450,26 @@ def _startup_banner(strict, persona, project, tier=None):
     except Exception:
         endpoint, live = os.environ.get("SONDER_API", "http://127.0.0.1:11435"), False
 
+    try:
+        # Startup must never wait on a remote Git server.  The cached
+        # origin/main ref still shows the installed/newest known revisions;
+        # `/updatecheck` is the explicit network refresh command.
+        source = server.runtime_source_update_status_data(refresh=False)
+        revision = "%s @ %s" % (
+            str(source.get("installed_commit") or "unknown")[:12],
+            source.get("installed_commit_time") or "unknown time",
+        )
+        newest = "%s @ %s" % (
+            str(source.get("newest_commit") or "unknown")[:12],
+            source.get("newest_commit_time") or "unknown time",
+        )
+        update = "%s (behind %s)" % (
+            source.get("state") or "unknown", source.get("behind", "?"),
+        )
+    except Exception as exc:
+        revision = newest = "unavailable (%s)" % type(exc).__name__
+        update = "check unavailable"
+
     rows = [
         ("model", "%s  %s" % (model, _paint("(%s tier)" % tier, _Ansi.muted)),
          (_Ansi.cyan,)),
@@ -459,6 +479,9 @@ def _startup_banner(strict, persona, project, tier=None):
         ("directory", _home_relative(os.getcwd()), ()),
         ("persona", str(persona), (_Ansi.cyan,)),
         ("project", str(project or "(none)"), ()),
+        ("installed source", revision, ()),
+        ("newest source", newest, ()),
+        ("update", "%s  /updatecheck | /update" % update, (_Ansi.amber,)),
     ]
     if strict:
         rows.append(("strict", "on  pinned to the sonder alias", (_Ansi.amber,)))
@@ -1208,6 +1231,7 @@ def main():
                 ))
             elif cmd in (
                 "/runtime", "/models", "/mcp", "/convergence",
+                "/update", "/updatecheck", "/updatesource",
                 "/hardware", "/training", "/weighttraining",
                 "/selfmod", "/selfmodify",
                 "/learning", "/learnhealth", "/metrics",

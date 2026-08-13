@@ -520,6 +520,26 @@ def _request(port, method, path, body=None, headers=None):
     return result
 
 
+def test_served_source_update_requires_admin_but_check_remains_read_only(monkeypatch):
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "developer", "role": "developer"},
+    }
+    admin = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "admin", "role": "admin"},
+    }
+    monkeypatch.setattr(ts.server, "control_command", lambda prompt, **_kwargs: "ran " + prompt)
+
+    for command in ("/update", "/updatesource apply"):
+        refused = ts._handle_slash(command, context=developer)
+        assert refused.startswith("refused "), refused
+        assert "administrator" in refused
+        assert ts._handle_slash(command, context=admin).startswith("ran ")
+
+    assert ts._handle_slash("/updatecheck", context=developer).startswith("ran ")
+
+
 def test_system_status_uses_projected_activity_and_shared_feed(
     monkeypatch, tmp_path,
 ):
