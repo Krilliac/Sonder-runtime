@@ -84,6 +84,16 @@ def _request_route(path) -> str:
     return urllib.parse.urlsplit(str(path or "")).path.rstrip("/") or "/"
 
 
+def _local_log_dashboard_allowed(peer: str) -> bool:
+    """Whether unauthenticated browser log diagnostics are safe to expose.
+
+    A reverse proxy commonly connects to the loopback listener itself. Do not
+    let that topology turn this convenience page into remote, unauthenticated
+    observability; authenticated API diagnostics remain separate.
+    """
+    return not TLS_TERMINATED_BY_PROXY and _is_loopback_host(peer)
+
+
 def _env_int(name, default):
     try:
         return int(os.environ.get(name, default))
@@ -125,6 +135,10 @@ HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
 REQUIRE_ACCOUNT = _env_flag("SONDER_REQUIRE_ACCOUNT")
 AUTH_MODE = _resolve_auth_mode(API_KEY, REQUIRE_ACCOUNT)
 CORS_ORIGINS = _parse_cors_origins(os.environ.get("SONDER_CORS_ORIGINS", ""))
+# The validated serve entry point sets this whenever a TLS-terminating proxy
+# fronts the otherwise-loopback runtime. Peer-address checks alone cannot tell
+# that proxy apart from a direct local browser.
+TLS_TERMINATED_BY_PROXY = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
 ALLOW_REGISTRATION = _env_flag("SONDER_ALLOW_REGISTRATION")
 MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
     "SONDER_MAX_REQUEST_BYTES", 1024 * 1024
@@ -2490,11 +2504,11 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_disallowed_origin():
             return
         path = _request_route(self.path)
-        if path == "/" and self._peer_is_loopback():
+        if path == "/" and _local_log_dashboard_allowed(self._peer()):
             self._send_local_log_page()
             return
         if path == "/v1/local/server-log":
-            if not self._peer_is_loopback():
+            if not _local_log_dashboard_allowed(self._peer()):
                 self._send_not_found()
             else:
                 self._send_json_payload({"log": _local_server_log_tail()})

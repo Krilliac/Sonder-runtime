@@ -13,6 +13,15 @@ import sonder_config
 import sonder_health
 
 
+def test_local_log_dashboard_requires_direct_loopback_and_no_tls_proxy(monkeypatch):
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", False)
+    assert ts._local_log_dashboard_allowed("127.0.0.1") is True
+    assert ts._local_log_dashboard_allowed("203.0.113.10") is False
+
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", True)
+    assert ts._local_log_dashboard_allowed("127.0.0.1") is False
+
+
 def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
