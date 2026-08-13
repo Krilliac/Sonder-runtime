@@ -17,6 +17,16 @@ def test_status_and_info_phrasings():
     assert cr.resolve("what can you do") == "/help"
 
 
+def test_read_only_update_check_phrasings_do_not_invoke_update():
+    assert cr.resolve("check for updates") == "/updatecheck"
+    assert cr.resolve("show Sonder updates") == "/updatecheck"
+    assert cr.resolve("is Sonder up to date?") == "/updatecheck"
+    assert cr.resolve("am the runtime current?") == "/updatecheck"
+    # More than a check is an ordinary request; do not discard the rest by
+    # silently converting it into a command.
+    assert cr.resolve("check for updates and install them") is None
+
+
 def test_session_lifecycle_phrasings():
     assert cr.resolve("new session") == "/new"
     assert cr.resolve("start over") == "/new"
