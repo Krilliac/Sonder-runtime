@@ -5296,11 +5296,11 @@ def _sonder_impl_serialized(
         except Exception:
             found = None
         if found is None or _fanout_nonchat_reason(found[1]):
-            return "ERROR: unavailable chat model pin '%s'." % model_override
+            return "model pin '%s' is unavailable or is not chat-capable." % model_override
         pinned_model, _record = found
         if _is_cloud_model_name(pinned_model) != cloud:
             return (
-                "ERROR: model pin '%s' is incompatible with the selected %s route."
+                "model pin '%s' is incompatible with the selected %s route."
                 % (pinned_model, "cloud" if cloud else "local")
             )
         tgt_model = pinned_model
