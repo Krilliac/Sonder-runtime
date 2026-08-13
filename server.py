@@ -16094,6 +16094,12 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
     "self_heal_repair", "memory_export", "memory_privacy_repair",
     "memory_quality_repair", "workflow_save", "workflow_delete", "workflow_run",
+    # These process-wide controls require a human operator at an authenticated
+    # surface.  An agent is intentionally never that operator, even in unsafe
+    # lab mode: prompt text must not be able to alter later users' runtime
+    # behaviour or unload their models.
+    "set_context_size", "unload", "update_emotion_vectors",
+    "tune_emotion_vectors", "learn_preference",
 })
 
 
