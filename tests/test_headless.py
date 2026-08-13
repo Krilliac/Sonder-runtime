@@ -388,6 +388,20 @@ def test_main_start_returns_failure_until_managed_server_is_reachable(monkeypatc
     assert H.main(["start"]) == 1
 
 
+def test_main_start_accepts_a_managed_listener_that_binds_after_readiness_window(monkeypatch):
+    monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
+    monkeypatch.setattr(H, "start_ollama", lambda: "ollama: already reachable")
+    monkeypatch.setattr(H, "ensure_sonder_alias", lambda: (True, "engine: alias ready"))
+    monkeypatch.setattr(
+        H, "start_sonder",
+        lambda *args, **kwargs: "sonder: start requested pid=7, not reachable yet",
+    )
+    monkeypatch.setattr(H, "status", lambda *args: "sonder api: listening on http://127.0.0.1:11435")
+    monkeypatch.setattr(H, "_managed_pid", lambda *args: 7)
+
+    assert H.main(["start"]) == 0
+
+
 def test_main_start_rejects_unmanaged_listener(monkeypatch):
     monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
     monkeypatch.setattr(H, "start_ollama", lambda: "ollama: already reachable")
