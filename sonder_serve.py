@@ -46,6 +46,11 @@ import unsafe_lab
 DEFAULT_PORT = 11435
 
 
+def _request_route(path) -> str:
+    """Return a normalized routing path while preserving query data elsewhere."""
+    return urllib.parse.urlsplit(str(path or "")).path.rstrip("/") or "/"
+
+
 def _env_int(name, default):
     try:
         return int(os.environ.get(name, default))
@@ -1730,7 +1735,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if (
             self.command == "POST"
-            and self.path.rstrip("/") == "/v1/chat/completions"
+            and _request_route(self.path) == "/v1/chat/completions"
         ):
             self._record_chat_completion_metric(
                 sonder_lifecycle.get(), "cors_rejected",
@@ -1770,7 +1775,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if (
             self.command == "POST"
-            and self.path.rstrip("/") == "/v1/chat/completions"
+            and _request_route(self.path) == "/v1/chat/completions"
         ):
             self._record_chat_completion_metric(
                 sonder_lifecycle.get(), "auth_rate_limited",
@@ -1948,7 +1953,7 @@ class Handler(BaseHTTPRequestHandler):
         self._request_started = time.monotonic()
         if self._reject_disallowed_origin():
             return
-        path = self.path.rstrip("/")
+        path = _request_route(self.path)
         if self._handle_lifecycle_get(path):
             return
         if sonder_health.request_path_matches(self.path):
@@ -2233,7 +2238,7 @@ class Handler(BaseHTTPRequestHandler):
         # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive
         # requests. The terminal-metric latch is per request, never per socket.
         self._chat_completion_metrics_recorded = False
-        is_chat_completion = self.path.rstrip("/") == "/v1/chat/completions"
+        is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
 
         def record_early_chat_metric(result):
             if is_chat_completion:
@@ -2244,7 +2249,7 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_disallowed_origin():
             return
         _maybe_live_reload()
-        path = self.path.rstrip("/")
+        path = _request_route(self.path)
         self._correlation()
         if path == "/v1/admin/drain":
             self._handle_admin_drain()
