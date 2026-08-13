@@ -711,6 +711,37 @@ def test_fanout_execution_rejects_a_model_outside_its_snapshot(monkeypatch, tmp_
     assert any(row["model"] == "injected:cloud" for row in receipt["skipped"])
 
 
+def test_fanout_cancel_between_claim_and_send_does_not_start_provider_call(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+    ))
+    run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
+    original_claim = server.fanout_store.claim_next_result
+    cancelled = False
+
+    def claim_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        row = original_claim(*args, **kwargs)
+        if row is not None and not cancelled:
+            cancelled = True
+            server.fanout_store.request_cancel(run["id"])
+        return row
+
+    provider_calls = []
+    monkeypatch.setattr(server.fanout_store, "claim_next_result", claim_then_cancel)
+    monkeypatch.setattr(server, "_post", lambda *args, **kwargs: provider_calls.append(args) or {})
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert cancelled is True
+    assert provider_calls == []
+    assert receipt["status"] == "cancelled"
+    assert receipt["models_skipped"] == 1
+    assert receipt["skipped"][0]["model"] == "remote:cloud"
+
+
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
 

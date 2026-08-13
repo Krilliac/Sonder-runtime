@@ -333,6 +333,32 @@ def claim_next_result(run_id: str, owner_id: str, *, owner_pid: int, lease_secon
         return _row(conn.execute("SELECT * FROM fanout_results WHERE run_id=? AND model=?", (str(run_id), candidate["model"])).fetchone())
 
 
+def worker_can_dispatch(run_id: str, owner_id: str) -> bool:
+    """Whether this worker still owns an active run immediately before I/O.
+
+    This is intentionally a read-only, narrow pre-dispatch fence.  It cannot
+    revoke a request already handed to a provider, but it prevents a
+    cancellation that won the claim-to-send race from starting another call.
+    """
+    now = time.time()
+    conn = _connect()
+    try:
+        run = conn.execute(
+            "SELECT cancel_requested,owner_id,status,lease_until FROM fanout_runs WHERE id=?",
+            (str(run_id),),
+        ).fetchone()
+        return bool(
+            run is not None
+            and not run["cancel_requested"]
+            and run["owner_id"] == str(owner_id)
+            and run["status"] == "running"
+            and run["lease_until"] is not None
+            and run["lease_until"] >= now
+        )
+    finally:
+        conn.close()
+
+
 def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer: str = "", error: str = "", elapsed_ms: int | None = None, retry_after_ts: float | None = None) -> dict | None:
     if status not in ("answered", "failed", "skipped", "unknown"): raise ValueError("invalid fanout result status: %s" % status)
     now = time.time(); elapsed = None if elapsed_ms is None else max(0, min(int(elapsed_ms), 86_400_000))
