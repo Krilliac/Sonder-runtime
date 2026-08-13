@@ -21950,6 +21950,10 @@ def _runtime_update_format(data, *, updated=None):
             data.get("ahead", "?"),
             "clean" if data.get("clean") else "dirty",
         ),
+        "  checkout: %s (source root: %s)" % (
+            data.get("branch") or "detached HEAD",
+            data.get("root") or "unknown",
+        ),
         "  remote: %s%s" % (
             data.get("remote") or "unknown",
             "" if data.get("trusted_remote") else " [not canonical; update refused]",

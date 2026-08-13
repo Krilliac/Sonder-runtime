@@ -403,7 +403,11 @@ def runtime_update(root, *, timeout=MAX_TIMEOUT):
         raise PermissionError("runtime update requires the canonical Sonder origin remote")
     before = runtime_update_status(top, refresh=True, timeout=timeout)
     if before["branch"] != RUNTIME_UPDATE_BRANCH:
-        raise PermissionError("runtime update requires branch %r" % RUNTIME_UPDATE_BRANCH)
+        raise PermissionError(
+            "runtime update requires branch %r (current checkout: %r); "
+            "switch the clean canonical checkout to %r, then retry"
+            % (RUNTIME_UPDATE_BRANCH, before["branch"] or "detached HEAD", RUNTIME_UPDATE_BRANCH)
+        )
     if not before["clean"]:
         raise PermissionError("runtime update refuses a dirty source checkout")
     if before["ahead"]:

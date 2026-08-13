@@ -384,6 +384,8 @@ def test_runtime_update_neutralizes_checkout_filter_processes(monkeypatch, tmp_p
 
 def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch):
     data = {
+        "root": "C:/Sonder-runtime",
+        "branch": "main",
         "installed_commit": "a" * 40,
         "installed_commit_time": "2026-08-13T01:00:00Z",
         "newest_commit": "b" * 40,
@@ -398,6 +400,8 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert "aaaaaaaaaaaa" in text
     assert "bbbbbbbbbbbb" in text
     assert "behind=3" in text
+    assert "checkout: main" in text
+    assert "source root: C:/Sonder-runtime" in text
 
     monkeypatch.setattr(
         server.git_tools, "runtime_update", lambda _root: {"updated": False, "after": data},
@@ -407,6 +411,30 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert "usage:" in server.control_command("/update check")
     assert not sonder_serve._dangerous_http_slash("/updatecheck")
     assert sonder_serve._dangerous_http_slash("/update")
+
+
+def test_runtime_update_refusal_names_current_branch_and_safe_recovery(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(git_tools, "_require_repository_root", lambda *_args, **_kwargs: repo)
+    monkeypatch.setattr(
+        git_tools, "_runtime_remote_url",
+        lambda _root: "https://github.com/Krilliac/Sonder-runtime.git",
+    )
+    monkeypatch.setattr(
+        git_tools, "runtime_update_status",
+        lambda *_args, **_kwargs: {
+            "branch": "feat/experiment", "clean": True, "ahead": 0,
+            "state": "behind",
+        },
+    )
+
+    with pytest.raises(PermissionError) as excinfo:
+        git_tools.runtime_update(repo)
+
+    message = str(excinfo.value)
+    assert "requires branch 'main'" in message
+    assert "current checkout: 'feat/experiment'" in message
+    assert "switch the clean canonical checkout to 'main', then retry" in message
 
 
 def test_update_status_distinguishes_running_source_from_new_checkout(monkeypatch):
