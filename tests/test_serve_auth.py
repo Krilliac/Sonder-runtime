@@ -89,6 +89,41 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
+@pytest.mark.parametrize("response_format", [
+    {"type": "json_object"},
+    {"type": "json_schema", "json_schema": {"name": "result", "schema": {"type": "object"}}},
+    None,
+    "json_object",
+    [],
+])
+def test_chat_rejects_unsupported_response_format_before_routing(monkeypatch, response_format):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    calls = []
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: calls.append("prewarm"))
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *_args, **_kwargs: calls.append("model") or "answer")
+    request = json.dumps({
+        "model": "sonder",
+        "response_format": response_format,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": "response_format is not supported by this endpoint",
+        "type": "invalid_request",
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+    assert calls == []
+
+
 def test_chat_false_stream_returns_json_not_sse(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
