@@ -91,6 +91,10 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
 
 @pytest.mark.parametrize("response_format", [
     {"type": "json_schema", "json_schema": {"name": "result", "schema": {"type": "object"}}},
+    {"type": "json_schema", "json_schema": {
+        "name": "result", "strict": True,
+        "schema": {"type": "number", "minimum": float("nan")},
+    }},
     None,
     "json_object",
     [],
@@ -118,6 +122,19 @@ def test_chat_rejects_invalid_response_format_before_routing(monkeypatch, respon
     assert json.loads(body)["error"]["type"] == "invalid_request"
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
     assert calls == []
+
+
+def test_response_format_accepts_an_arbitrarily_large_finite_integer_bound():
+    schema = ts._response_format_schema({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "large_integer",
+            "strict": True,
+            "schema": {"type": "integer", "minimum": 10 ** 400},
+        },
+    })
+
+    assert schema["minimum"] == 10 ** 400
 
 
 def test_chat_response_format_uses_isolated_direct_model_path(monkeypatch):
