@@ -1241,14 +1241,19 @@ def main():
             print(_paint("usage: /model <model-name>  |  /model <tier>", _Ansi.muted))
             return
 
-        if arg in server.TIERS:
-            active_tier = arg
+        tier_names = {str(name).casefold(): name for name in server.TIERS}
+        selected_tier = tier_names.get(arg.casefold())
+        if selected_tier is not None:
+            active_tier = selected_tier
             active_model = None
-            print("active tier: %s  ->  %s" % (arg, server.TIERS.get(arg)))
+            print("active tier: %s  ->  %s" % (
+                selected_tier, server.TIERS.get(selected_tier)))
             return
 
         names = [name for name, _size in installed]
-        if installed and arg not in names:
+        model_names = {str(name).casefold(): name for name in names}
+        selected_model = model_names.get(arg.casefold())
+        if installed and selected_model is None:
             # Refuse rather than rebind to something that will fail on the next
             # turn with an opaque ollama error. Suggest, because a near miss is
             # usually a tag typo (":7b" vs ":latest").
@@ -1261,8 +1266,13 @@ def main():
             return
 
         active_tier = tier
-        active_model = arg
-        print("%s session model -> %s" % (tier, _paint(arg, _Ansi.cyan, _Ansi.bold)))
+        # Preserve the catalog's spelling for the actual request.  Ollama's
+        # model tags are conventionally lowercase, but accepting a pasted or
+        # manually capitalized selector should not turn a valid discovery into
+        # an avoidable next-turn pin refusal.
+        active_model = selected_model or arg
+        print("%s session model -> %s" % (
+            tier, _paint(active_model, _Ansi.cyan, _Ansi.bold)))
 
     def do_run(timeout=grounding.DEFAULT_TIMEOUT):
         block = grounding.extract_runnable_code_block(last_run_source or last_response)
