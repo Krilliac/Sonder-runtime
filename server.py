@@ -40,7 +40,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from pydantic import StrictBool, StrictStr
+from pydantic import StrictBool, StrictInt, StrictStr
 
 import sonder_runtime.adapters.task_store as task_state_adapter
 import sonder_runtime.application.tasks.use_cases as task_use_cases
@@ -15009,7 +15009,7 @@ def tool_manifest() -> str:
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, and `healthy-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. Natural chat supports `ask healthy local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
+        "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; list caller-scoped safe recent-run summaries after a restart, inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, and `healthy-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. Natural chat supports `ask healthy local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
         "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
@@ -23100,6 +23100,36 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
     if receipt is None:
         return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
     return json.dumps(receipt, indent=2, sort_keys=True)
+
+
+@mcp.tool()
+def model_fanout_recent(limit: StrictInt = 20, include_finished: StrictBool = True,
+                        token: str = "") -> str:
+    """List recent durable fanout run summaries available to this caller.
+
+    This supports recovery after a UI/terminal restart.  It intentionally
+    omits prompts, answers, model names, error text, hashes, limits and owner
+    data; use ``model_fanout_status(run_id)`` for an authorized full receipt.
+    """
+    started = time.time()
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        return _format_model_call_error(ModelCallError(
+            "configuration", "limit must be an integer between 1 and 100",
+        ))
+    if not isinstance(include_finished, bool):
+        return _format_model_call_error(ModelCallError(
+            "configuration", "include_finished must be a boolean",
+        ))
+    refusal = _developer_gate("model_fanout_recent", token, started)
+    if refusal:
+        return refusal
+    owner, account = _direct_fanout_identity(token)
+    request_owner = None
+    if _deployment_authenticates_callers() and str((account or {}).get("role") or "") != "admin":
+        request_owner = owner
+    return json.dumps({"runs": fanout_store.recent_run_summaries(
+        request_owner=request_owner, include_finished=include_finished, limit=limit,
+    )}, indent=2, sort_keys=True)
 
 
 @mcp.tool()

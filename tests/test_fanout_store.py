@@ -51,6 +51,32 @@ def test_sealed_execution_prompt_is_not_exposed_by_receipt_readers():
     assert store.execution_prompt_ciphertext(run["id"]) == "ciphertext"
 
 
+def test_recent_run_summaries_are_owner_scoped_and_never_return_sensitive_rows():
+    first = store.create_run(
+        "private prompt alpha", ["local-a", "local-b"],
+        request_owner="owner-a", scope="local", execution_prompt_ciphertext="cipher-a",
+    )
+    second = store.create_run(
+        "private prompt beta", ["cloud-a"],
+        request_owner="owner-b", scope="cloud", execution_prompt_ciphertext="cipher-b",
+    )
+
+    summaries = store.recent_run_summaries(request_owner="owner-a")
+
+    assert [row["run_id"] for row in summaries] == [first["id"]]
+    row = summaries[0]
+    assert row["models_selected"] == 2
+    assert row["models_answered"] == row["models_failed"] == row["models_skipped"] == 0
+    assert set(row) == {
+        "run_id", "status", "scope", "created_ts", "updated_ts", "finished_ts",
+        "models_selected", "models_answered", "models_failed", "models_skipped",
+    }
+    rendered = repr(summaries)
+    for secret in ("private prompt", "cipher", "owner-a", "models_json", "prompt_sha256"):
+        assert secret not in rendered
+    assert second["id"] not in rendered
+
+
 def test_schema_migration_scrubs_pre_vault_prompt_and_digest(isolated):
     run = store.create_run("private legacy prompt", ["local"])
     conn = sqlite3.connect(isolated)

@@ -325,6 +325,47 @@ def list_runs(*, include_finished: bool = True, limit: int = 20) -> list[dict]:
     finally: conn.close()
 
 
+def recent_run_summaries(*, request_owner: str | None = None,
+                         include_finished: bool = True,
+                         limit: int = 20) -> list[dict]:
+    """Return a deliberately non-sensitive fanout history projection.
+
+    This is not a filtered version of :func:`list_runs`: that API returns the
+    sealed prompt, prompt digest, model snapshot, limits, and owner metadata.
+    Restart recovery needs only a run identifier, lifecycle state, and counts,
+    so select precisely those fields rather than relying on callers to redact
+    a broad row after it has already crossed an authorization boundary.
+    """
+    limit = max(1, min(int(limit), 100))
+    reconcile_stale_runs()
+    clauses, values = [], []
+    if request_owner is not None:
+        clauses.append("runs.request_owner=?")
+        values.append(str(request_owner))
+    if not include_finished:
+        clauses.append("runs.status NOT IN ('completed','cancelled','interrupted')")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    query = """
+        SELECT runs.id AS run_id, runs.status, runs.scope, runs.created_ts,
+               runs.updated_ts, runs.finished_ts,
+               COUNT(results.model) AS models_selected,
+               COALESCE(SUM(CASE WHEN results.status='answered' THEN 1 ELSE 0 END), 0) AS models_answered,
+               COALESCE(SUM(CASE WHEN results.status='failed' THEN 1 ELSE 0 END), 0) AS models_failed,
+               COALESCE(SUM(CASE WHEN results.status='skipped' THEN 1 ELSE 0 END), 0) AS models_skipped
+          FROM fanout_runs AS runs
+          LEFT JOIN fanout_results AS results ON results.run_id=runs.id
+    """ + where + """
+         GROUP BY runs.id
+         ORDER BY runs.updated_ts DESC
+         LIMIT ?
+    """
+    conn = _connect()
+    try:
+        return [dict(row) for row in conn.execute(query, (*values, limit))]
+    finally:
+        conn.close()
+
+
 def list_results(run_id: str, *, include_answers: bool = True) -> list[dict]:
     conn = _connect()
     try:
