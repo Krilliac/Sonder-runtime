@@ -5569,6 +5569,63 @@ def answer_with_history(
     return _append_activity(result, response=response, replace=True)
 
 
+def structured_answer_with_history(
+    prompt,
+    history,
+    schema,
+    tier=None,
+    context_size="",
+    target_observer=None,
+):
+    """Generate one decoder-constrained, host-validated chat response.
+
+    This intentionally does *not* share ``answer_with_history``'s control,
+    web, execution, code-repair, footer, or activity-response paths.  Those
+    paths can synthesize or append text after generation, which would turn an
+    apparently JSON-only response into something the decoder never produced.
+    The HTTP layer admits this helper only after it has rejected control-route
+    syntax and validated the small schema dialect it promises to post-check.
+    """
+    _maybe_live_reload()
+    model, cloud, _augment, tier_label = _serve_target(tier, None)
+    if tier_label == "cloud-disabled":
+        raise ModelCallError("configuration", _cloud_disabled_message(), cloud=True)
+    if tier_label is None:
+        raise ModelCallError(
+            "configuration", "unknown model '%s'. Valid: sonder, %s."
+            % (tier, _valid_tier_names()),
+        )
+    if model is None:
+        raise ModelCallError(
+            "configuration",
+            "`sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
+            "with strict=False to fall back to the base coder.",
+        )
+    if target_observer is not None:
+        try:
+            target_observer(model, tier_label, cloud)
+        except Exception:
+            pass
+    req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
+    system = _build_system("", False, "", model=model, cloud=cloud)
+    response = _make_generate(
+        model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
+    )(prompt, history or None)
+    try:
+        data = json.loads(response)
+    except (TypeError, ValueError) as exc:
+        raise ModelCallError(
+            "protocol", "response is not valid JSON despite response_format: %s" % exc,
+        ) from exc
+    checked = json_schema_verifier.check(data, schema)
+    if checked.errors or checked.unchecked:
+        detail = "; ".join(checked.errors or [
+            "host validator could not verify: %s" % _format_schema_gaps(checked.unchecked)
+        ])
+        raise ModelCallError("protocol", "response_format validation failed: " + detail)
+    return response
+
+
 @mcp.tool()
 def record_outcome(interaction_id: str, signal: str) -> str:
     """Feed a real-world outcome back into sonder's learning loop.

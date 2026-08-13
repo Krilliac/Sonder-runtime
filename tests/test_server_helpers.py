@@ -1046,6 +1046,33 @@ def test_answer_with_history_unknown_model_errors_before_ollama(monkeypatch):
     assert "unknown model" in out
 
 
+def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_text(monkeypatch):
+    seen = {}
+    schema = {
+        "type": "object", "required": ["ok"],
+        "properties": {"ok": {"type": "boolean"}},
+        "additionalProperties": False,
+    }
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
+    )
+    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+
+    def fake_make_generate(*_args, **kwargs):
+        seen["schema"] = kwargs["schema"]
+        return lambda *_call_args: '{"ok":true}'
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    assert server.structured_answer_with_history("return json", [], schema, tier="fast") == '{"ok":true}'
+    assert seen["schema"] == schema
+
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda *_call_args: '{"ok":"no"}')
+    with pytest.raises(server.ModelCallError, match="response_format validation failed"):
+        server.structured_answer_with_history("return json", [], schema, tier="fast")
+
+
 def test_serve_target_default_is_local_student(monkeypatch):
     monkeypatch.setattr(server, "_get",
                         lambda path: {"models": [{"name": "qwen2.5:3b"}]})

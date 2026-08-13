@@ -1852,6 +1852,119 @@ def _run_prompt(
     return result if return_result else result.content
 
 
+def _run_structured_prompt(prompt, history, tier, schema, context_size=""):
+    """Run the isolated structured path; never add a footer or activity text."""
+    resolved_target = {}
+
+    def record_target(model, tier_label, _cloud):
+        resolved_target["model"] = _receipt_text(model)
+        resolved_target["tier"] = _receipt_text(tier_label)
+
+    content = server.structured_answer_with_history(
+        prompt, history, schema, tier=tier, context_size=context_size,
+        target_observer=record_target,
+    )
+    return TurnResult(
+        content, None, content, "", resolved_target.get("model", ""),
+        resolved_target.get("tier", ""),
+    )
+
+
+_STRUCTURED_SCHEMA_KEYS = frozenset({
+    "type", "enum", "const", "required", "properties",
+    "additionalProperties", "minProperties", "maxProperties", "items",
+    "minItems", "maxItems", "uniqueItems", "minLength", "maxLength",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+})
+_STRUCTURED_TYPES = frozenset({
+    "object", "array", "string", "integer", "number", "boolean", "null",
+})
+_STRUCTURED_SCHEMA_MAX_DEPTH = 16
+
+
+def _response_format_error(message):
+    return HTTPRequestError(400, message)
+
+
+def _response_format_schema(value):
+    """Return the fully host-verifiable schema promised by HTTP chat.
+
+    ``json_schema_verifier`` deliberately supports a broader, disclosure-based
+    dialect for internal tools. HTTP cannot expose a partial guarantee under an
+    OpenAI-compatible ``response_format`` label, so it accepts only this small
+    recursive subset and requires ``strict: true`` for ``json_schema``.
+    """
+    if not isinstance(value, dict):
+        raise _response_format_error("response_format must be an object")
+    kind = value.get("type")
+    if kind == "json_object" and set(value) == {"type"}:
+        return {"type": "object"}
+    if kind != "json_schema" or set(value) != {"type", "json_schema"}:
+        raise _response_format_error(
+            "response_format must be {'type':'json_object'} or a strict json_schema object",
+        )
+    envelope = value["json_schema"]
+    if not isinstance(envelope, dict) or set(envelope) != {"name", "schema", "strict"}:
+        raise _response_format_error(
+            "json_schema must contain exactly name, schema, and strict",
+        )
+    if (not isinstance(envelope["name"], str) or not envelope["name"].strip()
+            or len(envelope["name"]) > 64 or envelope["strict"] is not True):
+        raise _response_format_error(
+            "json_schema requires a non-empty name (at most 64 characters) and strict=true",
+        )
+    schema = envelope["schema"]
+    _validate_structured_schema(schema)
+    return schema
+
+
+def _validate_structured_schema(schema, depth=0):
+    """Reject schema features that this endpoint cannot prove post-hoc."""
+    if depth > _STRUCTURED_SCHEMA_MAX_DEPTH:
+        raise _response_format_error("response_format schema is nested too deeply")
+    if not isinstance(schema, dict):
+        raise _response_format_error("response_format schema nodes must be objects")
+    unknown = set(schema) - _STRUCTURED_SCHEMA_KEYS
+    if unknown:
+        raise _response_format_error("response_format schema uses unsupported keywords: %s"
+            % ", ".join(sorted(unknown)),
+        )
+    declared = schema.get("type")
+    if not isinstance(declared, str) or declared not in _STRUCTURED_TYPES:
+        raise _response_format_error("every response_format schema node needs one supported type")
+    if "required" in schema and (
+        not isinstance(schema["required"], list)
+        or any(not isinstance(key, str) for key in schema["required"])
+    ):
+        raise _response_format_error("schema required must be an array of strings")
+    if "properties" in schema:
+        properties = schema["properties"]
+        if not isinstance(properties, dict) or any(not isinstance(key, str) for key in properties):
+            raise _response_format_error("schema properties must be an object")
+        for child in properties.values():
+            _validate_structured_schema(child, depth + 1)
+    if "additionalProperties" in schema:
+        extra = schema["additionalProperties"]
+        if isinstance(extra, dict):
+            _validate_structured_schema(extra, depth + 1)
+        elif not isinstance(extra, bool):
+            raise _response_format_error("additionalProperties must be boolean or a schema")
+    if "items" in schema:
+        _validate_structured_schema(schema["items"], depth + 1)
+    for keyword in ("minProperties", "maxProperties", "minItems", "maxItems", "minLength", "maxLength"):
+        if keyword in schema and (isinstance(schema[keyword], bool) or not isinstance(schema[keyword], int) or schema[keyword] < 0):
+            raise _response_format_error("%s must be a non-negative integer" % keyword)
+    if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
+        raise _response_format_error("uniqueItems must be a boolean")
+    for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
+        if keyword in schema and (isinstance(schema[keyword], bool) or not isinstance(schema[keyword], (int, float))):
+            raise _response_format_error("%s must be a number" % keyword)
+    if "multipleOf" in schema and schema["multipleOf"] <= 0:
+        raise _response_format_error("multipleOf must be positive")
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        raise _response_format_error("enum must be an array")
+
+
 def _receipt_text(value):
     """Bound a provider/configuration label for response metadata.
 
@@ -2655,26 +2768,29 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
-        # ``response_format`` cannot be honored consistently yet: this route
-        # may satisfy a request through guarded slash/feedback/web paths rather
-        # than model generation, and the normal response pipeline may append
-        # activity metadata. Reject it explicitly instead of silently returning
-        # unconstrained text to an OpenAI-compatible caller.
+        structured_schema = None
         if "response_format" in req:
-            record_early_chat_metric("unsupported_response_format")
-            self._send_json_payload(
-                {"error": {
-                    "message": "response_format is not supported by this endpoint",
-                    "type": "invalid_request",
-                }},
-                status=400,
-            )
-            return
+            try:
+                structured_schema = _response_format_schema(req["response_format"])
+            except HTTPRequestError as error:
+                record_early_chat_metric("invalid_response_format")
+                self._send_json_payload(
+                    {"error": {"message": error.message, "type": error.error_type}},
+                    status=error.status,
+                )
+                return
         prompt = _last_user_message(messages)
         # Normalize an explicitly recognized whole-turn model request before
         # policy checks.  Otherwise ``use model x: /run ...`` could evade the
         # initial slash-command gate and execute after the rewrite below.
         natural_model = server.natural_model_request(prompt)
+        if structured_schema is not None and natural_model is not None:
+            record_early_chat_metric("structured_control_route")
+            self._send_json_payload(
+                {"error": {"message": "response_format is unavailable for natural model/control routes", "type": "invalid_request"}},
+                status=400,
+            )
+            return
         if natural_model:
             selected_prompt = natural_model["prompt"]
             if selected_prompt.lstrip().startswith("/"):
@@ -2690,6 +2806,13 @@ class Handler(BaseHTTPRequestHandler):
             # feedback/work-intent handlers and execute before fanout gating.
             if natural_model["kind"] == "model":
                 prompt = selected_prompt
+        if structured_schema is not None and prompt.lstrip().startswith("/"):
+            record_early_chat_metric("structured_control_route")
+            self._send_json_payload(
+                {"error": {"message": "response_format is unavailable for slash/tool/control routes", "type": "invalid_request"}},
+                status=400,
+            )
+            return
         if _dangerous_http_slash(prompt) and not _developer_authorized(context):
             record_early_chat_metric("forbidden_command")
             self._send_json_payload(
@@ -2820,18 +2943,29 @@ class Handler(BaseHTTPRequestHandler):
                     session=storage_session,
                     project=storage_project,
                 ) as activity_response:
-                    reply = _handle_slash(
-                        prompt, messages=messages, state=state,
-                        project=storage_project, context=context,
-                    )
-                    if reply is None and not (natural_model and natural_model["kind"] == "fanout"):
+                    if structured_schema is not None:
+                        turn = _run_structured_prompt(
+                            prompt, history, model_selector, structured_schema,
+                            context_size=context_size,
+                        )
+                        content = turn.content
+                        response_model = turn.resolved_model
+                        response_tier = turn.resolved_tier
+                    else:
+                        reply = _handle_slash(
+                            prompt, messages=messages, state=state,
+                            project=storage_project, context=context,
+                        )
+                    if (structured_schema is None and reply is None
+                            and not (natural_model and natural_model["kind"] == "fanout")):
                         reply = _handle_feedback(prompt, state=state)
-                    if (reply is None and _developer_authorized(context)
+                    if (structured_schema is None and reply is None
+                            and _developer_authorized(context)
                             and not (natural_model and natural_model["kind"] == "fanout")):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state
                         )
-                    if reply is None and natural_model and natural_model["kind"] == "fanout":
+                    if structured_schema is None and reply is None and natural_model and natural_model["kind"] == "fanout":
                         # Developer authority was established above from this
                         # request's HTTP auth context.  Do not call the public
                         # MCP wrapper: it intentionally has no knowledge of
@@ -2843,7 +2977,7 @@ class Handler(BaseHTTPRequestHandler):
                             request_owner=_fanout_request_owner(context),
                             request_role=_fanout_request_role(context),
                         )
-                    if reply is None:
+                    if structured_schema is None and reply is None:
                         reply = server.chat_web_response(
                             prompt,
                             history=history,
@@ -2857,16 +2991,16 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                         )
                         web_routed = reply is not None
-                    if reply is None:
+                    if structured_schema is None and reply is None:
                         reply = _handle_work_intent(
                             prompt,
                             project=storage_project,
                             authorized=_developer_authorized(context),
                         )
                         execution_routed = reply is not None
-                    if reply is not None:
+                    if structured_schema is None and reply is not None:
                         content = reply
-                    else:
+                    elif structured_schema is None:
                         turn = _run_prompt(
                             prompt,
                             history,
@@ -2882,9 +3016,10 @@ class Handler(BaseHTTPRequestHandler):
                         response_reasoning = turn.thinking
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                content = server._append_activity(
-                    content, response=activity_response, replace=True,
-                )
+                if structured_schema is None:
+                    content = server._append_activity(
+                        content, response=activity_response, replace=True,
+                    )
                 _record_chat(
                     "assistant",
                     content,
