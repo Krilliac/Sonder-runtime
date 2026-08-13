@@ -50,6 +50,24 @@ def test_direct_cloud_model_still_requires_opt_in(monkeypatch):
     assert server._serve_target("kimi:cloud", False) == (None, True, False, "cloud-disabled")
 
 
+def test_fanout_catalog_classifies_discovered_cloud_tag_conventions(monkeypatch):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("local:latest", {"name": "local:latest"}),
+        ("provider-cloud:latest", {"name": "provider-cloud:latest"}),
+        ("provider:cloud", {"name": "provider:cloud"}),
+    ])
+    monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _name: None)
+
+    cloud, error = server._fanout_plan("cloud")
+    local, local_error = server._fanout_plan("local")
+
+    assert error is None
+    assert local_error is None
+    assert cloud["selected"] == ["provider-cloud:latest", "provider:cloud"]
+    assert local["selected"] == ["local:latest"]
+
+
 def test_http_selector_accepts_discovered_gpt_tag(monkeypatch):
     monkeypatch.setattr(server, "_get", lambda _path: {"models": [{"name": "gpt-oss:20b"}]})
 
@@ -750,6 +768,21 @@ def test_retired_cloud_model_gets_a_health_cooldown(monkeypatch):
     assert "private prompt" not in recorded[0][1]["error"]
 
 
+@pytest.mark.parametrize("status", [402, 404, 410])
+def test_terminal_discovered_cloud_model_errors_get_a_health_cooldown(monkeypatch, status):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    server._fanout_health(
+        "provider-cloud:latest",
+        server.ModelCallError("http", "provider terminal failure", status=status, cloud=True),
+        "private prompt",
+    )
+
+    assert 3_598 <= recorded[0][1]["disabled_until"] - time.time() <= 3_601
+    assert recorded[0][1]["counts_toward_backoff"] is False
+
+
 def test_failed_local_model_gets_a_bounded_health_cooldown(monkeypatch):
     recorded = []
     monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _model: None)
@@ -777,6 +810,18 @@ def test_failed_cloud_model_without_provider_retry_hint_gets_backoff(monkeypatch
         server.ModelCallError("timeout", "provider timed out", cloud=True),
         "private prompt",
     )
+
+    assert 298 <= recorded[0][1]["disabled_until"] - time.time() <= 301
+    assert recorded[0][1]["counts_toward_backoff"] is True
+
+
+def test_empty_cloud_response_gets_a_retryable_cooldown_without_replay(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _model: None)
+    monkeypatch.setattr(server.fanout_store, "record_model_health", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    error = server.ModelCallError("empty_response", "no content", cloud=True)
+    server._fanout_health("provider-cloud:latest", error, "private prompt")
 
     assert 298 <= recorded[0][1]["disabled_until"] - time.time() <= 301
     assert recorded[0][1]["counts_toward_backoff"] is True
@@ -906,6 +951,35 @@ def test_fanout_error_never_persists_a_partial_provider_prompt_excerpt():
 
     assert "private request" not in rendered
     assert "HTTP 400" in rendered
+
+
+def test_fanout_answer_receipt_scrubs_prompt_echo_and_secret_markers(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    prompt = "private request with distinctive ending 78421"
+    answer = (
+        "private request with distinctive ending 78421\n"
+        "Authorization: Bearer very-secret-provider-token\n"
+        "api_key=also-secret\n"
+        '{"token":"quoted-json-secret"}\n'
+        'curl -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" https://example.test\n'
+        "normal answer"
+    )
+
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: answer)
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout(prompt, scope="local"))
+    rendered = receipt["answers"][0]["answer"]
+
+    assert prompt not in json.dumps(receipt)
+    assert "very-secret-provider-token" not in json.dumps(receipt)
+    assert "also-secret" not in json.dumps(receipt)
+    assert "quoted-json-secret" not in json.dumps(receipt)
+    assert "dXNlcjpwYXNzd29yZA==" not in json.dumps(receipt)
+    assert "normal answer" in rendered
 
 
 def test_fanout_execution_rejects_a_model_outside_its_snapshot(monkeypatch, tmp_path):

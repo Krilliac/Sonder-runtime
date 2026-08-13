@@ -21957,6 +21957,37 @@ def _fanout_safe_error(exc, prompt):
     return _fanout_redact_prompt_echo(rendered, prompt)[:4000]
 
 
+def _fanout_safe_answer(value, prompt):
+    """Return receipt-safe model output without retaining obvious credentials.
+
+    Fanout answers are deliberately returned to the caller, but they are also
+    durable receipt fields.  A model can repeat a credential from context or
+    emit one while demonstrating a configuration snippet, so prompt-echo
+    removal alone is not sufficient for that persistence boundary.  This is
+    intentionally a narrow marker-based scrubber: ordinary prose remains
+    useful, while recognizable bearer/header/key values are never stored.
+    """
+    rendered = _fanout_redact_prompt_echo(value, prompt)
+    rendered = re.sub(
+        r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*"
+        r"(?:(?:bearer|basic)\s+)?[^\s\"',;}\]]+",
+        "Authorization: <redacted>",
+        rendered,
+    )
+    rendered = re.sub(
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}",
+        "Bearer <redacted>",
+        rendered,
+    )
+    rendered = re.sub(
+        r"(?i)(^|[\s,{])([\"']?(?:password|passwd|secret|token|api[-_]?key|credential)[\"']?)"
+        r"\s*[:=]\s*(?!<(?:redacted|nested)>)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)",
+        r"\1\2=<redacted>",
+        rendered,
+    )
+    return rendered
+
+
 def _fanout_redact_prompt_echo(value, prompt):
     """Remove verbatim request material before a durable receipt is written.
 
@@ -22358,7 +22389,7 @@ def _execute_fanout_run(run_id):
                                      ))(question) or "").strip()
             if not answer:
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
-            return row, "answered", _fanout_redact_prompt_echo(answer, question), "", int((time.monotonic() - started) * 1000), None
+            return row, "answered", _fanout_safe_answer(answer, question), "", int((time.monotonic() - started) * 1000), None
         except Exception as caught:
             exc = caught
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc
