@@ -483,6 +483,40 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert unloads == []
 
 
+def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
+    """Cloud workers do not inherit the response span; local calls do."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}, {"name": "remote:cloud"}]}
+        if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    def fake_make(model, *_args, **_kwargs):
+        def generate(_prompt):
+            # The local invocation shares the enclosing response span.  The
+            # cloud invocation runs in a worker and therefore has no span.
+            server.activity_tracker.record_model_call(model=model, elapsed_ms=5)
+            if model == "remote:cloud":
+                raise server.ModelCallError("timeout", "provider timed out", cloud=True)
+            return "answer"
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+    with server.activity_tracker.response_span("chat", "fanout") as activity:
+        receipt = json.loads(server.model_fanout("public question", scope="all"))
+
+    assert receipt["models_answered"] == 1
+    assert receipt["models_failed"] == 1
+    assert activity["model_calls"] == 2
+    event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
+    assert event["cloud_model_calls"] == 1
+    assert event["answered"] == 1
+    assert event["failed"] == 1
+    assert event["skipped"] == 0
+
+
 def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monkeypatch, tmp_path):
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (

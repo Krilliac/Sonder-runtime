@@ -566,6 +566,40 @@ def record_model_call(
         )
 
 
+def record_model_fanout(*, cloud_model_calls=0, answered=0, failed=0,
+                        skipped=0, elapsed_ms=0):
+    """Record a bounded aggregate for a durable model fanout.
+
+    Local fanout calls execute in the response thread and are already captured
+    individually by :func:`record_model_call`.  Cloud calls execute in worker
+    threads, which deliberately do not inherit that response context, so add
+    only their terminal attempted count here.  This preserves a truthful
+    response-level total without manufacturing per-model prompt previews.
+    """
+    response = _current()
+    if response is None:
+        return
+    cloud_model_calls = max(0, int(cloud_model_calls or 0))
+    answered = max(0, int(answered or 0))
+    failed = max(0, int(failed or 0))
+    skipped = max(0, int(skipped or 0))
+    elapsed_ms = max(0, int(elapsed_ms or 0))
+    with _LOCK:
+        response["model_calls"] += cloud_model_calls
+        _event(
+            response,
+            "model_fanout",
+            cloud_model_calls=cloud_model_calls,
+            answered=answered,
+            failed=failed,
+            skipped=skipped,
+            elapsed_ms=elapsed_ms,
+            summary="%d answered, %d failed, %d skipped" % (
+                answered, failed, skipped,
+            ),
+        )
+
+
 def record_tool_call(name, args=None, *, ok=True, elapsed_ms=0, summary=""):
     response = _current()
     if response is None:

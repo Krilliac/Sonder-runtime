@@ -23049,10 +23049,20 @@ def _execute_fanout_run(run_id):
             fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
     receipt = _fanout_receipt(run_id)
     if receipt is not None:
-        activity_tracker.record_event(
-            "model_fanout", summary="%d/%d model answers in %dms" % (
-                receipt["models_answered"], receipt["models_selected"], receipt["total_elapsed_ms"]
-            ),
+        # Local calls are recorded by _make_generate in this response thread.
+        # Cloud calls use worker threads, whose activity context is purposely
+        # not inherited; account for their terminal attempts once here.
+        cloud_attempts = sum(
+            1 for row in fanout_store.list_results(run_id)
+            if _is_cloud_model_name(row.get("model", ""))
+            and row.get("status") in ("answered", "failed", "unknown")
+        )
+        activity_tracker.record_model_fanout(
+            cloud_model_calls=cloud_attempts,
+            answered=receipt["models_answered"],
+            failed=receipt["models_failed"],
+            skipped=receipt["models_skipped"],
+            elapsed_ms=receipt["total_elapsed_ms"],
         )
     return receipt
 
