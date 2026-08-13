@@ -1,6 +1,7 @@
 """Direct-MCP permission preflight is a truthful read-only boundary."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -84,3 +85,14 @@ def test_preflight_names_the_existing_operator_control_exemption(policy_sandbox)
 
     assert "gate result: allow (operator control exemption)" in out
     assert "will execute: no" in out
+
+
+def test_plan_mode_admits_preflight_through_the_direct_mcp_gate(policy_sandbox):
+    pm.set_mode(pm.PLAN)
+
+    blocks, _ = asyncio.run(server.mcp.call_tool(
+        "policy_explain", {"tool_name": "file_write"},
+    ))
+
+    assert "policy preflight: file_write" in blocks[0].text
+    assert "gate result: deny" in blocks[0].text

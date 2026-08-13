@@ -282,7 +282,7 @@ _READ_ONLY = frozenset({
     "admin_whoami", "autopilot_status", "calibration_status", "learn_tiers",
     "live_reload_status", "mcp_runtime_status", "reasoning_show",
     "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
-    "memory_export",
+    "memory_export", "policy_explain",
 })
 
 # Branches whose real work is done by module-level functions that front no
