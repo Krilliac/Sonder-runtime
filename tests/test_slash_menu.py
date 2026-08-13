@@ -314,6 +314,25 @@ def test_long_input_is_wrapped_without_a_display_cap():
     assert "..." not in "".join(lines)
 
 
+def test_live_redraw_keeps_only_a_viewport_sized_tail_of_wrapped_input():
+    lines = [str(index) for index in range(10)]
+
+    visible = slash_menu._visible_input_lines(lines, height=5, menu_rows=2)
+
+    assert visible == ["8", "9"]
+    assert len(visible) == 2
+
+
+def test_raw_cleanup_returns_to_first_wrapped_row_before_erasing():
+    state = slash_menu.MenuState(buffer="/" + "x" * 80)
+    state._drawn_input_rows = 4
+    out = _FakeStdout()
+
+    slash_menu._clear_raw_input(state, out)
+
+    assert out.text == "\r" + slash_menu.CSI + "3A" + slash_menu.CSI + "0J"
+
+
 def test_rows_never_exceed_the_terminal_height():
     entries = [_Entry("/c%d" % i, "summary %d" % i) for i in range(40)]
     state = slash_menu.MenuState(completer=lambda p, limit=8: entries[:limit])
