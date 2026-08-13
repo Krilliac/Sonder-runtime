@@ -28,6 +28,7 @@ MAX_THINKING_CHARS = 1_000_000
 MAX_ERROR_CHARS = 4_000
 MAX_EVENT_CHARS = 1_000
 MAX_MODELS = 128
+MAX_PROVIDER_RETRY_SECONDS = 3600
 DEFAULT_LEASE_SECONDS = 300
 # A queued receipt should normally be claimed immediately by its caller.  If a
 # process dies in that narrow handoff window, leave enough time for ordinary
@@ -36,6 +37,14 @@ QUEUED_DISPATCH_GRACE_SECONDS = DEFAULT_LEASE_SECONDS
 ACTIVE_RUNS = frozenset(("queued", "running", "cancelling"))
 TERMINAL_RUNS = frozenset(("completed", "cancelled", "interrupted"))
 RESULT_STATUSES = frozenset(("pending", "running", "answered", "failed", "skipped", "unknown"))
+# This is deliberately not the provider's error kind or status.  It is a
+# small, content-free receipt vocabulary that can safely outlive a provider
+# response body and remains stable across transport implementations.
+FAILURE_CLASSES = frozenset((
+    "configuration", "request_rejected", "throttled", "unavailable",
+    "timeout", "transport", "protocol", "empty_response",
+    "budget_exhausted", "cancelled", "execution_uncertain", "unknown",
+))
 _SCHEMA_LOCK = threading.RLock()
 _INITIALIZED_PATHS: set[str] = set()
 
@@ -68,7 +77,7 @@ CREATE TABLE IF NOT EXISTS fanout_results (
  answer_chars INTEGER NOT NULL DEFAULT 0, answer_truncated INTEGER NOT NULL DEFAULT 0,
  answer_truncation_known INTEGER NOT NULL DEFAULT 0, thinking_chars INTEGER NOT NULL DEFAULT 0,
  done_reason TEXT NOT NULL DEFAULT '',
- retry_after_ts REAL, started_ts REAL, finished_ts REAL, updated_ts REAL NOT NULL,
+ failure_class TEXT, retry_after_ts REAL, started_ts REAL, finished_ts REAL, updated_ts REAL NOT NULL,
  PRIMARY KEY(run_id, model), FOREIGN KEY(run_id) REFERENCES fanout_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_fanout_results_claim ON fanout_results(run_id, status, updated_ts);
@@ -162,6 +171,9 @@ def _ensure_schema(path: str) -> None:
                     ("answer_truncation_known", "INTEGER NOT NULL DEFAULT 0"),
                     ("thinking_chars", "INTEGER NOT NULL DEFAULT 0"),
                     ("done_reason", "TEXT NOT NULL DEFAULT ''"),
+                    # NULL is intentional for legacy rows: old receipts did
+                    # not carry enough metadata to classify a failure safely.
+                    ("failure_class", "TEXT"),
                 ):
                     if column not in result_columns:
                         conn.execute(
@@ -316,7 +328,7 @@ def list_runs(*, include_finished: bool = True, limit: int = 20) -> list[dict]:
 def list_results(run_id: str, *, include_answers: bool = True) -> list[dict]:
     conn = _connect()
     try:
-        columns = "*" if include_answers else "run_id,model,status,attempts,elapsed_ms,answer_chars,answer_truncated,answer_truncation_known,thinking_chars,done_reason,retry_after_ts,started_ts,finished_ts,updated_ts"
+        columns = "*" if include_answers else "run_id,model,status,attempts,elapsed_ms,answer_chars,answer_truncated,answer_truncation_known,thinking_chars,done_reason,failure_class,retry_after_ts,started_ts,finished_ts,updated_ts"
         return [_row(r) for r in conn.execute("SELECT %s FROM fanout_results WHERE run_id=? ORDER BY model" % columns, (str(run_id),))]
     finally: conn.close()
 
@@ -339,7 +351,7 @@ def claim_run(run_id: str, owner_id: str, *, owner_pid: int, lease_seconds: int 
             # Lease ownership is a run-wide fence.  A successor must atomically
             # retire any old in-flight result before taking the run, otherwise
             # a delayed prior worker can commit after its lease has ended.
-            conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease transferred; request was not replayed',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (now, now, str(run_id)))
+            conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease transferred; request was not replayed',failure_class='execution_uncertain',retry_after_ts=NULL,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (now, now, str(run_id)))
         changed = conn.execute("UPDATE fanout_runs SET status='running',owner_id=?,owner_pid=?,owner_host=?,lease_until=?,updated_ts=? WHERE id=? AND status NOT IN ('completed','cancelled','interrupted') AND cancel_requested=0",
                                (_safe_text(owner_id, 200), int(owner_pid), socket.gethostname(), lease, now, str(run_id))).rowcount
         if not changed: return None
@@ -418,7 +430,35 @@ def _done_reason(value) -> str:
     return value if value in ("stop", "length") else "other"
 
 
-def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer: str = "", error: str = "", elapsed_ms: int | None = None, retry_after_ts: float | None = None, answer_chars: int | None = None, thinking_chars: int | None = None, done_reason: str = "") -> dict | None:
+def normalize_failure_class(value) -> str | None:
+    """Return one auditable failure label without accepting arbitrary text.
+
+    Receipt readers must never expose a provider-controlled exception kind,
+    body, or status through this field.  ``None`` is reserved for legacy rows
+    and for non-failure result states.
+    """
+    if value is None:
+        return None
+    normalized = str(value).strip().casefold()
+    return normalized if normalized in FAILURE_CLASSES else "unknown"
+
+
+def retry_after_timestamp(seconds, *, now: float | None = None) -> float | None:
+    """Convert an already-parsed provider hint to a bounded absolute expiry."""
+    if isinstance(seconds, bool):
+        return None
+    try:
+        delay = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if delay != delay or delay in (float("inf"), float("-inf")):
+        return None
+    return (time.time() if now is None else float(now)) + max(
+        0.0, min(delay, float(MAX_PROVIDER_RETRY_SECONDS)),
+    )
+
+
+def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer: str = "", error: str = "", elapsed_ms: int | None = None, failure_class: str | None = None, retry_after_ts: float | None = None, answer_chars: int | None = None, thinking_chars: int | None = None, done_reason: str = "") -> dict | None:
     if status not in ("answered", "failed", "skipped", "unknown"): raise ValueError("invalid fanout result status: %s" % status)
     now = time.time(); elapsed = None if elapsed_ms is None else max(0, min(int(elapsed_ms), 86_400_000))
     raw_answer = str(answer or "")
@@ -433,15 +473,36 @@ def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer
     )
     persisted_thinking_chars = _metric_count(thinking_chars, MAX_THINKING_CHARS)
     persisted_done_reason = _done_reason(done_reason)
+    persisted_failure_class = normalize_failure_class(failure_class) if status in ("failed", "unknown") else None
+    try:
+        persisted_retry_after_ts = float(retry_after_ts) if retry_after_ts is not None else None
+    except (TypeError, ValueError, OverflowError):
+        persisted_retry_after_ts = None
+    if (
+        persisted_retry_after_ts is None
+        or persisted_retry_after_ts != persisted_retry_after_ts
+        or persisted_retry_after_ts in (float("inf"), float("-inf"))
+    ):
+        persisted_retry_after_ts = None
+    elif status not in ("failed", "unknown"):
+        persisted_retry_after_ts = None
+    else:
+        # This is an advisory provider hint, never a scheduler instruction.
+        # Bound even a malformed/direct caller so a receipt cannot retain an
+        # arbitrary future timestamp.
+        persisted_retry_after_ts = max(now, min(
+            persisted_retry_after_ts, now + MAX_PROVIDER_RETRY_SECONDS,
+        ))
     with _write_transaction() as conn:
         run = conn.execute("SELECT cancel_requested,owner_id,status,lease_until FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if (run is None or run["cancel_requested"] or run["owner_id"] != owner_id
                 or run["status"] != "running" or run["lease_until"] is None
                 or run["lease_until"] < now): return None
-        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,answer_chars=?,answer_truncated=?,answer_truncation_known=1,thinking_chars=?,done_reason=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
+        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,answer_chars=?,answer_truncated=?,answer_truncation_known=1,thinking_chars=?,done_reason=?,failure_class=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
                                WHERE run_id=? AND model=? AND owner_id=? AND status='running'""",
-                               (status, safe_answer, safe_error, elapsed, persisted_answer_chars,
-                                int(answer_truncated), persisted_thinking_chars, persisted_done_reason, retry_after_ts, now,
+                                (status, safe_answer, safe_error, elapsed, persisted_answer_chars,
+                                int(answer_truncated), persisted_thinking_chars, persisted_done_reason,
+                                persisted_failure_class, persisted_retry_after_ts, now,
                                 now, str(run_id), str(model), str(owner_id))).rowcount
         if not changed: return None
         _event(conn, str(run_id), status, "%s: %s" % (model, error or status), now)
@@ -488,7 +549,7 @@ def resume_run(run_id: str, *, include_failed: bool = False, retry_unknown: bool
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None or row["status"] not in TERMINAL_RUNS:
             return None
-        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',error='',elapsed_ms=NULL,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
+        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',error='',elapsed_ms=NULL,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',failure_class=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
         if not changed:
             return None
         conn.execute("UPDATE fanout_runs SET status='queued',cancel_requested=0,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=NULL,updated_ts=? WHERE id=?", (now, str(run_id)))
@@ -520,7 +581,7 @@ def reconcile_stale_runs(now: float | None = None) -> int:
                 conn.execute("UPDATE fanout_results SET status='skipped',error='worker did not begin; safe explicit resume required',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='pending'", (current, current, run["id"]))
                 message = "worker did not begin; safe explicit resume is required"
             else:
-                conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease ended; request was not replayed',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (current, current, run["id"]))
+                conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease ended; request was not replayed',failure_class='execution_uncertain',retry_after_ts=NULL,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (current, current, run["id"]))
                 message = "worker lease ended; explicit resume is required"
             conn.execute("UPDATE fanout_runs SET status='interrupted',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? WHERE id=?", (current, current, run["id"]))
             _event(conn, run["id"], "interrupted", message, current); changed += 1
