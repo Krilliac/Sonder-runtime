@@ -120,9 +120,13 @@ class MenuState:
     """
 
     def __init__(self, completer=None, limit: int = MAX_ROWS, buffer: str = "",
-                 hint_provider=None):
+                 hint_provider=None, frame: str = ""):
         self.completer = completer or _default_completer
         self.hint_provider = hint_provider or _default_argument_hint
+        # ``frame`` is presentation only.  The input state stays exactly the
+        # same, so a terminal that cannot draw chrome still gets the ordinary
+        # prompt and the full, unmodified buffer.
+        self.frame = str(frame or "")
         self.limit = max(1, int(limit))
         self.buffer = str(buffer or "")
         self.cursor = len(self.buffer)
@@ -134,6 +138,7 @@ class MenuState:
         # it; retaining the number of drawn physical rows lets the raw reader
         # erase a wrapped message before redrawing it after the next key.
         self._drawn_input_rows = 1
+        self._drawn_cursor_row = 0
 
     # -- queries ----------------------------------------------------------
 
@@ -296,7 +301,7 @@ class MenuState:
         if prefix is not None and prefix != self.buffer:
             probe = MenuState(
                 self.completer, self.limit, buffer=str(prefix),
-                hint_provider=self.hint_provider,
+                hint_provider=self.hint_provider, frame=self.frame,
             )
             probe.selected = self.selected
             return probe.render_rows(width=width, height=height)
@@ -440,6 +445,44 @@ def _input_lines(prompt: str, buffer: str, width: int) -> list[str]:
     return [text[index:index + columns] for index in range(0, len(text), columns)]
 
 
+def _frame_chars(stream) -> dict[str, str]:
+    """Use Unicode chrome when the active console can encode it."""
+    try:
+        "╭╮╰╯│─·".encode(getattr(stream, "encoding", None) or "utf-8")
+        return {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "v": "│", "h": "─", "dot": "·"}
+    except (LookupError, UnicodeEncodeError):
+        return {"tl": "+", "tr": "+", "bl": "+", "br": "+", "v": "|", "h": "-", "dot": "."}
+
+
+def _framed_input_lines(frame: str, buffer: str, width: int, stream) -> tuple[str, list[str], str]:
+    """Build a compact composer title, full-width editable rows, and footer.
+
+    The content buffer itself is never shortened. Only the fixed title/footer
+    labels are clipped to make a reliable terminal rectangle.
+    """
+    outer = max(8, int(width) - 1)
+    inner = max(1, outer - 3)  # ``│ `` + content + ``│``
+    clean_frame = _ANSI_ESCAPE_RE.sub("", str(frame or "")).strip()
+    chars = _frame_chars(stream)
+    title = (" " + clean_frame + " ")[: max(0, outer - 4)]
+    top = chars["tl"] + chars["h"] + title + chars["h"] * max(0, outer - 2 - len(title) - 1) + chars["tr"]
+    text = str(buffer or "")
+    content = [text[index:index + inner] for index in range(0, len(text), inner)] or [""]
+    rows = [chars["v"] + " " + line.ljust(inner) + chars["v"] for line in content]
+    footer_text = " Enter send %s Up/Down history %s Ctrl+L clear " % (chars["dot"], chars["dot"])
+    footer = chars["bl"] + chars["h"] + footer_text[: max(0, outer - 4)].ljust(max(0, outer - 4), chars["h"]) + chars["h"] + chars["br"]
+    return top, rows, footer
+
+
+def _framed_cursor_cell(buffer: str, cursor: int, width: int,
+                        line_count: int) -> tuple[int, int]:
+    outer = max(8, int(width) - 1)
+    columns = max(1, outer - 3)
+    offset = max(0, min(len(str(buffer or "")), int(cursor)))
+    row = min(max(0, int(line_count) - 1), offset // columns)
+    return row, min(columns, offset % columns)
+
+
 def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
                  line_count: int) -> tuple[int, int]:
     """Return the wrapped input row/column for a buffer cursor.
@@ -459,9 +502,9 @@ def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
 
 
 def _cursor_to_input_start(state: MenuState) -> str:
-    """Move from the current final input row back to its first row."""
-    rows = max(1, int(getattr(state, "_drawn_input_rows", 1) or 1))
-    return "\r" + (CSI + "%dA" % (rows - 1) if rows > 1 else "")
+    """Move from the current cursor cell back to the first rendered row."""
+    row = max(0, int(getattr(state, "_drawn_cursor_row", 0) or 0))
+    return "\r" + (CSI + "%dA" % row if row else "")
 
 
 def _visible_input_lines(lines: list[str], *, cursor_row: int, height: int,
@@ -496,19 +539,40 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
     """
     rows = state.render_rows()
     cols, height = _terminal_size()
-    all_lines = _input_lines(prompt, state.buffer, cols)
-    cursor_row, cursor_col = _cursor_cell(
-        prompt, state.buffer, state.cursor, cols, len(all_lines),
-    )
-    lines, start = _visible_input_lines(
-        all_lines, cursor_row=cursor_row, height=height, menu_rows=len(rows),
-    )
+    framed = bool(state.frame)
+    if framed:
+        top, all_lines, footer = _framed_input_lines(
+            state.frame, state.buffer, cols, stream)
+        cursor_row, cursor_col = _framed_cursor_cell(
+            state.buffer, state.cursor, cols, len(all_lines))
+        lines, start = _visible_input_lines(
+            all_lines, cursor_row=cursor_row, height=max(1, height - 2),
+            menu_rows=len(rows),
+        )
+    else:
+        all_lines = _input_lines(prompt, state.buffer, cols)
+        cursor_row, cursor_col = _cursor_cell(
+            prompt, state.buffer, state.cursor, cols, len(all_lines),
+        )
+        lines, start = _visible_input_lines(
+            all_lines, cursor_row=cursor_row, height=height, menu_rows=len(rows),
+        )
     visible_cursor_row = max(0, cursor_row - start)
-    parts = [_cursor_to_input_start(state), CSI + "0J", "\n".join(lines)]
-    state._drawn_input_rows = len(lines)
+    if framed:
+        body = top + "\n" + "\n".join(lines) + "\n" + footer
+        input_rows = len(lines) + 2
+        cursor_from_start = visible_cursor_row + 1
+        cursor_col += 2  # left border and breathing space
+    else:
+        body = "\n".join(lines)
+        input_rows = len(lines)
+        cursor_from_start = visible_cursor_row
+    parts = [_cursor_to_input_start(state), CSI + "0J", body]
+    state._drawn_input_rows = input_rows
+    state._drawn_cursor_row = cursor_from_start
     if rows:
         parts.append("\n" + "\n".join(rows))
-    up = len(rows) + len(lines) - 1 - visible_cursor_row
+    up = len(rows) + input_rows - 1 - cursor_from_start
     if up:
         parts.append(CSI + "%dA" % up)
     parts.append("\r")
@@ -521,8 +585,12 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
 def _finish(state: MenuState, prompt: str, stream) -> None:
     """Clear the menu and leave only the accepted line on screen."""
     cols, _ = _terminal_size()
-    lines = _input_lines(prompt, state.buffer, cols)
-    stream.write(_cursor_to_input_start(state) + CSI + "0J" + "\n".join(lines) + "\n")
+    if state.frame:
+        top, lines, footer = _framed_input_lines(state.frame, state.buffer, cols, stream)
+        rendered = top + "\n" + "\n".join(lines) + "\n" + footer
+    else:
+        rendered = "\n".join(_input_lines(prompt, state.buffer, cols))
+    stream.write(_cursor_to_input_start(state) + CSI + "0J" + rendered + "\n")
     stream.flush()
 
 
@@ -531,12 +599,13 @@ def _clear_screen(state: MenuState, stream) -> None:
     stream.write(CSI + "2J" + CSI + "H")
     stream.flush()
     state._drawn_input_rows = 1
+    state._drawn_cursor_row = 0
 
 
-def _read_line_raw(prompt: str, completer=None, history=None) -> str:
+def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "") -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
-    state = MenuState(completer=completer)
+    state = MenuState(completer=completer, frame=frame)
     recalled = HistoryCursor(history)
     try:
         _paint(state, prompt, stream)
@@ -594,7 +663,8 @@ def _read_line_raw(prompt: str, completer=None, history=None) -> str:
         raise
 
 
-def read_line(prompt: str = "", *, enabled: bool = True, history=None) -> str:
+def read_line(prompt: str = "", *, enabled: bool = True, history=None,
+              frame: str = "") -> str:
     """Read one line, showing a live command menu while it starts with ``/``.
 
     Falls back to builtin :func:`input` whenever the menu cannot or should not
@@ -606,7 +676,7 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None) -> str:
     if not enabled or not available():
         return input(prompt)
     try:
-        return _read_line_raw(prompt, history=history)
+        return _read_line_raw(prompt, history=history, frame=frame)
     except KeyboardInterrupt:
         raise
     except EOFError:

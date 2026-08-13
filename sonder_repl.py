@@ -59,12 +59,18 @@ def _paint(text, *styles):
     return "".join(styles) + str(text) + _Ansi.reset
 
 
-def _read_input(prompt, *, history=None):
-    """Prompt for a line, with the live "/" menu when the terminal allows it."""
+def _read_input(prompt, *, history=None, composer=False):
+    """Prompt for a line, optionally in the raw terminal composer frame."""
     if slash_menu is not None:
         try:
             if slash_menu.available():
-                return slash_menu.read_line(prompt, history=history)
+                # Keep ordinary input() as the universal fallback.  The
+                # framed composer is raw-terminal presentation only, never a
+                # second input protocol or a source of changed prompt text.
+                return slash_menu.read_line(
+                    "" if composer else prompt,
+                    history=history, frame=prompt if composer else "",
+                )
         except (EOFError, KeyboardInterrupt):
             raise
         except Exception:
@@ -707,6 +713,31 @@ def _completion_timing(started_at):
     return "Sonder completed in %.2fs" % (elapsed_ms / 1000.0)
 
 
+def _print_chat_result(text, started_at, *, offer_feedback=False,
+                       label="Sonder"):
+    """Present one completed turn with lightweight terminal chrome.
+
+    The result itself is printed verbatim: the bars are separate lines, never
+    a width cap, pager, or content transform.  Piped/scripted uses retain the
+    historical plain output so shells and callers do not receive decoration.
+    """
+    answer = str(text or "")
+    timing = _completion_timing(started_at)
+    if not _console_has_operator():
+        print(answer)
+        print(_paint("[%s]" % timing, _Ansi.muted))
+        if offer_feedback:
+            print("(/pass or /fail to teach Sonder Runtime)")
+        return
+
+    box = _box_chars()
+    title = "%s %s " % (box["tl"], label)
+    print(_paint(title + box["h"] * 8, _Ansi.teal, _Ansi.bold))
+    print(answer)
+    footer = "%s %s  %s" % (box["bl"], timing, "(/pass or /fail)" if offer_feedback else "")
+    print(_paint(footer, _Ansi.muted))
+
+
 def _print_lessons():
     conn = server._open_db()
     try:
@@ -1051,7 +1082,7 @@ def main():
         try:
             line = _read_input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
                                _execution_prompt() + _paint(" > ", _Ansi.muted),
-                               history=input_history)
+                               history=input_history, composer=True)
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1559,8 +1590,7 @@ def main():
             last_iid = None
             last_response = out
             last_run_source = _answer_only(out)
-            print(out)
-            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
+            _print_chat_result(out, started_at, label="Sonder work")
             continue
 
         started_at = time.monotonic()
@@ -1569,18 +1599,14 @@ def main():
                             tier=active_tier or "",
                             location_consent=location_consent)
         if out.startswith("ERROR"):
-            print(out)
-            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
+            _print_chat_result(out, started_at, label="Sonder error")
             continue
 
         last_iid = server.parse_interaction_id(out)
         last_response = out
         last_run_source = _answer_only(out)
         cleaned = _strip_footer(out)
-        print(cleaned)
-        print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
-        if last_iid:
-            print("(/pass or /fail to teach Sonder Runtime)")
+        _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid))
 
 
 if __name__ == "__main__":
