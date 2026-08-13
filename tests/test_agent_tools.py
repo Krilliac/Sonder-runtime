@@ -1176,6 +1176,57 @@ def test_agent_failed_file_evidence_is_not_recovered_by_unrelated_success(monkey
     assert "completed" not in out
 
 
+def test_agent_failed_file_evidence_requires_same_call_to_recover(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"missing-required.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"completed"}',
+    ]
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed",
+        lambda tool, args, **_kwargs: (
+            "ERROR: file not found"
+            if args.get("path") == "missing-required.md"
+            else "README evidence"
+        ),
+    )
+
+    out = server._agent_impl(
+        "Review Repository", tier="code", max_steps=3,
+        require_file_evidence=True, read_only=True, include_evidence=True,
+    )
+
+    assert out.startswith("EVIDENCE_REQUIRED:")
+    assert "completed" not in out
+
+
+def test_agent_required_evidence_failure_requests_exact_retry(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"completed"}',
+    ]
+    prompts = []
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: prompts.append(prompt) or responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed", lambda *_args, **_kwargs: "ERROR: transient read failure",
+    )
+
+    out = server._agent_impl(
+        "Review Repository", tier="code", max_steps=2,
+        require_file_evidence=True, read_only=True, include_evidence=True,
+    )
+
+    assert out.startswith("EVIDENCE_REQUIRED:")
+    assert "retry this exact call" in prompts[1]
+
+
 def test_agent_failed_singleton_required_tool_is_not_recovered_by_alternative(monkeypatch):
     responses = [
         '{"tool":"web_fetch","args":{"url":"https://example.com"}}',
