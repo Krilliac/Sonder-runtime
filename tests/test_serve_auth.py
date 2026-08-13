@@ -1270,6 +1270,8 @@ def test_dangerous_slash_denied_before_handler(monkeypatch):
     [
         "use model phi4: /run",
         "run using phi4:latest: /run",
+        "ask all available models for /run",
+        "ask with qwen2.5-coder:14b to /run",
     ],
 )
 def test_wrapped_dangerous_slash_is_denied_before_handler(monkeypatch, prompt):

@@ -5349,6 +5349,11 @@ def sonder(
         return command
     natural = natural_model_request(prompt)
     if natural and natural["kind"] == "fanout":
+        if natural["prompt"].lstrip().startswith("/"):
+            return _format_model_call_error(ModelCallError(
+                "configuration",
+                "model selection cannot wrap a slash command; issue the command directly.",
+            ))
         return model_fanout(
             natural["prompt"], scope=natural["scope"], profile=natural.get("profile", ""),
             num_predict=num_predict, token=token,
@@ -14841,7 +14846,7 @@ def tool_manifest() -> str:
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; inspect its owner-scoped receipt, cancel it, or explicitly retry finished results. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, and `healthy-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. Natural chat supports `ask healthy local chat models: ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, and `ask with qwen2.5-coder:14b model to ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
+        "model_fanout/model_fanout_status/model_fanout_cancel/model_fanout_resume": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; inspect its owner-scoped receipt, cancel it, or explicitly retry finished results. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, and `healthy-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. Natural chat supports `ask healthy local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
         "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
@@ -21769,15 +21774,26 @@ def natural_model_request(text):
             "prompt": using_model.group(2).strip(),
         }
     using_tag = re.match(
-        # An internal tag colon keeps ordinary prose out of this routing path;
-        # the live catalog remains the downstream selector authority.
-        r"^(?:use|run|ask|try|query)\s+(?:with|using)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._/-]*)(?:\s+model\s*(?::\s+|to\s+)|\s*:\s+)(.+)$",
+        # An internal tag colon keeps ordinary prose out of this routing path.
+        # ``with/using <tag> to/for`` is natural speech, but remains bounded:
+        # it requires a tag-shaped selector, an explicit delimiter, and the
+        # exact selector is still resolved against the live catalog downstream.
+        r"^(?:use|run|ask|try|query)\s+(?:with|using)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._/-]*)(?:\s+model\s*(?::\s+|to\s+|for\s+)|\s*(?::\s+|to\s+|for\s+))(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if using_tag:
+        selector = using_tag.group(1).strip()
+        # These are command/interpreter names first and model tags only by
+        # coincidence.  Let ordinary work such as ``run using python:3.12 to
+        # reproduce this`` reach the normal agent path; a user who really
+        # means a model can use the unambiguous ``using model <tag>`` form.
+        if selector.partition(":")[0].casefold() in {
+            "bash", "cmd", "node", "nodejs", "powershell", "pwsh", "python", "sh",
+        }:
+            return None
         return {
             "kind": "model",
-            "model": using_tag.group(1).strip(),
+            "model": selector,
             "prompt": using_tag.group(2).strip(),
         }
     # A colon in a model tag is common, which is why the legacy form above
