@@ -43,6 +43,25 @@ def test_piped_chat_result_stays_plain_for_scripts(monkeypatch, capsys):
     assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
 
 
+def test_interactive_turn_acknowledges_work_without_claiming_progress(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    sonder_repl._begin_chat_turn("Sonder work")
+
+    text = capsys.readouterr().out
+    assert "Sonder work is working" in text
+    assert "%" not in text and "complete" not in text
+
+
+def test_piped_turn_acknowledgement_stays_silent(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+
+    sonder_repl._begin_chat_turn()
+
+    assert capsys.readouterr().out == ""
+
+
 def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/runtime" in sonder_repl.HELP
     assert "/mcp" in sonder_repl.HELP

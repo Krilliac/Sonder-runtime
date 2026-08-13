@@ -713,6 +713,20 @@ def _completion_timing(started_at):
     return "Sonder completed in %.2fs" % (elapsed_ms / 1000.0)
 
 
+def _begin_chat_turn(label="Sonder"):
+    """Acknowledge an interactive submission before synchronous work begins.
+
+    The REPL deliberately keeps model dispatch synchronous for predictable
+    host gating and cancellation semantics. This small receipt makes that
+    wait visible without adding a second worker, polling loop, or fake
+    progress claim; scripts retain their historical silent behavior.
+    """
+    if not _console_has_operator():
+        return
+    box = _box_chars()
+    print(_paint("%s %s is working..." % (box["dot"], label), _Ansi.muted))
+
+
 def _print_chat_result(text, started_at, *, offer_feedback=False,
                        label="Sonder"):
     """Present one completed turn with lightweight terminal chrome.
@@ -1584,6 +1598,7 @@ def main():
         # persistent checklist instead of being a prose-only suggestion.
         if intents.classify_work(line):
             started_at = time.monotonic()
+            _begin_chat_turn("Sonder work")
             out = server.workbench_agent(
                 prompt=line, tier="auto", max_steps=12, project=project,
             )
@@ -1594,6 +1609,7 @@ def main():
             continue
 
         started_at = time.monotonic()
+        _begin_chat_turn()
         out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                             session=session_id, project=project,
                             tier=active_tier or "",
