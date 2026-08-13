@@ -24,8 +24,23 @@ def test_terminal_launcher_distinguishes_an_existing_unmanaged_server_from_failu
     assert "using an existing local API server" in text
 
 
+def test_windows_launcher_uses_a_per_invocation_bootstrap_log():
+    text = (ROOT / "sonder.cmd").read_text(encoding="utf-8")
+
+    assert 'set "SONDER_BOOT_LOG=%TEMP%\\sonder-bootstrap-%RANDOM%-%RANDOM%.log"' in text
+    assert 'set "SONDER_BOOT_LOG=%TEMP%\\sonder-bootstrap.log"' not in text
+
+
 def test_server_deploy_pins_ollama_clients_to_preflight_origin():
     text = (ROOT / "deploy_sonder.sh").read_text(encoding="utf-8")
 
     assert "configured_origin(allow_remote=False)" in text
     assert text.count('OLLAMA_HOST="$CLIENT_OLLAMA_HOST" ollama ') == 3
+
+
+def test_terminal_launcher_cleans_only_its_generated_bootstrap_log():
+    text = (ROOT / "sonder.cmd").read_text(encoding="utf-8")
+
+    assert "SONDER_BOOT_LOG_GENERATED=1" in text
+    assert "if defined SONDER_BOOT_LOG_GENERATED if exist" in text
+    assert 'del /q "%SONDER_BOOT_LOG%"' in text
