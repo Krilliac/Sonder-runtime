@@ -23203,14 +23203,25 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
     if refusal:
         return refusal
     try:
-        # Resolve the explicit/default target before vault access so a cloud,
-        # stale, or non-generative selector cannot cause source construction.
-        model = _fanout_synthesis_model(synth_model)
-        bundle, source_hashes = _fanout_synthesis_sources(run)
-        answer = _fanout_synthesis_generate(model, bundle)
+        return json.dumps(_fanout_synthesize_run(run, synth_model), ensure_ascii=False, sort_keys=True)
     except ModelCallError as exc:
         return _format_model_call_error(exc)
-    return json.dumps({
+
+
+def _fanout_synthesize_run(run, synth_model=""):
+    """Synthesize an already-authorized fanout run without changing its receipt.
+
+    HTTP lifecycle routes authenticate and scope ownership before calling this
+    helper. Keeping that boundary outside this function prevents an HTTP
+    account principal from being reinterpreted as a direct-MCP token, while
+    retaining the exact local-only, no-persistence synthesis contract.
+    """
+    # Resolve the explicit/default target before vault access so a cloud,
+    # stale, or non-generative selector cannot cause source construction.
+    model = _fanout_synthesis_model(synth_model)
+    bundle, source_hashes = _fanout_synthesis_sources(run)
+    answer = _fanout_synthesis_generate(model, bundle)
+    return {
         "run_id": run["id"],
         "synth_model": model,
         "answer": answer,
@@ -23218,7 +23229,7 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
             "source_count": len(source_hashes),
             "source_previews": source_hashes,
         },
-    }, ensure_ascii=False, sort_keys=True)
+    }
 
 
 def _ensemble_targets(tiers: str = ""):
