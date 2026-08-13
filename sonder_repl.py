@@ -59,12 +59,19 @@ def _paint(text, *styles):
     return "".join(styles) + str(text) + _Ansi.reset
 
 
-def _read_input(prompt, *, history=None):
-    """Prompt for a line, with the live "/" menu when the terminal allows it."""
+def _read_input(prompt, *, history=None, composer=False):
+    """Prompt for a line, optionally in the raw terminal composer frame."""
     if slash_menu is not None:
         try:
             if slash_menu.available():
-                return slash_menu.read_line(prompt, history=history)
+                # Keep ordinary input() as the universal fallback.  The
+                # framed composer is raw-terminal presentation only, never a
+                # second input protocol or a source of changed prompt text.
+                return slash_menu.read_line(
+                    "" if composer else prompt,
+                    history=history, frame=prompt if composer else "",
+                    fallback_prompt=prompt,
+                )
         except (EOFError, KeyboardInterrupt):
             raise
         except Exception:
@@ -108,6 +115,22 @@ def _console_has_operator():
         return bool(stream.isatty())
     except Exception:
         # A stream that cannot answer is not evidence of an operator.
+        return False
+
+
+def _stdout_is_interactive():
+    """Whether presentation can safely add terminal-only chrome.
+
+    An operator may type at a terminal while redirecting stdout to a file.
+    That is still interactive for permission prompts, but result decoration
+    belongs only on an actual terminal so redirected output stays script-safe.
+    """
+    stream = getattr(sys, "stdout", None)
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:
         return False
 
 
@@ -510,6 +533,20 @@ def _execution_prompt(status=None):
     return _paint("[lanes %s | agents %s]" % (lanes, agents), colour)
 
 
+def _composer_title(tier=None, status=None):
+    """Compact, live identity for the terminal composer title edge."""
+    resolved_tier = str(tier or "code")
+    try:
+        model = str(server.TIERS.get(resolved_tier) or "unknown")
+    except Exception:
+        model = "unknown"
+    # This is intentionally the live table rather than a cached launch value:
+    # /model changes should be visible before the very next submitted turn.
+    return "Sonder %s (%s)  %s" % (
+        resolved_tier, model, _execution_prompt(status),
+    )
+
+
 def _watch_activity(poll_seconds=1.0):
     """Blocking feed tail; never interleaves with the normal input prompt."""
     last_seq = -1
@@ -623,6 +660,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /new               start a fresh conversation thread (forget this chat's history)
   /sessions          list past conversation threads
   /resume <id|title> continue a past thread by id or title prefix
+  terminal editing   Up/Down history; Ctrl+R search; Left/Right/Home/End; Ctrl+W word; Ctrl+K suffix; Ctrl+L clear
   /project [name]    show/set the active project (scopes facts)
   /fact <text>       remember a durable fact for the active project
   /facts             list facts for the active project
@@ -704,6 +742,46 @@ def _completion_timing(started_at):
     if elapsed_ms < 1000:
         return "Sonder completed in %dms" % elapsed_ms
     return "Sonder completed in %.2fs" % (elapsed_ms / 1000.0)
+
+
+def _begin_chat_turn(label="Sonder"):
+    """Acknowledge an interactive submission before synchronous work begins.
+
+    The REPL deliberately keeps model dispatch synchronous for predictable
+    host gating and cancellation semantics. This small receipt makes that
+    wait visible without adding a second worker, polling loop, or fake
+    progress claim; scripts retain their historical silent behavior.
+    """
+    if not (_console_has_operator() and _stdout_is_interactive()):
+        return
+    box = _box_chars()
+    print(_paint("%s %s is working..." % (box["dot"], label), _Ansi.muted))
+
+
+def _print_chat_result(text, started_at, *, offer_feedback=False,
+                       label="Sonder", error=False):
+    """Present one completed turn with lightweight terminal chrome.
+
+    The result itself is printed verbatim: the bars are separate lines, never
+    a width cap, pager, or content transform.  Piped/scripted uses retain the
+    historical plain output so shells and callers do not receive decoration.
+    """
+    answer = str(text or "")
+    timing = _completion_timing(started_at)
+    if not (_console_has_operator() and _stdout_is_interactive()):
+        print(answer)
+        print(_paint("[%s]" % timing, _Ansi.muted))
+        if offer_feedback:
+            print("(/pass or /fail to teach Sonder Runtime)")
+        return
+
+    box = _box_chars()
+    title = "%s %s " % (box["tl"], label)
+    tone = _Ansi.red if error else _Ansi.teal
+    print(_paint(title + box["h"] * 8, tone, _Ansi.bold))
+    print(answer)
+    footer = "%s %s  %s" % (box["bl"], timing, "(/pass or /fail)" if offer_feedback else "")
+    print(_paint(footer, _Ansi.muted))
 
 
 def _print_lessons():
@@ -1048,9 +1126,8 @@ def main():
 
     while True:
         try:
-            line = _read_input(_paint("sonder", _Ansi.teal, _Ansi.bold) + " " +
-                               _execution_prompt() + _paint(" > ", _Ansi.muted),
-                               history=input_history)
+            line = _read_input(_composer_title(active_tier),
+                               history=input_history, composer=True)
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1552,34 +1629,31 @@ def main():
         # persistent checklist instead of being a prose-only suggestion.
         if intents.classify_work(line):
             started_at = time.monotonic()
+            _begin_chat_turn("Sonder work")
             out = server.workbench_agent(
                 prompt=line, tier="auto", max_steps=12, project=project,
             )
             last_iid = None
             last_response = out
             last_run_source = _answer_only(out)
-            print(out)
-            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
+            _print_chat_result(out, started_at, label="Sonder work")
             continue
 
         started_at = time.monotonic()
+        _begin_chat_turn()
         out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                             session=session_id, project=project,
                             tier=active_tier or "",
                             location_consent=location_consent)
         if out.startswith("ERROR"):
-            print(out)
-            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
+            _print_chat_result(out, started_at, label="Sonder error", error=True)
             continue
 
         last_iid = server.parse_interaction_id(out)
         last_response = out
         last_run_source = _answer_only(out)
         cleaned = _strip_footer(out)
-        print(cleaned)
-        print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
-        if last_iid:
-            print("(/pass or /fail to teach Sonder Runtime)")
+        _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid))
 
 
 if __name__ == "__main__":

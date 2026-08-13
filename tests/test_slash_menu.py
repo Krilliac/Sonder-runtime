@@ -155,6 +155,33 @@ def test_backspace_on_prose_behaves_like_normal_input():
     assert state.render_rows() == []
 
 
+def test_left_right_home_end_and_delete_edit_in_the_middle_of_input():
+    state = _state("abcd")
+    state.handle_key(slash_menu.KEY_LEFT)
+    state.handle_key(slash_menu.KEY_LEFT)
+    state.handle_key("X")
+    assert (state.buffer, state.cursor) == ("abXcd", 3)
+
+    state.handle_key("\x08")
+    assert (state.buffer, state.cursor) == ("abcd", 2)
+    state.handle_key(slash_menu.KEY_DELETE)
+    assert (state.buffer, state.cursor) == ("abd", 2)
+    state.handle_key(slash_menu.KEY_HOME)
+    assert state.cursor == 0
+    state.handle_key(slash_menu.KEY_END)
+    assert state.cursor == len(state.buffer)
+
+
+def test_word_and_suffix_delete_preserve_other_mid_line_text():
+    state = _state("keep this clause and this suffix")
+    state.cursor = len("keep this clause and this")
+    state.handle_key("\x17")  # Ctrl+W
+    assert (state.buffer, state.cursor) == ("keep this clause and  suffix", 21)
+
+    state.handle_key("\x0b")  # Ctrl+K
+    assert (state.buffer, state.cursor) == ("keep this clause and ", 21)
+
+
 def test_slash_opens_the_menu_on_the_popular_set():
     state = _state("/")
     assert state.menu_active is True
@@ -250,6 +277,28 @@ def test_tab_with_no_match_leaves_the_buffer_alone():
     assert state.buffer == "/zzz"
 
 
+def test_argument_context_renders_usage_instead_of_selectable_completion():
+    state = slash_menu.MenuState(
+        completer=_completer,
+        hint_provider=lambda buffer: "usage for %s" % buffer,
+    )
+    state.feed("/read notes.txt")
+
+    assert state.argument_context is True
+    assert state.has_palette_matches() is False
+    assert state.selection() is None
+    assert state.render_rows(width=200) == ["  usage for /read notes.txt"]
+
+
+def test_argument_context_does_not_replace_input_on_tab():
+    state = slash_menu.MenuState(
+        completer=_completer, hint_provider=lambda _buffer: "usage",
+    )
+    state.feed("/read notes.txt")
+    state.handle_key("\t")
+    assert state.buffer == "/read notes.txt"
+
+
 def test_enter_accepts_the_line_as_typed():
     state = _state("/read notes.txt")
     assert state.handle_key("\r") == slash_menu.ACCEPT
@@ -314,18 +363,29 @@ def test_long_input_is_wrapped_without_a_display_cap():
     assert "..." not in "".join(lines)
 
 
+def test_cursor_cell_tracks_wrapped_input_without_terminal_autowrap():
+    # 19 visible cells at width 20; the prompt consumes two of them.
+    assert slash_menu._cursor_cell(
+        "> ", "x" * 20, 17, 20, 2,
+    ) == (1, 0)
+
+
 def test_live_redraw_keeps_only_a_viewport_sized_tail_of_wrapped_input():
     lines = [str(index) for index in range(10)]
 
-    visible = slash_menu._visible_input_lines(lines, height=5, menu_rows=2)
+    visible, start = slash_menu._visible_input_lines(
+        lines, cursor_row=9, height=5, menu_rows=2,
+    )
 
     assert visible == ["8", "9"]
     assert len(visible) == 2
+    assert start == 8
 
 
 def test_raw_cleanup_returns_to_first_wrapped_row_before_erasing():
     state = slash_menu.MenuState(buffer="/" + "x" * 80)
     state._drawn_input_rows = 4
+    state._drawn_cursor_row = 3
     out = _FakeStdout()
 
     slash_menu._clear_raw_input(state, out)
@@ -368,10 +428,16 @@ def test_a_broken_completer_yields_an_empty_menu():
     assert state.buffer == "/re"
 
 
-def test_unknown_control_keys_are_ignored():
+def test_unknown_control_keys_are_ignored_except_the_standard_clear_shortcut():
     state = _state("/re")
-    state.handle_key("\x0c")  # Ctrl+L
+    state.handle_key("\x0e")  # Ctrl+N
     assert state.buffer == "/re"
+
+
+def test_ctrl_l_requests_a_clear_without_discarding_input():
+    state = _state("/read notes.txt")
+    assert state.handle_key("\x0c") == slash_menu.CLEAR
+    assert state.buffer == "/read notes.txt"
 
 
 # --- the raw reader, driven through a fake console ------------------------
@@ -404,13 +470,13 @@ class _FakeStdout:
         return "".join(self.chunks)
 
 
-def _drive(monkeypatch, keys, prompt="> ", history=None):
+def _drive(monkeypatch, keys, prompt="> ", history=None, frame=""):
     console = _FakeConsole(keys)
     out = _FakeStdout()
     monkeypatch.setattr(slash_menu, "_msvcrt", lambda: console)
     monkeypatch.setattr(slash_menu.sys, "stdout", out)
     return slash_menu._read_line_raw(
-        prompt, completer=_completer, history=history), out
+        prompt, completer=_completer, history=history, frame=frame), out
 
 
 def test_raw_reader_accepts_a_typed_line(monkeypatch):
@@ -426,6 +492,12 @@ def test_raw_reader_decodes_the_arrow_prefix_and_completes_with_tab(monkeypatch)
     assert line == "/report"
 
 
+def test_raw_reader_handles_cursor_edit_scan_codes(monkeypatch):
+    keys = list("ac") + ["\xe0", "K", "b", "\xe0", "G", "\xe0", "S", "\r"]
+    line, _ = _drive(monkeypatch, keys)
+    assert line == "bc"
+
+
 def test_raw_reader_recalls_session_history_outside_the_slash_palette(monkeypatch):
     line, _ = _drive(
         monkeypatch, ["\xe0", "H", "\r"], history=["one", "two"])
@@ -439,6 +511,26 @@ def test_raw_reader_down_restores_the_unfinished_draft(monkeypatch):
         history=["older"],
     )
     assert line == "draft"
+
+
+def test_raw_reader_reverse_searches_session_history_without_persisting(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, list("build") + ["\x12", "\x12", "\r"],
+        history=["open readme", "build release", "build debug"],
+    )
+
+    # First Ctrl+R finds the newest match; repeated Ctrl+R walks older matches
+    # using the original "build" term rather than the recalled full command.
+    assert line == "build release"
+
+
+def test_reverse_search_restarts_after_an_edit(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, list("build") + ["\x12", "\x15"] + list("build!") + ["\x12", "\r"],
+        history=["build! release", "build debug"],
+    )
+
+    assert line == "build! release"
 
 
 def test_raw_reader_recall_works_for_slash_text_without_palette_matches(monkeypatch):
@@ -458,6 +550,14 @@ def test_raw_reader_editing_recalled_input_keeps_the_saved_draft(monkeypatch):
     assert line == "draft"
 
 
+def test_raw_reader_uses_history_after_a_command_enters_argument_context(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, list("/read notes.txt") + ["\xe0", "H", "\r"],
+        history=["previous request"],
+    )
+    assert line == "previous request"
+
+
 def test_raw_reader_ignores_an_unmapped_extended_key(monkeypatch):
     # \x00 + 'R' is Insert: it must be consumed whole, not leak an 'R'.
     keys = ["/", "\x00", "R", "h", "\r"]
@@ -468,6 +568,12 @@ def test_raw_reader_ignores_an_unmapped_extended_key(monkeypatch):
 def test_raw_reader_raises_keyboard_interrupt_on_ctrl_c(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         _drive(monkeypatch, list("/re") + ["\x03"])
+
+
+def test_raw_reader_ctrl_l_clears_screen_and_keeps_typed_input(monkeypatch):
+    line, out = _drive(monkeypatch, list("draft") + ["\x0c", "\r"])
+    assert line == "draft"
+    assert slash_menu.CSI + "2J" + slash_menu.CSI + "H" in out.text
 
 
 def test_raw_reader_clears_the_menu_before_returning(monkeypatch):
@@ -487,3 +593,53 @@ def test_raw_reader_moves_the_cursor_back_onto_the_input_line(monkeypatch):
     assert rows, "expected the fixture to produce a menu"
     assert slash_menu.CSI + "%dA" % len(rows) in text
     assert slash_menu.CSI + "%dC" % len("> /re") in text
+
+
+def test_framed_raw_reader_draws_a_full_composer_and_keeps_the_line(monkeypatch):
+    line, out = _drive(
+        monkeypatch, list("hello") + ["\r"], prompt="", frame="sonder [lanes 2 | agents 1]")
+
+    assert line == "hello"
+    # Frame punctuation is deliberately presentation only: the accepted
+    # buffer is exactly the text typed by the user.
+    assert "sonder [lanes 2 | agents 1]" in out.text
+    assert "Enter send" in out.text
+    assert "hello" in out.text
+    assert any(token in out.text for token in ("╭", "+"))
+
+
+def test_framed_palette_sits_above_composer_with_its_own_controls(monkeypatch):
+    _line, out = _drive(monkeypatch, list("/re") + ["\r"], prompt="", frame="sonder")
+
+    text = out.text
+    # The menu is presented before the composer top edge, not below its
+    # footer, and its controls describe selection rather than generic send.
+    assert text.rfind("> /read") < text.rfind("╭")
+    assert "Tab complete" in text
+    assert "Up/Down select" in text
+
+
+def test_framed_composer_uses_a_stable_rectangle_without_content_truncation():
+    out = _FakeStdout()
+    top, rows, footer = slash_menu._framed_input_lines(
+        "sonder [lanes 2 | agents 1]", "x" * 60, 20, out)
+
+    assert len(top) == len(footer) == 19
+    assert all(len(row) == 19 for row in rows)
+    assert "".join(row[2:-1].rstrip() for row in rows) == "x" * 60
+
+
+def test_framed_composer_tracks_a_cursor_in_a_wrapped_buffer(monkeypatch):
+    monkeypatch.setattr(slash_menu, "_terminal_size", lambda: (12, 12))
+    # 8 editable cells per row in the 11-column visual frame. Move left into
+    # the earlier row, insert there, and prove redraw keeps the entire value.
+    keys = list("abcdefghijkl") + ["\xe0", "K", "\xe0", "K", "\xe0", "K", "\xe0", "K", "X", "\r"]
+    line, out = _drive(monkeypatch, keys, prompt="", frame="sonder")
+
+    assert line == "abcdefghXijkl"
+    assert "abcdefgh" in out.text and "Xijkl" in out.text
+
+
+def test_framed_cursor_stays_at_row_end_at_an_exact_wrap_boundary():
+    # 12 terminal columns yield 8 editable cells in the frame.
+    assert slash_menu._framed_cursor_cell("x" * 8, 8, 12, 1) == (0, 8)

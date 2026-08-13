@@ -106,36 +106,90 @@ by Ollama. Ollama is the local model server.
 The `app-latest` badges are a mutable prerelease snapshot. They may lag `main`
 and are not a versioned, release-ready build. Versioned `app-vX.Y.Z` releases
 must pass the repository's version, artifact-integrity, SBOM, and provenance
-gates. For a local server install from source:
+gates.
+
+### Packaged app or bundled runtime
+
+Run the one-time bootstrap from the installed bundle. It starts Ollama and
+chooses a compatible local model. Then open a new Bash or PowerShell terminal
+and start the REPL with `sonder`.
+
+```powershell
+# Windows PowerShell, from the installed bundle
+.\bootstrap-engine.cmd
+sonder
+```
 
 ```bash
+# Linux/macOS, from the installed bundle
+./bootstrap-engine.sh
+sonder
+```
+
+### From source
+
+Install and start [Ollama](https://ollama.com) first. The following command
+blocks create a virtual environment, install the runtime, configure the local
+`sonder` model alias, and open the REPL.
+
+```bash
+# Linux/macOS
 git clone https://github.com/Krilliac/Sonder-runtime.git
 cd Sonder-runtime
-bash deploy_sonder.sh
+python3 -m venv venv
+./venv/bin/pip install -r requirements-runtime.txt
+./venv/bin/python setup_alias.py
+./venv/bin/python -m sonder_runtime repl
 ```
 
-Start the optional loopback-only API service:
-
-```bash
-bash deploy_sonder.sh --serve
-```
-
-For local development:
-
-```bash
-python -m venv venv
-# Linux/macOS
-./venv/bin/pip install -r requirements-dev.txt
-./venv/bin/python sonder_repl.py
-
+```powershell
 # Windows PowerShell
-venv\Scripts\pip.exe install -r requirements-dev.txt
-venv\Scripts\python.exe sonder_repl.py
+git clone https://github.com/Krilliac/Sonder-runtime.git
+Set-Location Sonder-runtime
+python -m venv venv
+.\venv\Scripts\pip.exe install -r requirements-runtime.txt
+.\venv\Scripts\python.exe setup_alias.py
+.\venv\Scripts\python.exe -m sonder_runtime repl
 ```
 
-Desktop packages can also run `bootstrap-engine.cmd` on Windows,
-`./bootstrap-engine.sh` on Linux/macOS, or **Setup engine** in the app. Setup
-detects available memory, starts Ollama, and selects a compatible local model.
+For a Linux loopback service install that provisions Ollama, its local model,
+and systemd in one step, run `bash deploy_sonder.sh --serve` as root from a
+source checkout. Use the production installer and TLS runbook for non-loopback
+hosting.
+
+### Launch and use
+
+After bootstrap or installation has added Sonder to your `PATH`, simply type
+`sonder` in Bash or PowerShell. From a source checkout, use the explicit
+module command below. In either case, ask normally; type `/help` for guarded
+commands and use the visible composer shortcuts for history and editing.
+
+```bash
+sonder
+# or, from this source checkout:
+python -m sonder_runtime repl
+# sonder > explain this repository's test layout
+```
+
+Start the loopback OpenAI-compatible API in a second terminal when another
+client needs it. Run `doctor` first if this is a new machine.
+
+```bash
+python -m sonder_runtime doctor
+python -m sonder_runtime serve
+curl http://127.0.0.1:11435/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"sonder","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+For a source checkout, prefix the commands with the venv Python shown above;
+for example `./venv/bin/python -m sonder_runtime serve` or
+`.\venv\Scripts\python.exe -m sonder_runtime serve`. For an MCP client, run
+`python -m sonder_runtime mcp`. See the
+[getting-started guide](docs/wiki/02-getting-started.md),
+[HTTP API reference](docs/wiki/05-http-api-and-lifecycle.md), and
+[CLI reference](docs/wiki/04-cli-and-entrypoint.md) for configuration,
+authentication, hosting, and full command details.
 
 ## What you get
 

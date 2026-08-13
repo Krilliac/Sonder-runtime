@@ -18,12 +18,83 @@ def test_completion_timing_uses_a_compact_elapsed_display(monkeypatch):
     assert sonder_repl._completion_timing(12.0) == "Sonder completed in 2.50s"
 
 
+def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    answer = "first very long line\nsecond line"
+    sonder_repl._print_chat_result(answer, 0.0, offer_feedback=True)
+
+    text = capsys.readouterr().out
+    assert answer in text
+    assert "Sonder completed in 1.00s" in text
+    assert "/pass or /fail" in text
+    assert any(glyph in text for glyph in ("╭", "+"))
+
+
+def test_interactive_error_result_uses_error_tone(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+
+    sonder_repl._print_chat_result("ERROR: refused", 0.0, error=True)
+
+    text = capsys.readouterr().out
+    assert sonder_repl._Ansi.red in text
+    assert "ERROR: refused" in text
+
+
+def test_piped_chat_result_stays_plain_for_scripts(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    sonder_repl._print_chat_result("exact output", 0.0)
+
+    assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
+
+
+def test_redirected_stdout_stays_plain_even_when_stdin_is_interactive(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: False)
+    monkeypatch.setattr(sonder_repl, "_completion_timing", lambda _started: "Sonder completed in 1.00s")
+
+    sonder_repl._print_chat_result("exact output", 0.0)
+
+    assert capsys.readouterr().out == "exact output\n[Sonder completed in 1.00s]\n"
+
+
+def test_interactive_turn_acknowledges_work_without_claiming_progress(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    sonder_repl._begin_chat_turn("Sonder work")
+
+    text = capsys.readouterr().out
+    assert "Sonder work is working" in text
+    assert "%" not in text and "complete" not in text
+
+
+def test_piped_turn_acknowledgement_stays_silent(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+
+    sonder_repl._begin_chat_turn()
+
+    assert capsys.readouterr().out == ""
+
+
 def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/runtime" in sonder_repl.HELP
     assert "/mcp" in sonder_repl.HELP
     assert "/learning" in sonder_repl.HELP
     assert "/artifactcheck" in sonder_repl.HELP
     assert "/consult" in sonder_repl.HELP
+    assert "Ctrl+W word" in sonder_repl.HELP
+    assert "Ctrl+R search" in sonder_repl.HELP
 
 
 def _strip(text):
@@ -87,6 +158,18 @@ def test_execution_prompt_shows_live_lanes_running_and_queued_agents(monkeypatch
 def test_execution_prompt_reports_unknown_instead_of_zero(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
     assert sonder_repl._execution_prompt({"known": False}) == "[lanes ? | agents ?]"
+
+
+def test_composer_title_uses_live_tier_and_execution_status(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+
+    title = sonder_repl._composer_title("code", {
+        "known": True, "running_lanes": 1, "running_agents": 0,
+        "queued_agents": 0,
+    })
+
+    assert title == "Sonder code (coder:14b)  [lanes 1 | agents 0]"
 
 
 def test_activity_watch_prints_each_sequence_once_and_stops_cleanly(
