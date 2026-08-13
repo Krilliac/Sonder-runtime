@@ -831,6 +831,7 @@ def _public_event(event, *, include_detail=False):
             out[key] = _short(_redact_text(event.get(key)), 160)
     for key in (
         "prompt_chars", "history_messages", "tokens_in", "tokens_out",
+        "cloud_model_calls", "answered", "failed", "skipped",
         "lines_added", "lines_edited", "lines_deleted", "bytes",
     ):
         if key in event:
@@ -1048,6 +1049,16 @@ def execution_feed(
                 })
                 row["request_preview"] = _feed_preview(event.get("request_preview"))
                 row["response_preview"] = _feed_preview(event.get("response_preview"))
+            elif kind == "model_fanout":
+                # Fanout observability is intentionally scalar-only.  The
+                # durable receipt is the owner-scoped place for model names,
+                # answers, failure detail, and other sensitive material.
+                row.update({
+                    key: event.get(key) for key in (
+                        "cloud_model_calls", "answered", "failed", "skipped",
+                        "tokens_in", "tokens_out",
+                    ) if key in event
+                })
             elif kind == "tool_call":
                 row.update({
                     key: event.get(key) for key in ("tool", "title", "ok") if key in event
@@ -1153,6 +1164,12 @@ def format_execution_feed(feed):
                 event.get("operation_mode", "unknown"),
                 event.get("fallback_handler", "unknown"),
                 event.get("handler_state", "unknown"),
+            )
+        elif kind == "model_fanout":
+            detail = "cloud calls=%s answered=%s failed=%s skipped=%s tok=%s/%s" % (
+                event.get("cloud_model_calls", 0), event.get("answered", 0),
+                event.get("failed", 0), event.get("skipped", 0),
+                event.get("tokens_in", 0), event.get("tokens_out", 0),
             )
         else:
             detail = event.get("tool") or event.get("model") or event.get("path") or ""
