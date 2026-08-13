@@ -78,6 +78,7 @@ def test_tool_manifest_documents_guarded_model_routes():
     assert "ask all local models and cloud models: ..." in manifest
     assert "ask the phi4:latest model to ..." in manifest
     assert "run using model phi4:latest: ..." in manifest
+    assert "run using phi4:latest: ..." in manifest
     assert "ask with qwen2.5-coder:14b model to ..." in manifest
     assert "explicit operator opt-in" in manifest
 
@@ -105,6 +106,7 @@ def test_tool_manifest_documents_guarded_model_routes():
         ("ask with model qwen2.5-coder:14b to review this function", {"kind": "model", "model": "qwen2.5-coder:14b", "prompt": "review this function"}),
         ("run using phi4:latest model: explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
         ("run using phi4:latest model to explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
+        ("run using phi4:latest: explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
         ("ask with qwen2.5-coder:14b model to review this function", {"kind": "model", "model": "qwen2.5-coder:14b", "prompt": "review this function"}),
         ("run model phi4:latest to explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
         ("ask the phi4:latest model to explain SSH", {"kind": "model", "model": "phi4:latest", "prompt": "explain SSH"}),
@@ -759,5 +761,9 @@ def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     assert reply.startswith("ERROR: model selection cannot wrap a slash command")
 
     reply = server.sonder("run using model phi4: /run echo should-not-run", session="none")
+
+    assert reply.startswith("ERROR: model selection cannot wrap a slash command")
+
+    reply = server.sonder("run using phi4:latest: /run echo should-not-run", session="none")
 
     assert reply.startswith("ERROR: model selection cannot wrap a slash command")
