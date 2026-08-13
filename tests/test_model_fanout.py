@@ -496,6 +496,86 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert unloads == []
 
 
+def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
+    """Cloud workers do not inherit the response span; local calls do."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}, {"name": "remote:cloud"}]}
+        if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    def fake_make(model, *_args, **_kwargs):
+        def generate(_prompt):
+            # The local invocation shares the enclosing response span.  The
+            # cloud invocation runs in a worker and therefore has no span.
+            if model == "remote:cloud":
+                generate.last_usage = {"tokens_in": 13, "tokens_out": 5}
+            else:
+                generate.last_usage = {"tokens_in": 11, "tokens_out": 7}
+            server.activity_tracker.record_model_call(
+                model=model, elapsed_ms=5,
+                tokens_in=generate.last_usage["tokens_in"],
+                tokens_out=generate.last_usage["tokens_out"],
+            )
+            if model == "remote:cloud":
+                raise server.ModelCallError("timeout", "provider timed out", cloud=True)
+            return "answer"
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+    with server.activity_tracker.response_span("chat", "fanout") as activity:
+        receipt = json.loads(server.model_fanout("public question", scope="all"))
+
+    assert receipt["models_answered"] == 1
+    assert receipt["models_failed"] == 1
+    assert activity["model_calls"] == 2
+    assert activity["tokens_in"] == 24
+    assert activity["tokens_out"] == 12
+    event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
+    assert event["cloud_model_calls"] == 1
+    assert event["tokens_in"] == 13
+    assert event["tokens_out"] == 5
+    assert event["answered"] == 1
+    assert event["failed"] == 1
+    assert event["skipped"] == 0
+
+
+def test_fanout_activity_resume_counts_only_current_cloud_attempts(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "cloud-a:cloud"}, {"name": "cloud-b:cloud"}]}
+        if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+    attempts = {"cloud-a:cloud": 0, "cloud-b:cloud": 0}
+
+    def fake_make(model, *_args, **_kwargs):
+        def generate(_prompt):
+            attempts[model] += 1
+            if model == "cloud-b:cloud" and attempts[model] == 1:
+                raise server.ModelCallError("timeout", "provider timed out", cloud=True)
+            return "answer from " + model
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+    first = json.loads(server.model_fanout("public question", scope="cloud"))
+    resumed = server.fanout_store.resume_run(first["run_id"], include_failed=True)
+    assert resumed is not None
+
+    with server.activity_tracker.response_span("chat", "resume") as activity:
+        second = server._execute_fanout_run(first["run_id"])
+
+    assert second["models_answered"] == 2
+    assert attempts == {"cloud-a:cloud": 1, "cloud-b:cloud": 2}
+    # cloud-a is historical on the resumed receipt; only cloud-b ran now.
+    assert activity["model_calls"] == 1
+    event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
+    assert event["cloud_model_calls"] == 1
+
+
 def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monkeypatch, tmp_path):
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (

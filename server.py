@@ -22968,6 +22968,11 @@ def _execute_fanout_run(run_id):
         return _fanout_receipt(run_id)
 
     resident_at_start = {name.casefold() for name in limits["resident_before"]}
+    cloud_usage = {"tokens_in": 0, "tokens_out": 0}
+    # This execution can resume a durable run containing terminal rows from
+    # earlier workers. Keep activity scoped to the rows this worker actually
+    # persisted now, rather than recounting historical receipt state.
+    cloud_attempts = 0
 
     def invoke(row):
         model = row["model"]
@@ -22990,6 +22995,10 @@ def _execute_fanout_run(run_id):
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
             metadata = getattr(generate, "last_response_meta", {}) or {}
             metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            usage = getattr(generate, "last_usage", {}) or {}
+            if isinstance(usage, dict):
+                metadata["tokens_in"] = usage.get("tokens_in", 0)
+                metadata["tokens_out"] = usage.get("tokens_out", 0)
             # Preserve the raw provider count before trim/redaction while the
             # durable payload remains the prompt-safe version below.
             metadata["answer_chars"] = len(raw_answer)
@@ -22998,6 +23007,11 @@ def _execute_fanout_run(run_id):
             exc = caught
             metadata = getattr(generate, "last_response_meta", {}) if generate is not None else {}
             metadata = metadata if isinstance(metadata, dict) else {}
+            usage = getattr(generate, "last_usage", {}) if generate is not None else {}
+            if isinstance(usage, dict):
+                metadata = dict(metadata)
+                metadata["tokens_in"] = usage.get("tokens_in", 0)
+                metadata["tokens_out"] = usage.get("tokens_out", 0)
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
             if not _is_cloud_model_name(model) and model.casefold() not in resident_at_start:
@@ -23005,7 +23019,15 @@ def _execute_fanout_run(run_id):
                     _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
 
     def persist(result):
+        nonlocal cloud_attempts
         row, status, answer, error, elapsed, exc, metadata = result
+        if _is_cloud_model_name(row["model"]):
+            for key in ("tokens_in", "tokens_out"):
+                try:
+                    value = int(metadata.get(key) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    value = 0
+                cloud_usage[key] += max(0, value)
         recorded = fanout_store.record_result(run_id, row["model"], owner_id, status,
                                               answer=answer, error=error, elapsed_ms=elapsed,
                                               failure_class=(
@@ -23020,6 +23042,9 @@ def _execute_fanout_run(run_id):
                                               thinking_chars=metadata.get("thinking_chars"),
                                               done_reason=metadata.get("done_reason", ""))
         if recorded is not None:
+            if (_is_cloud_model_name(row["model"])
+                    and status in ("answered", "failed", "unknown")):
+                cloud_attempts += 1
             with contextlib.suppress(Exception):
                 if status == "answered":
                     _fanout_health(row["model"], None, question)
@@ -23065,10 +23090,17 @@ def _execute_fanout_run(run_id):
             fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
     receipt = _fanout_receipt(run_id)
     if receipt is not None:
-        activity_tracker.record_event(
-            "model_fanout", summary="%d/%d model answers in %dms" % (
-                receipt["models_answered"], receipt["models_selected"], receipt["total_elapsed_ms"]
-            ),
+        # Local calls are recorded by _make_generate in this response thread.
+        # Cloud calls use worker threads, whose activity context is purposely
+        # not inherited; account for their terminal attempts once here.
+        activity_tracker.record_model_fanout(
+            cloud_model_calls=cloud_attempts,
+            tokens_in=cloud_usage["tokens_in"],
+            tokens_out=cloud_usage["tokens_out"],
+            answered=receipt["models_answered"],
+            failed=receipt["models_failed"],
+            skipped=receipt["models_skipped"],
+            elapsed_ms=receipt["total_elapsed_ms"],
         )
     return receipt
 
