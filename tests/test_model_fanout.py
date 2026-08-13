@@ -190,6 +190,33 @@ def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     assert receipt["models_failed"] == 1
     assert receipt["resident_before"] == ["local-a"]
     assert receipt["total_elapsed_ms"] >= 0
+    assert receipt["admission"] == {
+        "selected_models": ["local-a", "remote:cloud"],
+        "targets": {"total": 2, "local": 1, "cloud": 1},
+        "execution": {
+            "num_predict": 512, "request_timeout_s": 45,
+            "local_concurrency": 1, "cloud_concurrency": 2,
+        },
+        "upper_bounds": {
+            "initial_request_attempts_total": 2,
+            "initial_cloud_request_attempts": 1,
+            "scheduled_request_phase_wall_ms": 90_000,
+            "excludes": [
+                "catalog discovery", "queue or lease wait", "model load or unload",
+                "provider retry or throttle beyond a request timeout", "explicit later resume attempts",
+            ],
+        },
+        "cost": {
+            "provider_pricing": "not_estimated",
+            "reason": "the runtime has no trustworthy provider price schedule",
+        },
+        "privacy": {
+            "cloud_opt_in": True,
+            "cloud_targets": ["remote:cloud"],
+            "prompt_leaves_machine": True,
+            "notice": "selected cloud targets receive the prompt; cloud calls require explicit operator opt-in",
+        },
+    }
     assert receipt["answers"][0]["answer"] == "answer from local-a"
     assert "timeout" in receipt["failures"][0]["error"]
     assert unloads == []
@@ -206,6 +233,14 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
     receipt = json.loads(server.model_fanout("hello", scope="local"))
 
     assert receipt["models_answered"] == 1
+    assert receipt["admission"]["targets"] == {"total": 1, "local": 1, "cloud": 0}
+    assert receipt["admission"]["upper_bounds"]["scheduled_request_phase_wall_ms"] == 45_000
+    assert receipt["admission"]["privacy"] == {
+        "cloud_opt_in": False,
+        "cloud_targets": [],
+        "prompt_leaves_machine": False,
+        "notice": "no selected cloud target receives the prompt",
+    }
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
 
 
