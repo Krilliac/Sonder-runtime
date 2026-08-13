@@ -417,7 +417,10 @@ def _read_line_raw(prompt: str, completer=None, history=None) -> str:
                 key = {"H": KEY_UP, "P": KEY_DOWN}.get(second)
                 if key is None:
                     continue
-                if state.menu_active:
+                # A slash prefix alone is not enough to reserve arrows: paths
+                # and other ordinary slash-looking prose can have no palette
+                # matches and should retain normal terminal history recall.
+                if state.menu_active and state.matches():
                     action = state.handle_key(key)
                 elif key == KEY_UP:
                     state.buffer = recalled.up(state.buffer)
@@ -431,7 +434,6 @@ def _read_line_raw(prompt: str, completer=None, history=None) -> str:
                     action = CONTINUE
             else:
                 action = state.handle_key(ch)
-                recalled.reset()
             if action == ACCEPT:
                 _finish(state, prompt, stream)
                 return state.buffer
