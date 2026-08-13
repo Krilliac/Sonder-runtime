@@ -15309,6 +15309,28 @@ def tool_capability_coverage_report():
     return tool_capabilities.format_coverage_report(_tool_capability_shadow_surfaces())
 
 
+def tool_contract_report():
+    """Cross-surface authority drift from the executable tool contract.
+
+    Unlike the shadow registry above, ``tool_contract`` is load-bearing at
+    the HTTP boundary on every served dispatch; this report only makes its
+    drift check operator-visible. Imported lazily like the other policy
+    readers: ``tool_contract`` imports ``sonder_serve`` inside its own
+    functions, and this module must stay importable on its own.
+    """
+    import tool_contract
+
+    issues = tool_contract.validate_contracts()
+    if issues:
+        return "ERROR %d drift issue(s): %s" % (len(issues), "; ".join(issues))
+    rows = tool_contract.contracts()
+    bound = sum(1 for row in rows.values() if row.http_operation)
+    return (
+        "clean: %d tool(s) mapped, %d authority-bound; unbound system "
+        "operations deny by default" % (len(rows), bound)
+    )
+
+
 def _repository_scope_path_error(tool_name, args, project_root):
     """Reject a project-bound agent path outside its host-selected root.
 
@@ -21420,6 +21442,10 @@ def diagnostics() -> str:
         lines.append("  tool capability coverage: %s" % tool_capability_coverage_report())
     except Exception as e:
         lines.append("  tool capability shadow: ERROR validator failed: %s" % e)
+    try:
+        lines.append("  tool contract: %s" % tool_contract_report())
+    except Exception as e:
+        lines.append("  tool contract: ERROR validator failed: %s" % e)
     lines.append(
         "  execution routing: host-gated foreground/autopilot/fleet with local ambiguity review"
     )

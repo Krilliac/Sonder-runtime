@@ -19,6 +19,7 @@ never re-implementations.
 """
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -345,6 +346,29 @@ def test_every_authority_shaped_registration_is_declared_or_exempt():
         "authority-shaped tool(s) with no declared boundary and no reasoned "
         "exemption: %s" % ", ".join(unclassified)
     )
+
+
+def test_tool_contract_ships_in_the_packaged_payload():
+    """sonder_serve imports tool_contract at module level, so a payload
+    missing it dies exactly the way the packager's own comment describes:
+    in a detached process whose log the GUI never reads. REQUIRED_FILES is
+    the loud-failure list; a load-bearing gate module belongs on it, the
+    way tool_capabilities.py already is."""
+    from scripts import package_local_system as package
+
+    assert "tool_contract.py" in package.REQUIRED_FILES
+
+
+def test_diagnostics_reports_contract_drift_without_enforcement():
+    """Drift must be operator-visible in the same place the shadow registry's
+    is, and the clean verdict must say what deny-by-default covers."""
+    source = inspect.getsource(server.diagnostics)
+    assert "tool_contract_report()" in source
+    assert "tool contract" in source
+
+    report = server.tool_contract_report()
+    assert report.startswith("clean:")
+    assert "deny by default" in report
 
 
 def test_the_exemption_list_has_no_dead_entries_and_every_reason_is_real():
