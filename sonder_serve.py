@@ -2643,6 +2643,13 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(
                 urllib.parse.urlsplit(self.path).query, keep_blank_values=True,
             )
+            # A history query is a small, explicitly bounded contract.  Do
+            # not let duplicate values acquire accidental first-value-wins
+            # semantics through a proxy or a client encoder.
+            for name in ("limit", "include_finished"):
+                if len(query.get(name, ())) > 1:
+                    self._send_json_payload({"error": {"message": "%s must be supplied at most once" % name, "type": "invalid_request"}}, status=400)
+                    return True
             limit_text = (query.get("limit") or ["20"])[0]
             finished_text = (query.get("include_finished") or ["true"])[0].casefold()
             try:
