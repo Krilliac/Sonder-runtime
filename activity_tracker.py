@@ -566,8 +566,8 @@ def record_model_call(
         )
 
 
-def record_model_fanout(*, cloud_model_calls=0, answered=0, failed=0,
-                        skipped=0, elapsed_ms=0):
+def record_model_fanout(*, cloud_model_calls=0, tokens_in=0, tokens_out=0,
+                        answered=0, failed=0, skipped=0, elapsed_ms=0):
     """Record a bounded aggregate for a durable model fanout.
 
     Local fanout calls execute in the response thread and are already captured
@@ -580,16 +580,22 @@ def record_model_fanout(*, cloud_model_calls=0, answered=0, failed=0,
     if response is None:
         return
     cloud_model_calls = max(0, int(cloud_model_calls or 0))
+    tokens_in = max(0, int(tokens_in or 0))
+    tokens_out = max(0, int(tokens_out or 0))
     answered = max(0, int(answered or 0))
     failed = max(0, int(failed or 0))
     skipped = max(0, int(skipped or 0))
     elapsed_ms = max(0, int(elapsed_ms or 0))
     with _LOCK:
         response["model_calls"] += cloud_model_calls
+        response["tokens_in"] += tokens_in
+        response["tokens_out"] += tokens_out
         _event(
             response,
             "model_fanout",
             cloud_model_calls=cloud_model_calls,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
             answered=answered,
             failed=failed,
             skipped=skipped,

@@ -502,7 +502,15 @@ def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
         def generate(_prompt):
             # The local invocation shares the enclosing response span.  The
             # cloud invocation runs in a worker and therefore has no span.
-            server.activity_tracker.record_model_call(model=model, elapsed_ms=5)
+            if model == "remote:cloud":
+                generate.last_usage = {"tokens_in": 13, "tokens_out": 5}
+            else:
+                generate.last_usage = {"tokens_in": 11, "tokens_out": 7}
+            server.activity_tracker.record_model_call(
+                model=model, elapsed_ms=5,
+                tokens_in=generate.last_usage["tokens_in"],
+                tokens_out=generate.last_usage["tokens_out"],
+            )
             if model == "remote:cloud":
                 raise server.ModelCallError("timeout", "provider timed out", cloud=True)
             return "answer"
@@ -515,8 +523,12 @@ def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
     assert receipt["models_answered"] == 1
     assert receipt["models_failed"] == 1
     assert activity["model_calls"] == 2
+    assert activity["tokens_in"] == 24
+    assert activity["tokens_out"] == 12
     event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
     assert event["cloud_model_calls"] == 1
+    assert event["tokens_in"] == 13
+    assert event["tokens_out"] == 5
     assert event["answered"] == 1
     assert event["failed"] == 1
     assert event["skipped"] == 0

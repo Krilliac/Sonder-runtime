@@ -22962,6 +22962,7 @@ def _execute_fanout_run(run_id):
         return _fanout_receipt(run_id)
 
     resident_at_start = {name.casefold() for name in limits["resident_before"]}
+    cloud_usage = {"tokens_in": 0, "tokens_out": 0}
 
     def invoke(row):
         model = row["model"]
@@ -22984,6 +22985,10 @@ def _execute_fanout_run(run_id):
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
             metadata = getattr(generate, "last_response_meta", {}) or {}
             metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            usage = getattr(generate, "last_usage", {}) or {}
+            if isinstance(usage, dict):
+                metadata["tokens_in"] = usage.get("tokens_in", 0)
+                metadata["tokens_out"] = usage.get("tokens_out", 0)
             # Preserve the raw provider count before trim/redaction while the
             # durable payload remains the prompt-safe version below.
             metadata["answer_chars"] = len(raw_answer)
@@ -22992,6 +22997,11 @@ def _execute_fanout_run(run_id):
             exc = caught
             metadata = getattr(generate, "last_response_meta", {}) if generate is not None else {}
             metadata = metadata if isinstance(metadata, dict) else {}
+            usage = getattr(generate, "last_usage", {}) if generate is not None else {}
+            if isinstance(usage, dict):
+                metadata = dict(metadata)
+                metadata["tokens_in"] = usage.get("tokens_in", 0)
+                metadata["tokens_out"] = usage.get("tokens_out", 0)
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
             if not _is_cloud_model_name(model) and model.casefold() not in resident_at_start:
@@ -23000,6 +23010,13 @@ def _execute_fanout_run(run_id):
 
     def persist(result):
         row, status, answer, error, elapsed, exc, metadata = result
+        if _is_cloud_model_name(row["model"]):
+            for key in ("tokens_in", "tokens_out"):
+                try:
+                    value = int(metadata.get(key) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    value = 0
+                cloud_usage[key] += max(0, value)
         recorded = fanout_store.record_result(run_id, row["model"], owner_id, status,
                                               answer=answer, error=error, elapsed_ms=elapsed,
                                               failure_class=(
@@ -23069,6 +23086,8 @@ def _execute_fanout_run(run_id):
         )
         activity_tracker.record_model_fanout(
             cloud_model_calls=cloud_attempts,
+            tokens_in=cloud_usage["tokens_in"],
+            tokens_out=cloud_usage["tokens_out"],
             answered=receipt["models_answered"],
             failed=receipt["models_failed"],
             skipped=receipt["models_skipped"],
