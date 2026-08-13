@@ -26,7 +26,14 @@ rem echo showed every launch the same eight lines twice, above a status block
 rem the REPL banner now covers. Nothing is lost: on failure the captured log is
 rem printed in full, which is strictly more than the old output showed, and
 rem SONDER_TERMINAL_VERBOSE=1 restores the running commentary.
-set "SONDER_BOOT_LOG=%TEMP%\sonder-bootstrap.log"
+rem Concurrent terminal launches must not redirect into one shared file: cmd
+rem reports a visible "file is being used" warning before the REPL otherwise.
+rem Preserve an explicit operator override for diagnostics, but give the normal
+rem launcher a per-invocation path.
+if not defined SONDER_BOOT_LOG (
+  set "SONDER_BOOT_LOG=%TEMP%\sonder-bootstrap-%RANDOM%-%RANDOM%.log"
+  set "SONDER_BOOT_LOG_GENERATED=1"
+)
 
 if /I not "%SONDER_TERMINAL_BOOTSTRAP%"=="0" (
   if /I "%SONDER_TERMINAL_VERBOSE%"=="1" (
@@ -57,6 +64,11 @@ if /I not "%SONDER_TERMINAL_START_SERVER%"=="0" (
     )
   )
 )
+
+rem Generated logs have served their only purpose once bootstrap/start output
+rem has either been printed or accepted. An explicitly supplied path remains
+rem untouched for operator diagnostics.
+if defined SONDER_BOOT_LOG_GENERATED if exist "%SONDER_BOOT_LOG%" del /q "%SONDER_BOOT_LOG%" >nul 2>&1
 
 if defined SONDER_SERVER (
   if /I not "%SONDER_TERMINAL_REMOTE%"=="0" (
