@@ -1840,23 +1840,26 @@ def _chat_model_selection_error(selector):
     happens to start with ``ERROR:``.
     """
     if not selector:
-        return ""
+        return None
     try:
         _target, _cloud, _augment, tier_label = server._serve_target(selector, None)
+        if tier_label == "cloud-disabled":
+            return 403, "cloud model access is disabled by the operator"
         if tier_label is not None:
-            return ""
+            return None
         found = server.resolve_discovered_model_record(selector)
     except Exception:
-        # The regular serving route will surface an operational failure with
-        # its existing typed error handling.  Do not claim a model is invalid
-        # merely because catalog discovery is temporarily unavailable.
-        return ""
+        # An explicit exact selector needs the operator's live catalog.  A
+        # temporary catalog failure is neither a valid model nor a caller
+        # mistake; make it retryable instead of manufacturing a 200 response
+        # containing an error string.
+        return 503, "live model catalog is temporarily unavailable; retry shortly"
     if found:
         _name, record = found
         reason = server._fanout_nonchat_reason(record)
         if reason:
-            return "model is not chat-capable (%s)" % reason
-    return "unknown model '%s'" % selector
+            return 400, "model is not chat-capable (%s)" % reason
+    return 400, "unknown model '%s'" % selector
 
 
 def _openai_model_rows():
@@ -1884,7 +1887,10 @@ def _openai_model_rows():
     for name, record in records:
         if server._fanout_nonchat_reason(record):
             continue
-        add(name, "cloud" if server._is_cloud_model_name(name) else "local")
+        cloud = server._is_cloud_model_name(name)
+        if cloud and not server.cloud_allowed():
+            continue
+        add(name, "cloud" if cloud else "local")
     return rows
 
 
@@ -3089,10 +3095,14 @@ class Handler(BaseHTTPRequestHandler):
         model_selector = _request_model_selector(model)
         model_error = _chat_model_selection_error(model_selector)
         if model_error:
+            status, message = model_error
             record_early_chat_metric("invalid_model")
             self._send_json_payload(
-                {"error": {"message": model_error, "type": "invalid_request"}},
-                status=400,
+                {"error": {
+                    "message": message,
+                    "type": "forbidden" if status == 403 else "invalid_request",
+                }},
+                status=status,
             )
             return
         # Speculatively load the target model now, overlapping its cold-load
