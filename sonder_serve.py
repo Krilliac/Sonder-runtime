@@ -15,6 +15,7 @@ import json
 import hmac
 import hashlib
 import ipaddress
+import math
 import os
 import sqlite3
 import sys
@@ -1957,7 +1958,11 @@ def _validate_structured_schema(schema, depth=0):
     if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
         raise _response_format_error("uniqueItems must be a boolean")
     for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
-        if keyword in schema and (isinstance(schema[keyword], bool) or not isinstance(schema[keyword], (int, float))):
+        if keyword in schema and (
+            isinstance(schema[keyword], bool)
+            or not isinstance(schema[keyword], (int, float))
+            or not math.isfinite(schema[keyword])
+        ):
             raise _response_format_error("%s must be a number" % keyword)
     if "multipleOf" in schema and schema["multipleOf"] <= 0:
         raise _response_format_error("multipleOf must be positive")
