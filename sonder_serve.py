@@ -2685,13 +2685,14 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _handle_fanout_post(self, path, req, context):
-        """Cancel or explicitly resume the caller's durable fanout receipt."""
+        """Mutate or locally synthesize one caller-authorized fanout receipt."""
         prefix = "/v1/fanout/"
         if not path.startswith(prefix):
             return False
         suffix = path[len(prefix):].strip("/")
         parts = suffix.split("/")
-        if len(parts) != 2 or parts[1] not in ("cancel", "resume") or not parts[0] or len(parts[0]) > 80:
+        if (len(parts) != 2 or parts[1] not in ("cancel", "resume", "synthesize")
+                or not parts[0] or len(parts[0]) > 80):
             return False
         run_id, action = parts
         if not context["authorized"]:
@@ -2701,6 +2702,36 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             status, message = error
             self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
+            return True
+        if action == "synthesize":
+            if set(req) - {"synth_model"}:
+                self._send_json_payload({"error": {"message": "synthesis accepts only synth_model", "type": "invalid_request"}}, status=400)
+                return True
+            synth_model = req.get("synth_model", "")
+            if not isinstance(synth_model, str):
+                self._send_json_payload({"error": {"message": "synth_model must be a string", "type": "invalid_request"}}, status=400)
+                return True
+            try:
+                self._send_json_payload(server._fanout_synthesize_run(_run, synth_model))
+            except server.ModelCallError as exc:
+                status = exc.status or (
+                    400 if exc.kind == "configuration" else
+                    504 if exc.kind == "timeout" else 502
+                )
+                if status == 408:
+                    status = 504
+                if status not in (400, 403, 404, 429, 502, 503, 504):
+                    status = 502
+                error_type = "invalid_request_error" if 400 <= status < 500 else "server_error"
+                headers = None
+                if status in (429, 503, 504):
+                    wait = exc.retry_after_seconds
+                    retry_after = 1 if wait is None else max(0, int(round(wait)))
+                    headers = {"Retry-After": str(retry_after)}
+                self._send_json_payload(
+                    {"error": {"message": exc.detail, "type": error_type}},
+                    status=status, headers=headers,
+                )
             return True
         if action == "cancel":
             server.fanout_store.request_cancel(run_id)
