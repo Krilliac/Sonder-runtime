@@ -86,6 +86,28 @@ def test_stale_claim_becomes_unknown_and_is_not_replayed():
     assert store.list_results(run["id"])[0]["status"] == "unknown"
 
 
+def test_stale_queued_run_becomes_resumable_without_replaying_any_call():
+    run = store.create_run("question", ["a"])
+    created = run["created_ts"]
+
+    assert store.reconcile_stale_runs(
+        now=created + store.QUEUED_DISPATCH_GRACE_SECONDS - 1,
+    ) == 0
+    assert store.get_run(run["id"])["status"] == "queued"
+
+    assert store.reconcile_stale_runs(
+        now=created + store.QUEUED_DISPATCH_GRACE_SECONDS,
+    ) == 1
+    assert store.get_run(run["id"])["status"] == "interrupted"
+    result = store.list_results(run["id"])[0]
+    assert result["status"] == "skipped"
+    assert result["error"] == "worker did not begin; safe explicit resume required"
+
+    resumed = store.resume_run(run["id"])
+    assert resumed["status"] == "queued"
+    assert store.list_results(run["id"])[0]["status"] == "pending"
+
+
 def test_health_success_resets_failure_and_prune_removes_terminal_receipts():
     bad = store.record_model_health("m", error="429", disabled_until=time.time() + 1)
     assert bad["failure_count"] == 1
