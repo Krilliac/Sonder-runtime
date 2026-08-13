@@ -880,6 +880,29 @@ def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
     assert payload["think"] is True
 
 
+def test_kimi_k3_extra_usage_402_does_not_fallback_when_explicitly_disabled(monkeypatch):
+    calls = []
+
+    def fake_chat(
+        payload, *, model, cloud, timeout=None, cancel_check=None,
+        accept_native_tool_calls=False, idempotent=False,
+    ):
+        calls.append((model, idempotent))
+        raise server.ModelCallError(
+            "http", "extra usage balance is empty", status=402, cloud=True,
+        )
+
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request_with_cloud_fallback(
+            {"model": "kimi-k3:cloud"}, model="kimi-k3:cloud",
+            allow_cloud_fallback=False,
+        )
+
+    assert caught.value.status == 402
+    assert calls == [("kimi-k3:cloud", True)]
+
+
 def test_kimi_k3_agent_fallback_preserves_compact_native_tool_flags(monkeypatch):
     calls = []
 
