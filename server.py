@@ -21823,6 +21823,26 @@ def _fanout_profile_scope(profile):
     return scope, None
 
 
+_INTERPRETER_LIKE_MODEL_SELECTOR_PREFIXES = frozenset({
+    "bash", "cmd", "node", "nodejs", "powershell", "pwsh", "python", "sh",
+})
+
+
+def _is_interpreter_like_bare_model_selector(selector):
+    """Whether a tagged selector is more naturally a command name.
+
+    Natural-language routing must not reinterpret ordinary work such as
+    ``run python:3.12: reproduce this`` as a request to select a model.  The
+    This applies only to colon tags in bare-selector grammar.  An untagged
+    catalog model genuinely named ``python`` remains selectable via the
+    ordinary ``python model to`` phrasing; explicit ``model <tag>`` and
+    ``using model <tag>`` forms remain intentional opt-ins for any tag.
+    """
+    value = str(selector or "")
+    prefix, separator, _suffix = value.partition(":")
+    return bool(separator) and prefix.casefold() in _INTERPRETER_LIKE_MODEL_SELECTOR_PREFIXES
+
+
 def natural_model_request(text):
     """Recognize explicit user requests for a model or bounded model fanout.
 
@@ -21874,7 +21894,10 @@ def natural_model_request(text):
         value, re.IGNORECASE | re.DOTALL,
     )
     if named_tag:
-        return {"kind": "model", "model": named_tag.group(1).strip(), "prompt": named_tag.group(2).strip()}
+        selector = named_tag.group(1).strip()
+        if _is_interpreter_like_bare_model_selector(selector):
+            return None
+        return {"kind": "model", "model": selector, "prompt": named_tag.group(2).strip()}
     using_model = re.match(
         # This provides an explicit natural-language counterpart to the
         # established ``use model X: prompt`` form without attempting to
@@ -21904,9 +21927,7 @@ def natural_model_request(text):
         # coincidence.  Let ordinary work such as ``run using python:3.12 to
         # reproduce this`` reach the normal agent path; a user who really
         # means a model can use the unambiguous ``using model <tag>`` form.
-        if selector.partition(":")[0].casefold() in {
-            "bash", "cmd", "node", "nodejs", "powershell", "pwsh", "python", "sh",
-        }:
+        if _is_interpreter_like_bare_model_selector(selector):
             return None
         return {
             "kind": "model",
@@ -21942,6 +21963,8 @@ def natural_model_request(text):
             "appropriate", "available", "default", "preferred",
             "recommended", "right", "local", "cloud",
         }:
+            return None
+        if _is_interpreter_like_bare_model_selector(selector):
             return None
         return {
             "kind": "model",
