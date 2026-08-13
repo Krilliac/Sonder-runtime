@@ -314,6 +314,12 @@ def test_runtime_update_status_reports_ahead_behind_and_commit_times(tmp_path):
     assert result["trusted_remote"] is False
 
 
+def test_runtime_checkout_commit_reads_only_the_current_head(tmp_path):
+    repo = _repo(tmp_path)
+
+    assert git_tools.runtime_checkout_commit(repo) == _git(repo, "rev-parse", "HEAD").strip()
+
+
 def test_runtime_update_refuses_untrusted_or_dirty_checkout(tmp_path):
     remote = tmp_path / "remote.git"
     _git(tmp_path, "init", "--bare", str(remote))
@@ -403,6 +409,19 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert sonder_serve._dangerous_http_slash("/update")
 
 
+def test_update_status_distinguishes_running_source_from_new_checkout(monkeypatch):
+    monkeypatch.setattr(server.git_tools, "runtime_update_status", lambda *_args, **_kwargs: {
+        "installed_commit": "b" * 40,
+    })
+    monkeypatch.setattr(server, "RUNNING_SOURCE_COMMIT", "a" * 40)
+
+    data = server.runtime_source_update_status_data(refresh=False)
+
+    assert data["running_commit"] == "a" * 40
+    assert data["restart_required"] is True
+    assert "restart required" in server._runtime_update_format(data)
+
+
 def test_repl_startup_banner_reads_cached_update_status(monkeypatch):
     seen = []
     monkeypatch.setattr(
@@ -411,10 +430,13 @@ def test_repl_startup_banner_reads_cached_update_status(monkeypatch):
             "installed_commit": "a" * 40, "installed_commit_time": "now",
             "newest_commit": "b" * 40, "newest_commit_time": "later",
             "state": "behind", "behind": 1,
+            "running_commit": "a" * 40, "restart_required": True,
         },
     )
     monkeypatch.setattr(sonder_repl, "_paint", lambda text, *_styles: str(text))
     banner = sonder_repl._startup_banner(False, "coder", "")
     assert seen == [False]
     assert "installed source" in banner
+    assert "running source" in banner
+    assert "restart required" in banner
     assert "/updatecheck | /update" in banner
