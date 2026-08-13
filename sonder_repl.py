@@ -693,6 +693,19 @@ def _answer_only(text):
     return _strip_trace(_strip_footer(text or "")).rstrip()
 
 
+def _completion_timing(started_at):
+    """A user-facing duration for one REPL model/work turn.
+
+    The server's internal footer is intentionally stripped before printing an
+    answer, so keep the terminal's timing signal separate, stable, and free of
+    request content.  ``monotonic`` makes wall-clock adjustments irrelevant.
+    """
+    elapsed_ms = max(0, int((time.monotonic() - float(started_at)) * 1000))
+    if elapsed_ms < 1000:
+        return "Sonder completed in %dms" % elapsed_ms
+    return "Sonder completed in %.2fs" % (elapsed_ms / 1000.0)
+
+
 def _print_lessons():
     conn = server._open_db()
     try:
@@ -1538,6 +1551,7 @@ def main():
         # answer is backed by real inspection, file changes, validation, and a
         # persistent checklist instead of being a prose-only suggestion.
         if intents.classify_work(line):
+            started_at = time.monotonic()
             out = server.workbench_agent(
                 prompt=line, tier="auto", max_steps=12, project=project,
             )
@@ -1545,14 +1559,17 @@ def main():
             last_response = out
             last_run_source = _answer_only(out)
             print(out)
+            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
             continue
 
+        started_at = time.monotonic()
         out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                             session=session_id, project=project,
                             tier=active_tier or "",
                             location_consent=location_consent)
         if out.startswith("ERROR"):
             print(out)
+            print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
             continue
 
         last_iid = server.parse_interaction_id(out)
@@ -1560,6 +1577,7 @@ def main():
         last_run_source = _answer_only(out)
         cleaned = _strip_footer(out)
         print(cleaned)
+        print(_paint("[%s]" % _completion_timing(started_at), _Ansi.muted))
         if last_iid:
             print("(/pass or /fail to teach Sonder Runtime)")
 
