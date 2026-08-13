@@ -12,6 +12,7 @@ import sys
 import time
 
 import server
+import activity_tracker
 import sonder_runtime.adapters.memory_store as memory_store
 import grounding
 import code_runner
@@ -47,6 +48,9 @@ class _Ansi:
     reset = "\x1b[0m"
     teal = "\x1b[38;5;80m"
     cyan = "\x1b[38;5;117m"
+    # Keep the existing bright-cyan text, but give the composer itself a
+    # quieter, darker-blue surface that separates input from the transcript.
+    composer_surface = "\x1b[48;5;24m\x1b[38;5;117m"
     muted = "\x1b[38;5;245m"
     green = "\x1b[38;5;114m"
     amber = "\x1b[38;5;221m"
@@ -71,6 +75,7 @@ def _read_input(prompt, *, history=None, composer=False):
                 return slash_menu.read_line(
                     "" if composer else prompt,
                     history=history, frame=prompt if composer else "",
+                    frame_style=_Ansi.composer_surface if composer and _Ansi.enabled else "",
                     fallback_prompt=prompt,
                 )
         except (EOFError, KeyboardInterrupt):
@@ -545,8 +550,61 @@ def _execution_prompt(status=None):
     return _paint("[lanes %s | agents %s]" % (lanes, agents), colour)
 
 
-def _composer_title(tier=None, status=None):
-    """Compact, live identity for the terminal composer title edge."""
+def _compact_count(value):
+    """Render a non-negative count without making the composer noisy."""
+    try:
+        value = max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return "?"
+    if value >= 1_000_000:
+        return "%.1fm" % (value / 1_000_000.0)
+    if value >= 1_000:
+        return "%.1fk" % (value / 1_000.0)
+    return str(value)
+
+
+def _composer_context(session_id, project):
+    """Return the current approximate context budget without failing input."""
+    try:
+        data = server.context_health_data(session=session_id, project=project)
+        used = max(0, int(data.get("estimated_tokens") or 0))
+        limit = max(1, int(data.get("context_limit") or 1))
+        return {"used": used, "limit": limit, "left": max(0, limit - used)}
+    except Exception:
+        return None
+
+
+def _turn_metrics(response=None):
+    """Extract safe aggregate metrics from the REPL's completed response span."""
+    response = response if isinstance(response, dict) else {}
+    try:
+        return {
+            "tokens_in": max(0, int(response.get("tokens_in") or 0)),
+            "tokens_out": max(0, int(response.get("tokens_out") or 0)),
+            "elapsed_ms": max(0, int(response.get("elapsed_ms") or 0)),
+            "model_calls": max(0, int(response.get("model_calls") or 0)),
+            "tool_calls": max(0, int(response.get("tool_calls") or 0)),
+        }
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _latest_repl_turn_metrics(session_id="", *, surfaces=("terminal/mcp",)):
+    """Read metrics for the expected, immediately completed REPL response."""
+    try:
+        response = activity_tracker.latest()
+    except Exception:
+        return None
+    if not isinstance(response, dict) or response.get("surface") not in set(surfaces):
+        return None
+    if session_id and response.get("session") != session_id:
+        return None
+    return _turn_metrics(response)
+
+
+def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
+                    width=None):
+    """Live model, runtime, context and last-turn status for the composer."""
     resolved_tier = str(tier or "code")
     try:
         model = str(server.TIERS.get(resolved_tier) or "unknown")
@@ -554,9 +612,49 @@ def _composer_title(tier=None, status=None):
         model = "unknown"
     # This is intentionally the live table rather than a cached launch value:
     # /model changes should be visible before the very next submitted turn.
-    return "Sonder %s (%s)  %s" % (
-        resolved_tier, model, _execution_prompt(status),
-    )
+    compact = width is not None and int(width) <= 88
+    if compact:
+        try:
+            lanes = int((status or {}).get("running_lanes") or 0)
+            agents = int((status or {}).get("running_agents") or 0)
+        except (AttributeError, TypeError, ValueError):
+            lanes, agents = "?", "?"
+        parts = ["S %s" % resolved_tier, "L%s A%s" % (lanes, agents)]
+    else:
+        parts = ["Sonder %s (%s)  %s" % (
+            resolved_tier, model, _execution_prompt(status),
+        )]
+    if isinstance(context, dict):
+        parts.append(("C%s/%s L%s" if compact else "ctx~%s/%s (%s left)") % (
+            _compact_count(context.get("used")),
+            _compact_count(context.get("limit")),
+            _compact_count(context.get("left")),
+        ))
+    if isinstance(last_turn, dict):
+        parts.append(("T%s/%s" if compact else "tok %s/%s") % (
+            _compact_count(last_turn.get("tokens_in")),
+            _compact_count(last_turn.get("tokens_out")),
+        ))
+        elapsed = max(0, int(last_turn.get("elapsed_ms") or 0))
+        if elapsed:
+            parts.append(_elapsed_label(elapsed))
+        calls = int(last_turn.get("model_calls") or 0)
+        tools = int(last_turn.get("tool_calls") or 0)
+        if calls or tools:
+            parts.append(("M%s T%s" if compact else "calls %sM/%sT") % (
+                _compact_count(calls), _compact_count(tools),
+            ))
+    return (" | " if compact else "  |  ").join(parts)
+
+
+def _composer_frame_width():
+    """Use the raw composer's current width for a compact title when needed."""
+    if slash_menu is None:
+        return None
+    try:
+        return int(slash_menu._terminal_size()[0])
+    except Exception:
+        return None
 
 
 def _watch_activity(poll_seconds=1.0):
@@ -755,6 +853,14 @@ def _completion_timing(started_at):
     if elapsed_ms < 1000:
         return "Sonder completed in %dms" % elapsed_ms
     return "Sonder completed in %.2fs" % (elapsed_ms / 1000.0)
+
+
+def _elapsed_label(elapsed_ms):
+    """Short duration for status chrome, independent of wall-clock changes."""
+    elapsed_ms = max(0, int(elapsed_ms or 0))
+    if elapsed_ms < 1000:
+        return "%dms" % elapsed_ms
+    return "%.2fs" % (elapsed_ms / 1000.0)
 
 
 def _begin_chat_turn(label="Sonder"):
@@ -959,6 +1065,7 @@ def main():
     last_iid = None
     last_response = None
     last_run_source = None
+    last_turn_metrics = None
     # A fresh conversation thread per REPL launch; /new rerolls it, /resume switches it.
     session_id = memory_store.new_id()
     project = server.DEFAULT_PROJECT
@@ -1187,7 +1294,12 @@ def main():
 
     while True:
         try:
-            line = _read_input(_composer_title(active_tier),
+            line = _read_input(_composer_title(
+                active_tier,
+                context=_composer_context(session_id, project),
+                last_turn=last_turn_metrics,
+                width=_composer_frame_width(),
+            ),
                                history=input_history, composer=True)
         except (EOFError, KeyboardInterrupt):
             print()
@@ -1426,6 +1538,7 @@ def main():
                     last_response = out
                     last_run_source = _answer_only(out)
                     last_iid = None
+                    last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
                     print(out)
             elif cmd in (
                 "/report", "/endreport", "/checklist", "/plan",
@@ -1606,6 +1719,7 @@ def main():
                 last_iid = None
                 last_response = None
                 last_run_source = None
+                last_turn_metrics = None
                 print("started a new thread (%s)" % session_id)
             elif cmd == "/sessions":
                 _print_sessions()
@@ -1699,6 +1813,7 @@ def main():
             last_iid = None
             last_response = out
             last_run_source = _answer_only(out)
+            last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
             _print_chat_result(out, started_at, label="Sonder work")
             continue
 
@@ -1708,6 +1823,7 @@ def main():
                             session=session_id, project=project,
                             tier=active_tier or "",
                             location_consent=location_consent)
+        last_turn_metrics = _latest_repl_turn_metrics(session_id)
         if out.startswith("ERROR"):
             _print_chat_result(out, started_at, label="Sonder error", error=True)
             continue

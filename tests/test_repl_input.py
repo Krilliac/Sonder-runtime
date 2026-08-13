@@ -223,6 +223,66 @@ def test_composer_title_uses_live_tier_and_execution_status(monkeypatch):
     assert title == "Sonder code (coder:14b)  [lanes 1 | agents 0]"
 
 
+def test_composer_title_shows_approximate_context_and_last_turn_metrics(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:14b"}, raising=False)
+
+    title = sonder_repl._composer_title(
+        "code", {"known": True, "running_lanes": 0, "running_agents": 0,
+                 "queued_agents": 0},
+        context={"used": 1_250, "limit": 8_192, "left": 6_942},
+        last_turn={"tokens_in": 1_024, "tokens_out": 250, "elapsed_ms": 1_500,
+                   "model_calls": 1, "tool_calls": 2},
+    )
+
+    assert "ctx~1.2k/8.2k (6.9k left)" in title
+    assert "tok 1.0k/250" in title
+    assert "1.50s" in title and "calls 1M/2T" in title
+
+
+def test_composer_title_keeps_all_stats_inside_a_standard_80_column_frame(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    title = sonder_repl._composer_title(
+        "code", {"known": True, "running_lanes": 0, "running_agents": 0,
+                 "queued_agents": 0}, width=80,
+        context={"used": 1_250, "limit": 8_192, "left": 6_942},
+        last_turn={"tokens_in": 1_024, "tokens_out": 250, "elapsed_ms": 1_500,
+                   "model_calls": 1, "tool_calls": 2},
+    )
+
+    assert len(title) <= 76
+    assert "C1.2k/8.2k L6.9k" in title and "T1.0k/250" in title
+    assert "1.50s" in title and "M1 T2" in title
+
+
+def test_composer_context_and_last_turn_degrade_without_a_fake_value(monkeypatch):
+    monkeypatch.setattr(sonder_repl.server, "context_health_data", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {"surface": "chat-api"})
+
+    assert sonder_repl._composer_context("session", "project") is None
+    assert sonder_repl._latest_repl_turn_metrics() is None
+
+
+def test_last_turn_metrics_stay_bound_to_the_active_repl_session(monkeypatch):
+    monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {
+        "surface": "terminal/mcp", "session": "another-repl",
+        "tokens_in": 999, "tokens_out": 999,
+    })
+
+    assert sonder_repl._latest_repl_turn_metrics("this-repl") is None
+
+
+def test_last_turn_metrics_accept_an_agent_response_when_requested(monkeypatch):
+    monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {
+        "surface": "agent", "tokens_in": 12, "tokens_out": 34,
+    })
+
+    assert sonder_repl._latest_repl_turn_metrics(surfaces=("agent",)) == {
+        "tokens_in": 12, "tokens_out": 34, "elapsed_ms": 0,
+        "model_calls": 0, "tool_calls": 0,
+    }
+
+
 def test_activity_watch_prints_each_sequence_once_and_stops_cleanly(
     monkeypatch, capsys,
 ):
