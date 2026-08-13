@@ -566,6 +566,46 @@ def record_model_call(
         )
 
 
+def record_model_fanout(*, cloud_model_calls=0, tokens_in=0, tokens_out=0,
+                        answered=0, failed=0, skipped=0, elapsed_ms=0):
+    """Record a bounded aggregate for a durable model fanout.
+
+    Local fanout calls execute in the response thread and are already captured
+    individually by :func:`record_model_call`.  Cloud calls execute in worker
+    threads, which deliberately do not inherit that response context, so add
+    only their terminal attempted count here.  This preserves a truthful
+    response-level total without manufacturing per-model prompt previews.
+    """
+    response = _current()
+    if response is None:
+        return
+    cloud_model_calls = max(0, int(cloud_model_calls or 0))
+    tokens_in = max(0, int(tokens_in or 0))
+    tokens_out = max(0, int(tokens_out or 0))
+    answered = max(0, int(answered or 0))
+    failed = max(0, int(failed or 0))
+    skipped = max(0, int(skipped or 0))
+    elapsed_ms = max(0, int(elapsed_ms or 0))
+    with _LOCK:
+        response["model_calls"] += cloud_model_calls
+        response["tokens_in"] += tokens_in
+        response["tokens_out"] += tokens_out
+        _event(
+            response,
+            "model_fanout",
+            cloud_model_calls=cloud_model_calls,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            answered=answered,
+            failed=failed,
+            skipped=skipped,
+            elapsed_ms=elapsed_ms,
+            summary="%d answered, %d failed, %d skipped" % (
+                answered, failed, skipped,
+            ),
+        )
+
+
 def record_tool_call(name, args=None, *, ok=True, elapsed_ms=0, summary=""):
     response = _current()
     if response is None:
@@ -791,6 +831,7 @@ def _public_event(event, *, include_detail=False):
             out[key] = _short(_redact_text(event.get(key)), 160)
     for key in (
         "prompt_chars", "history_messages", "tokens_in", "tokens_out",
+        "cloud_model_calls", "answered", "failed", "skipped",
         "lines_added", "lines_edited", "lines_deleted", "bytes",
     ):
         if key in event:
@@ -1008,6 +1049,16 @@ def execution_feed(
                 })
                 row["request_preview"] = _feed_preview(event.get("request_preview"))
                 row["response_preview"] = _feed_preview(event.get("response_preview"))
+            elif kind == "model_fanout":
+                # Fanout observability is intentionally scalar-only.  The
+                # durable receipt is the owner-scoped place for model names,
+                # answers, failure detail, and other sensitive material.
+                row.update({
+                    key: event.get(key) for key in (
+                        "cloud_model_calls", "answered", "failed", "skipped",
+                        "tokens_in", "tokens_out",
+                    ) if key in event
+                })
             elif kind == "tool_call":
                 row.update({
                     key: event.get(key) for key in ("tool", "title", "ok") if key in event
@@ -1113,6 +1164,12 @@ def format_execution_feed(feed):
                 event.get("operation_mode", "unknown"),
                 event.get("fallback_handler", "unknown"),
                 event.get("handler_state", "unknown"),
+            )
+        elif kind == "model_fanout":
+            detail = "cloud calls=%s answered=%s failed=%s skipped=%s tok=%s/%s" % (
+                event.get("cloud_model_calls", 0), event.get("answered", 0),
+                event.get("failed", 0), event.get("skipped", 0),
+                event.get("tokens_in", 0), event.get("tokens_out", 0),
             )
         else:
             detail = event.get("tool") or event.get("model") or event.get("path") or ""
