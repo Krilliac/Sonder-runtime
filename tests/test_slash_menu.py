@@ -513,6 +513,26 @@ def test_raw_reader_down_restores_the_unfinished_draft(monkeypatch):
     assert line == "draft"
 
 
+def test_raw_reader_reverse_searches_session_history_without_persisting(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, list("build") + ["\x12", "\x12", "\r"],
+        history=["open readme", "build release", "build debug"],
+    )
+
+    # First Ctrl+R finds the newest match; repeated Ctrl+R walks older matches
+    # using the original "build" term rather than the recalled full command.
+    assert line == "build release"
+
+
+def test_reverse_search_restarts_after_an_edit(monkeypatch):
+    line, _ = _drive(
+        monkeypatch, list("build") + ["\x12", "\x15"] + list("build!") + ["\x12", "\r"],
+        history=["build! release", "build debug"],
+    )
+
+    assert line == "build! release"
+
+
 def test_raw_reader_recall_works_for_slash_text_without_palette_matches(monkeypatch):
     line, _ = _drive(
         monkeypatch, list("/usr/local/bin") + ["\xe0", "H", "\r"],

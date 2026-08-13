@@ -50,6 +50,7 @@ def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/artifactcheck" in sonder_repl.HELP
     assert "/consult" in sonder_repl.HELP
     assert "Ctrl+W word" in sonder_repl.HELP
+    assert "Ctrl+R search" in sonder_repl.HELP
 
 
 def _strip(text):
