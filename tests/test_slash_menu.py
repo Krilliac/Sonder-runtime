@@ -97,6 +97,19 @@ def test_read_line_falls_back_when_disabled(monkeypatch):
     assert called == []
 
 
+def test_framed_style_is_terminal_only_and_does_not_change_frame_geometry():
+    state = slash_menu.MenuState(frame="Sonder", frame_style="\x1b[48;5;24m")
+    styled = slash_menu._styled_frame("| input |", state.frame_style)
+
+    assert styled == "\x1b[48;5;24m| input |\x1b[0m"
+    assert slash_menu._ANSI_ESCAPE_RE.sub("", styled) == "| input |"
+
+
+def test_terminal_size_prefers_the_visible_windows_console(monkeypatch):
+    monkeypatch.setattr(slash_menu, "_windows_console_size", lambda: (144, 42))
+    assert slash_menu._terminal_size() == (144, 42)
+
+
 def test_raw_read_failure_falls_back_to_input(monkeypatch):
     """The whole point: a broken menu must not break the REPL."""
     monkeypatch.setattr(slash_menu, "available", lambda: True)

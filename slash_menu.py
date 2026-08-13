@@ -121,13 +121,17 @@ class MenuState:
     """
 
     def __init__(self, completer=None, limit: int = MAX_ROWS, buffer: str = "",
-                 hint_provider=None, frame: str = ""):
+                 hint_provider=None, frame: str = "", frame_style: str = ""):
         self.completer = completer or _default_completer
         self.hint_provider = hint_provider or _default_argument_hint
         # ``frame`` is presentation only.  The input state stays exactly the
         # same, so a terminal that cannot draw chrome still gets the ordinary
         # prompt and the full, unmodified buffer.
         self.frame = str(frame or "")
+        # ANSI presentation for the whole composer surface.  It is deliberately
+        # separate from ``frame`` so escape codes never become part of the
+        # prompt/title geometry or the accepted user input.
+        self.frame_style = str(frame_style or "")
         self.limit = max(1, int(limit))
         self.buffer = str(buffer or "")
         self.cursor = len(self.buffer)
@@ -407,8 +411,53 @@ def _truncate(text: str, width: int) -> str:
     return text[: max(1, limit - 1)] + "…"
 
 
+def _windows_console_size():
+    """Return the visible Windows console viewport, when it is available.
+
+    ``shutil.get_terminal_size`` correctly honors the portable ``COLUMNS``
+    convention, but Windows Terminal can leave it at its conservative 80-column
+    fallback even when the maximized viewport is much wider.  The raw composer
+    draws directly to that viewport, so prefer the console's own dimensions.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _Coord(ctypes.Structure):
+            _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+        class _Rect(ctypes.Structure):
+            _fields_ = [
+                ("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                ("Right", ctypes.c_short), ("Bottom", ctypes.c_short),
+            ]
+
+        class _ConsoleScreenBufferInfo(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", _Coord), ("dwCursorPosition", _Coord),
+                ("wAttributes", ctypes.c_ushort), ("srWindow", _Rect),
+                ("dwMaximumWindowSize", _Coord),
+            ]
+
+        handle = ctypes.windll.kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        info = _ConsoleScreenBufferInfo()
+        if not handle or not ctypes.windll.kernel32.GetConsoleScreenBufferInfo(
+            handle, ctypes.byref(info),
+        ):
+            return None
+        columns = int(info.srWindow.Right - info.srWindow.Left + 1)
+        lines = int(info.srWindow.Bottom - info.srWindow.Top + 1)
+        return (columns, lines) if columns > 0 and lines > 0 else None
+    except Exception:
+        return None
+
+
 def _terminal_size():
     try:
+        native = _windows_console_size()
+        if native is not None:
+            return max(20, native[0]), max(4, native[1])
         size = shutil.get_terminal_size((80, 24))
         return max(20, size.columns), max(4, size.lines)
     except Exception:
@@ -570,6 +619,13 @@ def _clear_raw_input(state: MenuState, stream) -> None:
     stream.flush()
 
 
+def _styled_frame(text: str, style: str) -> str:
+    """Apply optional terminal-only styling without changing frame geometry."""
+    if not style:
+        return text
+    return style + text + "\x1b[0m"
+
+
 def _paint(state: MenuState, prompt: str, stream) -> None:
     """Redraw the input line and the menu, leaving the cursor where typing is.
 
@@ -601,7 +657,9 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
         )
     visible_cursor_row = max(0, cursor_row - start)
     if framed:
-        body = top + "\n" + "\n".join(lines) + "\n" + footer
+        body = "\n".join(_styled_frame(row, state.frame_style) for row in (
+            [top] + lines + [footer]
+        ))
         input_rows = len(lines) + 2
         cursor_from_start = visible_cursor_row + 1
         cursor_col += 2  # left border and breathing space
@@ -636,7 +694,9 @@ def _finish(state: MenuState, prompt: str, stream) -> None:
         top, lines, footer = _framed_input_lines(
             state.frame, state.buffer, cols, stream,
             footer_hint=_composer_footer(state, stream))
-        rendered = top + "\n" + "\n".join(lines) + "\n" + footer
+        rendered = "\n".join(_styled_frame(row, state.frame_style) for row in (
+            [top] + lines + [footer]
+        ))
     else:
         rendered = "\n".join(_input_lines(prompt, state.buffer, cols))
     stream.write(_cursor_to_input_start(state) + CSI + "0J" + rendered + "\n")
@@ -651,10 +711,11 @@ def _clear_screen(state: MenuState, stream) -> None:
     state._drawn_cursor_row = 0
 
 
-def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "") -> str:
+def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
+                   frame_style: str = "") -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
-    state = MenuState(completer=completer, frame=frame)
+    state = MenuState(completer=completer, frame=frame, frame_style=frame_style)
     recalled = HistoryCursor(history)
     try:
         _paint(state, prompt, stream)
@@ -727,7 +788,8 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "") -
 
 
 def read_line(prompt: str = "", *, enabled: bool = True, history=None,
-              frame: str = "", fallback_prompt: str | None = None) -> str:
+              frame: str = "", frame_style: str = "",
+              fallback_prompt: str | None = None) -> str:
     """Read one line, showing a live command menu while it starts with ``/``.
 
     Falls back to builtin :func:`input` whenever the menu cannot or should not
@@ -740,7 +802,8 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
     if not enabled or not available():
         return input(fallback)
     try:
-        return _read_line_raw(prompt, history=history, frame=frame)
+        return _read_line_raw(prompt, history=history, frame=frame,
+                              frame_style=frame_style)
     except KeyboardInterrupt:
         raise
     except EOFError:
