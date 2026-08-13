@@ -377,6 +377,24 @@ def test_composer_title_keeps_all_stats_inside_a_standard_80_column_frame(monkey
     assert "1.50s" in title and "M1 T2" in title
 
 
+def test_composer_title_compacts_when_full_status_exceeds_a_wide_frame(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"}, raising=False)
+
+    title = sonder_repl._composer_title(
+        "code", {"known": True, "running_lanes": 0, "running_agents": 0,
+                 "queued_agents": 0}, width=120,
+        context={"used": 1_250, "limit": 8_192, "left": 6_942},
+        last_turn={"tokens_in": 3_252, "tokens_out": 29, "elapsed_ms": 17_366,
+                   "model_calls": 1, "tool_calls": 0},
+    )
+
+    assert len(title) <= 116
+    assert "C1.2k/8.2k L6.9k" in title
+    assert "T3.3k/29" in title
+    assert "calls" not in title
+
+
 def test_composer_context_and_last_turn_degrade_without_a_fake_value(monkeypatch):
     monkeypatch.setattr(sonder_repl.server, "context_health_data", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {"surface": "chat-api"})
