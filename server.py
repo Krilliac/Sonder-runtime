@@ -22386,9 +22386,10 @@ def _execute_fanout_run(run_id):
     return receipt
 
 
-def _model_fanout_authorized(prompt: str, scope: str = "", profile: str = "", num_predict: int = 512,
+def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 512,
                              timeout: int = 45, max_cloud_workers: int = 2,
-                             request_owner: str = "", request_role: str = "") -> str:
+                             request_owner: str = "", request_role: str = "",
+                             profile: str = "") -> str:
     """Execute fanout after the caller's authority was established upstream.
 
     This is intentionally private.  HTTP has an authenticated principal and
@@ -22428,8 +22429,9 @@ def _model_fanout_authorized(prompt: str, scope: str = "", profile: str = "", nu
 
 
 @mcp.tool()
-def model_fanout(prompt: str, scope: str = "", profile: str = "", num_predict: int = 512,
-                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "") -> str:
+def model_fanout(prompt: str, scope: str = "", num_predict: int = 512,
+                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "",
+                 profile: str = "") -> str:
     """Ask every discovered local, cloud, or all model the same prompt.
 
     Local models are serial to avoid GPU/VRAM contention.  Cloud calls require
