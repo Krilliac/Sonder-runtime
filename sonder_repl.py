@@ -863,6 +863,33 @@ def _answer_only(text):
     return _strip_trace(_strip_footer(text or "")).rstrip()
 
 
+def _is_repl_error(text):
+    """Classify narrow host refusals that lack the legacy ``ERROR:`` prefix.
+
+    An exact model pin can disappear or become route-incompatible after the
+    REPL's `/model` check. Those host refusals intentionally avoid new server
+    error literals, but they must not be rendered as a normal model answer.
+    """
+    raw = str(text or "")
+    # A successful model turn has a durable interaction footer. Never turn a
+    # model-authored imitation of a host refusal into an error, because that
+    # would discard its answer and break feedback/`/run` continuity.
+    if server.parse_interaction_id(raw) is not None:
+        return False
+    value = server._strip_activity_block(raw).strip()
+    if value.startswith("ERROR"):
+        return True
+    if not value.startswith("model pin '"):
+        return False
+    return (
+        value.endswith(" is unavailable or is not chat-capable.")
+        or (
+            "' is incompatible with the selected " in value
+            and value.endswith(" route.")
+        )
+    )
+
+
 def _completion_timing(started_at):
     """A user-facing duration for one REPL model/work turn.
 
@@ -1915,7 +1942,7 @@ def main():
                 indicator.stop()
             raise
         last_turn_metrics = _latest_repl_turn_metrics(session_id)
-        if out.startswith("ERROR"):
+        if _is_repl_error(out):
             _print_chat_result(out, started_at, label="Sonder error", error=True,
                                indicator=indicator)
             continue
