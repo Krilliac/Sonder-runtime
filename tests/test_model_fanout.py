@@ -137,6 +137,10 @@ def test_natural_model_requests_are_explicit_only():
             "kind": "fanout", "scope": "all", "profile": "healthy-chat",
             "prompt": "a concise summary",
         }),
+        ("ask loaded local chat models: summarize this", {
+            "kind": "fanout", "scope": "local", "profile": "loaded-local-chat",
+            "prompt": "summarize this",
+        }),
     ],
 )
 def test_natural_fanout_profiles_are_fixed_whole_turn_requests(phrase, expected):
@@ -173,6 +177,7 @@ def test_tool_manifest_documents_guarded_model_routes():
     assert "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize" in manifest
     assert "healthy-local-chat" in manifest
     assert "healthy-cloud-chat" in manifest
+    assert "loaded-local-chat" in manifest
     assert "never accept arbitrary selectors" in manifest
     assert "ask all available local models: ..." in manifest
     assert "ask all available models for ..." in manifest
@@ -434,6 +439,41 @@ def test_profile_uses_its_fixed_scope_when_direct_scope_is_omitted(monkeypatch):
     assert error is None
     assert plan["scope"] == "all"
     assert plan["selected"] == ["local-ok", "cloud-ok:cloud"]
+
+
+def test_loaded_local_chat_profile_selects_only_resident_chat_models(monkeypatch):
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("resident-chat", {"name": "resident-chat", "capabilities": ["chat"]}),
+        ("cold-chat", {"name": "cold-chat", "capabilities": ["completion"]}),
+        ("resident-embed", {"name": "resident-embed", "capabilities": ["embedding"]}),
+    ])
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "resident-chat"}, {"name": "resident-embed"}]}
+        if path == "/api/ps" else (_ for _ in ()).throw(AssertionError(path))
+    ))
+    monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _name: None)
+
+    plan, error = server._fanout_plan("", profile="loaded-local-chat")
+
+    assert error is None
+    assert plan["scope"] == "local"
+    assert plan["selected"] == ["resident-chat"]
+    assert {row["model"]: row["reason"] for row in plan["skipped"]} == {
+        "cold-chat": "not currently resident",
+        "resident-embed": "embedding-only capability",
+    }
+
+
+def test_loaded_local_chat_profile_fails_closed_when_residency_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        server, "_get", lambda _path: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    plan, error = server._fanout_plan("", profile="loaded-local-chat")
+
+    assert plan["selected"] == []
+    assert error is not None
+    assert "could not verify loaded local models" in str(error)
 
 
 def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
