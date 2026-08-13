@@ -43,12 +43,14 @@ KEY_DOWN = "<down>"
 CONTINUE = "continue"   # keep reading; the caller should repaint
 ACCEPT = "accept"       # the line is finished
 INTERRUPT = "interrupt"  # Ctrl+C: the caller should raise KeyboardInterrupt
+CLEAR = "clear"          # Ctrl+L: clear screen but retain the input buffer
 
 _ENTER = ("\r", "\n")
 _BACKSPACE = ("\x08", "\x7f")
 _TAB = "\t"
 _ESC = "\x1b"
 _CTRL_C = "\x03"
+_CTRL_L = "\x0c"
 _CTRL_U = "\x15"
 
 MAX_ROWS = 8
@@ -190,6 +192,8 @@ class MenuState:
             return CONTINUE
         if ch == _CTRL_C:
             return INTERRUPT
+        if ch == _CTRL_L:
+            return CLEAR
         if ch == _CTRL_U:
             self.buffer = ""
             self.dismissed = False
@@ -448,6 +452,13 @@ def _finish(state: MenuState, prompt: str, stream) -> None:
     stream.flush()
 
 
+def _clear_screen(state: MenuState, stream) -> None:
+    """Clear terminal presentation; retain the in-progress input buffer."""
+    stream.write(CSI + "2J" + CSI + "H")
+    stream.flush()
+    state._drawn_input_rows = 1
+
+
 def _read_line_raw(prompt: str, completer=None, history=None) -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
@@ -486,6 +497,8 @@ def _read_line_raw(prompt: str, completer=None, history=None) -> str:
             if action == INTERRUPT:
                 _finish(state, prompt, stream)
                 raise KeyboardInterrupt
+            if action == CLEAR:
+                _clear_screen(state, stream)
             _paint(state, prompt, stream)
     except (KeyboardInterrupt, EOFError):
         raise
