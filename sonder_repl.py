@@ -5,6 +5,7 @@ drops you into an interactive session. Slash-commands control trace/strict mode,
 teach outcomes back, and surface stats/lessons. Stdlib only + server/memory_store.
 """
 import json
+import inspect
 import os
 import re
 import sys
@@ -309,6 +310,17 @@ def _run_catalogued(line, cmd):
         tool, kwargs = parsed
         handler = getattr(server, tool, None)
         if callable(handler):
+            # A successful /login is the REPL's authenticated session. Thread
+            # it through catalogue-dispatched tools that explicitly accept a
+            # token, while preserving an explicit command argument if present.
+            # This keeps durable fanout status/recovery usable in an account
+            # deployment without making users paste session tokens into input.
+            try:
+                accepts_token = "token" in inspect.signature(handler).parameters
+            except (TypeError, ValueError):
+                accepts_token = False
+            if accepts_token:
+                kwargs.setdefault("token", CURRENT_TOKEN)
             may_run, refusal = _permission_gate(tool)
             if not may_run:
                 return refusal
