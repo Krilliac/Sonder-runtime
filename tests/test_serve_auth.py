@@ -582,6 +582,46 @@ def test_chat_accepts_valid_text_messages_and_forwards_history(monkeypatch):
     )]
 
 
+def test_chat_success_receipt_uses_actual_generation_target(monkeypatch):
+    """The receipt reports the accepted target, not the client selector."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def fake_answer(prompt, history, *, target_observer=None, **kwargs):
+        target_observer("actual-model:latest", "code", False)
+        return "receipt answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    request = json.dumps({
+        "model": "code", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    payload = json.loads(body)
+    receipt = payload["sonder_receipt"]
+    assert receipt["request_id"].startswith("req_")
+    assert headers["X-Sonder-Correlation-Id"] == receipt["request_id"]
+    assert receipt["elapsed_ms"] == payload["sonder_elapsed_ms"]
+    assert receipt["model"] == "actual-model:latest"
+    assert receipt["tier"] == "code"
+    assert "hello" not in json.dumps(receipt)
+
+
 def test_models_response_includes_elapsed_header(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
@@ -843,11 +883,21 @@ def test_stream_exposes_same_elapsed_header_as_terminal_chunk():
             pass
 
     probe = StreamProbe()
-    assert ts.Handler._send_stream(probe, "hello", "sonder", iid="stream", elapsed_ms=37)
+    probe._correlation_id = "req_stream"
+    receipt = {
+        "request_id": "req_stream", "elapsed_ms": 37,
+        "model": "actual-model:latest", "tier": "code",
+    }
+    assert ts.Handler._send_stream(
+        probe, "hello", "sonder", iid="stream", elapsed_ms=37,
+        receipt=receipt,
+    )
 
     body = probe.wfile.getvalue().decode("utf-8")
     assert probe.headers["X-Sonder-Elapsed-Ms"] == "37"
+    assert probe.headers["X-Sonder-Correlation-Id"] == "req_stream"
     assert '"sonder_elapsed_ms": 37' in body
+    assert '"sonder_receipt": {"request_id": "req_stream"' in body
     assert body.endswith("data: [DONE]\n\n")
 
 

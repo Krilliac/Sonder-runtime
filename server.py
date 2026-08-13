@@ -5395,6 +5395,7 @@ def _answer_with_history_impl(
     session="",
     project="",
     raise_model_errors=False,
+    target_observer=None,
 ):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
@@ -5422,6 +5423,13 @@ def _answer_with_history_impl(
     if model is None:
         return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
+    if target_observer is not None:
+        try:
+            target_observer(model, tier_label, cloud)
+        except Exception:
+            # Observability must not make a valid model call fail.  The
+            # observer is an in-process metadata hook, never model input.
+            pass
     effective_system = _build_system("", trace, "", model=model, cloud=cloud)
     # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
     # resends history each request), so a non-learning model can skip capture entirely:
@@ -5527,6 +5535,7 @@ def answer_with_history(
     session="",
     project="",
     raise_model_errors=False,
+    target_observer=None,
 ):
     label = "chat:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
@@ -5547,6 +5556,7 @@ def answer_with_history(
             session=session,
             project=project,
             raise_model_errors=raise_model_errors,
+            target_observer=target_observer,
         )
     return _append_activity(result, response=response, replace=True)
 
