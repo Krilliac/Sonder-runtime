@@ -397,12 +397,15 @@ def request_cancel(run_id: str) -> dict | None:
 
 
 def resume_run(run_id: str, *, include_failed: bool = False, retry_unknown: bool = False) -> dict | None:
-    """Requeue selected terminal receipts; unknown requests require explicit opt-in.
+    """Requeue unfinished terminal receipts; unknown requests require explicit opt-in.
 
     The worker must claim the resulting queued run before any call is made.
     """
     now = time.time()
-    statuses = ["skipped"]
+    # A stale worker may have claimed one target, leaving later targets pending.
+    # They have never been dispatched, so resume them without asking callers to
+    # opt into replaying the potentially metered unknown target.
+    statuses = ["pending", "skipped"]
     if include_failed:
         statuses.append("failed")
     if retry_unknown:
