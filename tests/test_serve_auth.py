@@ -788,6 +788,126 @@ def test_models_response_includes_elapsed_header(monkeypatch):
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
+def test_models_response_lists_discovered_chat_models_not_nonchat_catalog_entries(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {"code": "gemma3:12b"})
+    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+        ("gemma3:12b", {"name": "gemma3:12b", "capabilities": ["chat"]}),
+        ("cloud-code:cloud", {"name": "cloud-code:cloud", "capabilities": ["chat"]}),
+        ("nomic-embed-text:latest", {"capabilities": "embedding"}),
+        ("llava:latest", {"name": "llava:latest"}),
+    ])
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/models")
+
+    assert status == 200
+    rows = json.loads(body)["data"]
+    assert [row["id"] for row in rows] == ["sonder", "code", "gemma3:12b"]
+    assert "nomic-embed-text:latest" not in {row["id"] for row in rows}
+    assert "llava:latest" not in {row["id"] for row in rows}
+
+
+def test_models_response_hides_discovered_cloud_models_without_opt_in(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {})
+    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+        ("local:latest", {"capabilities": ["chat"]}),
+        ("provider-cloud:latest", {"capabilities": ["chat"]}),
+    ])
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/models")
+
+    assert status == 200
+    assert [row["id"] for row in json.loads(body)["data"]] == ["sonder", "local:latest"]
+
+
+@pytest.mark.parametrize(
+    ("selector", "record", "expected"),
+    [
+        ("nomic-embed-text:latest", {"capabilities": ["embedding"]}, "not chat-capable"),
+        ("missing-model", None, "unknown model 'missing-model'"),
+    ],
+)
+def test_chat_rejects_unusable_explicit_model_before_prewarm(monkeypatch, selector, record, expected):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "_request_model_selector", lambda _model: selector)
+    monkeypatch.setattr(ts.server, "_serve_target", lambda *_args: (None, False, False, None))
+    monkeypatch.setattr(
+        ts.server, "resolve_discovered_model_record",
+        lambda _selector: (selector, record) if record is not None else None,
+    )
+    calls = []
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: calls.append("prewarm"))
+    request = json.dumps({
+        "model": selector,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert expected in json.loads(body)["error"]["message"]
+    assert json.loads(body)["error"]["type"] == "invalid_request"
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("serve_target", "record_resolver", "expected_status", "expected_text"),
+    [
+        ((None, True, False, "cloud-disabled"), None, 403, "cloud model access is disabled"),
+        (None, RuntimeError("catalog unavailable"), 503, "catalog is temporarily unavailable"),
+    ],
+)
+def test_chat_rejects_disabled_cloud_or_catalog_outage_before_prewarm(
+    monkeypatch, serve_target, record_resolver, expected_status, expected_text,
+):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "_request_model_selector", lambda _model: "selected:latest")
+    if serve_target is not None:
+        monkeypatch.setattr(ts.server, "_serve_target", lambda *_args: serve_target)
+    else:
+        monkeypatch.setattr(ts.server, "_serve_target", lambda *_args: (None, False, False, None))
+    if isinstance(record_resolver, Exception):
+        def fail_resolver(_selector):
+            raise record_resolver
+        monkeypatch.setattr(ts.server, "resolve_discovered_model_record", fail_resolver)
+    else:
+        monkeypatch.setattr(ts.server, "resolve_discovered_model_record", lambda _selector: None)
+    calls = []
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: calls.append("prewarm"))
+    request = json.dumps({
+        "model": "selected:latest",
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == expected_status
+    assert expected_text in json.loads(body)["error"]["message"]
+    assert calls == []
+
+
 def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     """An API-key owner must not be rejected by MCP's token-only gate."""
     api_key = "k" * 32
@@ -1387,6 +1507,10 @@ def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    # This test exercises a provider-side 429.  Enable the separate operator
+    # cloud consent gate so early selector preflight reaches the mocked model
+    # transport rather than correctly denying cloud use first.
+    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: True)
 
     class FakeConnection:
         def close(self):
