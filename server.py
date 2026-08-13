@@ -15067,7 +15067,7 @@ def tool_manifest() -> str:
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; list caller-scoped safe recent-run summaries after a restart, inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, and `healthy-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. Natural chat supports `ask healthy local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `ask all Sonder models + cloud: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
+        "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; list caller-scoped safe recent-run summaries after a restart, inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, `healthy-chat`, and `loaded-local-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. `loaded-local-chat` is local-only and fails closed unless Ollama confirms residency at both planning and dispatch, so it never triggers a model load. Natural chat supports `ask healthy local chat models: ...`, `ask loaded local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `ask all Sonder models + cloud: ...`, `run every available cloud models to answer: ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
         "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
@@ -22004,6 +22004,10 @@ FANOUT_SELECTION_PROFILES = {
     "healthy-local-chat": "local",
     "healthy-cloud-chat": "cloud",
     "healthy-chat": "all",
+    # A deliberate no-load profile for an interactive machine: only models
+    # that Ollama already reports as resident may be selected.  This stays
+    # local and still passes the normal chat-capability/health gates below.
+    "loaded-local-chat": "local",
 }
 
 
@@ -22016,7 +22020,7 @@ def _fanout_profile_scope(profile):
     if scope is None:
         return None, ModelCallError(
             "configuration",
-            "unknown fanout profile; use healthy-local-chat, healthy-cloud-chat, or healthy-chat",
+            "unknown fanout profile; use healthy-local-chat, healthy-cloud-chat, healthy-chat, or loaded-local-chat",
         )
     return scope, None
 
@@ -22059,7 +22063,7 @@ def natural_model_request(text):
         # Keep this whole-turn syntax as constrained as the existing all-model
         # grammar.  In particular, no trailing selector or embedded prose may
         # become a profile request.
-        r"^(?:ask|run|try|query)\s+(healthy\s+(?:local|cloud)?\s*chat)\s+models?\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
+        r"^(?:ask|run|try|query)\s+((?:healthy\s+(?:local|cloud)?|loaded\s+local)\s*chat)\s+models?\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if profiled_fanout:
@@ -22219,6 +22223,24 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             "configuration",
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
         )
+    resident_only = selected_profile == "loaded-local-chat"
+    resident = set()
+    if resident_only:
+        # A no-load profile is meaningful only with an authoritative residency
+        # snapshot.  Fail closed rather than degrading into an all-local
+        # fanout that can unexpectedly load models into an active GPU.
+        try:
+            rows = _get("/api/ps").get("models", [])
+            if not isinstance(rows, list):
+                raise ValueError("invalid Ollama /api/ps response")
+            resident = {
+                str(row.get("name") or "").strip().casefold()
+                for row in rows if isinstance(row, dict) and str(row.get("name") or "").strip()
+            }
+        except Exception:
+            return {"scope": scope, "selected": [], "skipped": []}, ModelCallError(
+                "configuration", "could not verify loaded local models for fanout"
+            )
     selected, skipped, now = [], [], time.time()
     for name, record in discovered_model_records():
         cloud = _is_cloud_model_name(name)
@@ -22227,6 +22249,9 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
         reason = _fanout_nonchat_reason(record)
         if reason:
             skipped.append({"model": name, "reason": reason})
+            continue
+        if resident_only and name.casefold() not in resident:
+            skipped.append({"model": name, "reason": "not currently resident"})
             continue
         health = fanout_store.get_model_health(name)
         disabled_until = health.get("disabled_until") if health else None
@@ -22537,6 +22562,32 @@ def _fanout_limits(run):
         "plan_skipped": list(raw.get("plan_skipped", [])),
         "selection_profile": str(raw.get("selection_profile") or "").strip().lower(),
     }
+
+
+def _fanout_dispatch_residency_reason(limits, model):
+    """Return a no-load fence refusal for a selected resident-only target.
+
+    A durable fanout may wait in the queue or be explicitly resumed long after
+    planning.  Its original ``/api/ps`` snapshot therefore cannot authorize a
+    later model load.  Recheck immediately before the provider closure exists;
+    a missing or unavailable row is a skipped receipt, never a fallback load.
+    """
+    if limits.get("selection_profile") != "loaded-local-chat":
+        return ""
+    try:
+        payload = _get("/api/ps")
+        rows = payload.get("models", []) if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("invalid Ollama /api/ps response")
+        resident = {
+            str(row.get("name") or "").strip().casefold()
+            for row in rows if isinstance(row, dict) and str(row.get("name") or "").strip()
+        }
+    except Exception:
+        return "could not verify model residency at dispatch"
+    if str(model or "").strip().casefold() not in resident:
+        return "model is no longer resident at dispatch"
+    return ""
 
 
 def _fanout_snapshot_allows(run, model):
@@ -22994,6 +23045,9 @@ def _execute_fanout_run(run_id):
         started = time.monotonic()
         if not _fanout_snapshot_allows(run, model):
             return row, "skipped", "", "model is outside immutable fanout target snapshot", 0, None, {}
+        residency_reason = _fanout_dispatch_residency_reason(limits, model)
+        if residency_reason:
+            return row, "skipped", "", residency_reason, 0, None, {}
         if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not cloud_allowed()):
             return row, "skipped", "", "cloud access disabled before execution", 0, None, {}
         exc = None
@@ -23179,7 +23233,8 @@ def model_fanout(prompt: str, scope: str = "", num_predict: StrictInt = 512,
     no failed cloud call is retried automatically.  The JSON receipt reports
     selected, answered, failed, resident-before, and total elapsed metrics.
     ``profile`` is optional but exact: healthy-local-chat,
-    healthy-cloud-chat, or healthy-chat.  It cannot accept a user selector.
+    healthy-cloud-chat, healthy-chat, or loaded-local-chat.  It cannot accept
+    a user selector.
     """
     started = time.time()
     refusal = _developer_gate("model_fanout", token, started)
