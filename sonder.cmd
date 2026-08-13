@@ -47,8 +47,13 @@ if /I not "%SONDER_TERMINAL_START_SERVER%"=="0" (
   ) else (
     "%SONDER_PYTHON%" "%REPO%sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%" >"%SONDER_BOOT_LOG%" 2>&1
     if errorlevel 1 (
-      echo [sonder] WARNING: local API server did not start cleanly.
-      if exist "%SONDER_BOOT_LOG%" type "%SONDER_BOOT_LOG%"
+      findstr /C:"sonder: already listening" "%SONDER_BOOT_LOG%" >nul 2>&1
+      if not errorlevel 1 (
+        echo [sonder] NOTE: using an existing local API server that this launch does not manage.
+      ) else (
+        echo [sonder] WARNING: local API server did not start cleanly.
+        if exist "%SONDER_BOOT_LOG%" type "%SONDER_BOOT_LOG%"
+      )
     )
   )
 )

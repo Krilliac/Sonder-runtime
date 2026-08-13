@@ -2,6 +2,7 @@ import io
 import subprocess
 
 import sonder_headless as H
+import sonder_serve
 
 
 class GateInput:
@@ -232,6 +233,37 @@ def test_start_sonder_records_real_listener_pid(monkeypatch, tmp_path):
 
     assert "started pid=222" in out
     assert H.pid_file("sonder_serve").read_text(encoding="ascii") == "222"
+
+
+def test_start_sonder_accepts_a_listener_that_binds_at_wait_timeout(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    probes = iter((False, True))
+    monkeypatch.setattr(H, "port_open", lambda host, port: next(probes))
+    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: False)
+    monkeypatch.setattr(H, "python_exe", lambda: "python")
+    monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
+    monkeypatch.setattr(H, "_listener_pid", lambda host, port: 111)
+    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: True)
+
+    out = H.start_sonder("127.0.0.1", 11435)
+
+    assert "started pid=111" in out
+
+
+def test_local_server_log_tail_is_bounded_and_redacts_secret_assignments(monkeypatch, tmp_path):
+    home = tmp_path / "state"
+    run = home / "run"
+    run.mkdir(parents=True)
+    (run / "sonder_serve.log").write_text(
+        "Authorization: Bearer secret-value\napi_key=other-secret\nready\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sonder_serve.server.sonder_paths, "default_home", lambda: home)
+
+    tail = sonder_serve._local_server_log_tail()
+
+    assert "secret-value" not in tail and "other-secret" not in tail
+    assert "ready" in tail and "<redacted>" in tail
 
 
 def test_start_sonder_preserves_sonder_health_token(monkeypatch):

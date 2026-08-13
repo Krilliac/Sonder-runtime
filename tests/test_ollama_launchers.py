@@ -17,6 +17,13 @@ def test_primary_launchers_delegate_engine_checks_to_gated_python():
         assert 'sonder_ollama_exe:-ollama}" show' not in lowered
 
 
+def test_terminal_launcher_distinguishes_an_existing_unmanaged_server_from_failure():
+    text = (ROOT / "sonder.cmd").read_text(encoding="utf-8")
+
+    assert 'findstr /C:"sonder: already listening"' in text
+    assert "using an existing local API server" in text
+
+
 def test_server_deploy_pins_ollama_clients_to_preflight_origin():
     text = (ROOT / "deploy_sonder.sh").read_text(encoding="utf-8")
 
