@@ -477,6 +477,14 @@ SYSTEM_OPERATION_TOOLS = {
     "permission_rule_set": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
+    # These mutate process-wide runtime behaviour or durable prompt inputs.
+    # They must not be reachable by ordinary served accounts through their
+    # registered ``/<tool>`` names when the curated aliases are gated.
+    "set_context_size": "runtime_policy_change",
+    "unload": "runtime_policy_change",
+    "update_emotion_vectors": "runtime_policy_change",
+    "tune_emotion_vectors": "runtime_policy_change",
+    "learn_preference": "runtime_policy_change",
     "update_system_profile": "selfmod_deploy",
     "self_heal_repair": "selfmod_deploy",
     "admin_set_account": "account_management",
@@ -486,7 +494,11 @@ SYSTEM_OPERATION_TOOLS = {
     "autopilot_cancel": "automation_lifecycle",
     "workflow_save": "automation_lifecycle",
     "workflow_delete": "automation_lifecycle",
-    "workflow_run": "automation_lifecycle",
+    # A saved workflow can contain any loop action, including the shared
+    # controls above.  Treat its execution as a runtime-policy operation;
+    # otherwise a developer can save or invoke an admin-authored payload to
+    # bypass the per-action HTTP gate.
+    "workflow_run": "runtime_policy_change",
     "memory_export": "workspace_execution",
     "memory_privacy_repair": "workspace_execution",
     "memory_quality_repair": "workspace_execution",
@@ -988,7 +1000,7 @@ def _dump_chat(messages=None, label="chat", state=None):
     return "dumped chat/debug log to %s" % path
 
 
-def _http_slash_refusal(cmd, context=None):
+def _http_slash_refusal(cmd, argument="", context=None):
     """The permission gate for this chain: "" to proceed, else the refusal text.
 
     This chain calls `server.file_write` / `file_edit` / `file_delete`
@@ -1025,7 +1037,65 @@ def _http_slash_refusal(cmd, context=None):
         # Fail closed on ignorance: an empty map would answer "allowed" for
         # every command in this chain.
         return "refused %s: %s" % (cmd, exc)
+    # The catalog deliberately reports the union of a slash alias' branches.
+    # These aliases contain both an inspection and a process-wide mutation, so
+    # applying the mutation's admin gate to `/emotion status` or `/prefer
+    # status` would accidentally turn a read-only request into an admin-only
+    # operation.  Narrow only after the command's own grammar has established
+    # that it will take the read-only branch.
+    read_only_argument = str(argument or "").strip().lower()
+    if cmd in ("/emotion", "/emotions", "/vectors", "/mood") and (
+        not read_only_argument or read_only_argument in ("status", "list", "show")
+    ):
+        tools = ("emotion_vector_status",)
+    elif cmd in ("/prefer", "/preference", "/preferences") and (
+        not read_only_argument or read_only_argument in ("status", "list", "show")
+    ):
+        tools = ("preferences_status",)
+    elif cmd in ("/contextsize", "/ctxsize") and not read_only_argument:
+        tools = ("context_policy_status",)
+    elif cmd in ("/runtime", "/models") and (
+        not read_only_argument or read_only_argument == "status"
+    ):
+        tools = ("runtime_policy_status",)
     return _http_tool_refusal(tools, cmd, context=context)
+
+
+_LOOP_GLOBAL_OPERATION_TYPES = {
+    "emotion_update": "runtime_policy_change",
+    "emotion_tune": "runtime_policy_change",
+    "learn_preference": "runtime_policy_change",
+    "unload": "runtime_policy_change",
+}
+
+
+def _loop_global_operation_refusal(actions_json, context=None):
+    """Refuse HTTP loop payloads that would mutate shared runtime state.
+
+    ``server.loop`` remains the single parser/executor for validity and
+    bounded-loop semantics.  This shallow inspection only recognizes the
+    known global action types early enough to apply served-account authority;
+    malformed payloads continue to receive the loop tool's normal error.
+    """
+    if context is None:
+        return ""
+    try:
+        parsed = json.loads(actions_json)
+    except (TypeError, ValueError):
+        return ""
+    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
+    if not isinstance(actions, list):
+        return ""
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_type = str(action.get("type") or action.get("action") or "").strip().lower()
+        operation = _LOOP_GLOBAL_OPERATION_TYPES.get(action_type)
+        if operation:
+            authority_error = _system_operation_authority_error(operation, context)
+            if authority_error:
+                return "refused /loop: %s" % authority_error
+    return ""
 
 
 def _http_tool_refusal(tools, label, context=None):
@@ -1084,7 +1154,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     # One choke point in front of every branch below, for the same reason the
     # REPL has one: this is a flat chain of ~130 `if cmd == ...` returns, and a
     # check placed after even one of them leaves that one ungated.
-    refusal = _http_slash_refusal(cmd, context=context)
+    refusal = _http_slash_refusal(cmd, arg, context=context)
     if refusal:
         return refusal
     operation = _slash_system_operation(cmd, arg)
@@ -1427,6 +1497,10 @@ def _dispatch_catalogued_tool(line, state, context=None):
     refusal = _http_tool_refusal((tool_name,), "/" + tool_name, context=context)
     if refusal:
         return refusal
+    if tool_name == "loop":
+        refusal = _loop_global_operation_refusal(kwargs.get("actions_json"), context)
+        if refusal:
+            return refusal
     # Guarded tools take the caller's own token exactly as the explicit
     # branches pass it (/read, /files, /delete); the tool still enforces its
     # own permission rules with it.
