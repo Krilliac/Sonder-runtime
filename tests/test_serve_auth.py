@@ -91,6 +91,10 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
 
 @pytest.mark.parametrize("response_format", [
     {"type": "json_schema", "json_schema": {"name": "result", "schema": {"type": "object"}}},
+    {"type": "json_schema", "json_schema": {
+        "name": "result", "strict": True,
+        "schema": {"type": "number", "minimum": float("nan")},
+    }},
     None,
     "json_object",
     [],
