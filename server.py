@@ -22801,6 +22801,8 @@ def _fanout_receipt(run_id):
         return item
 
     failures = [failure_receipt(row) for row in rows if row["status"] in ("failed", "unknown")]
+    failed_rows = [row for row in rows if row["status"] == "failed"]
+    unknown_rows = [row for row in rows if row["status"] == "unknown"]
     execution_skips = [{"model": row["model"], "reason": row["error"] or "not executed"}
                        for row in rows if row["status"] == "skipped"]
     ended = run.get("finished_ts") or now
@@ -22824,7 +22826,11 @@ def _fanout_receipt(run_id):
         "selection_profile": limits["selection_profile"] or None,
         "models_selected": len(rows),
         "models_answered": len(answers),
-        "models_failed": len(failures),
+        # ``unknown`` means the host cannot prove whether an in-flight
+        # provider request was sent. Keep it separate from ordinary failures
+        # so retry_unknown remains an explicit metered replay decision.
+        "models_failed": len(failed_rows),
+        "models_unknown": len(unknown_rows),
         "models_skipped": len(plan_skips) + len(execution_skips),
         "skipped": plan_skips + execution_skips,
         "resident_before": limits["resident_before"],
@@ -23238,6 +23244,7 @@ def _execute_fanout_run(run_id):
             tokens_out=cloud_usage["tokens_out"],
             answered=receipt["models_answered"],
             failed=receipt["models_failed"],
+            unknown=receipt["models_unknown"],
             skipped=receipt["models_skipped"],
             elapsed_ms=receipt["total_elapsed_ms"],
         )
