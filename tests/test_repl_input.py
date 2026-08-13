@@ -10,6 +10,14 @@ def test_normal_repl_input_is_unchanged_except_whitespace():
     assert sonder_repl._normalize_input_line("  hello sonder  ") == "hello sonder"
 
 
+def test_completion_timing_uses_a_compact_elapsed_display(monkeypatch):
+    monkeypatch.setattr(sonder_repl.time, "monotonic", lambda: 12.345)
+    assert sonder_repl._completion_timing(12.0) == "Sonder completed in 345ms"
+
+    monkeypatch.setattr(sonder_repl.time, "monotonic", lambda: 14.5)
+    assert sonder_repl._completion_timing(12.0) == "Sonder completed in 2.50s"
+
+
 def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/runtime" in sonder_repl.HELP
     assert "/mcp" in sonder_repl.HELP
