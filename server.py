@@ -5475,7 +5475,7 @@ def sonder(
     prompt: str,
     system: str = "",
     temperature: float = 0.2,
-    num_predict: int = 1024,
+    num_predict: StrictInt = 1024,
     num_ctx: int = 4096,
     context_size: str = "",
     trace: bool = False,
@@ -23140,14 +23140,20 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
         return _format_model_call_error(ModelCallError(
             "configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS
         ))
-    try:
-        cap = max(32, min(int(num_predict), 4096))
-        request_timeout = max(5, min(int(timeout), 300))
-        cloud_workers = max(1, min(int(max_cloud_workers), 2))
-    except (TypeError, ValueError):
+    # These values define resource and provider-spend bounds.  Do not use
+    # ``int(...)`` coercion here: ``True`` becomes one and strings/floats can
+    # silently change a caller's requested budget before the durable receipt
+    # is created.  MCP and HTTP schemas are typed, but this private helper is
+    # also deliberately safe for direct in-process callers.
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (
+        num_predict, timeout, max_cloud_workers,
+    )):
         return _format_model_call_error(ModelCallError(
             "configuration", "num_predict, timeout, and max_cloud_workers must be integers."
         ))
+    cap = max(32, min(num_predict, 4096))
+    request_timeout = max(5, min(timeout, 300))
+    cloud_workers = max(1, min(max_cloud_workers, 2))
     try:
         run = _fanout_start(
             question, scope, profile=profile, cap=cap, request_timeout=request_timeout,
@@ -23163,8 +23169,8 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
 
 
 @mcp.tool()
-def model_fanout(prompt: str, scope: str = "", num_predict: int = 512,
-                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "",
+def model_fanout(prompt: str, scope: str = "", num_predict: StrictInt = 512,
+                 timeout: StrictInt = 45, max_cloud_workers: StrictInt = 2, token: str = "",
                  profile: str = "") -> str:
     """Ask every discovered local, cloud, or all model the same prompt.
 
