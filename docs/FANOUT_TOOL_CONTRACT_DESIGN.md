@@ -82,16 +82,18 @@ ToolContract(
     name,                  # canonical tool / stand-in name
     registered,            # is a live MCP registration
     risk,                  # permission_modes.risk_of(name)
-    http_operation,        # SYSTEM_OPERATION_TOOLS binding ("" when unbound)
-    http_role,             # SYSTEM_OPERATION_ROLES[http_operation]
+    http_operation,        # binding, "" when none, or the UNBOUND sentinel
+    http_role,             # EFFECTIVE role at the boundary (UNBOUND -> admin)
     agent_operator,        # in server._AGENT_SYSTEM_OPERATOR_TOOLS
     durable_authority,     # in permission_modes.DURABLE_AUTHORITY_TOOLS
-    in_tool_authority,     # "admin"/"developer"/"" — AST-verified in-tool check
-    loop_action_names,     # loop action spellings resolving here
-    slash_spellings,       # catalogued + native alias spellings resolving here
-    sensitive_params,      # schema params the activity ledger must redact
 )
 ```
+
+Spelling closure (catalog aliases, agent aliases, loop action names) is
+asserted directly against the catalog and the canonicalizers in the
+conformance tests rather than materialized as fields, and the
+sensitive-parameter vocabulary lives in `activity_tracker` where the masks
+read it — one home per fact.
 
 Everything is read from the authoritative sources at call time — the live MCP
 registry, the catalog derivations (`console_tools`, `http_slash_tools`,
