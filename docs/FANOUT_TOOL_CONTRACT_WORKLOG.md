@@ -23,14 +23,14 @@ continue without re-deriving anything; update it at every milestone with
 - [x] Research: surfaces, gates, catalog, permission modes, HTTP roles,
       loop/workflow path, redaction, existing test corpus (see design doc).
 - [x] Design doc under `docs/`.
-- [ ] `tool_contract.py` classifier module.
-- [ ] Conformance tests `tests/test_tool_contract_conformance.py` (P1–P8),
+- [x] `tool_contract.py` classifier module.
+- [x] Conformance tests `tests/test_tool_contract_conformance.py` (P1–P8),
       RED first against the live holes, then green with the enforcement.
-- [ ] E1: deny-by-default for unbound system operations at
+- [x] E1: deny-by-default for unbound system operations at
       `sonder_serve._http_tool_refusal`.
-- [ ] E2: derived loop-payload closure replacing
+- [x] E2: derived loop-payload closure replacing
       `_LOOP_GLOBAL_OPERATION_TYPES`.
-- [ ] E3: activity-ledger sensitive-key vocabulary aligned with the text
+- [x] E3: activity-ledger sensitive-key vocabulary aligned with the text
       regex.
 - [ ] Focused suites green; architecture / error-signal / privacy gates
       green; broad relevant suite green — record the actual commands and
@@ -73,11 +73,49 @@ doc):
   console, MCP decide()-level), `test_permission_gate_coverage.py` (branch →
   map completeness floor), `test_activity_redaction.py` (redactor shapes).
 
+### M2 — classifier + conformance harness + E1/E2/E3 (verified)
+
+RED first (run 2026-08-13, `pytest tests/test_tool_contract_conformance.py`):
+`9 failed, 3 passed` — the failures, verbatim reasons:
+
+- `test_every_system_operator_tool_is_refused_for_an_ordinary_account` —
+  "admin_accounts is agent-refused as a system operation but sails past the
+  HTTP boundary for an ordinary served account" (H1, live).
+- `test_loop_action_spelling_carries_the_same_role_as_the_tools_own_name` —
+  `memory_privacy_repair`: `_loop_global_operation_refusal` returned `""`
+  (H2, live). Same for `self_heal_repair` under a developer context.
+- `test_the_ledger_masks_every_name_the_text_redactor_treats_as_secret` —
+  `{"pwd": "hunter2-value"}` survived `_safe_args` verbatim (H4, live);
+  `--pwd` argv value survived `_safe_command`.
+- Four `ModuleNotFoundError: No module named 'tool_contract'`.
+
+Slice 2 RED (same day): `4 failed, 25 passed` — `validate_contracts`/
+`contracts` missing, and the unbound rule initially swallowed the
+durable-authority refusal's actionable text for `admin_login`
+("administrator authorization is required for an unclassified system
+operation" instead of the console/allow-rule remedy) — fixed by letting
+durable tools fall through to `decide()`.
+
+GREEN (after `tool_contract.py`, E1, E2, E3, and binding
+`admin_accounts -> account_management`): `29 passed` in the conformance
+file. Affected-suite sweeps, all with the venv interpreter from this
+worktree:
+
+- `test_system_operation_roles + test_activity_redaction +
+  test_activity_verdict + test_permission_gate_http +
+  test_permission_gate_dispatch + test_risk_of_fail_closed +
+  test_permission_gate_coverage + test_workflows` → **237 passed**.
+- `test_advertised_surface_drift + test_memory_maintenance +
+  test_workbench_server + test_serve_auth + test_permission_modes +
+  test_permission_durable_authority + test_tool_capabilities +
+  test_policy_explain + test_app_permission_surface +
+  test_read_only_agent_policy + test_permission_rules` →
+  **422 passed, 1 failed**: `test_serve_auth.py::
+  test_query_string_does_not_change_openai_route_or_terminal_metric`
+  (socket `TimeoutError`; passes in isolation in 6.10s — load flake on this
+  16 GB box, route untouched by this diff; re-checked in the broad run).
+
 ## Next steps (for a resumed session)
 
-1. Write `tool_contract.py` (classifier; see design "The contract model").
-2. Write `tests/test_tool_contract_conformance.py`; run it and record the
-   RED failures for H1/H2/H4 here verbatim.
-3. Implement E1/E2/E3; record the same tests green.
-4. Run focused + gate scripts + broad suite; record real counts.
-5. Adversarial diff review; final DoD evidence section here.
+1. Run the three gate scripts + the broad suite; record real counts here.
+2. Adversarial diff review; final DoD evidence section here.
