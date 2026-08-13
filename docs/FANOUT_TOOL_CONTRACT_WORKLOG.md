@@ -196,10 +196,39 @@ races / test-only enforcement):
 - `git diff --check` clean; DCO on every commit; this log records the
   verified commands, results, limitations, and next steps.
 
-Branch left committed and clean; not merged. Commits:
-`97fb227` (design), `8fd2943` (harness + E1/E2/E3), `02a0591`
-(workflow-store test isolation), `6d88084` (diagnostics + packager),
-plus the final work-log update commit.
+Branch left committed and clean; not merged. Commits (post-rebase hashes;
+the branch was rebased onto `a4b3760`, which merged PRs #173/#174, after
+M4's first pass): `959d42c` (design), `ffaeb9d` (harness + E1/E2/E3),
+`eb3dcbb` (workflow-store test isolation), `6548b56` (diagnostics +
+packager), `d95460b`/`c6b2e4e` (work-log evidence), plus the final
+evidence commits below.
+
+### M5 — re-verification on the rebased base (2026-08-13)
+
+The rebase put PRs #173 (fanout selection profiles) and #174 (chat
+response receipts — touches `sonder_serve.py`) beneath this branch.
+Verified on the rebased tree:
+
+- Enforcement intact: `tool_contract` import, E1/E2 blocks, and the
+  `admin_accounts` binding all present; `git diff a4b3760..HEAD --stat`
+  matches the branch's 8 files exactly.
+- Focused suites (conformance + serve_auth + system-operation roles +
+  gate-http + gate-dispatch + gate-coverage + activity-redaction +
+  tool-capabilities + packager) → **372 passed, 1 failed** (the
+  `test_serve_auth` query-string timeout; investigation below).
+- Gates: architecture rc=0, error-signal rc=0, history-privacy rc=0.
+
+`test_query_string_does_not_change_openai_route_or_terminal_metric`
+investigation (it began failing consistently ~01:10): the route answers
+in 1.30s outside pytest on this tree; interleaved paired sampling
+(mine/base alternating, 3 rounds) then failed on BOTH this branch and the
+`request-trace-receipt` worktree, whose `sonder_serve.py` hash equals the
+merge-base's — i.e. pure pre-change code fails identically. The failure
+is a 5s client-socket budget missed during first-request startup in a
+fresh pytest process while the box sits at 2.1G free RAM of 15.3G
+(fleet-preflight CAUTION). Environmental, base-equivalent, not from this
+branch. Same family as the `test_sonder_storage.py` budgets; both belong
+to a machine-load flake backlog, not to this change.
 
 ## Residual limitations / next steps
 
