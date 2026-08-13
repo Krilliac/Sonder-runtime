@@ -21953,6 +21953,62 @@ def _fanout_snapshot_allows(run, model):
     return scope in ("all", "available") or (scope == "cloud" and cloud) or (scope == "local" and not cloud)
 
 
+def _fanout_admission(run, rows, limits):
+    """Describe the immutable request envelope without inventing a price.
+
+    This is an admission record, not a latency or billing promise.  Model
+    catalogs do not publish a trustworthy, stable provider pricing schedule,
+    so the receipt gives callers concrete request and scheduling ceilings
+    instead of a misleading currency estimate.
+    """
+    selected = sorted(
+        {str(row.get("model") or "").strip() for row in rows if str(row.get("model") or "").strip()},
+        key=str.casefold,
+    )
+    cloud_targets = [name for name in selected if _is_cloud_model_name(name)]
+    local_count = len(selected) - len(cloud_targets)
+    cloud_workers = limits["cloud_workers"]
+    # Locals execute serially to protect shared VRAM/RAM. Cloud rows use the
+    # bounded worker pool. This deliberately excludes setup/queue/retry costs.
+    request_phase_seconds = limits["timeout"] * (
+        local_count + math.ceil(len(cloud_targets) / cloud_workers)
+    )
+    return {
+        "selected_models": selected,
+        "targets": {
+            "total": len(selected), "local": local_count, "cloud": len(cloud_targets),
+        },
+        "execution": {
+            "num_predict": limits["num_predict"],
+            "request_timeout_s": limits["timeout"],
+            "local_concurrency": 1,
+            "cloud_concurrency": cloud_workers,
+        },
+        "upper_bounds": {
+            "initial_request_attempts_total": len(selected),
+            "initial_cloud_request_attempts": len(cloud_targets),
+            "scheduled_request_phase_wall_ms": int(request_phase_seconds * 1000),
+            "excludes": [
+                "catalog discovery", "queue or lease wait", "model load or unload",
+                "provider retry or throttle beyond a request timeout", "explicit later resume attempts",
+            ],
+        },
+        "cost": {
+            "provider_pricing": "not_estimated",
+            "reason": "the runtime has no trustworthy provider price schedule",
+        },
+        "privacy": {
+            "cloud_opt_in": bool(run.get("cloud_opt_in")),
+            "cloud_targets": cloud_targets,
+            "prompt_leaves_machine": bool(cloud_targets),
+            "notice": (
+                "selected cloud targets receive the prompt; cloud calls require explicit operator opt-in"
+                if cloud_targets else "no selected cloud target receives the prompt"
+            ),
+        },
+    }
+
+
 def _fanout_receipt(run_id):
     """Build a serializable receipt without exposing the sealed prompt."""
     run = fanout_store.get_run(run_id)
@@ -21992,6 +22048,7 @@ def _fanout_receipt(run_id):
         "resident_before": limits["resident_before"],
         "total_elapsed_ms": max(0, int((float(ended) - float(run["created_ts"])) * 1000)),
         "cloud_workers": limits["cloud_workers"],
+        "admission": _fanout_admission(run, rows, limits),
         "answers": sorted(answers, key=lambda row: row["model"].casefold()),
         "failures": sorted(failures, key=lambda row: row["model"].casefold()),
     }
