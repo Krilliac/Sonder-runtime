@@ -379,7 +379,12 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
     merged_env.setdefault("SONDER_HOST", host)
     merged_env.setdefault("SONDER_PORT", str(port))
     pid = _popen(cmd, "sonder_serve", env=merged_env)
-    if wait_until(lambda: port_open(host, port), 12):
+    # ``wait_until`` can expire at the same instant the child binds the port;
+    # perform one final direct probe before reporting a failed startup.  The
+    # caller prints ``status`` immediately afterward, and without this probe a
+    # healthy server can be labelled "did not start cleanly" one line before
+    # that status says it is listening.
+    if wait_until(lambda: port_open(host, port), 12) or port_open(host, port):
         listener = _listener_pid(host, port)
         if listener and _is_sonder_server_pid(listener):
             pid = listener
