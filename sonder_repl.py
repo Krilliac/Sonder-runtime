@@ -623,6 +623,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /new               start a fresh conversation thread (forget this chat's history)
   /sessions          list past conversation threads
   /resume <id|title> continue a past thread by id or title prefix
+  terminal editing   Up/Down history; Left/Right/Home/End; Ctrl+W word; Ctrl+K suffix; Ctrl+L clear
   /project [name]    show/set the active project (scopes facts)
   /fact <text>       remember a durable fact for the active project
   /facts             list facts for the active project
