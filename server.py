@@ -19658,6 +19658,10 @@ def _agent_turn(
             final = "%s this run claimed completion without %s - %s\n\n%s" % (
                 _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
             )
+            # The activity/end-report status must agree with the host fence.
+            # Otherwise users see ``result: complete`` directly above this
+            # warning and the model's claim wins the most visible field.
+            activity_tracker.set_response_status("unverified", "agent completion lacks required verification")
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
