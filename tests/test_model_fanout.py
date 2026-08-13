@@ -476,6 +476,49 @@ def test_loaded_local_chat_profile_fails_closed_when_residency_is_unavailable(mo
     assert "could not verify loaded local models" in str(error)
 
 
+@pytest.mark.parametrize(("dispatch_state", "expected_reason"), [
+    ("missing", "model is no longer resident at dispatch"),
+    ("unavailable", "could not verify model residency at dispatch"),
+])
+def test_loaded_local_chat_profile_rechecks_residency_before_provider_call(
+    monkeypatch, tmp_path, dispatch_state, expected_reason,
+):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    ps_calls = 0
+
+    def fake_get(path):
+        nonlocal ps_calls
+        if path == "/api/tags":
+            return {"models": [{"name": "resident-chat", "capabilities": ["chat"]}]}
+        assert path == "/api/ps"
+        ps_calls += 1
+        # Planning and receipt creation both observe residency.  The execution
+        # fence sees a later absent/unavailable state before it can load.
+        if ps_calls <= 2:
+            return {"models": [{"name": "resident-chat"}]}
+        if dispatch_state == "unavailable":
+            raise RuntimeError("Ollama unavailable")
+        return {"models": []}
+
+    monkeypatch.setattr(server, "_get", fake_get)
+    monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _name: None)
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider must not run")),
+    )
+    run = server._fanout_start(
+        "private prompt", "", profile="loaded-local-chat", cap=32,
+        request_timeout=5, cloud_workers=1,
+    )
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert ps_calls == 3
+    assert receipt["status"] == "completed"
+    assert receipt["models_answered"] == 0
+    assert receipt["skipped"] == [{"model": "resident-chat", "reason": expected_reason}]
+
+
 def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     def fake_get(path):
         if path == "/api/tags":
