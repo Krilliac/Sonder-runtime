@@ -136,6 +136,17 @@ _RULES = [
           _fixed("/fanouts")),
     _rule(r"^(?:tool\s+)?activity\b|^recent\s+tools?\b|^what\s+tools\s+ran\b",
           _fixed("/activity")),
+    # These are deliberately exact whole-turn lifecycle requests.  Listing a
+    # goal/workflow is read-only; starting a saved workflow remains an
+    # explicitly named request and still goes through the REPL's ordinary
+    # ``workflow_run`` permission gate before any saved action can execute.
+    _rule(r"^(?:show\s+(?:me\s+)?(?:my\s+)?|what(?:'s|\s+is)\s+(?:my\s+)?)"
+          r"(?:(?:current|active)\s+)?goals?\s*[?!.]*$", _fixed("/goal")),
+    _rule(r"^(?:show|list)\s+(?:my\s+)?(?:saved\s+)?workflows?\s*[?!.]*$",
+          _fixed("/workflow_list")),
+    _rule(r"^(?:run|start)\s+(?:the\s+)?(?:saved\s+)?workflow\s+"
+          r"(?P<arg>[A-Za-z][A-Za-z0-9_-]{1,63})\s*[?!.]*$",
+          lambda m: "/workflow_run " + m.group("arg").lower()),
     _rule(r"^(?:orchestrate|master)\s+(?P<arg>.+)$", _with_arg("/master")),
     _rule(r"^autopilot\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/autopilot %s" % (m.group("arg") or "")).strip()),

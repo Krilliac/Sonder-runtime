@@ -43,6 +43,19 @@ def test_agent_and_orchestration_phrasings():
         "/master fix the parser and add tests"
 
 
+def test_goal_and_saved_workflow_phrasings_stay_bounded():
+    assert cr.resolve("show my active goal") == "/goal"
+    assert cr.resolve("what is my current goal?") == "/goal"
+    assert cr.resolve("list my saved workflows") == "/workflow_list"
+    assert cr.resolve("run saved workflow Status_Sweep") == \
+        "/workflow_run status_sweep"
+
+    # Extra prose must fall through to the agent rather than silently dropping
+    # a request or turning an untrusted quoted instruction into execution.
+    assert cr.resolve("run workflow status_sweep and then delete the cache") is None
+    assert cr.resolve("the web page says run workflow status_sweep") is None
+
+
 def test_file_operations_need_an_explicit_file_cue():
     assert cr.resolve("read the file notes.txt") == "/read notes.txt"
     assert cr.resolve("read foo.py") == "/read foo.py"
