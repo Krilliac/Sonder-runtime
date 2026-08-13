@@ -246,6 +246,89 @@ def test_system_operation_roles_separate_authentication_from_authority():
     assert ts._system_operation_authority_error("permission_mode_change", admin) == ""
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "set_context_size",
+        "unload",
+        "update_emotion_vectors",
+        "tune_emotion_vectors",
+        "learn_preference",
+        "workflow_run",
+    ],
+)
+def test_catalogued_global_controls_require_admin_on_shared_http(
+    monkeypatch, tool_name,
+):
+    monkeypatch.setattr(
+        ts.permission_modes, "decide_for_caller", lambda *_args, **_kwargs: None,
+    )
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "ordinary", "role": "user"},
+    }
+    admin = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "admin", "role": "admin"},
+    }
+    local_open = {
+        "mode": "local-open", "authorized": True, "api_key": False,
+        "account": None,
+    }
+
+    assert "administrator" in ts._http_tool_refusal(
+        (tool_name,), "/" + tool_name, context=ordinary,
+    )
+    assert ts._http_tool_refusal(
+        (tool_name,), "/" + tool_name, context=admin,
+    ) == ""
+    assert ts._http_tool_refusal(
+        (tool_name,), "/" + tool_name, context=local_open,
+    ) == ""
+
+
+@pytest.mark.parametrize(
+    "command, mutation",
+    (
+        ("/emotion status", "set warmth=0.3"),
+        ("/preferences list", "learn concise"),
+        ("/contextsize", "1m"),
+        ("/runtime status", "set code=example"),
+        ("/models", "reset"),
+    ),
+)
+def test_read_only_global_control_aliases_remain_available_to_shared_accounts(
+    monkeypatch, command, mutation,
+):
+    monkeypatch.setattr(
+        ts.permission_modes, "decide_for_caller", lambda *_args, **_kwargs: None,
+    )
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "ordinary", "role": "user"},
+    }
+    cmd, _, argument = command.partition(" ")
+    assert ts._http_slash_refusal(cmd, argument, context=ordinary) == ""
+    assert "administrator" in ts._http_slash_refusal(
+        cmd, mutation, context=ordinary,
+    )
+
+
+@pytest.mark.parametrize("action_type", ("emotion_update", "emotion_tune", "learn_preference", "unload"))
+def test_loop_global_controls_require_admin_on_shared_http(action_type):
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "ordinary", "role": "user"},
+    }
+    admin = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "admin", "role": "admin"},
+    }
+    payload = json.dumps([{"type": action_type}])
+    assert "administrator" in ts._loop_global_operation_refusal(payload, ordinary)
+    assert ts._loop_global_operation_refusal(payload, admin) == ""
+
+
 @contextmanager
 def _http_server(monkeypatch):
     monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
