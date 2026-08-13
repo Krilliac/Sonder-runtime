@@ -37,6 +37,12 @@ client that names a `session` but sends only the current message gets
 server-side history rebuilt from the stored session — so both contracts
 work. The reply carries an activity footer of observable actions.
 
+The supported chat subset currently includes `model`, `messages`, `stream`,
+`session`, `project`, `context_size`, and the consented location fields.
+`response_format` is rejected with `400 invalid_request` rather than silently
+returning unconstrained text. Structured-output support needs an end-to-end
+contract for model, tool-route, streaming, and activity-footer behavior.
+
 ## Process & dependency state
 
 `sonder_service_state.py` tracks one process state and per-dependency
