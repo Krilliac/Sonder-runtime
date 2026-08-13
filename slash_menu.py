@@ -26,6 +26,7 @@ asked to draw anything.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 
@@ -53,6 +54,7 @@ _CTRL_U = "\x15"
 MAX_ROWS = 8
 
 CSI = "\x1b["
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 # --- the pure state machine ----------------------------------------------
@@ -94,6 +96,10 @@ class MenuState:
         self.dismissed = False
         self._cache_key = None
         self._cache: list = []
+        # Rendering state only.  The pure key/menu state above never relies on
+        # it; retaining the number of drawn physical rows lets the raw reader
+        # erase a wrapped message before redrawing it after the next key.
+        self._drawn_input_rows = 1
 
     # -- queries ----------------------------------------------------------
 
@@ -282,6 +288,30 @@ def available() -> bool:
 # --- the raw reader -------------------------------------------------------
 
 
+def _input_lines(prompt: str, buffer: str, width: int) -> list[str]:
+    """Return the complete visible input, wrapped without eliding it.
+
+    The raw reader redraws after every key. Its former one-row renderer used
+    an ellipsis at terminal width, which made long ordinary messages appear to
+    be changed even though the underlying buffer was intact. Reserve the last
+    terminal column to avoid eager wrapping, then explicitly wrap all text.
+    ANSI styling is intentionally removed only in this raw redraw path: escape
+    bytes are not display cells and splitting them would corrupt the prompt.
+    """
+    visible_prompt = _ANSI_ESCAPE_RE.sub("", str(prompt or ""))
+    text = visible_prompt + str(buffer or "")
+    columns = max(1, int(width) - 1)
+    if not text:
+        return [""]
+    return [text[index:index + columns] for index in range(0, len(text), columns)]
+
+
+def _cursor_to_input_start(state: MenuState) -> str:
+    """Move from the current final input row back to its first row."""
+    rows = max(1, int(getattr(state, "_drawn_input_rows", 1) or 1))
+    return "\r" + (CSI + "%dA" % (rows - 1) if rows > 1 else "")
+
+
 def _paint(state: MenuState, prompt: str, stream) -> None:
     """Redraw the input line and the menu, leaving the cursor where typing is.
 
@@ -291,27 +321,25 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
     scrollback is consumed because nothing is ever printed past the last row.
     """
     rows = state.render_rows()
-    line = prompt + state.buffer
     cols, _ = _terminal_size()
-    line_out = _truncate(line, cols) if len(line) >= cols else line
-    parts = ["\r", CSI + "0J", line_out]
+    lines = _input_lines(prompt, state.buffer, cols)
+    parts = [_cursor_to_input_start(state), CSI + "0J", "\n".join(lines)]
+    state._drawn_input_rows = len(lines)
     if rows:
         parts.append("\n" + "\n".join(rows))
         parts.append(CSI + "%dA" % len(rows))
         parts.append("\r")
-        if len(line_out):
-            parts.append(CSI + "%dC" % len(line_out))
+        if lines[-1]:
+            parts.append(CSI + "%dC" % len(lines[-1]))
     stream.write("".join(parts))
     stream.flush()
 
 
 def _finish(state: MenuState, prompt: str, stream) -> None:
     """Clear the menu and leave only the accepted line on screen."""
-    line = prompt + state.buffer
     cols, _ = _terminal_size()
-    stream.write("\r" + CSI + "0J" + (
-        _truncate(line, cols) if len(line) >= cols else line
-    ) + "\n")
+    lines = _input_lines(prompt, state.buffer, cols)
+    stream.write(_cursor_to_input_start(state) + CSI + "0J" + "\n".join(lines) + "\n")
     stream.flush()
 
 
