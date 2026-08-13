@@ -639,20 +639,20 @@ def test_framed_composer_uses_a_stable_rectangle_without_content_truncation():
 
     assert len(top) == len(footer) == 19
     assert all(len(row) == 19 for row in rows)
-    assert "".join(row[2:-1].rstrip() for row in rows) == "x" * 60
+    assert "".join(row[4:-1].rstrip() for row in rows) == "x" * 60
 
 
 def test_framed_composer_tracks_a_cursor_in_a_wrapped_buffer(monkeypatch):
     monkeypatch.setattr(slash_menu, "_terminal_size", lambda: (12, 12))
-    # 8 editable cells per row in the 11-column visual frame. Move left into
+    # 6 editable cells per row in the 11-column visual frame. Move left into
     # the earlier row, insert there, and prove redraw keeps the entire value.
     keys = list("abcdefghijkl") + ["\xe0", "K", "\xe0", "K", "\xe0", "K", "\xe0", "K", "X", "\r"]
     line, out = _drive(monkeypatch, keys, prompt="", frame="sonder")
 
     assert line == "abcdefghXijkl"
-    assert "abcdefgh" in out.text and "Xijkl" in out.text
+    assert "abcdef" in out.text and "ghXijk" in out.text
 
 
 def test_framed_cursor_stays_at_row_end_at_an_exact_wrap_boundary():
-    # 12 terminal columns yield 8 editable cells in the frame.
-    assert slash_menu._framed_cursor_cell("x" * 8, 8, 12, 1) == (0, 8)
+    # 12 terminal columns yield 6 editable cells after the chat prompt marker.
+    assert slash_menu._framed_cursor_cell("x" * 6, 6, 12, 1) == (0, 6)

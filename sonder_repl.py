@@ -8,7 +8,9 @@ import json
 import inspect
 import os
 import re
+import shutil
 import sys
+import threading
 import time
 
 import server
@@ -50,7 +52,7 @@ class _Ansi:
     cyan = "\x1b[38;5;117m"
     # Keep the existing bright-cyan text, but give the composer itself a
     # quieter, darker-blue surface that separates input from the transcript.
-    composer_surface = "\x1b[48;5;24m\x1b[38;5;117m"
+    composer_surface = "\x1b[48;2;17;38;54m\x1b[38;5;117m"
     muted = "\x1b[38;5;245m"
     green = "\x1b[38;5;114m"
     amber = "\x1b[38;5;221m"
@@ -863,28 +865,78 @@ def _elapsed_label(elapsed_ms):
     return "%.2fs" % (elapsed_ms / 1000.0)
 
 
-def _begin_chat_turn(label="Sonder"):
-    """Acknowledge an interactive submission before synchronous work begins.
+class _WorkingIndicator:
+    """A terminal-only animated acknowledgement for a synchronous REPL turn."""
 
-    The REPL deliberately keeps model dispatch synchronous for predictable
-    host gating and cancellation semantics. This small receipt makes that
-    wait visible without adding a second worker, polling loop, or fake
-    progress claim; scripts retain their historical silent behavior.
-    """
+    def __init__(self, label, stream=None):
+        self.label = str(label or "Sonder")
+        self.stream = stream or sys.stdout
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def _render(self, tick):
+        dots = "." * (1 + tick % 3)
+        base = "%s %s is working%s" % (_box_chars()["dot"], self.label, dots)
+        if not _Ansi.enabled:
+            return base
+        # A single cyan highlight crosses the label from left to right.  The
+        # text itself stays stable, so it reads as activity rather than a
+        # progress or completion claim.
+        index = tick % max(1, len(base))
+        return (
+            _Ansi.muted + base[:index] + _Ansi.cyan + _Ansi.bold
+            + base[index:index + 1] + _Ansi.muted + base[index + 1:]
+            + _Ansi.reset
+        )
+
+    def _run(self):
+        tick = 0
+        while not self._stop.is_set():
+            try:
+                self.stream.write("\r" + self._render(tick))
+                self.stream.flush()
+            except Exception:
+                return
+            tick += 1
+            self._stop.wait(0.14)
+
+    def stop(self):
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(0.5)
+        try:
+            width = max(20, shutil.get_terminal_size((80, 24)).columns - 1)
+            self.stream.write("\r" + (" " * width) + "\r")
+            self.stream.flush()
+        except Exception:
+            pass
+
+
+def _begin_chat_turn(label="Sonder"):
+    """Acknowledge an interactive submission before synchronous work begins."""
     if not (_console_has_operator() and _stdout_is_interactive()):
-        return
-    box = _box_chars()
-    print(_paint("%s %s is working..." % (box["dot"], label), _Ansi.muted))
+        return None
+    if not _Ansi.enabled:
+        box = _box_chars()
+        print(_paint("%s %s is working..." % (box["dot"], label), _Ansi.muted))
+        return None
+    return _WorkingIndicator(label).start()
 
 
 def _print_chat_result(text, started_at, *, offer_feedback=False,
-                       label="Sonder", error=False):
+                       label="Sonder", error=False, indicator=None):
     """Present one completed turn with lightweight terminal chrome.
 
     The result itself is printed verbatim: the bars are separate lines, never
     a width cap, pager, or content transform.  Piped/scripted uses retain the
     historical plain output so shells and callers do not receive decoration.
     """
+    if indicator is not None:
+        indicator.stop()
     answer = str(text or "")
     timing = _completion_timing(started_at)
     if not (_console_has_operator() and _stdout_is_interactive()):
@@ -1806,33 +1858,45 @@ def main():
         # persistent checklist instead of being a prose-only suggestion.
         if intents.classify_work(line):
             started_at = time.monotonic()
-            _begin_chat_turn("Sonder work")
-            out = server.workbench_agent(
-                prompt=line, tier="auto", max_steps=12, project=project,
-            )
+            indicator = _begin_chat_turn("Sonder work")
+            try:
+                out = server.workbench_agent(
+                    prompt=line, tier="auto", max_steps=12, project=project,
+                )
+            except BaseException:
+                if indicator is not None:
+                    indicator.stop()
+                raise
             last_iid = None
             last_response = out
             last_run_source = _answer_only(out)
             last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
-            _print_chat_result(out, started_at, label="Sonder work")
+            _print_chat_result(out, started_at, label="Sonder work", indicator=indicator)
             continue
 
         started_at = time.monotonic()
-        _begin_chat_turn()
-        out = server.sonder(line, trace=trace, strict=strict, persona=persona,
-                            session=session_id, project=project,
-                            tier=active_tier or "",
-                            location_consent=location_consent)
+        indicator = _begin_chat_turn()
+        try:
+            out = server.sonder(line, trace=trace, strict=strict, persona=persona,
+                                session=session_id, project=project,
+                                tier=active_tier or "",
+                                location_consent=location_consent)
+        except BaseException:
+            if indicator is not None:
+                indicator.stop()
+            raise
         last_turn_metrics = _latest_repl_turn_metrics(session_id)
         if out.startswith("ERROR"):
-            _print_chat_result(out, started_at, label="Sonder error", error=True)
+            _print_chat_result(out, started_at, label="Sonder error", error=True,
+                               indicator=indicator)
             continue
 
         last_iid = server.parse_interaction_id(out)
         last_response = out
         last_run_source = _answer_only(out)
         cleaned = _strip_footer(out)
-        _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid))
+        _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid),
+                           indicator=indicator)
 
 
 if __name__ == "__main__":
