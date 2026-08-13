@@ -155,6 +155,23 @@ def test_backspace_on_prose_behaves_like_normal_input():
     assert state.render_rows() == []
 
 
+def test_left_right_home_end_and_delete_edit_in_the_middle_of_input():
+    state = _state("abcd")
+    state.handle_key(slash_menu.KEY_LEFT)
+    state.handle_key(slash_menu.KEY_LEFT)
+    state.handle_key("X")
+    assert (state.buffer, state.cursor) == ("abXcd", 3)
+
+    state.handle_key("\x08")
+    assert (state.buffer, state.cursor) == ("abcd", 2)
+    state.handle_key(slash_menu.KEY_DELETE)
+    assert (state.buffer, state.cursor) == ("abd", 2)
+    state.handle_key(slash_menu.KEY_HOME)
+    assert state.cursor == 0
+    state.handle_key(slash_menu.KEY_END)
+    assert state.cursor == len(state.buffer)
+
+
 def test_slash_opens_the_menu_on_the_popular_set():
     state = _state("/")
     assert state.menu_active is True
@@ -336,13 +353,23 @@ def test_long_input_is_wrapped_without_a_display_cap():
     assert "..." not in "".join(lines)
 
 
+def test_cursor_cell_tracks_wrapped_input_without_terminal_autowrap():
+    # 19 visible cells at width 20; the prompt consumes two of them.
+    assert slash_menu._cursor_cell(
+        "> ", "x" * 20, 17, 20, 2,
+    ) == (1, 0)
+
+
 def test_live_redraw_keeps_only_a_viewport_sized_tail_of_wrapped_input():
     lines = [str(index) for index in range(10)]
 
-    visible = slash_menu._visible_input_lines(lines, height=5, menu_rows=2)
+    visible, start = slash_menu._visible_input_lines(
+        lines, cursor_row=9, height=5, menu_rows=2,
+    )
 
     assert visible == ["8", "9"]
     assert len(visible) == 2
+    assert start == 8
 
 
 def test_raw_cleanup_returns_to_first_wrapped_row_before_erasing():
@@ -452,6 +479,12 @@ def test_raw_reader_decodes_the_arrow_prefix_and_completes_with_tab(monkeypatch)
     keys = list("/re") + ["\xe0", "P", "\t", "\r"]
     line, _ = _drive(monkeypatch, keys)
     assert line == "/report"
+
+
+def test_raw_reader_handles_cursor_edit_scan_codes(monkeypatch):
+    keys = list("ac") + ["\xe0", "K", "b", "\xe0", "G", "\xe0", "S", "\r"]
+    line, _ = _drive(monkeypatch, keys)
+    assert line == "bc"
 
 
 def test_raw_reader_recalls_session_history_outside_the_slash_palette(monkeypatch):
