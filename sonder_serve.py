@@ -574,6 +574,7 @@ SYSTEM_OPERATION_TOOLS = {
     "permission_rule_set": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
+    "runtime_source_update": "selfmod_deploy",
     # These mutate process-wide runtime behaviour or durable prompt inputs.
     # They must not be reachable by ordinary served accounts through their
     # registered ``/<tool>`` names when the curated aliases are gated.
@@ -683,6 +684,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
     "/agentretry", "/retryagent",
     "/runtime", "/models",
+    "/update", "/updatecheck", "/updatesource",
     "/selfmod", "/selfmodify",
     "/elevate",
     # Spends several full model load+generate cycles per call.
@@ -702,6 +704,11 @@ def _dangerous_http_slash(content):
     if command in ("/runtime", "/models"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "help", "?")
+    if command in ("/update", "/updatecheck", "/updatesource"):
+        if command == "/updatecheck":
+            return False
+        action = pieces[1].lower() if len(pieces) > 1 else "apply"
+        return action in ("apply", "now")
     if command in ("/selfmod", "/selfmodify"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "history", "inspect", "diff", "tests", "backups", "verify-backup", "opportunities", "help", "?")
@@ -710,7 +717,7 @@ def _dangerous_http_slash(content):
 
 # Slash names gated by action rather than by membership in the frozenset above.
 _CONDITIONALLY_GATED_SLASH = frozenset({
-    "/autopilot", "/auto", "/runtime", "/models", "/selfmod", "/selfmodify",
+    "/autopilot", "/auto", "/runtime", "/models", "/update", "/updatecheck", "/updatesource", "/selfmod", "/selfmodify",
 })
 
 # Who clears _developer_authorized() in each mode. Keep in step with it.
@@ -1277,6 +1284,8 @@ def _slash_system_operation(command, argument):
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
         return "runtime_policy_change"
+    if command in ("/update", "/updatesource") and action in ("", "apply", "now"):
+        return "selfmod_deploy"
     return ""
 
 
@@ -1403,6 +1412,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/autopilot", "/auto"):
         return server.control_command(stripped, project=project)
     if cmd in ("/runtime", "/models"):
+        return server.control_command(stripped, project=project)
+    if cmd in ("/update", "/updatecheck", "/updatesource"):
         return server.control_command(stripped, project=project)
     if cmd in ("/selfmod", "/selfmodify"):
         return server.control_command(stripped, project=project)
@@ -3236,6 +3247,13 @@ def main():
     url = "http://%s:%d" % (HOST, port)
     print("sonder_serve listening on %s" % url)
     print("auth mode: %s" % _effective_auth_mode())
+    try:
+        # Do not let a Git network timeout delay the first request.  This
+        # reports cached origin/main state; `/updatecheck` is the explicit
+        # refresh operation.
+        print(server.runtime_source_update_status(refresh=False))
+    except Exception as exc:
+        print("runtime source update status unavailable: %s" % type(exc).__name__)
     print("point your chat UI's OpenAI API base at %s/v1" % url)
     try:
         httpd.serve_forever()

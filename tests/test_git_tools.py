@@ -1,10 +1,13 @@
 import subprocess
 import sys
+from datetime import datetime
 
 import pytest
 
 import git_tools
 import server
+import sonder_serve
+import sonder_repl
 
 
 def _git(repo, *args):
@@ -288,3 +291,130 @@ def test_git_tools_are_advertised_and_allowed_for_read_only_agents():
     assert {"repo_status", "repo_diff"} <= server.REPOSITORY_READ_ONLY_TOOLS
     manifest = server.tool_manifest()
     assert "repo_status/repo_diff" in manifest
+
+
+def test_runtime_update_status_reports_ahead_behind_and_commit_times(tmp_path):
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", str(remote))
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+
+    (repo / "tracked.txt").write_text("local ahead\n", encoding="utf-8")
+    _git(repo, "commit", "-am", "ahead")
+    result = git_tools.runtime_update_status(repo, refresh=False)
+
+    assert result["ahead"] == 1
+    assert result["behind"] == 0
+    assert result["state"] == "ahead"
+    assert result["installed_commit"] != result["newest_commit"]
+    assert result["remote"] == str(remote)
+    assert datetime.fromisoformat(result["installed_commit_time"]).tzinfo is not None
+    assert datetime.fromisoformat(result["newest_commit_time"]).tzinfo is not None
+    assert result["trusted_remote"] is False
+
+
+def test_runtime_update_refuses_untrusted_or_dirty_checkout(tmp_path):
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", str(remote))
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+
+    with pytest.raises(PermissionError, match="canonical Sonder origin"):
+        git_tools.runtime_update(repo)
+
+
+def test_runtime_update_status_refuses_untrusted_origin_before_fetch(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/not-sonder.git")
+    calls = []
+    real_checked = git_tools._checked_git
+
+    def observed(root, arguments, **kwargs):
+        calls.append(list(arguments))
+        return real_checked(root, arguments, **kwargs)
+
+    monkeypatch.setattr(git_tools, "_checked_git", observed)
+    with pytest.raises(PermissionError, match="canonical Sonder origin"):
+        git_tools.runtime_update_status(repo, refresh=True)
+    assert not any("fetch" in call for call in calls)
+
+
+def test_runtime_update_neutralizes_checkout_filter_processes(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/Krilliac/Sonder-runtime.git")
+    _git(repo, "config", "filter.hostile.smudge", "unsafe-smudge")
+    _git(repo, "config", "filter.hostile.process", "unsafe-process")
+    calls = []
+
+    def fake_status(_root, **_kwargs):
+        return {
+            "root": str(repo), "branch": "main", "installed_commit": "a",
+            "newest_commit": "b", "ahead": 0, "behind": 1,
+            "state": "behind", "clean": True, "trusted_remote": True,
+        }
+
+    def fake_checked(_root, arguments, **_kwargs):
+        calls.append(list(arguments))
+        return {"stdout": "", "stderr": "", "returncode": 0, "timed_out": False,
+                "elapsed_ms": 1, "truncated": False, "output_bytes": 0, "output_limit": 65536}
+
+    monkeypatch.setattr(git_tools, "runtime_update_status", fake_status)
+    monkeypatch.setattr(git_tools, "_checked_git", fake_checked)
+    monkeypatch.setattr(git_tools, "_require_repository_root", lambda *_args, **_kwargs: repo)
+    monkeypatch.setattr(
+        git_tools, "_runtime_remote_url",
+        lambda _root: "https://github.com/Krilliac/Sonder-runtime.git",
+    )
+    # Keep the real filter probe, which uses _run_git rather than _checked_git.
+    result = git_tools.runtime_update(repo)
+    merge = next(call for call in calls if "merge" in call)
+    assert "filter.hostile.process=" in merge
+    assert "filter.hostile.smudge=cat" in merge
+    assert "--no-overwrite-ignore" in merge
+    assert result["updated"] is True
+
+
+def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch):
+    data = {
+        "installed_commit": "a" * 40,
+        "installed_commit_time": "2026-08-13T01:00:00Z",
+        "newest_commit": "b" * 40,
+        "newest_commit_time": "2026-08-13T02:00:00Z",
+        "ahead": 0, "behind": 3, "state": "behind", "clean": True,
+        "remote": "https://github.com/Krilliac/Sonder-runtime.git",
+        "trusted_remote": True, "checked_at": "2026-08-13T03:00:00Z",
+    }
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "runtime_source_update_status_data", lambda refresh=True: data)
+    text = server.runtime_source_update_status()
+    assert "aaaaaaaaaaaa" in text
+    assert "bbbbbbbbbbbb" in text
+    assert "behind=3" in text
+
+    monkeypatch.setattr(
+        server.git_tools, "runtime_update", lambda _root: {"updated": False, "after": data},
+    )
+    assert "already current" in server.runtime_source_update()
+    assert server.control_command("/updatecheck").startswith("Sonder source update status:")
+    assert "usage:" in server.control_command("/update check")
+    assert not sonder_serve._dangerous_http_slash("/updatecheck")
+    assert sonder_serve._dangerous_http_slash("/update")
+
+
+def test_repl_startup_banner_reads_cached_update_status(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        server, "runtime_source_update_status_data",
+        lambda *, refresh: seen.append(refresh) or {
+            "installed_commit": "a" * 40, "installed_commit_time": "now",
+            "newest_commit": "b" * 40, "newest_commit_time": "later",
+            "state": "behind", "behind": 1,
+        },
+    )
+    monkeypatch.setattr(sonder_repl, "_paint", lambda text, *_styles: str(text))
+    banner = sonder_repl._startup_banner(False, "coder", "")
+    assert seen == [False]
+    assert "installed source" in banner
+    assert "/updatecheck | /update" in banner
