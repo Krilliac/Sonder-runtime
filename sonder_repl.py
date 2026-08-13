@@ -66,7 +66,7 @@ def _paint(text, *styles):
     return "".join(styles) + str(text) + _Ansi.reset
 
 
-def _read_input(prompt, *, history=None, composer=False):
+def _read_input(prompt, *, history=None, composer=False, argument_completer=None):
     """Prompt for a line, optionally in the raw terminal composer frame."""
     if slash_menu is not None:
         try:
@@ -78,6 +78,7 @@ def _read_input(prompt, *, history=None, composer=False):
                     "" if composer else prompt,
                     history=history, frame=prompt if composer else "",
                     frame_style=_Ansi.composer_surface if composer and _Ansi.enabled else "",
+                    argument_completer=argument_completer,
                     fallback_prompt=prompt,
                 )
         except (EOFError, KeyboardInterrupt):
@@ -477,6 +478,44 @@ def _installed_models():
             pretty = ""
         out.append((name, pretty))
     return sorted(out)
+
+
+class _ModelArgumentCompleter:
+    """Cached model/tier vocabulary for the interactive ``/model`` palette.
+
+    The palette redraws after each key, so querying ``/api/tags`` from the
+    completer would turn ordinary typing into repeated network traffic. The
+    first ``/model`` completion obtains a snapshot, then a successful `/model`
+    command refreshes that snapshot from its already-required discovery call.
+    """
+
+    def __init__(self):
+        self._choices = None
+
+    def refresh(self, installed=None):
+        if installed is None:
+            installed = _installed_models()
+        try:
+            tiers = [str(name) for name in server.TIERS if str(name)]
+        except Exception:
+            tiers = []
+        models = [str(name) for name, _size in (installed or []) if str(name)]
+        # Tiers win a same-named collision because /model resolves them before
+        # exact tags. Keep display order deterministic for keyboard selection.
+        self._choices = sorted(set(tiers), key=str.casefold) + sorted(
+            set(models).difference(tiers), key=str.casefold,
+        )
+        return self._choices
+
+    def __call__(self, command, prefix, *, limit=8):
+        if str(command or "").casefold() != "/model":
+            return []
+        if self._choices is None:
+            self.refresh()
+        needle = str(prefix or "").casefold()
+        return [choice for choice in self._choices if choice.casefold().startswith(needle)][
+            :max(1, int(limit))
+        ]
 
 
 def _home_relative(path):
@@ -1195,6 +1234,7 @@ def main():
     # private repository context, so terminal convenience must not create a
     # durable prompt log.
     input_history = []
+    model_argument_completer = _ModelArgumentCompleter()
 
     def apply_trace(val):
         nonlocal trace
@@ -1226,6 +1266,7 @@ def main():
         arg = (arg or "").strip()
         tier = active_tier or "code"
         installed = _installed_models()
+        model_argument_completer.refresh(installed)
 
         if not arg:
             current = str(active_model or server.TIERS.get(tier) or "?")
@@ -1435,7 +1476,8 @@ def main():
                 width=_composer_frame_width(),
                 model_override=active_model,
             ),
-                               history=input_history, composer=True)
+                               history=input_history, composer=True,
+                               argument_completer=model_argument_completer)
         except (EOFError, KeyboardInterrupt):
             print()
             break

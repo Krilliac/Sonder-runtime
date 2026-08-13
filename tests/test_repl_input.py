@@ -178,6 +178,43 @@ def test_repl_error_classifier_preserves_footered_model_pin_shaped_answers():
     assert sonder_repl._is_repl_error(text) is False
 
 
+def test_model_argument_completer_caches_discovery_and_keeps_tiers_first(monkeypatch):
+    discovered = []
+    monkeypatch.setattr(
+        sonder_repl, "_installed_models",
+        lambda: discovered.append(True) or [
+            ("gemma3:12b", "8.0 GB"), ("code", "unexpected collision"),
+        ],
+    )
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "coder:7b", "fast": "small"})
+    completer = sonder_repl._ModelArgumentCompleter()
+
+    assert completer("/model", "", limit=8) == ["code", "fast", "gemma3:12b"]
+    assert completer("/model", "ge", limit=8) == ["gemma3:12b"]
+    assert completer("/read", "ge", limit=8) == []
+    assert discovered == [True]
+
+
+def test_read_input_forwards_a_bounded_argument_completer(monkeypatch):
+    captured = {}
+
+    class _Menu:
+        @staticmethod
+        def available():
+            return True
+
+        @staticmethod
+        def read_line(*_args, **kwargs):
+            captured.update(kwargs)
+            return "/model code"
+
+    marker = object()
+    monkeypatch.setattr(sonder_repl, "slash_menu", _Menu)
+
+    assert sonder_repl._read_input("frame", composer=True, argument_completer=marker) == "/model code"
+    assert captured["argument_completer"] is marker
+
+
 def test_catalogued_fanout_status_reuses_the_logged_in_repl_token(monkeypatch):
     captured = {}
     monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "developer-session-token")

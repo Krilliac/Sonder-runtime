@@ -321,6 +321,40 @@ def test_argument_context_does_not_replace_input_on_tab():
     assert state.buffer == "/read notes.txt"
 
 
+def test_bounded_argument_completer_renders_and_completes_model_choices():
+    calls = []
+
+    def choices(command, prefix, *, limit):
+        calls.append((command, prefix, limit))
+        return ["gemma3:12b", "gemma3:4b"]
+
+    state = slash_menu.MenuState(completer=_completer, argument_completer=choices)
+    state.feed("/model gem")
+
+    assert state.has_palette_matches() is True
+    assert state.render_rows(width=200) == [
+        "> gemma3:12b  ", "  gemma3:4b   ",
+    ]
+    state.handle_key(slash_menu.KEY_DOWN)
+    state.handle_key("\t")
+    assert state.buffer == "/model gemma3:4b"
+    assert calls == [("/model", "gem", 8)]
+
+
+def test_bounded_argument_completer_never_claims_free_form_second_arguments():
+    calls = []
+    state = slash_menu.MenuState(
+        completer=_completer,
+        argument_completer=lambda *args, **kwargs: calls.append((args, kwargs)) or ["x"],
+        hint_provider=lambda _buffer: "usage",
+    )
+    state.feed("/model gemma extra")
+
+    assert state.argument_matches() == []
+    assert state.render_rows(width=200) == ["  usage"]
+    assert calls == []
+
+
 def test_enter_accepts_the_line_as_typed():
     state = _state("/read notes.txt")
     assert state.handle_key("\r") == slash_menu.ACCEPT
