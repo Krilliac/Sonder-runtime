@@ -606,6 +606,25 @@ def test_direct_mcp_fanout_receipts_are_owner_scoped_on_shared_deployments(
     }
 
 
+def test_model_fanout_preserves_legacy_positional_parameter_order(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(server, "_developer_gate", lambda *_args: "")
+    monkeypatch.setattr(
+        server, "_direct_fanout_identity", lambda _token: ("owner", {"role": "developer"}),
+    )
+    monkeypatch.setattr(
+        server, "_model_fanout_authorized",
+        lambda prompt, **kwargs: captured.update({"prompt": prompt, **kwargs}) or "created",
+    )
+
+    assert server.model_fanout("question", "cloud", 1024, 60, 2, "legacy-token") == "created"
+    assert captured == {
+        "prompt": "question", "scope": "cloud", "num_predict": 1024,
+        "timeout": 60, "max_cloud_workers": 2, "profile": "",
+        "request_owner": "owner", "request_role": "developer",
+    }
+
+
 def test_shared_direct_mcp_fanout_does_not_expose_legacy_unowned_receipts(monkeypatch):
     monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
     monkeypatch.setattr(
