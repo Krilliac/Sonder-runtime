@@ -2616,6 +2616,15 @@ def control_command(prompt: str, history=None, session="", project="",
         return _autopilot_command(arg, project=project)
     if cmd in ("/runtime", "/models"):
         return _runtime_command(arg)
+    if cmd == "/updatecheck":
+        if arg.strip():
+            return "usage: /updatecheck"
+        return runtime_source_update_status(refresh=True)
+    if cmd in ("/update", "/updatesource"):
+        action = arg.strip().casefold()
+        if action in ("", "apply", "now"):
+            return runtime_source_update()
+        return "usage: /update [apply]  (check first with /updatecheck)"
     if cmd in ("/hardware",):
         return _training_command("hardware")
     if cmd in ("/training", "/weighttraining"):
@@ -14993,6 +15002,7 @@ def tool_manifest() -> str:
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
         "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
+        "runtime_source_update_status/runtime_source_update": "Check the installed Git commit and canonical origin/main update time, or safely fast-forward only a clean canonical Sonder source checkout. Updates never merge/rebase/overwrite local work and require restart.",
         "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
         "admin_register/admin_login/admin_accounts/admin_set_account": "Manage hosted accounts, roles, bans, tiers, and developer flags.",
@@ -21816,7 +21826,100 @@ def status() -> str:
         )
     except Exception as exc:
         lines.append("branch predictor: ERROR %s" % exc)
+    try:
+        source = runtime_source_update_status_data(refresh=False)
+        lines.append(
+            "source update: %s @ %s; newest %s @ %s; %s (behind %s)"
+            % (
+                str(source.get("installed_commit") or "unknown")[:12],
+                source.get("installed_commit_time") or "unknown time",
+                str(source.get("newest_commit") or "unknown")[:12],
+                source.get("newest_commit_time") or "unknown time",
+                source.get("state") or "unknown", source.get("behind", "?"),
+            )
+        )
+    except Exception as exc:
+        lines.append("source update: unavailable (%s)" % type(exc).__name__)
     return "\n".join(lines)
+
+
+def _runtime_source_root():
+    """Return Sonder's own source tree, never a caller-selected project root."""
+    return Path(__file__).resolve().parent
+
+
+def _runtime_update_format(data, *, updated=None):
+    """Format a bounded, operator-facing Git update report."""
+    lines = [
+        "Sonder source update status:",
+        "  installed: %s (%s)" % (
+            str(data.get("installed_commit") or "unknown")[:12],
+            data.get("installed_commit_time") or "unknown time",
+        ),
+        "  newest origin/main: %s (%s)" % (
+            str(data.get("newest_commit") or "unknown")[:12],
+            data.get("newest_commit_time") or "unknown time",
+        ),
+        "  state: %s (behind=%s, ahead=%s; worktree=%s)" % (
+            data.get("state") or "unknown", data.get("behind", "?"),
+            data.get("ahead", "?"),
+            "clean" if data.get("clean") else "dirty",
+        ),
+        "  remote: %s%s" % (
+            data.get("remote") or "unknown",
+            "" if data.get("trusted_remote") else " [not canonical; update refused]",
+        ),
+        "  checked: %s" % (data.get("checked_at") or "unknown"),
+    ]
+    if updated is True:
+        lines.append("  update: fast-forwarded; restart Sonder to run the new source")
+    elif updated is False:
+        lines.append("  update: already current; no files changed")
+    return "\n".join(lines)
+
+
+def runtime_source_update_status_data(refresh: bool = True) -> dict:
+    """Return source-update facts for local startup/status renderers.
+
+    Kept separate from the MCP text renderer so the REPL and HTTP startup log
+    do not parse prose.  This is still read-only: a refresh only fetches the
+    fixed canonical ref.
+    """
+    return git_tools.runtime_update_status(
+        _runtime_source_root(), refresh=bool(refresh),
+    )
+
+
+@mcp.tool()
+def runtime_source_update_status(refresh: StrictBool = True) -> str:
+    """Check whether this Git source installation is behind canonical main.
+
+    This reads only Sonder's own checkout.  With the default ``refresh=True``
+    it fetches the fixed ``origin/main`` ref, but never modifies the worktree.
+    Packaged/non-Git installs return an explicit unavailable message.
+    """
+    _maybe_live_reload()
+    try:
+        data = runtime_source_update_status_data(refresh=bool(refresh))
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return "runtime source update status unavailable: %s" % exc
+    return _runtime_update_format(data)
+
+
+@mcp.tool()
+def runtime_source_update() -> str:
+    """Safely fast-forward this clean canonical source checkout to origin/main.
+
+    This cannot merge, rebase, overwrite local edits, select another remote or
+    branch, or run Git hooks.  A successful update only changes source bytes;
+    restart Sonder to execute them.
+    """
+    _maybe_live_reload()
+    try:
+        result = git_tools.runtime_update(_runtime_source_root())
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return "runtime source update refused: %s" % exc
+    return _runtime_update_format(result["after"], updated=bool(result["updated"]))
 
 
 # Ensemble ("ask several models, compound one answer") -------------------------
