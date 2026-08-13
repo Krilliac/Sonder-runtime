@@ -810,6 +810,52 @@ def test_http_fanout_wrapper_is_not_reclassified_as_work_or_feedback(monkeypatch
     assert calls == [("run this code", "all")]
 
 
+@pytest.mark.parametrize("phrase", [
+    "run python:3.12: reproduce this issue",
+    "run python:3.12 model to reproduce this issue",
+    "run using powershell:7 for reproduce this issue",
+])
+def test_http_bare_interpreter_tags_stay_on_normal_work_route(monkeypatch, phrase):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    prewarmed = []
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda model: prewarmed.append(model))
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: None)
+    intents = []
+    monkeypatch.setattr(
+        ts, "_handle_intent", lambda content, **_kwargs: intents.append(content) or None,
+    )
+    monkeypatch.setattr(ts, "_handle_work_intent", lambda *_args, **_kwargs: None)
+    seen = []
+    monkeypatch.setattr(
+        ts.server, "answer_with_history",
+        lambda prompt, _history, **_kwargs: seen.append(prompt) or "answer",
+    )
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": phrase}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith("answer")
+    assert prewarmed == [""]
+    assert intents == [phrase]
+    assert seen == [phrase]
+
+
 def test_http_fanout_lifecycle_is_owner_scoped(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")

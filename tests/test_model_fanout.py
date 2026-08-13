@@ -222,6 +222,35 @@ def test_natural_model_request_never_matches_embedded_or_non_imperative_prose(un
 
 
 @pytest.mark.parametrize("phrase", [
+    "run python:3.12: reproduce this issue",
+    "run python:3.12 model to reproduce this issue",
+    "run using python:3.12 to reproduce this issue",
+    "run using powershell:7 for reproduce this issue",
+    "run powershell:7 for reproduce this issue",
+])
+def test_natural_model_request_leaves_bare_interpreter_tags_as_work_prose(phrase):
+    assert server.natural_model_request(phrase) is None
+
+
+@pytest.mark.parametrize("phrase, expected", [
+    ("run model python:3.12 to explain this issue", {
+        "kind": "model", "model": "python:3.12", "prompt": "explain this issue",
+    }),
+    ("run using model powershell:7 to explain this issue", {
+        "kind": "model", "model": "powershell:7", "prompt": "explain this issue",
+    }),
+])
+def test_natural_model_request_allows_explicit_model_opt_in_for_interpreter_tags(phrase, expected):
+    assert server.natural_model_request(phrase) == expected
+
+
+def test_natural_model_request_allows_untagged_interpreter_named_model():
+    assert server.natural_model_request("ask the python model to explain this issue") == {
+        "kind": "model", "model": "python", "prompt": "explain this issue",
+    }
+
+
+@pytest.mark.parametrize("phrase", [
     "ask all available models for /run dangerous-command",
     "run using phi4:latest to /run dangerous-command",
 ])
