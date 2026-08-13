@@ -23290,14 +23290,13 @@ def _ensemble_targets(tiers: str = ""):
 
 
 def _project_facts_text(project: str) -> str:
-    """Durable facts for a project, as a constraints block.
+    """Durable facts for a project, as fenced reference material.
 
     The ensemble builds its prompts directly rather than going through the
-    learning orchestrator, so it never saw the facts sonder_remember_fact
-    stores -- which is precisely where they are most useful, since the failure
-    modes worth recording (wrong-library calls, generics written with
-    parentheses, deleting code to silence a compiler) are all code-generation
-    failures.
+    learning orchestrator.  Reuse that path's facts fence rather than promoting
+    stored note text to a system-like instruction.  Facts can be stale, wrong,
+    or contain instruction-shaped text from an earlier audit; the final task is
+    always authoritative.
     """
     name = (project or "").strip()
     if not name or name.lower() == "none":
@@ -23313,12 +23312,8 @@ def _project_facts_text(project: str) -> str:
     facts = [f for f in facts if f]
     if not facts:
         return ""
-    return (
-        "HARD CONSTRAINTS for this project. These are recorded from measured "
-        "past failures; violating one is a known way this goes wrong:\n"
-        + "\n".join("- " + f for f in facts)
-        + "\n\n"
-    )
+    block, _omitted = orchestrator._facts_block([], facts)
+    return block + "\n\n"
 
 
 def _ensemble_code_synthesis_prompt(question, answers):
