@@ -245,6 +245,94 @@ def _state_principal(context):
     return "local-open"
 
 
+def _task_account_scope(context):
+    """Return an opaque durable task boundary for an authenticated account.
+
+    Local-open and direct MCP remain deliberately global.  Account names must
+    not become task-store data: callers can choose them, and retaining a
+    domain-separated digest gives the store only a stable authorization key.
+    """
+    account = (context or {}).get("account") or {}
+    if not account:
+        return None
+    material = "task-account-scope\0" + _state_principal(context)
+    return "ta-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+_SCOPED_TASK_TOOLS = frozenset((
+    "task_create", "task_list", "task_update", "task_show", "task_delete",
+    "task_plan", "task_progress", "task_depend", "checklist_create",
+    "checklist_show", "checklist_update",
+))
+
+# These tools may create or update checklists *inside* server.py after the
+# HTTP dispatcher has handed off control.  The public MCP variants deliberately
+# remain global for a local operator, but an account-backed HTTP request has an
+# opaque task boundary and must never silently escape it.  There is not yet a
+# first-class task-scope argument on the agent/master/workflow internals, so
+# fail closed here rather than create durable state in the shared namespace.
+_ACCOUNT_UNSCOPED_TASK_TOOLS = frozenset((
+    "agent", "workbench_agent", "master_orchestrate", "master_retry",
+    "agent_retry", "workflow_run", "self_heal_repair",
+))
+_ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
+    "checklist_create", "checklist_update", "checklist_show",
+    "work", "agent", "workbench_agent", "master", "master_orchestrate",
+    # Retrying an existing master re-enters the worker path, which enables
+    # auto_checklist.  It is therefore the same global task-store escape as
+    # a fresh master run, even though the retry itself names no task row.
+    "master_retry", "agent_retry", "self_heal_repair",
+))
+
+
+def _account_task_boundary_refusal(tool_name, kwargs, context):
+    """Reject account requests whose internal task writes cannot be scoped.
+
+    This is intentionally an HTTP-only choke point.  Direct MCP and
+    local-open operation are the single-user/operator surface and retain their
+    historical global task/checklist behavior.  A malformed loop payload is
+    left to ``server.loop`` so callers still receive its useful JSON contract;
+    only a recognizable action that can touch the global task namespace is
+    refused here.
+    """
+    if _task_account_scope(context) is None:
+        return ""
+    name = str(tool_name or "").strip().lower()
+    if name in _ACCOUNT_UNSCOPED_TASK_TOOLS:
+        return (
+            "refused /%s: account-scoped task state is not available for "
+            "this autonomous tool; use the scoped task/checklist commands."
+        ) % name
+    if name != "loop":
+        return ""
+    try:
+        parsed = json.loads((kwargs or {}).get("actions_json", ""))
+    except (TypeError, ValueError):
+        return ""
+    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
+    if not isinstance(actions, list):
+        return ""
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_type = str(action.get("type") or action.get("action") or "").strip().lower()
+        if action_type in _ACCOUNT_UNSCOPED_LOOP_ACTIONS:
+            return (
+                "refused /loop: account-scoped task state is not available "
+                "for loop action '%s'; use scoped task/checklist commands."
+            ) % action_type
+    return ""
+
+
+def _served_task_tool(tool_name, kwargs, context):
+    """Run account-scoped task operations without exposing a scope argument."""
+    scope = _task_account_scope(context)
+    if scope is not None:
+        return server.scoped_task_tool_dispatch(tool_name, kwargs, account_scope=scope)
+    handler = getattr(server, tool_name)
+    return str(handler(**kwargs))
+
+
 def _fanout_request_owner(context):
     """Stable, non-secret receipt owner key for durable fanout state.
 
@@ -1207,27 +1295,27 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/todo", "/task", "/tasks"):
         text = arg.strip()
         if not text or text.lower() in ("list", "ls"):
-            return server.task_list()
+            return _served_task_tool("task_list", {}, context)
         action, _, rest = text.partition(" ")
         action = action.lower()
         if action in ("add", "create", "new"):
-            return server.task_create(title=rest.strip())
+            return _served_task_tool("task_create", {"title": rest.strip()}, context)
         if action in ("done", "complete", "finish"):
             if not rest.strip():
                 return "usage: /todo done <task-id>"
-            return server.task_update(task_id=rest.strip(), status="done")
+            return _served_task_tool("task_update", {"task_id": rest.strip(), "status": "done"}, context)
         if action in ("start", "doing"):
             if not rest.strip():
                 return "usage: /todo start <task-id>"
-            return server.task_update(task_id=rest.strip(), status="in_progress")
+            return _served_task_tool("task_update", {"task_id": rest.strip(), "status": "in_progress"}, context)
         if action in ("block", "blocked"):
             if not rest.strip():
                 return "usage: /todo block <task-id>"
-            return server.task_update(task_id=rest.strip(), status="blocked")
+            return _served_task_tool("task_update", {"task_id": rest.strip(), "status": "blocked"}, context)
         if action in ("show", "view"):
             if not rest.strip():
                 return "usage: /todo show <task-id>"
-            return server.task_show(rest.strip())
+            return _served_task_tool("task_show", {"task_id": rest.strip()}, context)
         return (
             "usage: /todo [list] | /todo add <title> | /todo start <id> | "
             "/todo done <id> | /todo block <id> | /todo show <id>"
@@ -1250,6 +1338,12 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
         "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
         "/agentretry", "/retryagent",
     ):
+        if cmd in ("/agentretry", "/retryagent"):
+            task_boundary_error = _account_task_boundary_refusal(
+                "master_retry", {}, context,
+            )
+            if task_boundary_error:
+                return task_boundary_error
         return server.control_command(stripped, project=project)
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
@@ -1272,6 +1366,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/work", "/agent"):
         if not arg.strip():
             return "usage: /work <task>"
+        task_boundary_error = _account_task_boundary_refusal(
+            "workbench_agent", {}, context,
+        )
+        if task_boundary_error:
+            return task_boundary_error
         return server.workbench_agent(
             prompt=arg.strip(), tier="auto", max_steps=12, project=project,
         )
@@ -1283,6 +1382,13 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
         "/image", "/inspectimage", "/mkdir", "/runprogram", "/runscript",
         "/artifactcheck", "/verifyartifact", "/groundartifact",
     ):
+        scope = _task_account_scope(context)
+        if scope is not None and cmd in ("/checklist", "/plan"):
+            if arg.strip():
+                return server.scoped_task_tool_dispatch(
+                    "checklist_show", {"checklist_id": arg.strip()}, account_scope=scope,
+                )
+            return server.scoped_latest_checklist(scope)
         return server.control_command(stripped, project=project)
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         parts2 = arg.strip().split(None, 1)
@@ -1379,6 +1485,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
             path=arg.strip(), dry_run=True, token=state.token
         )
     if cmd == "/master":
+        task_boundary_error = _account_task_boundary_refusal(
+            "master_orchestrate", {}, context,
+        )
+        if task_boundary_error:
+            return task_boundary_error
         text = arg.strip()
         mode = "ask"
         task = text
@@ -1501,6 +1612,9 @@ def _dispatch_catalogued_tool(line, state, context=None):
         refusal = _loop_global_operation_refusal(kwargs.get("actions_json"), context)
         if refusal:
             return refusal
+    task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context)
+    if task_boundary_error:
+        return task_boundary_error
     # Guarded tools take the caller's own token exactly as the explicit
     # branches pass it (/read, /files, /delete); the tool still enforces its
     # own permission rules with it.
@@ -1512,6 +1626,8 @@ def _dispatch_catalogued_tool(line, state, context=None):
         if command and any(p.name == "token" for p in command.params):
             kwargs["token"] = state.token
     try:
+        if tool_name in _SCOPED_TASK_TOOLS and _task_account_scope(context) is not None:
+            return _served_task_tool(tool_name, kwargs, context)
         return str(handler(**kwargs))
     except TypeError as error:
         return "%s: %s" % (tool_name, error)
