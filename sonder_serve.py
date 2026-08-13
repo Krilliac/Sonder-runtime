@@ -2568,6 +2568,21 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
+        # ``response_format`` cannot be honored consistently yet: this route
+        # may satisfy a request through guarded slash/feedback/web paths rather
+        # than model generation, and the normal response pipeline may append
+        # activity metadata. Reject it explicitly instead of silently returning
+        # unconstrained text to an OpenAI-compatible caller.
+        if "response_format" in req:
+            record_early_chat_metric("unsupported_response_format")
+            self._send_json_payload(
+                {"error": {
+                    "message": "response_format is not supported by this endpoint",
+                    "type": "invalid_request",
+                }},
+                status=400,
+            )
+            return
         prompt = _last_user_message(messages)
         # Normalize an explicitly recognized whole-turn model request before
         # policy checks.  Otherwise ``use model x: /run ...`` could evade the
