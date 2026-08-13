@@ -66,10 +66,10 @@ def test_recent_run_summaries_are_owner_scoped_and_never_return_sensitive_rows()
     assert [row["run_id"] for row in summaries] == [first["id"]]
     row = summaries[0]
     assert row["models_selected"] == 2
-    assert row["models_answered"] == row["models_failed"] == row["models_skipped"] == 0
+    assert row["models_answered"] == row["models_failed"] == row["models_unknown"] == row["models_skipped"] == 0
     assert set(row) == {
         "run_id", "status", "scope", "created_ts", "updated_ts", "finished_ts",
-        "models_selected", "models_answered", "models_failed", "models_skipped",
+        "models_selected", "models_answered", "models_failed", "models_unknown", "models_skipped",
     }
     rendered = repr(summaries)
     for secret in ("private prompt", "cipher", "owner-a", "models_json", "prompt_sha256"):
