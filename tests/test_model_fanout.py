@@ -265,6 +265,36 @@ def test_profile_rejects_conflicting_scope(monkeypatch):
     assert "requires scope local" in str(error)
 
 
+@pytest.mark.parametrize("profile, scope", [
+    ("healthy-local-chat", "cloud"),
+    ("healthy-cloud-chat", "local"),
+    ("healthy-chat", "local"),
+])
+def test_profile_rejects_every_explicit_conflicting_scope(monkeypatch, profile, scope):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+
+    plan, error = server._fanout_plan(scope, profile=profile)
+
+    assert plan["selected"] == []
+    assert error is not None
+    assert "requires scope" in str(error)
+
+
+def test_profile_uses_its_fixed_scope_when_direct_scope_is_omitted(monkeypatch):
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("local-ok", {"name": "local-ok"}),
+        ("cloud-ok:cloud", {"name": "cloud-ok:cloud"}),
+    ])
+    monkeypatch.setattr(server, "_fanout_health", lambda _name: None)
+
+    plan, error = server._fanout_plan("", profile="healthy-chat")
+
+    assert error is None
+    assert plan["scope"] == "all"
+    assert plan["selected"] == ["local-ok", "cloud-ok:cloud"]
+
+
 def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     def fake_get(path):
         if path == "/api/tags":

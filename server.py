@@ -21787,8 +21787,12 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             return {"scope": str(scope or "local"), "selected": [], "skipped": []}, profile_error
         # A profile is a fixed, reviewed selector.  Reject a contradictory
         # caller-supplied scope rather than quietly broadening or narrowing it.
-        requested_scope = str(scope or "local").strip().lower()
-        if requested_scope not in ("", "local", profile_scope):
+        # An omitted scope lets the fixed profile choose its own reviewed
+        # scope.  An explicit scope must agree exactly; treating the legacy
+        # ``local`` default as omitted would silently broaden a direct caller
+        # to cloud/all targets.
+        requested_scope = str(scope or "").strip().lower()
+        if requested_scope not in ("", profile_scope):
             return {"scope": requested_scope, "selected": [], "skipped": []}, ModelCallError(
                 "configuration", "fanout profile %s requires scope %s" % (selected_profile, profile_scope),
             )
@@ -22382,7 +22386,7 @@ def _execute_fanout_run(run_id):
     return receipt
 
 
-def _model_fanout_authorized(prompt: str, scope: str = "local", profile: str = "", num_predict: int = 512,
+def _model_fanout_authorized(prompt: str, scope: str = "", profile: str = "", num_predict: int = 512,
                              timeout: int = 45, max_cloud_workers: int = 2,
                              request_owner: str = "", request_role: str = "") -> str:
     """Execute fanout after the caller's authority was established upstream.
@@ -22424,7 +22428,7 @@ def _model_fanout_authorized(prompt: str, scope: str = "local", profile: str = "
 
 
 @mcp.tool()
-def model_fanout(prompt: str, scope: str = "local", profile: str = "", num_predict: int = 512,
+def model_fanout(prompt: str, scope: str = "", profile: str = "", num_predict: int = 512,
                  timeout: int = 45, max_cloud_workers: int = 2, token: str = "") -> str:
     """Ask every discovered local, cloud, or all model the same prompt.
 
