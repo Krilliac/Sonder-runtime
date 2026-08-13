@@ -545,6 +545,31 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     assert seen[0]["model_override"] == "gemma3:12b"
 
 
+def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
+    lines = iter(("web search to find computer repair shops near 67215", "/exit"))
+    calls = []
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda _prompt: True)
+    monkeypatch.setattr(
+        sonder_repl.server, "workbench_agent",
+        lambda **_kwargs: pytest.fail("explicit web search must not enter workbench"),
+    )
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda prompt, **kwargs: calls.append((prompt, kwargs)) or "web result",
+    )
+
+    sonder_repl.main()
+
+    assert calls and calls[0][0] == "web search to find computer repair shops near 67215"
+
+
 def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):
     lines = iter(("/model CODE", "/model Gemma3:12B", "hello", "/exit"))
     seen = []
