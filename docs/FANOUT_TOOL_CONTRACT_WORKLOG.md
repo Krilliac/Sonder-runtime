@@ -9,7 +9,7 @@ continue without re-deriving anything; update it at every milestone with
 
 - Worktree: `D:\sonder-wt\fable-tool-contract` (one of many agent worktrees;
   never `git stash` here — `refs/stash` is shared across worktrees).
-- Tests: `C:/Users/natew/.claude/mcp-servers/sonder-runtime/venv/Scripts/python.exe -m pytest tests/... -q`
+- Tests: `python -m pytest tests/... -q` (from the runtime virtual environment)
   with cwd = this worktree (verified: `server`/`sonder_runtime` resolve to the
   worktree, pytest 9.1.1; `tests/test_permission_gate_coverage.py` +
   `tests/test_tool_capabilities.py` → 42 passed in 6.59s).
@@ -128,8 +128,8 @@ tests (`-k "required or payload or manifest"`) → **7 passed**;
 
 ### M4 — final verification (2026-08-13)
 
-Commands run from this worktree with
-`C:/Users/natew/.claude/mcp-servers/sonder-runtime/venv/Scripts/python.exe`:
+Commands run from this worktree with its runtime virtual environment's
+`python` executable:
 
 - `scripts/check_architecture.py` → rc=0.
 - `scripts/check_error_signals.py` → rc=0 (no new `ERROR:`-literal returns;
