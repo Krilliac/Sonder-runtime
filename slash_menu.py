@@ -59,6 +59,7 @@ _CTRL_L = "\x0c"
 _CTRL_U = "\x15"
 _CTRL_W = "\x17"
 _CTRL_K = "\x0b"
+_CTRL_R = "\x12"
 
 MAX_ROWS = 8
 HISTORY_LIMIT = 200
@@ -349,6 +350,8 @@ class HistoryCursor:
         self.entries = [str(entry) for entry in (entries or []) if str(entry)]
         self.index = len(self.entries)
         self.draft = ""
+        self._search_term = None
+        self._search_index = len(self.entries)
 
     def up(self, current: str) -> str:
         if not self.entries:
@@ -370,6 +373,29 @@ class HistoryCursor:
     def reset(self) -> None:
         self.index = len(self.entries)
         self.draft = ""
+        self.reset_search()
+
+    def reset_search(self) -> None:
+        self._search_term = None
+        self._search_index = len(self.entries)
+
+    def reverse_search(self, current: str) -> str:
+        """Recall the next older history entry containing the initial query.
+
+        Ctrl+R is deliberately in-memory only.  Repeated presses retain the
+        initial search term rather than treating a recalled full command as a
+        new query, matching the shell behavior users expect.
+        """
+        if not self.entries:
+            return current
+        if self._search_term is None:
+            self._search_term = str(current or "").casefold()
+            self._search_index = len(self.entries)
+        for index in range(self._search_index - 1, -1, -1):
+            if self._search_term in self.entries[index].casefold():
+                self._search_index = index
+                return self.entries[index]
+        return current
 
 
 def _truncate(text: str, width: int) -> str:
@@ -484,7 +510,7 @@ def _composer_footer(state: MenuState, stream) -> str:
         return " Tab complete %s Up/Down select %s Esc dismiss " % (dot, dot)
     if state.argument_context:
         return " Enter run %s Up/Down history %s Ctrl+L clear " % (dot, dot)
-    return " Enter send %s Up/Down history %s Ctrl+L clear " % (dot, dot)
+    return " Enter send %s Ctrl+R search %s Ctrl+L clear " % (dot, dot)
 
 
 def _framed_cursor_cell(buffer: str, cursor: int, width: int,
@@ -632,6 +658,13 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "") -
         _paint(state, prompt, stream)
         while True:
             ch = msvcrt.getwch()
+            if ch == _CTRL_R:
+                state.buffer = recalled.reverse_search(state.buffer)
+                state.cursor = len(state.buffer)
+                state.dismissed = False
+                state._reset_selection()
+                _paint(state, prompt, stream)
+                continue
             if ch in ("\x00", "\xe0"):
                 # Windows delivers arrows as a prefix byte plus a scan code.
                 second = msvcrt.getwch()
@@ -648,12 +681,14 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "") -
                 if state.menu_active and state.has_palette_matches():
                     action = state.handle_key(key)
                 elif key == KEY_UP:
+                    recalled.reset_search()
                     state.buffer = recalled.up(state.buffer)
                     state.cursor = len(state.buffer)
                     state.dismissed = False
                     state._reset_selection()
                     action = CONTINUE
                 elif key == KEY_DOWN:
+                    recalled.reset_search()
                     state.buffer = recalled.down(state.buffer)
                     state.cursor = len(state.buffer)
                     state.dismissed = False
@@ -663,6 +698,11 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "") -
                     action = state.handle_key(key)
             else:
                 action = state.handle_key(ch)
+                # Any edit starts a fresh reverse-search query on the next
+                # Ctrl+R; entering a character must not keep an old search
+                # term alive invisibly.
+                if ch not in (_CTRL_R,):
+                    recalled.reset_search()
             if action == ACCEPT:
                 _finish(state, prompt, stream)
                 return state.buffer
