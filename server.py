@@ -576,8 +576,16 @@ def _cloud_extra_usage_fallback(model, error):
 def _chat_request_with_cloud_fallback(
     payload, *, model, timeout=None, cancel_check=None,
     accept_native_tool_calls=False, compact_cloud_reasoning=False,
+    allow_cloud_fallback=True,
 ):
-    """Make one cloud request, falling back exactly once on K3 HTTP 402."""
+    """Make one cloud request, optionally falling back once on K3 HTTP 402.
+
+    A normal single-model request may use the documented K3-to-K2.7
+    availability fallback.  Durable fanout rows are different: each row is an
+    immutable, caller-visible target and must never attribute another model's
+    response (or spend) to it.  Those callers pass ``allow_cloud_fallback``
+    false so the requested target's provider error is recorded directly.
+    """
     try:
         out, content = _chat_request(
             payload,
@@ -590,6 +598,8 @@ def _chat_request_with_cloud_fallback(
         )
         return out, content, model
     except ModelCallError as error:
+        if not allow_cloud_fallback:
+            raise
         fallback = _cloud_extra_usage_fallback(model, error)
         if fallback is None:
             raise
@@ -1160,7 +1170,7 @@ def resolve_sonder_model(strict=False):
 def _make_generate(
     model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
     cancel_check=None, accept_native_tool_calls=False,
-    compact_cloud_reasoning=False, schema=None,
+    compact_cloud_reasoning=False, schema=None, allow_cloud_fallback=True,
 ):
     """Build a generate(prompt, history) closure for `model`.
 
@@ -1218,6 +1228,7 @@ def _make_generate(
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
                     compact_cloud_reasoning=compact_cloud_reasoning,
+                    allow_cloud_fallback=allow_cloud_fallback,
                 )
             else:
                 out, content = _chat_request(
@@ -22289,17 +22300,11 @@ def _fanout_admission(run, rows, limits):
         key=str.casefold,
     )
     cloud_targets = [name for name in selected if _is_cloud_model_name(name)]
-    # A K3 402 can make one bounded automatic retry through the documented
-    # K2.7 fallback.  It is still the same logical result, but it is a second
-    # provider request and receives the prompt, so admission must include it.
-    fallback_targets = sorted({
-        CLOUD_EXTRA_USAGE_FALLBACK_MODEL for name in cloud_targets
-        if str(name).casefold().startswith("kimi-k3:")
-    }, key=str.casefold)
-    disclosed_cloud_targets = sorted(set(cloud_targets + fallback_targets), key=str.casefold)
-    fallback_attempts = sum(
-        1 for name in cloud_targets if str(name).casefold().startswith("kimi-k3:")
-    )
+    # Durable fanout dispatches exactly the immutable selected targets.  In
+    # particular, a K3 availability failure remains a failed K3 row rather
+    # than silently sending the sealed prompt to K2.7 and misattributing the
+    # answer or model health.
+    disclosed_cloud_targets = sorted(set(cloud_targets), key=str.casefold)
     effective_num_predict = max([
         int(limits["num_predict"]),
         *[
@@ -22316,9 +22321,9 @@ def _fanout_admission(run, rows, limits):
     local_count = len(selected) - len(cloud_targets)
     cloud_workers = limits["cloud_workers"]
     # Locals execute serially to protect shared VRAM/RAM. Cloud rows use the
-    # bounded worker pool. This deliberately excludes setup/queue/retry costs.
+    # bounded worker pool. This deliberately excludes setup and queue costs.
     request_phase_seconds = limits["timeout"] * (
-        local_count + math.ceil((len(cloud_targets) + fallback_attempts) / cloud_workers)
+        local_count + math.ceil(len(cloud_targets) / cloud_workers)
     )
     return {
         "selected_models": selected,
@@ -22333,8 +22338,8 @@ def _fanout_admission(run, rows, limits):
             "cloud_concurrency": cloud_workers,
         },
         "upper_bounds": {
-            "initial_request_attempts_total": len(selected) + fallback_attempts,
-            "initial_cloud_request_attempts": len(cloud_targets) + fallback_attempts,
+            "initial_request_attempts_total": len(selected),
+            "initial_cloud_request_attempts": len(cloud_targets),
             "scheduled_request_phase_wall_ms": int(request_phase_seconds * 1000),
             "excludes": [
                 "catalog discovery", "queue or lease wait", "model load or unload",
@@ -22537,6 +22542,7 @@ def _execute_fanout_run(run_id):
         try:
             generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
                                       timeout=limits["timeout"],
+                                      allow_cloud_fallback=False,
                                       cancel_check=lambda: not fanout_store.worker_can_dispatch(
                                           run_id, owner_id,
                                       ))

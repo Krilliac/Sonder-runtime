@@ -549,7 +549,7 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
     assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
 
 
-def test_fanout_admission_uses_snapshot_and_covers_k3_fallback(monkeypatch):
+def test_fanout_admission_uses_only_its_immutable_k3_target(monkeypatch):
     run = {
         "models_json": json.dumps(["kimi-k3:cloud", "local-thinking"]),
         "cloud_opt_in": True,
@@ -562,12 +562,52 @@ def test_fanout_admission_uses_snapshot_and_covers_k3_fallback(monkeypatch):
     assert admission["selected_models"] == ["kimi-k3:cloud", "local-thinking"]
     assert admission["execution"]["requested_num_predict"] == 512
     assert admission["execution"]["num_predict"] == 4096
-    assert admission["upper_bounds"]["initial_request_attempts_total"] == 3
-    assert admission["upper_bounds"]["initial_cloud_request_attempts"] == 2
+    assert admission["upper_bounds"]["initial_request_attempts_total"] == 2
+    assert admission["upper_bounds"]["initial_cloud_request_attempts"] == 1
     assert admission["upper_bounds"]["scheduled_request_phase_wall_ms"] == 20_000
-    assert admission["privacy"]["cloud_targets"] == [
-        server.CLOUD_EXTRA_USAGE_FALLBACK_MODEL, "kimi-k3:cloud",
-    ]
+    assert admission["privacy"]["cloud_targets"] == ["kimi-k3:cloud"]
+
+
+def test_fanout_k3_402_records_the_requested_target_without_cloud_fallback(monkeypatch, tmp_path):
+    """A durable K3 row must not send the sealed prompt to K2.7 on 402."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    calls = []
+    health = []
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "discovered_model_records", lambda: [
+        ("kimi-k3:cloud", {"name": "kimi-k3:cloud"}),
+    ])
+    monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _model: None)
+    recorded_health = server.fanout_store.record_model_health
+
+    def track_health(*args, **kwargs):
+        health.append((args, kwargs))
+        return recorded_health(*args, **kwargs)
+
+    def fake_chat(
+        _payload, *, model, cloud, timeout=None, cancel_check=None,
+        accept_native_tool_calls=False, idempotent=False,
+    ):
+        calls.append((model, cloud, idempotent))
+        raise server.ModelCallError(
+            "http", "extra usage balance is empty", status=402, cloud=True,
+        )
+
+    monkeypatch.setattr(server.fanout_store, "record_model_health", track_health)
+    monkeypatch.setattr(server, "_chat_request", fake_chat)
+
+    receipt = json.loads(server.model_fanout(
+        "public fanout question", scope="cloud", timeout=5, max_cloud_workers=1,
+    ))
+
+    assert calls == [("kimi-k3:cloud", True, True)]
+    assert receipt["models_answered"] == 0
+    assert receipt["models_failed"] == 1
+    assert receipt["failures"][0]["model"] == "kimi-k3:cloud"
+    assert receipt["admission"]["privacy"]["cloud_targets"] == ["kimi-k3:cloud"]
+    assert health[0][0][0] == "kimi-k3:cloud"
+    assert health[0][1]["disabled_until"] is not None
 
 
 def test_model_fanout_persists_a_sealed_prompt_and_durable_receipt(monkeypatch, tmp_path):
