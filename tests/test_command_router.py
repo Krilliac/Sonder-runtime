@@ -114,6 +114,18 @@ def test_environment_phrasings_resolve_to_env():
     assert cr.resolve("which toolchains are installed") == "/env"
 
 
+def test_explicit_local_hardware_phrasings_resolve_to_grounded_probe():
+    assert cr.resolve("show hardware") == "/hardware"
+    assert cr.resolve("show me my GPU hardware") == "/hardware"
+    assert cr.resolve("what is my GPU compute capability") == "/hardware"
+    assert cr.resolve("what graphics card do I have?") == "/hardware"
+    # Explanatory questions are not a host probe and remain ordinary chat.
+    assert cr.resolve("what does compute capability mean for model parameters?") is None
+    assert cr.resolve("what is hardware?") is None
+    assert cr.resolve("what is GPU?") is None
+    assert cr.resolve("what is compute capability?") is None
+
+
 def test_command_prefixes_do_not_hijack_longer_prose_or_drop_followup_work():
     for text in (
         "reset the session token when it expires",
