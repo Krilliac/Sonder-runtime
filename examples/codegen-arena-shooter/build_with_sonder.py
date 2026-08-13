@@ -603,6 +603,17 @@ def main() -> int:
     args = ap.parse_args()
     PROJECT = os.path.abspath(os.path.expanduser(args.project))
 
+    # A typo here used to select zero files in sequential mode.  The driver
+    # would then build whatever happened to already be in --project and could
+    # print BUILD SUCCEEDED without asking Sonder to write the requested file.
+    # Validate before importing server as well: an invalid command must be
+    # cheap and must not need a running local model service to explain itself.
+    known_files = {name for name, _contract in specs.files()}
+    if args.only and args.only not in known_files:
+        print("no such file in specs: %s" % args.only)
+        print("available files: %s" % ", ".join(sorted(known_files)))
+        return 2
+
     import server  # late import so the sys.path insert applies
 
     if args.sequential:
@@ -611,9 +622,6 @@ def main() -> int:
     file_list = specs.files()
     if args.only:
         file_list = [(n, c) for n, c in file_list if n == args.only]
-        if not file_list:
-            print(f"no such file in specs: {args.only}")
-            return 2
 
     targets, unknown = server._ensemble_targets(args.tiers)
     print("ensemble models: " + ", ".join(f"{t}={m}" for t, m in targets))
