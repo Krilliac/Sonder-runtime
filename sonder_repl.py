@@ -622,6 +622,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /improve           show the next system improvement checklist
   /master [mode] ... run orchestration: ask, inline, delegate, or fleet
   /agents            show live master/subagent activity
+  /fanouts [N|active]  list safe recent durable model-fanout summaries
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
   /agentretry <id>   explicitly retry persisted interrupted/failed master work
@@ -782,6 +783,54 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
     print(answer)
     footer = "%s %s  %s" % (box["bl"], timing, "(/pass or /fail)" if offer_feedback else "")
     print(_paint(footer, _Ansi.muted))
+
+
+def _format_fanout_summaries(payload):
+    """Render the intentionally content-free durable fanout recovery index."""
+    try:
+        data = payload or {}
+        if data.get("error"):
+            return "fanout history refused: %s" % str(data["error"])
+        rows = list(data.get("runs") or [])
+    except AttributeError:
+        return "fanout history unavailable"
+    if not rows:
+        return "no durable fanout runs"
+    lines = ["recent fanouts (%d)" % len(rows)]
+    for row in rows:
+        lines.append(
+            "  %(run_id)s  %(status)s  %(scope)s  "
+            "%(models_answered)s/%(models_selected)s answered  "
+            "%(models_failed)s failed  %(models_skipped)s skipped" % {
+                "run_id": str(row.get("run_id") or "unknown"),
+                "status": str(row.get("status") or "unknown"),
+                "scope": str(row.get("scope") or "unknown"),
+                "models_answered": int(row.get("models_answered") or 0),
+                "models_selected": int(row.get("models_selected") or 0),
+                "models_failed": int(row.get("models_failed") or 0),
+                "models_skipped": int(row.get("models_skipped") or 0),
+            }
+        )
+    lines.append("  use /model_fanout_status run_id=<id> for an authorized full receipt")
+    return "\n".join(lines)
+
+
+def _fanout_recent_command(arg):
+    text = (arg or "").strip().casefold()
+    include_finished, limit = True, 20
+    if text == "active":
+        include_finished = False
+    elif text:
+        if not text.isdigit() or not 1 <= int(text) <= 100:
+            return "usage: /fanouts [N|active]  (N is 1..100)"
+        limit = int(text)
+    try:
+        payload = json.loads(server.model_fanout_recent(
+            limit=limit, include_finished=include_finished, token=CURRENT_TOKEN,
+        ))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "fanout history unavailable"
+    return _format_fanout_summaries(payload)
 
 
 def _print_lessons():
@@ -1314,6 +1363,8 @@ def main():
                 print(server.system_improvement_report(session=session_id, project=project))
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
+            elif cmd == "/fanouts":
+                print(_fanout_recent_command(arg))
             elif cmd in ("/capacity", "/agentcapacity"):
                 print(server.control_command(line, session=session_id, project=project))
             elif cmd in ("/agentcancel", "/cancelagents"):
