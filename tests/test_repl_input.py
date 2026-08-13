@@ -87,6 +87,19 @@ def test_piped_turn_acknowledgement_stays_silent(monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_fanout_recent_display_is_content_free_and_reports_recovery_ids():
+    text = sonder_repl._format_fanout_summaries({"runs": [{
+        "run_id": "fan-123", "status": "completed", "scope": "cloud",
+        "models_selected": 4, "models_answered": 3,
+        "models_failed": 1, "models_skipped": 0,
+        "prompt": "must not appear", "answer": "must not appear",
+    }]})
+
+    assert "fan-123" in text and "3/4 answered" in text
+    assert "must not appear" not in text
+    assert "model_fanout_status" in text
+
+
 def test_help_exposes_runtime_policy_and_live_mcp_convergence():
     assert "/runtime" in sonder_repl.HELP
     assert "/mcp" in sonder_repl.HELP
