@@ -5475,7 +5475,7 @@ def sonder(
     prompt: str,
     system: str = "",
     temperature: float = 0.2,
-    num_predict: int = 1024,
+    num_predict: StrictInt = 1024,
     num_ctx: int = 4096,
     context_size: str = "",
     trace: bool = False,
@@ -23169,8 +23169,8 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
 
 
 @mcp.tool()
-def model_fanout(prompt: str, scope: str = "", num_predict: int = 512,
-                 timeout: int = 45, max_cloud_workers: int = 2, token: str = "",
+def model_fanout(prompt: str, scope: str = "", num_predict: StrictInt = 512,
+                 timeout: StrictInt = 45, max_cloud_workers: StrictInt = 2, token: str = "",
                  profile: str = "") -> str:
     """Ask every discovered local, cloud, or all model the same prompt.
 
