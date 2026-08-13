@@ -22007,7 +22007,13 @@ def _fanout_profile_scope(profile):
 
 
 _INTERPRETER_LIKE_MODEL_SELECTOR_PREFIXES = frozenset({
-    "bash", "cmd", "node", "nodejs", "powershell", "pwsh", "python", "sh",
+    # Bare ``run <runtime>:<version> ...`` is substantially more likely to be
+    # an execution/work request than an intent to select a model.  Explicit
+    # ``model <tag>`` forms remain the unambiguous opt-in for catalog models
+    # that happen to share one of these names.
+    "bash", "bun", "cargo", "cmd", "deno", "dotnet", "go", "java",
+    "node", "nodejs", "perl", "php", "powershell", "pwsh", "python",
+    "ruby", "sh",
 })
 
 
@@ -22015,8 +22021,8 @@ def _is_interpreter_like_bare_model_selector(selector):
     """Whether a tagged selector is more naturally a command name.
 
     Natural-language routing must not reinterpret ordinary work such as
-    ``run python:3.12: reproduce this`` as a request to select a model.  The
-    This applies only to colon tags in bare-selector grammar.  An untagged
+    ``run python:3.12: reproduce this`` as a request to select a model.  This
+    applies only to colon tags in bare-selector grammar.  An untagged
     catalog model genuinely named ``python`` remains selectable via the
     ordinary ``python model to`` phrasing; explicit ``model <tag>`` and
     ``using model <tag>`` forms remain intentional opt-ins for any tag.

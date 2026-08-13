@@ -983,6 +983,8 @@ def test_http_fanout_wrapper_is_not_reclassified_as_work_or_feedback(monkeypatch
     "run python:3.12: reproduce this issue",
     "run python:3.12 model to reproduce this issue",
     "run using powershell:7 for reproduce this issue",
+    "run ruby:3.3: reproduce this issue",
+    "run using java:21 for reproduce this issue",
 ])
 def test_http_bare_interpreter_tags_stay_on_normal_work_route(monkeypatch, phrase):
     monkeypatch.setattr(ts, "API_KEY", "")
