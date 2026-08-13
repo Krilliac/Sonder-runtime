@@ -1463,6 +1463,10 @@ def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    # This test exercises a provider-side 429.  Enable the separate operator
+    # cloud consent gate so early selector preflight reaches the mocked model
+    # transport rather than correctly denying cloud use first.
+    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: True)
 
     class FakeConnection:
         def close(self):
