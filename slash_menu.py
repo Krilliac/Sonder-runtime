@@ -38,6 +38,11 @@ import sys
 # a character the user could actually type.
 KEY_UP = "<up>"
 KEY_DOWN = "<down>"
+KEY_LEFT = "<left>"
+KEY_RIGHT = "<right>"
+KEY_HOME = "<home>"
+KEY_END = "<end>"
+KEY_DELETE = "<delete>"
 
 # handle_key's return values.
 CONTINUE = "continue"   # keep reading; the caller should repaint
@@ -118,6 +123,7 @@ class MenuState:
         self.hint_provider = hint_provider or _default_argument_hint
         self.limit = max(1, int(limit))
         self.buffer = str(buffer or "")
+        self.cursor = len(self.buffer)
         self.selected = 0
         self.dismissed = False
         self._cache_key = None
@@ -178,6 +184,22 @@ class MenuState:
         self.selected = 0
 
     def handle_key(self, ch: str) -> str:
+        if ch == KEY_LEFT:
+            self.cursor = max(0, self.cursor - 1)
+            return CONTINUE
+        if ch == KEY_RIGHT:
+            self.cursor = min(len(self.buffer), self.cursor + 1)
+            return CONTINUE
+        if ch == KEY_HOME:
+            self.cursor = 0
+            return CONTINUE
+        if ch == KEY_END:
+            self.cursor = len(self.buffer)
+            return CONTINUE
+        if ch == KEY_DELETE:
+            self.buffer = self.buffer[:self.cursor] + self.buffer[self.cursor + 1:]
+            self._reset_selection()
+            return CONTINUE
         if ch == KEY_UP:
             if self.menu_active and self.has_palette_matches():
                 # Clamps rather than wrapping: wrapping from the first entry to
@@ -196,6 +218,7 @@ class MenuState:
             return CLEAR
         if ch == _CTRL_U:
             self.buffer = ""
+            self.cursor = 0
             self.dismissed = False
             self._reset_selection()
             return CONTINUE
@@ -212,10 +235,13 @@ class MenuState:
                 entry = self.selection()
                 if entry is not None:
                     self.buffer = _name_of(entry)
+                    self.cursor = len(self.buffer)
                     self._reset_selection()
             return CONTINUE
         if ch in _BACKSPACE:
-            self.buffer = self.buffer[:-1]
+            if self.cursor:
+                self.buffer = self.buffer[:self.cursor - 1] + self.buffer[self.cursor:]
+                self.cursor -= 1
             if not self.buffer:
                 # An empty line is a fresh start, so a later "/" re-opens the
                 # menu even after Esc.
@@ -223,7 +249,8 @@ class MenuState:
             self._reset_selection()
             return CONTINUE
         if len(ch) == 1 and (ch >= " " and ch != "\x7f"):
-            self.buffer += ch
+            self.buffer = self.buffer[:self.cursor] + ch + self.buffer[self.cursor:]
+            self.cursor += 1
             self._reset_selection()
             return CONTINUE
         # Unknown control key: ignore it rather than inserting a glyph.
@@ -392,13 +419,32 @@ def _input_lines(prompt: str, buffer: str, width: int) -> list[str]:
     return [text[index:index + columns] for index in range(0, len(text), columns)]
 
 
+def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
+                 line_count: int) -> tuple[int, int]:
+    """Return the wrapped input row/column for a buffer cursor.
+
+    The terminal reserves its final column, so this mirrors
+    :func:`_input_lines` exactly rather than trusting terminal auto-wrap.
+    """
+    visible_prompt = _ANSI_ESCAPE_RE.sub("", str(prompt or ""))
+    prefix = visible_prompt + str(buffer or "")[:max(0, int(cursor))]
+    columns = max(1, int(width) - 1)
+    row = len(prefix) // columns
+    column = len(prefix) % columns
+    if row >= max(1, int(line_count)):
+        row = max(0, int(line_count) - 1)
+        column = columns
+    return row, column
+
+
 def _cursor_to_input_start(state: MenuState) -> str:
     """Move from the current final input row back to its first row."""
     rows = max(1, int(getattr(state, "_drawn_input_rows", 1) or 1))
     return "\r" + (CSI + "%dA" % (rows - 1) if rows > 1 else "")
 
 
-def _visible_input_lines(lines: list[str], *, height: int, menu_rows: int) -> list[str]:
+def _visible_input_lines(lines: list[str], *, cursor_row: int, height: int,
+                         menu_rows: int) -> tuple[list[str], int]:
     """Keep an interactive redraw inside the terminal viewport.
 
     The input buffer is never shortened: :func:`_finish` writes every line on
@@ -409,7 +455,8 @@ def _visible_input_lines(lines: list[str], *, height: int, menu_rows: int) -> li
     text was modified.
     """
     budget = max(1, int(height) - max(0, int(menu_rows)) - 1)
-    return lines[-budget:] or [""]
+    start = max(0, min(int(cursor_row), max(0, len(lines) - budget)))
+    return (lines[start:start + budget] or [""], start)
 
 
 def _clear_raw_input(state: MenuState, stream) -> None:
@@ -428,18 +475,24 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
     """
     rows = state.render_rows()
     cols, height = _terminal_size()
-    lines = _visible_input_lines(
-        _input_lines(prompt, state.buffer, cols),
-        height=height, menu_rows=len(rows),
+    all_lines = _input_lines(prompt, state.buffer, cols)
+    cursor_row, cursor_col = _cursor_cell(
+        prompt, state.buffer, state.cursor, cols, len(all_lines),
     )
+    lines, start = _visible_input_lines(
+        all_lines, cursor_row=cursor_row, height=height, menu_rows=len(rows),
+    )
+    visible_cursor_row = max(0, cursor_row - start)
     parts = [_cursor_to_input_start(state), CSI + "0J", "\n".join(lines)]
     state._drawn_input_rows = len(lines)
     if rows:
         parts.append("\n" + "\n".join(rows))
-        parts.append(CSI + "%dA" % len(rows))
-        parts.append("\r")
-        if lines[-1]:
-            parts.append(CSI + "%dC" % len(lines[-1]))
+    up = len(rows) + len(lines) - 1 - visible_cursor_row
+    if up:
+        parts.append(CSI + "%dA" % up)
+    parts.append("\r")
+    if cursor_col:
+        parts.append(CSI + "%dC" % cursor_col)
     stream.write("".join(parts))
     stream.flush()
 
@@ -471,7 +524,11 @@ def _read_line_raw(prompt: str, completer=None, history=None) -> str:
             if ch in ("\x00", "\xe0"):
                 # Windows delivers arrows as a prefix byte plus a scan code.
                 second = msvcrt.getwch()
-                key = {"H": KEY_UP, "P": KEY_DOWN}.get(second)
+                key = {
+                    "H": KEY_UP, "P": KEY_DOWN, "K": KEY_LEFT,
+                    "M": KEY_RIGHT, "G": KEY_HOME, "O": KEY_END,
+                    "S": KEY_DELETE,
+                }.get(second)
                 if key is None:
                     continue
                 # A slash prefix alone is not enough to reserve arrows: paths
@@ -481,14 +538,18 @@ def _read_line_raw(prompt: str, completer=None, history=None) -> str:
                     action = state.handle_key(key)
                 elif key == KEY_UP:
                     state.buffer = recalled.up(state.buffer)
+                    state.cursor = len(state.buffer)
+                    state.dismissed = False
+                    state._reset_selection()
+                    action = CONTINUE
+                elif key == KEY_DOWN:
+                    state.buffer = recalled.down(state.buffer)
+                    state.cursor = len(state.buffer)
                     state.dismissed = False
                     state._reset_selection()
                     action = CONTINUE
                 else:
-                    state.buffer = recalled.down(state.buffer)
-                    state.dismissed = False
-                    state._reset_selection()
-                    action = CONTINUE
+                    action = state.handle_key(key)
             else:
                 action = state.handle_key(ch)
             if action == ACCEPT:
