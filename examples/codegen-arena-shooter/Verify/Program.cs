@@ -135,6 +135,44 @@ public static class Program
         if (inst == null) return;
         Check(true, "parameterless constructor runs");
 
+        // Bounds are part of GameMap's collision contract. A modulo-based
+        // implementation can compile while wrapping positive coordinates and
+        // throwing on negative ones, which hides the defect from ordinary
+        // in-arena movement checks.
+        MethodInfo? wallCell = map.GetMethod("IsWallCell");
+        if (wallCell == null) { Check(false, "IsWallCell exists"); }
+        else
+        {
+            try
+            {
+                bool beforeMap = (bool)wallCell.Invoke(inst, new object[] { -1, 0 })!;
+                bool afterMap = (bool)wallCell.Invoke(inst, new object[] { 10_000, 0 })!;
+                Check(beforeMap, "a negative cell coordinate is solid");
+                Check(afterMap, "a cell coordinate past the map is solid");
+            }
+            catch (Exception e)
+            {
+                Check(false, "IsWallCell handles out-of-range coordinates",
+                      e.InnerException?.Message ?? e.Message);
+            }
+        }
+
+        MethodInfo? wallAt = map.GetMethod("IsWallAt");
+        if (wallAt == null) { Check(false, "IsWallAt exists"); }
+        else
+        {
+            try
+            {
+                bool outside = (bool)wallAt.Invoke(inst, new object[] { new Vector3(-0.1f, 0f, -0.1f) })!;
+                Check(outside, "a world coordinate outside the map is solid");
+            }
+            catch (Exception e)
+            {
+                Check(false, "IsWallAt handles out-of-range world coordinates",
+                      e.InnerException?.Message ?? e.Message);
+            }
+        }
+
         // The bug a compiler cannot see: map data declared but never filled.
         MethodInfo? wallCells = map.GetMethod("WallCells");
         if (wallCells == null) { Check(false, "WallCells() exists"); }
