@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -132,11 +133,33 @@ def test_timeout_is_reported():
     assert "timed out" in out["error"]
 
 
+def test_timeout_terminates_background_descendants(tmp_path):
+    marker = tmp_path / "survived-timeout.txt"
+    child = (
+        "import pathlib, time; time.sleep(1.5); "
+        "pathlib.Path(%r).write_text('survived')" % str(marker)
+    )
+    code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', %r])\n"
+        "while True: time.sleep(.1)\n" % child
+    )
+
+    out = code_runner.run_code(code, timeout=1)
+
+    assert out["ok"] is False
+    assert "timed out" in out["error"]
+    # The child would create this shortly after the parent deadline if the
+    # runner only killed the direct interpreter.
+    time.sleep(2)
+    assert not marker.exists()
+
+
 def test_missing_runtime_is_reported(monkeypatch):
     def missing(*args, **kwargs):
         raise FileNotFoundError("missing")
 
-    monkeypatch.setattr(code_runner.subprocess, "run", missing)
+    monkeypatch.setattr(code_runner.subprocess, "Popen", missing)
     out = code_runner.run_code("console.log(1)", language="js")
     assert out["ok"] is False
     assert "node executable not found" in out["error"]
@@ -267,11 +290,14 @@ def test_run_code_window_rejects_non_windows(monkeypatch):
 def test_timeout_is_clamped(monkeypatch):
     seen = {}
 
-    def fake_run(*args, **kwargs):
-        seen["timeout"] = kwargs["timeout"]
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+    class Proc:
+        returncode = 0
 
-    monkeypatch.setattr(code_runner.subprocess, "run", fake_run)
+        def communicate(self, *, input, timeout):
+            seen["timeout"] = timeout
+            return "", ""
+
+    monkeypatch.setattr(code_runner.subprocess, "Popen", lambda *args, **kwargs: Proc())
     out = code_runner.run_code("print(1)", timeout=999)
     assert out["ok"] is True
     assert seen["timeout"] == code_runner.MAX_TIMEOUT
