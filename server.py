@@ -15157,11 +15157,13 @@ def tool_manifest() -> str:
 
 @mcp.tool()
 def tool_capability_manifest() -> str:
-    """Return a deterministic fingerprint of the currently advertised tool surface.
+    """Return the live tool schemas and a deterministic fingerprint of them.
 
     This is visibility only: it cannot add, remove, approve, or invoke tools.
-    Clients can retain the SHA-256 value with a run receipt and notice when a
-    live-reloaded runtime presents a different capability surface.
+    Clients can use ``tools`` to construct a valid call, and retain the
+    SHA-256 value with a run receipt to notice when a live-reloaded runtime
+    presents a different capability surface.  The digest is of the canonical
+    JSON form of that exact returned ``tools`` list, not merely its names.
     """
     _maybe_live_reload()
     manifest = tool_manifest()
@@ -15182,9 +15184,10 @@ def tool_capability_manifest() -> str:
     return json.dumps({
         "sha256": digest,
         "tool_count": len(capabilities),
+        "tools": capabilities,
         "manifest": manifest,
         "authority": "informational only; host policy remains authoritative",
-    }, indent=2, sort_keys=True)
+    }, indent=2, sort_keys=True, default=str)
 
 
 @mcp.tool()
