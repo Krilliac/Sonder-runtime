@@ -1926,6 +1926,51 @@ def test_unload_deduplicates_verifies_and_cleans_discovery_probes(monkeypatch):
     assert "41, 42" in output
 
 
+def test_ollama_get_rejects_oversized_control_plane_response(monkeypatch):
+    """Catalog/residency GETs must not have a larger allocation budget than POSTs."""
+    seen = {}
+
+    class Response:
+        def read(self, limit):
+            seen["limit"] = limit
+            return b"x" * limit
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(server.ModelCallError, match="16 MiB safety limit"):
+        server._get("/api/tags")
+
+    assert seen["limit"] == server._MAX_MODEL_RESPONSE_BYTES + 1
+
+
+def test_unload_reports_bounded_get_failure_without_raising(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.master_orchestrator, "active_model_call_count", lambda: 0)
+    monkeypatch.setattr(server, "TIERS", {"code": "sonder:latest"})
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {"done": True})
+    monkeypatch.setattr(
+        server, "_get",
+        lambda *_args: (_ for _ in ()).throw(
+            server.ModelCallError("protocol", "Ollama response exceeded the 16 MiB safety limit")
+        ),
+    )
+    monkeypatch.setattr(
+        server.ollama_lifecycle, "cleanup_orphaned_discovery_probes",
+        lambda **_kwargs: {"terminated": [], "terminated_model_runners": [], "protected_model_runners": [], "errors": []},
+    )
+
+    output = server.unload("all")
+
+    assert "residency could not be confirmed" in output
+    assert "16 MiB safety limit" in output
+
+
 def test_orchestrator_worker_propagates_activity_into_worker_thread(monkeypatch):
     calls = []
 
