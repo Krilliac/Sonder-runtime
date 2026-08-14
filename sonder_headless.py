@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -197,17 +198,38 @@ def _is_sonder_server_pid(pid: int) -> bool:
     return bool(command and script in command)
 
 
+def _is_sonder_server_for_port(pid: int, port: int) -> bool:
+    """Return whether a managed server PID belongs to ``port``.
+
+    ``sonder_serve.pid`` is deliberately a simple, backwards-compatible PID
+    file.  A user can nevertheless run another managed instance with a
+    different port, at which point a stale PID file must never make ``stop
+    --port`` terminate that other instance.  The supervisor always supplies
+    the port as the script's first argument.  Preserve legacy default-port
+    recognition for an older direct launch which omitted it.
+    """
+    command = _pid_command_line(pid)
+    normalized = command.lower().replace("/", os.sep).replace("\\", os.sep)
+    script = str((repo_root() / "sonder_serve.py").resolve()).lower()
+    if not command or script not in normalized:
+        return False
+    match = re.search(r"sonder_serve\.py[\"']?\s+(\d+)(?:\s|$)", command, re.IGNORECASE)
+    if match:
+        return int(match.group(1)) == int(port)
+    return int(port) == DEFAULT_PORT
+
+
 def _managed_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
     """Resolve a service PID, repairing stale Windows venv-launcher pidfiles."""
     recorded = _read_pid(name)
     if recorded and pid_alive(recorded) and (
-        name != "sonder_serve" or _is_sonder_server_pid(recorded)
+        name != "sonder_serve" or _is_sonder_server_for_port(recorded, port)
     ):
         return recorded
     if name != "sonder_serve" or not port_open(host, port):
         return None
     listener = _listener_pid(host, port)
-    if listener and pid_alive(listener) and _is_sonder_server_pid(listener):
+    if listener and pid_alive(listener) and _is_sonder_server_for_port(listener, port):
         pid_file(name).write_text(str(listener), encoding="ascii")
         return listener
     return None
@@ -386,7 +408,7 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
     # that status says it is listening.
     if wait_until(lambda: port_open(host, port), 12) or port_open(host, port):
         listener = _listener_pid(host, port)
-        if listener and _is_sonder_server_pid(listener):
+        if listener and _is_sonder_server_for_port(listener, port):
             pid = listener
             pid_file("sonder_serve").write_text(str(pid), encoding="ascii")
         return "sonder: started pid=%s at http://%s:%s" % (pid, host, port)
@@ -397,11 +419,15 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
 def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
     recorded = _read_pid(name)
     if name == "sonder_serve":
-        candidates = ([recorded] if recorded else []) + _listener_pids(host, port)
+        recorded_for_other_port = bool(
+            recorded and pid_alive(recorded)
+            and not _is_sonder_server_for_port(recorded, port)
+        )
+        candidates = ([] if recorded_for_other_port else [recorded]) + _listener_pids(host, port)
         pids = [
             pid for index, pid in enumerate(candidates)
             if pid and pid not in candidates[:index] and pid_alive(pid)
-            and _is_sonder_server_pid(pid)
+            and _is_sonder_server_for_port(pid, port)
         ]
     else:
         pids = [recorded] if recorded and pid_alive(recorded) else []
@@ -411,6 +437,11 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
         except OSError:
             pass
         if recorded:
+            if name == "sonder_serve" and recorded_for_other_port:
+                return (
+                    "%s: recorded pid %s is not for port %s; not stopped"
+                    % (name, recorded, port)
+                )
             return "%s: pid %s is not running" % (name, recorded)
         return "%s: no pid file" % name
     try:
