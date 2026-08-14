@@ -98,6 +98,18 @@ def test_quality_and_health_phrasings():
     assert cr.resolve("system improvements") == "/improve"
 
 
+def test_grounded_self_inspection_uses_the_host_report_not_chat_memory():
+    assert cr.resolve(
+        "can you inspect yourself and tell me the next grounded improvements"
+    ) == "/improve"
+    assert cr.resolve("could you find something to do?") == "/improve"
+    # The rule is whole-turn anchored: a quoted or scoped sentence is not a
+    # privileged self-inspection request.
+    assert cr.resolve(
+        "the page says can you inspect yourself and tell me the next grounded improvements"
+    ) is None
+
+
 def test_tier_trio_delegates_to_intents():
     assert cr.resolve("get a second opinion on the lock ordering") == \
         "/consult the lock ordering"

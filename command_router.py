@@ -138,6 +138,16 @@ _RULES = [
     _rule(r"^(?:show\s+)?(?:emotions?|mood|emotion\s+vectors)\b", _fixed("/emotion")),
     _rule(r"^(?:show\s+)?(?:my\s+)?preferences?\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/prefer %s" % (m.group("arg") or "")).strip()),
+    # Self-inspection must use the host's deterministic improvement report,
+    # rather than asking the chat model to recall stale diagnostics or stored
+    # facts.  These are deliberately complete, question-shaped turns only;
+    # a request to inspect a particular file or quoted page text still falls
+    # through to the normal conversation/work routes.
+    _rule(r"^(?:can|could)\s+you\s+(?:inspect|audit)\s+yourself\s+"
+          r"(?:and\s+)?(?:tell|show)\s+me\s+(?:the\s+)?next\s+"
+          r"(?:grounded\s+)?improvements?\s*[?!.]*$", _fixed("/improve")),
+    _rule(r"^(?:can|could)\s+you\s+find\s+something\s+to\s+do\s*[?!.]*$",
+          _fixed("/improve")),
     _rule(r"^(?:show\s+)?(?:system\s+)?improvements?(?:\s+report)?\b|"
           r"^what\s+should\s+(?:you|the\s+system)\s+improve\b", _fixed("/improve")),
 
