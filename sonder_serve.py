@@ -1091,7 +1091,13 @@ def _history_from_messages(messages):
     user) message. A full chat UI owns conversation state here, so we thread
     exactly what it sends rather than a DB session; thin clients that name a
     session without resending a transcript fall back to
-    _server_side_history()."""
+    _server_side_history().  Sonder-generated assistant decoration is not
+    conversational content, however: older HTTP replies can contain an
+    observable activity block, trace, or interaction footer.  Normalize only
+    those assistant turns just as the server-side replay path does, so a
+    client that faithfully resends prior API responses does not feed telemetry
+    back to the model on a concise follow-up.
+    """
     msgs = messages or []
     last_user_idx = None
     for i in range(len(msgs) - 1, -1, -1):
@@ -1104,6 +1110,8 @@ def _history_from_messages(messages):
             continue
         role = m.get("role")
         content = m.get("content") or ""
+        if role == "assistant":
+            content = server._strip_activity_block(_answer_only(content)).strip()
         if role in ("user", "assistant") and content:
             history.append({"role": role, "content": content})
     return history

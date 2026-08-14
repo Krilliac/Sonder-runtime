@@ -28,6 +28,25 @@ def test_history_from_messages_drops_system_and_empty():
     assert hist == [{"role": "user", "content": "q1"}]
 
 
+def test_history_from_messages_strips_generated_assistant_decoration():
+    messages = [
+        {"role": "user", "content": "inspect the hardware"},
+        {"role": "assistant", "content": (
+            "The GPU is ready.\n\n"
+            "=== ACTIVITY (observable work) ===\n"
+            "model calls: 1\n"
+            "=== END ACTIVITY ===\n\n"
+            "[interaction_id: r000001]"
+        )},
+        {"role": "user", "content": "go ahead and do that"},
+    ]
+
+    assert ts._history_from_messages(messages) == [
+        {"role": "user", "content": "inspect the hardware"},
+        {"role": "assistant", "content": "The GPU is ready."},
+    ]
+
+
 def test_history_from_messages_single_turn_is_empty():
     hist = ts._history_from_messages([{"role": "user", "content": "only turn"}])
     assert hist == []
