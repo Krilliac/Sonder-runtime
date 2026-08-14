@@ -713,6 +713,7 @@ def _refresh_runtime_policy(create=True):
     """Apply the shared local-only policy without touching cloud configuration."""
     global _RUNTIME_POLICY
     policy = runtime_policy.load(create=create)
+    prior_embedding = str(_RUNTIME_POLICY.get("embedding_model") or "").strip()
     for tier in runtime_policy.LOCAL_TIERS:
         model = str(policy["local_models"].get(tier) or "").strip()
         if model:
@@ -724,9 +725,13 @@ def _refresh_runtime_policy(create=True):
             # unavailable and degrades to a base tier.
             TIERS.pop(tier, None)
     # Embeddings intentionally live outside ``TIERS`` so an embedding-only
-    # model can never become a chat target.  Changing this policy binding does
-    # not rewrite stored vectors; their provenance triggers explicit backfill.
-    embeddings.configure_model(policy["embedding_model"])
+    # model can never become a chat target. Only an actual policy transition
+    # reconfigures the process binding: a routine status/live-reload refresh
+    # must not overwrite a bounded backfill's immutable snapshot or a caller's
+    # deliberate temporary test/runtime override. Stored vectors remain
+    # untouched; their provenance triggers explicit backfill.
+    if prior_embedding != str(policy["embedding_model"] or "").strip():
+        embeddings.configure_model(policy["embedding_model"])
     _RUNTIME_POLICY = policy
     return policy
 
