@@ -172,6 +172,24 @@ def test_rule_alone_is_not_enough():
     assert server.admin_private_chain_of_thought() == REFUSAL
 
 
+def test_degraded_policy_cannot_preserve_private_reasoning_opt_in(monkeypatch):
+    """A valid surviving allow is insufficient when the policy is partial.
+
+    The generic permission-mode gate fails closed on degraded policy, but this
+    double-opt-in is evaluated directly so it must carry the same property.
+    """
+    monkeypatch.setenv("SONDER_ALLOW_PRIVATE_COT", "1")
+    path = server.sonder_paths.default_home() / "permissions.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '[{"pattern":"admin_private_chain_of_thought","action":"allow"},'
+        '{"pattern":"broken","action":"not-an-action"}]',
+        encoding="utf-8",
+    )
+
+    assert server.admin_private_chain_of_thought() == REFUSAL
+
+
 def test_built_in_rule_still_denies_this_tool():
     """The default deny rule is what makes the second act deliberate."""
     rule = policy.evaluate(policy.default_rules(), "admin_private_chain_of_thought")
