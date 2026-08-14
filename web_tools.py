@@ -631,16 +631,33 @@ def _search_query_variants(query):
 
 
 def _search_relevance(query, results):
-    terms = {
-        term for term in re.findall(r"[a-z0-9]+", query.lower())
-        if len(term) >= 3 and term not in _SEARCH_STOPWORDS
-    }
+    def normalized_terms(value):
+        normalized = set()
+        for term in re.findall(r"[a-z0-9]+", str(value or "").lower()):
+            if len(term) < 3 or term in _SEARCH_STOPWORDS:
+                continue
+            # Keep relevance lexical and bounded, but do not reject a useful
+            # listing merely because it uses a normal English plural.
+            if term.endswith("ies") and len(term) > 4:
+                term = term[:-3] + "y"
+            elif term.endswith("s") and len(term) > 3 and not term.endswith("ss"):
+                term = term[:-1]
+            normalized.add(term)
+        return normalized
+
+    terms = normalized_terms(query)
     if not terms:
         return 0, 0
     best = 0
     for row in results:
-        text = "%s %s" % (row.get("title", ""), row.get("url", ""))
-        words = set(re.findall(r"[a-z0-9]+", text.lower()))
+        # Providers preserve an extracted snippet precisely because a concise
+        # title/URL may not contain the terms that make the result relevant.
+        # Score that bounded result field too; it is returned to the caller and
+        # is not fetched or interpreted as a control instruction here.
+        text = "%s %s %s" % (
+            row.get("title", ""), row.get("url", ""), row.get("snippet", ""),
+        )
+        words = normalized_terms(text)
         best = max(best, len(terms & words))
     return best, min(2, len(terms))
 
@@ -774,8 +791,14 @@ def web_search(query, limit=5, timeout=10):
                     )
                 )
                 break
-    if best_results:
+    # Do not turn a weak provider fallback into a plausible-looking answer.
+    # The scorer normalizes straightforward inflections first, so concise
+    # listings such as "computer repairs" still count for "computer repair".
+    _best, required = _search_relevance(query, best_results)
+    if best_results and best_relevance >= required:
         return best_results
+    if best_results:
+        raise RuntimeError("search providers returned no sufficiently relevant results")
     if failures and len(failures) == len(endpoints):
         raise RuntimeError("search providers unavailable: %s" % ", ".join(failures))
     return []

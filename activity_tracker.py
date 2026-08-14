@@ -470,7 +470,12 @@ def response_span(label, prompt="", *, surface="", model="", session="", project
     try:
         record_event("response_start", summary=_short(prompt, 180))
         yield response
-        response["status"] = "complete"
+        # A host policy can downgrade a model's apparent success (for example,
+        # an agent that says "done" without the verification its lane makes
+        # reachable).  Do not overwrite that observable verdict on normal
+        # context-manager exit.
+        if response.get("status") == "running":
+            response["status"] = "complete"
     except Exception as exc:
         response["status"] = "error"
         record_event("response_error", summary=_short(exc, 180))
@@ -714,6 +719,24 @@ def set_result_summary(summary):
         return
     with _LOCK:
         response["result_summary"] = _block(summary, 1000)
+
+
+def set_response_status(status, summary=""):
+    """Set a bounded host-observed terminal status for the active response.
+
+    This is intentionally not a general model-facing status setter.  Callers
+    use it only for a host-established outcome such as ``unverified``; the
+    response span still owns ordinary completion and exceptions.
+    """
+    normalized = str(status or "").strip().lower()
+    if normalized not in {"unverified", "incomplete"}:
+        raise ValueError("unsupported response status")
+    response = _current()
+    if response is None:
+        return
+    with _LOCK:
+        response["status"] = normalized
+        _event(response, "response_%s" % normalized, summary=_short(summary, 180))
 
 
 @contextlib.contextmanager
