@@ -56,6 +56,19 @@ def test_arena_builder_imports_its_own_scaffold_before_runtime_module():
     assert "ensure_project_file = _SCAFFOLD_MODULE.ensure_project_file" in builder
 
 
+def test_arena_skeleton_initializes_deferred_lifecycle_fields_without_warnings():
+    skeleton = (
+        Path(__file__).resolve().parents[1]
+        / "examples" / "codegen-arena-shooter" / "skeleton.py"
+    ).read_text(encoding="utf-8")
+
+    assert "public string Name = string.Empty;" in skeleton
+    assert "private UdpClient _socket = null!;" in skeleton
+    assert "private IPEndPoint _remote = null!;" in skeleton
+    assert "private static Combatant _me = null!;" in skeleton
+    assert "_typingAddress" not in skeleton
+
+
 def test_arena_verifier_loads_the_copied_generated_artifact_explicitly():
     verifier = (
         Path(__file__).resolve().parents[1]
