@@ -176,6 +176,15 @@ python -m sonder_runtime repl
 # sonder > explain this repository's test layout
 ```
 
+<p align="center">
+  <img src="docs/assets/repl/terminal-repl.png" alt="Sonder terminal REPL with a framed dark-blue composer, live context and token statistics, and activity summary" width="1000">
+</p>
+
+The terminal REPL keeps the current model, active lanes, context budget, token
+usage, and elapsed time visible while you work. Type normally, use `/help` to
+discover guarded commands, and use `/model <tag-or-tier>` to choose an
+installed chat model.
+
 ### Check or update this source checkout
 
 The REPL banner shows its loaded and newest known source revisions without
