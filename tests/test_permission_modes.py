@@ -694,6 +694,57 @@ def test_decide_wires_to_the_real_policy_file_end_to_end(tmp_path, monkeypatch):
     assert "rule" in decision.reason.lower()
 
 
+def test_degraded_policy_cannot_relax_noninteractive_tool_gate(tmp_path, monkeypatch):
+    """A broken reload must not convert a written deny into unattended allow.
+
+    The old path loaded default ``run_*: ask`` rules after JSON failure; every
+    service/agent/MCP gate is non-interactive, so ``ask`` then degraded to
+    ``allow`` in auto mode.  Missing remains a healthy first-run default, but
+    a present malformed artifact is a policy outage and must stop non-read
+    work until the operator repairs it.
+    """
+    import sonder_paths
+
+    monkeypatch.setattr(sonder_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(pm, "_rule_lookup", pm._default_rule_lookup)
+    path = tmp_path / "permissions.json"
+    path.write_text(
+        json.dumps([{"pattern": "run_code", "action": "deny"}]),
+        encoding="utf-8",
+    )
+    assert pm.decide("run_code", interactive=False, mode=pm.AUTO).action == pm.DENY
+
+    path.write_text("{ not valid JSON", encoding="utf-8")
+    decision = pm.decide("run_code", interactive=False, mode=pm.AUTO)
+
+    assert decision.action == pm.DENY
+    assert decision.source == "rule"
+    assert "degraded permission policy" in decision.reason
+    # Recovery diagnostics remain readable rather than making a corrupt local
+    # policy impossible to inspect.
+    assert pm.decide("status", interactive=False, mode=pm.AUTO).action == pm.ALLOW
+
+
+def test_partial_policy_cannot_relax_an_omitted_deny(tmp_path, monkeypatch):
+    """Discarding just one rule is also an enforcement failure, not a warning."""
+    import sonder_paths
+
+    monkeypatch.setattr(sonder_paths, "default_home", lambda: tmp_path)
+    monkeypatch.setattr(pm, "_rule_lookup", pm._default_rule_lookup)
+    (tmp_path / "permissions.json").write_text(
+        json.dumps([
+            {"pattern": "run_code", "action": "DENY!"},
+            {"pattern": "status", "action": "allow"},
+        ]),
+        encoding="utf-8",
+    )
+
+    decision = pm.decide("run_code", interactive=False, mode=pm.AUTO)
+
+    assert decision.action == pm.DENY
+    assert "degraded permission policy" in decision.reason
+
+
 # --- drift: EXECUTION_TOOLS vs the real surface ---------------------------
 
 
