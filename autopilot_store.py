@@ -41,7 +41,11 @@ MAX_EVENT_CHARS = 1_000
 DEFAULT_LEASE_SECONDS = 3600
 
 _SCHEMA_LOCK = threading.RLock()
-_INITIALIZED_PATHS: set[str] = set()
+# Cache the database identity, not merely its pathname.  Backup/restore can
+# atomically replace ``autopilot.db`` while this process stays alive; treating
+# the replacement as initialized would then open an empty or older database
+# without running the idempotent schema bootstrap.
+_INITIALIZED_PATHS: dict[str, tuple[int, int]] = {}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS autopilot_runs (
@@ -115,12 +119,22 @@ def _json_text(value, limit=MAX_PLAN_CHARS) -> str:
     return text
 
 
+def _database_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_dev, stat.st_ino
+
+
 def _ensure_schema(path: str) -> None:
     resolved = str(Path(path).expanduser().resolve())
+    resolved_path = Path(resolved)
     with _SCHEMA_LOCK:
-        if resolved in _INITIALIZED_PATHS:
+        identity = _database_identity(resolved_path)
+        if identity is not None and _INITIALIZED_PATHS.get(resolved) == identity:
             return
-        Path(resolved).parent.mkdir(parents=True, exist_ok=True)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(resolved, timeout=5)
         try:
             conn.execute("PRAGMA busy_timeout=5000")
@@ -142,7 +156,10 @@ def _ensure_schema(path: str) -> None:
         if os.name != "nt":
             with contextlib.suppress(OSError):
                 os.chmod(resolved, 0o600)
-        _INITIALIZED_PATHS.add(resolved)
+        identity = _database_identity(resolved_path)
+        if identity is None:  # pragma: no cover - SQLite just committed it
+            raise RuntimeError("autopilot database disappeared during schema setup")
+        _INITIALIZED_PATHS[resolved] = identity
 
 
 def _connect() -> sqlite3.Connection:
