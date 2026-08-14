@@ -87,6 +87,32 @@ def test_reload_failure_keeps_old_module(monkeypatch, tmp_path):
         live_reload._ERRORS.pop(module_name, None)
 
 
+def test_reload_removal_drops_stale_module_symbols(monkeypatch, tmp_path):
+    """A security removal must not leave the retired callable live in memory."""
+    module_name = "live_reload_removed_symbol_mod"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text("KEEP = 1\nRETIRED_CHECK = lambda: 'old'\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        old = importlib.import_module(module_name)
+        live_reload.reload_changed_modules([module_name])
+
+        module_path.write_text("KEEP = 2\n", encoding="utf-8")
+        future = time.time() + 2
+        os.utime(module_path, (future, future))
+
+        refreshed = live_reload.reload_changed_modules([module_name])[module_name]
+        assert refreshed is not old
+        assert refreshed.KEEP == 2
+        assert not hasattr(refreshed, "RETIRED_CHECK")
+        assert sys.modules[module_name] is refreshed
+    finally:
+        sys.modules.pop(module_name, None)
+        live_reload._MTIMES.pop(module_name, None)
+        live_reload._SIGNATURES.pop(module_name, None)
+        live_reload._ERRORS.pop(module_name, None)
+
+
 def test_server_rebinds_reloaded_modules(monkeypatch):
     import server
 

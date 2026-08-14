@@ -6,6 +6,7 @@ to mutate active stack frames or native extensions. ``reloadable_mcp.py`` owns
 the separate atomic whole-server/tool-registry refresh boundary.
 """
 import importlib
+import importlib.util
 import os
 import sys
 import threading
@@ -114,7 +115,7 @@ def reload_changed_modules(module_names):
                 # so the bug was latent, but the returned set was wrong.
                 continue
             try:
-                module = importlib.reload(module)
+                module = _stage_module_reload(module)
             except Exception as exc:
                 _ERRORS[name] = "%s: %s" % (exc.__class__.__name__, exc)
                 changed[name] = module
@@ -125,6 +126,34 @@ def reload_changed_modules(module_names):
             _MTIMES[name] = refreshed_signature[0] / 1_000_000_000
             changed[name] = module
     return changed
+
+
+def _stage_module_reload(module):
+    """Execute replacement source before publishing a module to callers.
+
+    ``importlib.reload`` deliberately preserves a module dictionary.  That is
+    convenient for interactive sessions, but it makes source removal unsafe in
+    a long-running service: deleting a permission check or a deprecated helper
+    from a deployed file leaves the old symbol callable in the live module.
+
+    Build a fresh module object instead.  Its source executes without changing
+    ``sys.modules``; only a fully initialized candidate replaces every alias
+    that referred to the old object.  A syntax/import/runtime failure therefore
+    leaves the old module and all of its aliases exactly as they were.
+    """
+    spec = getattr(module, "__spec__", None)
+    loader = getattr(spec, "loader", None)
+    if spec is None or loader is None:
+        raise ImportError("module has no reloadable import specification")
+    candidate = importlib.util.module_from_spec(spec)
+    loader.exec_module(candidate)
+    # Compatibility aliases (for example ``workflow_store`` pointing at its
+    # packaged adapter) must move together.  Publish only after execution has
+    # succeeded so no alias observes a half-executed candidate.
+    aliases = [name for name, value in tuple(sys.modules.items()) if value is module]
+    for alias in aliases:
+        sys.modules[alias] = candidate
+    return candidate
 
 
 def snapshot(module_names):
