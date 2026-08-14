@@ -250,19 +250,25 @@ def test_start_sonder_accepts_a_listener_that_binds_at_wait_timeout(monkeypatch,
     assert "started pid=111" in out
 
 
-def test_local_server_log_tail_is_bounded_and_redacts_secret_assignments(monkeypatch, tmp_path):
+def test_local_server_log_tail_is_bounded_and_uses_shared_secret_redaction(monkeypatch, tmp_path):
     home = tmp_path / "state"
     run = home / "run"
     run.mkdir(parents=True)
     (run / "sonder_serve.log").write_text(
-        "Authorization: Bearer secret-value\napi_key=other-secret\nready\n",
+        "Authorization: Bearer secret-value\n"
+        "api_key='other secret with spaces'\n"
+        "connect postgres://admin:uri-password@db.internal/prod\n"
+        "issued eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJsb2NhbCJ9.signature\n"
+        "ready\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(sonder_serve.server.sonder_paths, "default_home", lambda: home)
 
     tail = sonder_serve._local_server_log_tail()
 
-    assert "secret-value" not in tail and "other-secret" not in tail
+    assert "secret-value" not in tail and "other secret with spaces" not in tail
+    assert "uri-password" not in tail
+    assert "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJsb2NhbCJ9.signature" not in tail
     assert "ready" in tail and "<redacted>" in tail
 
 

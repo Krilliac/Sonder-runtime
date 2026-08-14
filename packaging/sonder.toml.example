@@ -14,8 +14,10 @@ max_concurrent_requests = 4
 request_timeout_seconds = 300
 stream_idle_timeout_seconds = 60
 trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
-# Set true only when a TLS-terminating proxy fronts a non-loopback bind.
-tls_terminated_by_proxy = false
+# The packaged reverse-proxy topology terminates TLS before this loopback
+# listener. Keep this true there: it also disables the unauthenticated local
+# log dashboard, which a proxy must never publish to remote clients.
+tls_terminated_by_proxy = true
 
 [state]
 home = "/var/lib/sonder"
