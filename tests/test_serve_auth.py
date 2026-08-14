@@ -892,6 +892,55 @@ def test_system_status_uses_projected_activity_and_shared_feed(
         assert secret not in text
 
 
+def test_ordinary_hosted_account_cannot_read_global_operations_dashboard(monkeypatch):
+    """A normal served account must not learn another account's work/state."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(
+        ts, "_auth_account",
+        lambda _header: {"username": "ordinary", "role": "user"},
+    )
+    forbidden = []
+
+    def global_only(name):
+        def reject(*_args, **_kwargs):
+            forbidden.append(name)
+            raise AssertionError("ordinary account read global " + name)
+        return reject
+
+    monkeypatch.setattr(ts.server, "status", global_only("status"))
+    monkeypatch.setattr(ts.server, "sonder_stats", global_only("stats"))
+    monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", global_only("agents"))
+    monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", global_only("autopilot"))
+    monkeypatch.setattr(ts.server.activity_tracker, "snapshot", global_only("activity"))
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {"code": "local-code"})
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "GET",
+            "/v1/sonder/status",
+            headers={"Authorization": "Bearer ordinary-token"},
+        )
+
+    payload = json.loads(body)
+    assert status == 200
+    assert forbidden == []
+    assert payload["status"] == "restricted"
+    assert payload["account"] == {"username": "ordinary", "role": "user"}
+    assert payload["models"] == [
+        {"id": "sonder", "owned_by": "local"},
+        {"id": "code", "owned_by": "local"},
+    ]
+    assert payload["operational"]["available"] is False
+    for key in (
+        "stats", "agents", "activity", "execution", "autopilot", "db_path",
+        "state_home", "learning_health", "runtime_policy",
+    ):
+        assert key not in payload
+
+
 @pytest.mark.parametrize(("messages", "message"), [
     ([None], "messages[0] must be an object"),
     (["junk"], "messages[0] must be an object"),
