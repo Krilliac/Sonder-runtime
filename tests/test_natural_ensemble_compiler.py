@@ -67,7 +67,7 @@ def test_dispatch_rebases_to_host_project_and_refuses_rootless_calls(monkeypatch
     called = {}
     monkeypatch.setattr(server, "_agent_permission_gate_error", lambda _name: "")
     monkeypatch.setattr(
-        server, "ensemble_codegen_build_loop",
+        server, "codegen_build_loop",
         lambda **kwargs: called.update(kwargs) or "ok",
     )
     out = server._agent_dispatch(
@@ -80,6 +80,23 @@ def test_dispatch_rebases_to_host_project_and_refuses_rootless_calls(monkeypatch
     # _agent_dispatch receives only host-scoped args from _agent_dispatch_observed
     # in production; this direct call keeps its supplied project_dir unchanged.
     assert called["project_dir"] == "."
+    assert called["extra_roots"] == str(tmp_path)
+    assert called["tiers"] == "code,reasoning"
+    assert called["attempts"] == 2
+
+
+def test_public_wrapper_never_accepts_a_model_supplied_project_grant(monkeypatch):
+    called = {}
+    monkeypatch.setattr(
+        server, "codegen_build_loop",
+        lambda **kwargs: called.update(kwargs) or "bounded result",
+    )
+
+    assert server.ensemble_codegen_build_loop(
+        project_dir="C:/project", files_json='{"main.py": "fix it"}',
+        build_program="python",
+    ) == "bounded result"
+    assert called["extra_roots"] == ""
 
 
 def test_project_scope_rebases_the_wrapper_directory(tmp_path):
