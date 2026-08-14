@@ -78,6 +78,17 @@ public static class Program
         return p?.GetValue(instance);
     }
 
+    /// <summary>Set public mutable state whether a future implementation uses
+    /// a field or a property.</summary>
+    private static bool SetMember(object instance, Type type, string name, object value)
+    {
+        FieldInfo? f = type.GetField(name, BindingFlags.Public | BindingFlags.Instance);
+        if (f != null) { f.SetValue(instance, value); return true; }
+        PropertyInfo? p = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+        if (p?.CanWrite == true) { p.SetValue(instance, value); return true; }
+        return false;
+    }
+
     private static void VerifyClassKit(Type[] types)
     {
         Console.WriteLine("--- ClassKit ---");
@@ -253,6 +264,38 @@ public static class Program
 
         int hp = Convert.ToInt32(Member(inst, comb, "Health") ?? 0);
         Check(hp > 0, "constructor applies the kit (Health > 0)", $"HP {hp}");
+
+        MethodInfo? fire = comb.GetMethod("TryFire");
+        MethodInfo? reload = comb.GetMethod("TryReload");
+        if (fire == null || reload == null)
+        {
+            Check(false, "TryFire/TryReload weapon controls exist");
+        }
+        else
+        {
+            try
+            {
+                int startingAmmo = Convert.ToInt32(Member(inst, comb, "Ammo") ?? 0);
+                object? fired = fire.Invoke(inst, null);
+                int afterShot = Convert.ToInt32(Member(inst, comb, "Ammo") ?? -1);
+                Check(fired is true && startingAmmo > 0 && afterShot == startingAmmo - 1,
+                    "TryFire spends exactly one round", $"{startingAmmo} -> {afterShot}");
+
+                object? blocked = fire.Invoke(inst, null);
+                Check(blocked is false && Convert.ToInt32(Member(inst, comb, "Ammo") ?? -1) == afterShot,
+                    "TryFire respects the fire cooldown");
+
+                bool emptied = SetMember(inst, comb, "Ammo", 0) && SetMember(inst, comb, "FireCooldown", 0f);
+                object? reloaded = emptied ? reload.Invoke(inst, null) : null;
+                int afterReload = Convert.ToInt32(Member(inst, comb, "Ammo") ?? -1);
+                Check(reloaded is true && afterReload == startingAmmo,
+                    "TryReload refills an empty living combatant", $"ammo {afterReload}");
+                Check(reload.Invoke(inst, null) is false,
+                    "TryReload does not refill an already-full weapon");
+            }
+            catch (Exception e)
+            { Check(false, "weapon controls run", e.InnerException?.Message ?? e.Message); }
+        }
 
         MethodInfo? dmg = comb.GetMethod("TakeDamage");
         if (dmg != null)
