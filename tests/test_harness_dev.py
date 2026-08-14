@@ -43,6 +43,9 @@ def test_child_environment_removes_runtime_secrets_and_compiler_overrides(monkey
     """Repository-controlled developer commands must not receive host gates."""
     monkeypatch.setenv("SONDER_API_KEY", "api-secret-for-child")
     monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "approval-secret-for-child")
+    monkeypatch.setenv("SONDER_FILE_BYPASS", "1")
+    monkeypatch.setenv("SONDER_ISOLATED_APPROVAL_CODE", "isolated-execute-secret")
+    monkeypatch.setenv("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "isolated-write-secret")
     monkeypatch.setenv("CC", "unexpected-compiler")
     monkeypatch.setenv("CXX", "unexpected-cxx")
     monkeypatch.setenv("SAFE_BUILD_FLAG", "preserved")
@@ -51,6 +54,9 @@ def test_child_environment_removes_runtime_secrets_and_compiler_overrides(monkey
 
     assert "SONDER_API_KEY" not in env
     assert "SONDER_FILE_APPROVAL_CODE" not in env
+    assert "SONDER_FILE_BYPASS" not in env
+    assert "SONDER_ISOLATED_APPROVAL_CODE" not in env
+    assert "SONDER_ISOLATED_WRITE_APPROVAL_CODE" not in env
     assert "CC" not in env
     assert "CXX" not in env
     assert env["SAFE_BUILD_FLAG"] == "preserved"
