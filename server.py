@@ -20490,7 +20490,12 @@ def agent(
         )
     response = activity_tracker.current() if nested else activity_tracker.latest()
     if nested and response:
-        response["status"] = "complete"
+        # The inner agent may have deliberately downgraded the shared outer
+        # response to unverified (or terminally failed/cancelled). Completing
+        # the nested span must not overwrite that host-observed outcome merely
+        # to format an end report.
+        if response.get("status") in ("", "running"):
+            response["status"] = "complete"
         response["elapsed_ms"] = int((time.time() - response["started_at"]) * 1000)
     return "%s\n\n%s\n\n%s" % (
         result.rstrip(),

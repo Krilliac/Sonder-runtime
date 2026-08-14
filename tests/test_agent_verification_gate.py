@@ -143,6 +143,20 @@ def test_unbacked_completion_downgrades_the_activity_status(monkeypatch):
     assert any(event["kind"] == "response_unverified" for event in latest["events"])
 
 
+def test_nested_agent_report_preserves_an_unverified_outer_response(monkeypatch):
+    activity_tracker.reset_for_tests()
+
+    def unverified_result(_prompt, **_kwargs):
+        activity_tracker.set_response_status("unverified", "verification missing")
+        return "host-unverified result"
+
+    monkeypatch.setattr(server, "_agent_impl", unverified_result)
+    with activity_tracker.response_span("work", "outer request"):
+        report = server.agent("nested work", checklist=False)
+
+    assert "result: unverified" in report
+
+
 @pytest.mark.parametrize("counts", [UNMEASURED_RECORD, POOR_RECORD])
 def test_the_standing_quotes_the_measured_reason_verbatim(monkeypatch, counts):
     """Measured, never generated: the words are a projection of the counts."""
