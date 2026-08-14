@@ -246,13 +246,43 @@ def test_listener_pid_parses_windows_netstat(monkeypatch):
     assert H._listener_pid("127.0.0.1", 11435) == 4567
 
 
+def test_server_pid_port_match_rejects_another_managed_endpoint(monkeypatch):
+    script = H.repo_root() / "sonder_serve.py"
+    monkeypatch.setattr(
+        H, "_pid_command_line", lambda pid: 'python "%s" 11436' % script,
+    )
+
+    assert H._is_sonder_server_for_port(4567, 11435) is False
+    assert H._is_sonder_server_for_port(4567, 11436) is True
+
+
+def test_stop_does_not_kill_recorded_server_on_another_port(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    H.pid_file("sonder_serve").write_text("4567", encoding="ascii")
+    monkeypatch.setattr(H, "pid_alive", lambda pid: pid == 4567)
+    monkeypatch.setattr(H, "_listener_pids", lambda host, port: [])
+    monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: False)
+    monkeypatch.setattr(
+        H.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("another port must not be terminated")
+        ),
+    )
+
+    assert H.stop_pid("sonder_serve", port=11435) == (
+        "sonder_serve: recorded pid 4567 is not for port 11435; not stopped"
+    )
+    assert not H.pid_file("sonder_serve").exists()
+
+
 def test_managed_pid_repairs_stale_venv_launcher_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
     H.pid_file("sonder_serve").write_text("111", encoding="ascii")
     monkeypatch.setattr(H, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(H, "port_open", lambda host, port: True)
     monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
-    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: pid == 222)
+    monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: pid == 222)
 
     assert H._managed_pid("sonder_serve") == 222
     assert H.pid_file("sonder_serve").read_text(encoding="ascii") == "222"
@@ -265,7 +295,7 @@ def test_start_sonder_records_real_listener_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "python_exe", lambda: "python")
     monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
     monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
-    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: True)
+    monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: True)
 
     out = H.start_sonder("127.0.0.1", 11435)
 
