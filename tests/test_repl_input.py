@@ -1,9 +1,11 @@
+import io
 import re
 
 import pytest
 
 import sonder_headless
 import sonder_repl
+import command_catalog
 
 
 def test_piped_utf8_bom_does_not_hide_slash_command():
@@ -21,6 +23,29 @@ def test_completion_timing_uses_a_compact_elapsed_display(monkeypatch):
 
     monkeypatch.setattr(sonder_repl.time, "monotonic", lambda: 14.5)
     assert sonder_repl._completion_timing(12.0) == "Sonder completed in 2.50s"
+
+
+def test_clear_terminal_discards_scrollback_without_touching_runtime_state():
+    stream = io.StringIO()
+
+    assert sonder_repl._clear_terminal_scrollback(stream) is True
+    assert stream.getvalue() == "\x1b[3J\x1b[2J\x1b[H"
+    assert command_catalog._CATEGORY_BY_SLASH["/clear"] == "basic"
+
+
+def test_native_clear_command_uses_terminal_clear_without_a_model_turn(monkeypatch):
+    lines = iter(("/clear", "/exit"))
+    calls = []
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_clear_terminal_scrollback", lambda: calls.append("clear"))
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: pytest.fail("chat should not run"))
+
+    sonder_repl.main()
+
+    assert calls == ["clear"]
 
 
 def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkeypatch, capsys):
