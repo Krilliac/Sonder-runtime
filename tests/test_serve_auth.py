@@ -1468,6 +1468,31 @@ def test_stream_exposes_same_elapsed_header_as_terminal_chunk():
     assert body.endswith("data: [DONE]\n\n")
 
 
+def test_stream_swallows_a_client_disconnect_during_headers():
+    class StreamProbe:
+        def __init__(self):
+            self.headers = {}
+            self.close_connection = False
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            assert status == 200
+
+        def _cors(self):
+            return None
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            raise ConnectionResetError("client closed the socket")
+
+    probe = StreamProbe()
+    assert ts.Handler._send_stream(probe, "hello", "sonder") is False
+    assert probe.close_connection is True
+    assert probe.wfile.getvalue() == b""
+
+
 def test_json_payload_swallows_a_client_disconnect_during_headers():
     class JsonProbe:
         def __init__(self):
