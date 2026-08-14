@@ -114,6 +114,23 @@ def test_arena_verification_build_output_is_ignored() -> None:
     assert "examples/codegen-arena-shooter/Verify/obj/" in result.stdout
 
 
+def test_arena_skeleton_generated_project_is_ignored() -> None:
+    """The documented baseline command must not dirty a source checkout."""
+    result = subprocess.run(
+        [
+            "git", "-C", str(ROOT), "check-ignore", "-v",
+            "examples/codegen-arena-shooter/FpsGame_Skeleton/FpsGame_Skeleton.csproj",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "examples/codegen-arena-shooter/FpsGame_Skeleton/" in result.stdout
+
+
 def test_combatant_weapon_controls_are_host_owned_and_prompted() -> None:
     """Weapon invariants must not be re-derived by a generated frame body."""
     combatant = skeleton.by_name("Combatant.cs")

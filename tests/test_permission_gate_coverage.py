@@ -166,6 +166,7 @@ _DISPLAY_ONLY_BRANCHES = {
     "/persona": "chooses the persona; reads personas.names()",
     "/route": "reports which tier would answer (tier_router.route); routes nothing",
     "/new": "starts a new session id (memory_store.new_id)",
+    "/clear": "terminal presentation clear only; no runtime/tool mutation",
     "/sessions": "lists past sessions (memory_store.list_sessions)",
     "/resume": "looks a session up (memory_store.find_session)",
     "/facts": "prints stored facts",

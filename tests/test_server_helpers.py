@@ -3228,10 +3228,21 @@ def test_improvement_report_never_shows_the_blended_rate_alone():
     text = _improvement_report_text()
     assert "caller-judged: 52.7% of 186 reviewed" in text
     assert "autograded: 97.3% of 6645" in text
+    assert "legacy/unknown provenance: 0" in text
     # The blended number may appear, but only alongside its two components.
     blended_line = [ln for ln in text.split("\n") if "96.1" in ln]
     assert blended_line, "blended rate should still be reported"
     assert "caller-judged" in blended_line[0]
+
+
+def test_improvement_report_labels_legacy_outcomes_as_unknown_provenance():
+    text = _improvement_report_text(
+        outcomes=9451, autograded_outcomes=0, unknown_source_outcomes=9450,
+        acceptance_percent=None, acceptance_basis="unmeasured",
+    )
+
+    assert "legacy/unknown provenance: 9450" in text
+    assert "caller-judged: unmeasured" in text
 
 
 def test_improvement_report_flags_a_low_caller_judged_rate(monkeypatch, tmp_path):
