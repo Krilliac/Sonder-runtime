@@ -28,7 +28,9 @@ def test_vision_analysis_sends_guarded_png_to_bound_local_model(monkeypatch, tmp
     monkeypatch.setattr(server.file_ops, "require_read_access", lambda *_args, **_kwargs: image)
     monkeypatch.setattr(
         server.workbench, "image_inspect",
-        lambda *_args, **_kwargs: {"format": "PNG", "bytes": image.stat().st_size},
+        lambda *_args, **_kwargs: {
+            "format": "PNG", "bytes": image.stat().st_size, "width": 1, "height": 1,
+        },
     )
     seen = {}
 
@@ -97,6 +99,37 @@ def test_vision_analysis_refuses_small_operator_context_before_image_read(monkey
 
     with pytest.raises(server.ModelCallError, match="contextsize 4k"):
         server._vision_analyze_impl(str(image), "describe")
+
+
+def test_vision_analysis_refuses_oversized_question_before_model_or_image_read(monkeypatch, tmp_path):
+    image = _png(tmp_path)
+    monkeypatch.setitem(server.TIERS, "vision", "qwen2.5vl:3b")
+    monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: True)
+    monkeypatch.setattr(
+        server.file_ops, "require_read_access",
+        lambda *_args, **_kwargs: pytest.fail("image must not be read"),
+    )
+
+    with pytest.raises(server.ModelCallError, match="question exceeds"):
+        server._vision_analyze_impl(str(image), "q" * (server._MAX_VISION_PROMPT_CHARS + 1))
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [
+        {"width": 9000, "height": 1},
+        {"width": 5000, "height": 5000},
+        {"width": 0, "height": 1},
+    ],
+)
+def test_vision_analysis_refuses_pathological_dimensions_before_read(monkeypatch, tmp_path, dimensions):
+    image = _png(tmp_path)
+    monkeypatch.setattr(server.file_ops, "require_read_access", lambda *_args, **_kwargs: image)
+    metadata = {"format": "PNG", "bytes": image.stat().st_size, **dimensions}
+    monkeypatch.setattr(server.workbench, "image_inspect", lambda *_args, **_kwargs: metadata)
+
+    with pytest.raises(ValueError, match="(pixels|dimensions)"):
+        server._vision_input(str(image))
 
 
 def test_vision_analysis_uses_show_for_sparse_catalog_capability(monkeypatch):

@@ -12666,6 +12666,17 @@ def image_inspect(
 # one REPL/MCP request into a huge base64 prompt.
 _MAX_VISION_INPUT_BYTES = 8 * 1024 * 1024
 _VISION_INPUT_FORMATS = frozenset({"PNG", "JPEG", "BMP"})
+# File size alone does not bound decode or vision-encoder work: a highly
+# compressed raster can declare a vast pixel matrix.  Keep the direct local
+# tool within a predictable single-request budget before passing bytes to
+# Ollama.  The edge check also rules out pathological very-long images.
+_MAX_VISION_INPUT_PIXELS = 16_000_000
+_MAX_VISION_INPUT_EDGE = 8192
+# ``vision_analyze`` reserves a 1k completion inside the configured native
+# context.  A bounded question keeps a caller from displacing the image and
+# system contract with arbitrary text; reject rather than silently truncate a
+# question whose meaning could change.
+_MAX_VISION_PROMPT_CHARS = 4096
 # Context-policy's ``4k`` notation is decimal (4,000), and that is the
 # operator-facing setting this guard tells users to select.
 _MIN_VISION_CONTEXT = 4000
@@ -12764,6 +12775,18 @@ def _vision_input(path, *, token="", approval="", extra_roots=""):
         raise ValueError(
             "vision input exceeds %d bytes" % _MAX_VISION_INPUT_BYTES
         )
+    width, height = metadata.get("width"), metadata.get("height")
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        raise ValueError("vision input has invalid image dimensions")
+    if (
+        width > _MAX_VISION_INPUT_EDGE
+        or height > _MAX_VISION_INPUT_EDGE
+        or width * height > _MAX_VISION_INPUT_PIXELS
+    ):
+        raise ValueError(
+            "vision input exceeds %d pixels or %d pixels per edge"
+            % (_MAX_VISION_INPUT_PIXELS, _MAX_VISION_INPUT_EDGE)
+        )
     try:
         raw = resolved.read_bytes()
     except OSError as exc:
@@ -12786,6 +12809,11 @@ def _vision_analyze_impl(
     question = str(prompt or "").strip()
     if not question:
         raise ModelCallError("configuration", "a question about the image is required")
+    if len(question) > _MAX_VISION_PROMPT_CHARS:
+        raise ModelCallError(
+            "configuration",
+            "vision analysis question exceeds %d characters" % _MAX_VISION_PROMPT_CHARS,
+        )
     model = _vision_local_target()
     num_ctx = _vision_context_window()
     _resolved, _metadata, encoded = _vision_input(
