@@ -57,6 +57,61 @@ def test_run_lifecycle_persists_plan_events_and_exact_counts():
     assert any(event["kind"] == "test" for event in autopilot_store.events(run["id"]))
 
 
+def test_completed_status_requires_durable_host_validation_receipts():
+    run = autopilot_store.create_run("do not complete from prose alone")
+    owner = "owner-a"
+    autopilot_store.claim_run(run["id"], owner, owner_pid=os.getpid())
+
+    # A public repository caller used to be able to bypass the controller and
+    # publish this terminal state with no plan or host evidence at all.
+    assert autopilot_store.finish_run(run["id"], owner, "completed") is None
+    stored = autopilot_store.get_run(run["id"])
+    assert stored["status"] == "planning"
+    assert autopilot_store.events(run["id"])[-1]["kind"] == "completion_refused"
+
+    plan = [{
+        "id": "task-01", "title": "Claimed validation", "kind": "validate",
+        "instruction": "run check", "status": "passed", "attempts": 1,
+        "output": "PASS", "error": "", "history": [],
+        # Model text is not a host receipt and must not make completion legal.
+        "host_receipt": {},
+    }]
+    autopilot_store.save_progress(
+        run["id"], owner, plan=plan, criteria=["the check passes"],
+    )
+    assert autopilot_store.finish_run(run["id"], owner, "completed") is None
+    assert autopilot_store.get_run(run["id"])["status"] == "planning"
+
+    plan[0]["host_receipt"] = {
+        "tools": ["workspace_run"],
+        "mutation_observed": False,
+        "validation_attempted": True,
+        "validation_passed": True,
+    }
+    autopilot_store.save_progress(run["id"], owner, plan=plan)
+    completed = autopilot_store.finish_run(run["id"], owner, "completed")
+    assert completed["status"] == "completed"
+    assert autopilot_store.events(run["id"])[-1]["kind"] == "completed"
+
+
+def test_terminal_event_and_status_roll_back_together_if_event_write_fails(monkeypatch):
+    run = autopilot_store.create_run("event ordering survives a write fault")
+    owner = "owner-a"
+    autopilot_store.claim_run(run["id"], owner, owner_pid=os.getpid())
+    before = autopilot_store.events(run["id"])
+
+    def fail_event(*_args, **_kwargs):
+        raise sqlite3.OperationalError("injected event write failure")
+
+    monkeypatch.setattr(autopilot_store, "_event", fail_event)
+    with pytest.raises(sqlite3.OperationalError, match="event write failure"):
+        autopilot_store.finish_run(run["id"], owner, "paused")
+
+    stored = autopilot_store.get_run(run["id"])
+    assert stored["status"] == "planning"
+    assert autopilot_store.events(run["id"]) == before
+
+
 def test_active_pause_and_cancel_are_cooperative():
     first = autopilot_store.create_run("pause me")
     autopilot_store.claim_run(first["id"], "owner", owner_pid=os.getpid())
