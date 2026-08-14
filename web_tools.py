@@ -639,7 +639,13 @@ def _search_relevance(query, results):
         return 0, 0
     best = 0
     for row in results:
-        text = "%s %s" % (row.get("title", ""), row.get("url", ""))
+        # Providers preserve an extracted snippet precisely because a concise
+        # title/URL may not contain the terms that make the result relevant.
+        # Score that bounded result field too; it is returned to the caller and
+        # is not fetched or interpreted as a control instruction here.
+        text = "%s %s %s" % (
+            row.get("title", ""), row.get("url", ""), row.get("snippet", ""),
+        )
         words = set(re.findall(r"[a-z0-9]+", text.lower()))
         best = max(best, len(terms & words))
     return best, min(2, len(terms))
@@ -774,8 +780,16 @@ def web_search(query, limit=5, timeout=10):
                     )
                 )
                 break
-    if best_results:
+    # Do not turn a weak provider fallback into a plausible-looking answer.
+    # In particular, a local-intent query such as "computer repair shops near
+    # 67215" can overlap generic pages on just "computer". Returning those
+    # pages is worse than a typed no-result: the agent may claim it searched
+    # for nearby businesses when it did not obtain any relevant evidence.
+    _best, required = _search_relevance(query, best_results)
+    if best_results and best_relevance >= required:
         return best_results
+    if best_results:
+        raise RuntimeError("search providers returned no sufficiently relevant results")
     if failures and len(failures) == len(endpoints):
         raise RuntimeError("search providers unavailable: %s" % ", ".join(failures))
     return []

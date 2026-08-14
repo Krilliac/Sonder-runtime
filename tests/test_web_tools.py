@@ -106,6 +106,19 @@ def test_search_rss_parser_returns_direct_links_and_plain_snippets():
     }]
 
 
+def test_search_relevance_uses_a_provider_snippet():
+    score, required = web_tools._search_relevance(
+        "What is the capital of France?",
+        [{
+            "title": "Paris",
+            "url": "https://en.wikipedia.org/wiki/Paris",
+            "snippet": "Paris is the capital of France.",
+        }],
+    )
+
+    assert score >= required
+
+
 def test_web_search_retries_distinctive_query_after_blocks_and_irrelevant_rows(
     monkeypatch,
 ):
@@ -283,6 +296,15 @@ def test_web_tools_can_be_disabled(monkeypatch):
     monkeypatch.setenv("SONDER_WEB_TOOLS", "0")
     with pytest.raises(RuntimeError):
         web_tools.web_search("x")
+
+
+def test_web_search_rejects_weak_generic_fallback_for_local_intent(monkeypatch):
+    """One matching word is not evidence for a nearby-service query."""
+    generic = b'<a class="result__a" href="https://example.com/computer">Computer</a>'
+    monkeypatch.setattr(web_tools, "_request", lambda *_args, **_kwargs: (generic, "text/html"))
+
+    with pytest.raises(RuntimeError, match="sufficiently relevant"):
+        web_tools.web_search("computer repair shops near 67215")
 
 
 def test_format_search_results_empty():
