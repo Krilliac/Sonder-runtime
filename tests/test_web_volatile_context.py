@@ -439,6 +439,8 @@ def test_web_search_widget_is_still_a_work_request(monkeypatch):
     "Search the web, then patch the code",
     "Search the web; afterwards edit README.md",
     "Search the web and use what you find to update src/private.ps1",
+    "Search the web for the logo and download it to assets/logo.png",
+    "Search the web for an example and copy it into README.md",
 ])
 def test_compound_web_search_work_stays_on_work_path(monkeypatch, prompt):
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)

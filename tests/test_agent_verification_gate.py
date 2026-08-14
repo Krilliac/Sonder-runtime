@@ -34,6 +34,7 @@ import os
 
 import pytest
 
+import activity_tracker
 import autopilot_controller
 import calibration
 import server
@@ -127,6 +128,33 @@ def test_an_unbacked_completion_claim_is_reported_unverified(monkeypatch, counts
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
     assert "the work is complete" in out
+
+
+def test_unbacked_completion_downgrades_the_activity_status(monkeypatch):
+    _record(monkeypatch, UNMEASURED_RECORD)
+    activity_tracker.reset_for_tests()
+
+    with activity_tracker.response_span("agent:test", "do the work"):
+        out = _run(monkeypatch, [FINAL])
+
+    assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
+    latest = activity_tracker.latest()
+    assert latest["status"] == "unverified"
+    assert any(event["kind"] == "response_unverified" for event in latest["events"])
+
+
+def test_nested_agent_report_preserves_an_unverified_outer_response(monkeypatch):
+    activity_tracker.reset_for_tests()
+
+    def unverified_result(_prompt, **_kwargs):
+        activity_tracker.set_response_status("unverified", "verification missing")
+        return "host-unverified result"
+
+    monkeypatch.setattr(server, "_agent_impl", unverified_result)
+    with activity_tracker.response_span("work", "outer request"):
+        report = server.agent("nested work", checklist=False)
+
+    assert "result: unverified" in report
 
 
 @pytest.mark.parametrize("counts", [UNMEASURED_RECORD, POOR_RECORD])

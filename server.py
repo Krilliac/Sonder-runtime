@@ -19658,6 +19658,10 @@ def _agent_turn(
             final = "%s this run claimed completion without %s - %s\n\n%s" % (
                 _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
             )
+            # The activity/end-report status must agree with the host fence.
+            # Otherwise users see ``result: complete`` directly above this
+            # warning and the model's claim wins the most visible field.
+            activity_tracker.set_response_status("unverified", "agent completion lacks required verification")
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
@@ -20486,7 +20490,12 @@ def agent(
         )
     response = activity_tracker.current() if nested else activity_tracker.latest()
     if nested and response:
-        response["status"] = "complete"
+        # The inner agent may have deliberately downgraded the shared outer
+        # response to unverified (or terminally failed/cancelled). Completing
+        # the nested span must not overwrite that host-observed outcome merely
+        # to format an end report.
+        if response.get("status") in ("", "running"):
+            response["status"] = "complete"
         response["elapsed_ms"] = int((time.time() - response["started_at"]) * 1000)
     return "%s\n\n%s\n\n%s" % (
         result.rstrip(),

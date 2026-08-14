@@ -20,6 +20,7 @@ import grounding
 import code_runner
 import training_tasks
 import intents
+import web_intents
 import feedback
 import personas
 import live_reload
@@ -2005,7 +2006,12 @@ def main():
         # Concrete workspace requests run through the guarded agent so the
         # answer is backed by real inspection, file changes, validation, and a
         # persistent checklist instead of being a prose-only suggestion.
-        if intents.classify_work(line):
+        # An explicit public-web request is not workspace work.  The shared
+        # chat boundary already gives it a tightly scoped research agent, but
+        # the REPL used to intercept it first and send it to the general
+        # workbench loop.  That wasted tool calls and could produce a
+        # checklist-backed "complete" response with no relevant sources.
+        if intents.classify_work(line) and not web_intents.explicit_search(line):
             started_at = time.monotonic()
             indicator = _begin_chat_turn("Sonder work")
             try:
