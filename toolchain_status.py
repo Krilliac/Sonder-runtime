@@ -9,6 +9,8 @@ or caller-controlled arguments.
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 
 import environment_probe
 import sonder_logging
@@ -57,14 +59,83 @@ def _available_path(name: str, refresh: bool) -> str:
             or "")
 
 
-def _safe_output(completed: subprocess.CompletedProcess[str]) -> str:
+def _safe_output(text: str) -> str:
     # Version commands should be tiny, but retain a hard presentation bound and
     # redact any accidental credentials emitted by a local wrapper.
-    text = (completed.stdout or completed.stderr or "").strip()
+    text = (text or "").strip()
     text = sonder_logging.Redactor().redact(text)
     if len(text) > MAX_OUTPUT_CHARS:
         return text[:MAX_OUTPUT_CHARS] + "\n[output truncated]"
     return text
+
+
+def _run_bounded(argv: list[str]) -> tuple[str, str]:
+    """Run fixed argv while retaining at most one shared pipe-output budget."""
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=sonder_logging.child_environment(),
+        shell=False,
+    )
+    chunks: list[str] = []
+    size = 0
+    lock = threading.Lock()
+    overflow = threading.Event()
+
+    def drain(stream):
+        nonlocal size
+        try:
+            while True:
+                part = stream.read(1024)
+                if not part:
+                    return
+                with lock:
+                    remaining = MAX_OUTPUT_CHARS - size
+                    if remaining <= 0:
+                        overflow.set()
+                    else:
+                        chunks.append(part[:remaining])
+                        size += min(len(part), remaining)
+                        if len(part) > remaining:
+                            overflow.set()
+        finally:
+            stream.close()
+
+    readers = [threading.Thread(target=drain, args=(stream,), daemon=True)
+               for stream in (proc.stdout, proc.stderr)]
+    for reader in readers:
+        reader.start()
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    outcome = "ok"
+    try:
+        while proc.poll() is None:
+            if overflow.is_set():
+                outcome = "output_limit"
+                proc.kill()
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                outcome = "timeout"
+                proc.kill()
+                break
+            time.sleep(min(0.02, remaining))
+        proc.wait(timeout=1)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=1)
+        for reader in readers:
+            reader.join(timeout=1)
+    if overflow.is_set():
+        outcome = "output_limit"
+    elif outcome == "ok" and proc.returncode != 0:
+        outcome = "error"
+    return outcome, "".join(chunks)
 
 
 def status(name: str, refresh: bool = False) -> dict[str, object]:
@@ -80,24 +151,18 @@ def status(name: str, refresh: bool = False) -> dict[str, object]:
     if not path:
         return {"ok": False, "tool": tool, "error": "tool is not available on this host"}
     try:
-        completed = subprocess.run(
-            [path, *_VERSION_ARGUMENTS[tool]],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=TIMEOUT_SECONDS,
-            shell=False,
-            env=sonder_logging.child_environment(),
-        )
+        outcome, output = _run_bounded([path, *_VERSION_ARGUMENTS[tool]])
     except subprocess.TimeoutExpired:
         return {"ok": False, "tool": tool, "error": "status probe timed out"}
     except OSError:
         return {"ok": False, "tool": tool, "error": "status probe could not start"}
-    output = _safe_output(completed)
-    if completed.returncode != 0:
+    if outcome == "timeout":
+        return {"ok": False, "tool": tool, "error": "status probe timed out"}
+    if outcome == "output_limit":
+        return {"ok": False, "tool": tool, "error": "status probe output exceeded limit"}
+    if outcome != "ok":
         # A broken or wrapped executable controls stderr.  Do not copy its
         # arbitrary failure text into activity history; the exit verdict is
         # enough for an agent to choose a different safe path.
         return {"ok": False, "tool": tool, "error": "status probe failed"}
-    return {"ok": True, "tool": tool, "output": output}
+    return {"ok": True, "tool": tool, "output": _safe_output(output)}

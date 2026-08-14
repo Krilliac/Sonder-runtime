@@ -1,4 +1,5 @@
 import subprocess
+import io
 
 import environment_probe
 import server
@@ -13,18 +14,27 @@ def test_status_uses_only_discovered_path_and_fixed_arguments(monkeypatch):
     )
     seen = {}
 
-    def fake_run(argv, **kwargs):
-        seen["argv"] = argv
-        seen["kwargs"] = kwargs
-        return subprocess.CompletedProcess(argv, 0, stdout="cargo 9.9.9\n", stderr="")
+    class FakeProcess:
+        def __init__(self, argv, **kwargs):
+            seen["argv"] = argv
+            seen["kwargs"] = kwargs
+            self.stdout = io.StringIO("cargo 9.9.9\n")
+            self.stderr = io.StringIO("")
+            self._returncode = 0
 
-    monkeypatch.setattr(toolchain_status.subprocess, "run", fake_run)
+        def poll(self): return self._returncode
+        def wait(self, timeout=None): return self._returncode
+        def kill(self): self._returncode = -9
+        @property
+        def returncode(self): return self._returncode
+
+    monkeypatch.setattr(toolchain_status.subprocess, "Popen", lambda argv, **kwargs: FakeProcess(argv, **kwargs))
     assert toolchain_status.status("cargo") == {
         "ok": True, "tool": "cargo", "output": "cargo 9.9.9"
     }
     assert seen["argv"] == ["C:\\tools\\cargo.exe", "--version"]
     assert seen["kwargs"]["shell"] is False
-    assert seen["kwargs"]["timeout"] == toolchain_status.TIMEOUT_SECONDS
+    assert "timeout" not in seen["kwargs"]
     assert seen["kwargs"]["stdin"] is subprocess.DEVNULL
 
 
@@ -46,14 +56,34 @@ def test_status_omits_untrusted_failure_output(monkeypatch):
         "probe",
         lambda refresh=False: {"toolchains": {"cargo": "C:\\tools\\cargo.exe"}, "specialist_tools": {}},
     )
-    monkeypatch.setattr(
-        toolchain_status.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, stdout="", stderr="SECRET=not-returned"),
-    )
+    monkeypatch.setattr(toolchain_status, "_run_bounded", lambda argv: ("error", "SECRET=not-returned"))
     assert toolchain_status.status("cargo") == {
         "ok": False, "tool": "cargo", "error": "status probe failed"
     }
+
+
+def test_bounded_capture_terminates_overproducing_probe(monkeypatch):
+    class LoudProcess:
+        def __init__(self):
+            self.stdout = io.StringIO("x" * (toolchain_status.MAX_OUTPUT_CHARS + 1))
+            self.stderr = io.StringIO("")
+            self._returncode = None
+            self.killed = False
+
+        def poll(self): return self._returncode
+        def wait(self, timeout=None): return self._returncode
+        def kill(self):
+            self.killed = True
+            self._returncode = -9
+        @property
+        def returncode(self): return self._returncode
+
+    proc = LoudProcess()
+    monkeypatch.setattr(toolchain_status.subprocess, "Popen", lambda *args, **kwargs: proc)
+    outcome, output = toolchain_status._run_bounded(["cargo", "--version"])
+    assert outcome == "output_limit"
+    assert len(output) == toolchain_status.MAX_OUTPUT_CHARS
+    assert proc.killed
 
 
 def test_server_toolchain_status_records_only_safe_result(monkeypatch):
