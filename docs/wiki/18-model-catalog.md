@@ -108,6 +108,17 @@ Abliterated variants of any of the above trade the model's built-in refusals for
 fewer false-refusals on legitimate dual-use work; Sonder's host guardrails are
 enforced independently of the model ([Security Model](09-security-model.md)).
 
+Some community tags use **Heretic** in the name. That is a publisher label, not
+a standardized model capability or safety specification: inspect the published
+base model, Modelfile, quantization, license, and behavior before adopting one.
+**Abliterated** usually describes a model whose refusal/alignment behavior was
+modified, but the exact method and effect are likewise publisher-specific. In
+both cases, downloading a tag can install the publisher's weights together
+with its Modelfile-defined template, system prompt, parameters, and other
+model-side defaults. It does not grant new Sonder tools, relax workspace
+containment, bypass permission rules, or permit network/desktop side effects;
+those remain host-enforced.
+
 ## 4. Residency: you usually cannot hold them all
 
 Ollama keeps a limited set of models resident and swaps the rest on demand, so
