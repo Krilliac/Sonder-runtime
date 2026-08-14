@@ -670,6 +670,11 @@ SYSTEM_OPERATION_TOOLS = {
     "autopilot_resume": "automation_lifecycle",
     "autopilot_pause": "automation_lifecycle",
     "autopilot_cancel": "automation_lifecycle",
+    # The workflow store is process-wide.  Listing it reveals every saved
+    # action payload and description, which can include repository paths,
+    # command arguments, and operator-authored context.  It is therefore not
+    # an ordinary account's read-only status view on a shared deployment.
+    "workflow_list": "automation_lifecycle",
     "workflow_save": "automation_lifecycle",
     "workflow_delete": "automation_lifecycle",
     # A saved workflow can contain any loop action, including the shared
