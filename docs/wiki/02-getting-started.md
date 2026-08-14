@@ -80,7 +80,10 @@ runtime recovers on its own (it probes every 15s), no restart needed.
 - **MCP** — `python -m sonder_runtime mcp` exposes the tool surface to MCP
   clients.
 - **Flutter app** — in `app/`; its System page shows version, update
-  status, and rollback ([Update Manager](13-update-manager.md)).
+  status, and rollback ([Update Manager](13-update-manager.md)). API and host
+  launcher bearer tokens use the platform credential store rather than app
+  preferences. Use **Forget local session** to remove the account token from
+  this device; copied tokens remain valid until server expiry or revocation.
 
 ## Where to go next
 

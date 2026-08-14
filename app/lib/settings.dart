@@ -1,4 +1,33 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// Persistent storage for bearer credentials.
+///
+/// Keeping this small interface lets the settings model be tested without
+/// emulating a platform keychain. Production uses [FlutterSecureStorage],
+/// backed by the OS-specific credential store.
+abstract interface class CredentialStore {
+  Future<String?> read(String key);
+  Future<void> write(String key, String value);
+  Future<void> delete(String key);
+}
+
+class PlatformCredentialStore implements CredentialStore {
+  const PlatformCredentialStore([this._storage = const FlutterSecureStorage()]);
+
+  final FlutterSecureStorage _storage;
+
+  @override
+  Future<String?> read(String key) => _storage.read(key: key);
+
+  @override
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
+}
 
 /// Persisted connection settings (server URL, API key, theme).
 class Settings {
@@ -13,6 +42,12 @@ class Settings {
       'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
   static const _kLauncherToken = 'sonder_launcher_token';
+  static const _credentials = PlatformCredentialStore();
+
+  /// Test-only override: widget tests do not load desktop/mobile plugins, and
+  /// must never wait indefinitely on an unimplemented credential channel.
+  @visibleForTesting
+  static CredentialStore? testingCredentialStore;
 
   static const defaultModel = 'sonder';
 
@@ -77,11 +112,27 @@ class Settings {
   bool get usesHostLauncher =>
       hasHostLauncher && launcherConfigurationError == null;
 
-  static Future<Settings> load() async {
+  /// Loads non-sensitive preferences and credentials from separate stores.
+  ///
+  /// Earlier releases stored bearer tokens in SharedPreferences. Migrate an
+  /// existing value only after it was successfully written to secure storage;
+  /// if the keychain is unavailable, do not fall back to that plaintext value.
+  static Future<Settings> load({CredentialStore? credentialStore}) async {
     final p = await SharedPreferences.getInstance();
+    final credentials = credentialStore ?? testingCredentialStore ?? _credentials;
+    final apiKey = await _readCredential(
+      credentials: credentials,
+      preferences: p,
+      key: _kKey,
+    );
+    final launcherToken = await _readCredential(
+      credentials: credentials,
+      preferences: p,
+      key: _kLauncherToken,
+    );
     return Settings(
       serverUrl: p.getString(_kServer) ?? 'http://127.0.0.1:11435',
-      apiKey: p.getString(_kKey) ?? '',
+      apiKey: apiKey,
       darkMode: p.getBool(_kDark) ?? true,
       model: p.getString(_kModel) ?? defaultModel,
       allowHosted: p.getBool(_kAllowHosted) ?? false,
@@ -89,14 +140,40 @@ class Settings {
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
-      launcherToken: p.getString(_kLauncherToken) ?? '',
+      launcherToken: launcherToken,
     );
   }
 
-  Future<void> save() async {
+  /// Writes bearer credentials only to the platform credential store.
+  Future<void> save({CredentialStore? credentialStore}) async {
     final p = await SharedPreferences.getInstance();
+    final credentials = credentialStore ?? testingCredentialStore ?? _credentials;
+    // Empty fields are not enough evidence that an existing credential should
+    // be erased: Settings is also constructed for first-run preferences and
+    // platform/test environments that do not have a credential provider.
+    // The UI uses the explicit clear methods below when a user removes a
+    // previously saved credential or signs out.
+    if (apiKey.trim().isNotEmpty) {
+      await _writeCredential(
+        credentials: credentials,
+        preferences: p,
+        key: _kKey,
+        value: apiKey,
+      );
+    } else {
+      await p.remove(_kKey);
+    }
+    if (launcherToken.trim().isNotEmpty) {
+      await _writeCredential(
+        credentials: credentials,
+        preferences: p,
+        key: _kLauncherToken,
+        value: launcherToken,
+      );
+    } else {
+      await p.remove(_kLauncherToken);
+    }
     await p.setString(_kServer, serverUrl.trim());
-    await p.setString(_kKey, apiKey.trim());
     await p.setBool(_kDark, darkMode);
     await p.setString(_kModel, model);
     await p.setBool(_kAllowHosted, allowHosted);
@@ -107,6 +184,63 @@ class Settings {
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
     await p.setString(_kLauncherUrl, launcherUrl.trim());
-    await p.setString(_kLauncherToken, launcherToken.trim());
+  }
+
+  /// Forgets the local account/API credential. This is a local sign-out: the
+  /// server has no logout route, so a separately copied bearer token remains
+  /// valid until its normal expiry or server-side revocation.
+  static Future<void> clearApiKey({CredentialStore? credentialStore}) =>
+      _deleteCredential(
+        credentialStore ?? testingCredentialStore ?? _credentials,
+        _kKey,
+      );
+
+  /// Removes the distinct launcher-control credential from the device.
+  static Future<void> clearLauncherToken({CredentialStore? credentialStore}) =>
+      _deleteCredential(
+        credentialStore ?? testingCredentialStore ?? _credentials,
+        _kLauncherToken,
+      );
+
+  static Future<String> _readCredential({
+    required CredentialStore credentials,
+    required SharedPreferences preferences,
+    required String key,
+  }) async {
+    try {
+      final stored = await credentials.read(key);
+      if (stored != null) return stored;
+      final legacy = preferences.getString(key)?.trim() ?? '';
+      if (legacy.isEmpty) return '';
+      await credentials.write(key, legacy);
+      await preferences.remove(key);
+      return legacy;
+    } catch (_) {
+      // A missing/unavailable credential store must not silently re-enable an
+      // old plaintext token. The user can retry saving after fixing it.
+      return '';
+    }
+  }
+
+  static Future<void> _writeCredential({
+    required CredentialStore credentials,
+    required SharedPreferences preferences,
+    required String key,
+    required String value,
+  }) async {
+    final trimmed = value.trim();
+    await credentials.write(key, trimmed);
+    // Remove a legacy plaintext copy only after the secure operation above
+    // completed. This also covers explicit logout/credential clearing.
+    await preferences.remove(key);
+  }
+
+  static Future<void> _deleteCredential(
+    CredentialStore credentials,
+    String key,
+  ) async {
+    await credentials.delete(key);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.remove(key);
   }
 }
