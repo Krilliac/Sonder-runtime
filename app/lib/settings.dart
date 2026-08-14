@@ -65,6 +65,9 @@ class Settings {
         host == '::1' ||
         host == '0:0:0:0:0:0:0:1' ||
         host.startsWith('127.');
+    if (!loopback && uri.scheme.toLowerCase() != 'https') {
+      return 'A non-loopback host launcher requires an HTTPS endpoint.';
+    }
     if (!loopback && launcherToken.trim().length < 24) {
       return 'A non-loopback host launcher requires a token of at least 24 characters.';
     }

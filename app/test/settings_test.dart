@@ -31,6 +31,16 @@ void main() {
     expect(weak.usesHostLauncher, isFalse);
     expect(weak.launcherConfigurationError, contains('at least 24'));
 
+    final plaintextRemote = Settings(
+      launcherUrl: 'http://host.test:11436',
+      launcherToken: 'xxxxxxxxxxxxxxxxxxxxxxxx',
+    );
+    expect(plaintextRemote.usesHostLauncher, isFalse);
+    expect(
+      plaintextRemote.launcherConfigurationError,
+      contains('requires an HTTPS endpoint'),
+    );
+
     final loopback = Settings(launcherUrl: 'http://127.0.0.1:11436');
     expect(loopback.usesHostLauncher, isTrue);
   });
