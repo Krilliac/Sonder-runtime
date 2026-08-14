@@ -103,6 +103,26 @@ def _read_input(prompt, *, history=None, composer=False, argument_completer=None
     return input(prompt)
 
 
+def _clear_terminal_scrollback(stream=None):
+    """Erase the interactive terminal screen and its scrollback buffer.
+
+    This intentionally affects presentation only: conversation/session state,
+    command history, and the currently selected model remain intact.  It is
+    shared by the native ``/clear`` command and matches the Ctrl+L behaviour
+    in :mod:`slash_menu`.
+    """
+    target = stream or sys.stdout
+    csi = getattr(slash_menu, "CSI", "\x1b[")
+    try:
+        target.write(csi + "3J" + csi + "2J" + csi + "H")
+        target.flush()
+    except (AttributeError, OSError):
+        # A piped or closed stdout must not terminate the REPL merely because
+        # a presentation-only command was requested.
+        return False
+    return True
+
+
 # The gate's own controls are never gated by it. `permission_mode` is risk
 # `ask`, which `plan` denies -- so gating it would trap whoever is at the
 # keyboard in `plan` with no console way back out. A human typing the command
@@ -940,6 +960,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /runproject [sec]  execute file/path fenced blocks as a temp project
   /train, /learn [N] grounded practice: check N tasks and record lessons (default 3, max 500)
   /new               start a fresh conversation thread (forget this chat's history)
+  /clear             clear terminal scrollback; keep chat/session state
   /sessions          list past conversation threads
   /resume <id|title> continue a past thread by id or title prefix
   terminal editing   Up/Down history; Ctrl+R search; Left/Right/Home/End; Ctrl+W word; Ctrl+K suffix; Ctrl+L clear
@@ -1647,6 +1668,8 @@ def main():
                 print(command_catalog.format_matches(""))
             elif cmd == "/help":
                 print(command_catalog.help_text(arg.strip()))
+            elif cmd == "/clear":
+                _clear_terminal_scrollback()
             elif cmd == "/trace":
                 apply_trace(_on_off(arg, trace))
             elif cmd == "/strict":

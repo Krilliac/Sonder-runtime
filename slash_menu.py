@@ -959,8 +959,15 @@ def _finish(state: MenuState, prompt: str, stream) -> None:
 
 
 def _clear_screen(state: MenuState, stream) -> None:
-    """Clear terminal presentation; retain the in-progress input buffer."""
-    stream.write(CSI + "2J" + CSI + "H")
+    """Clear terminal presentation and scrollback; retain the input buffer.
+
+    ``CSI 2J`` erases only the visible screen.  Most Windows terminals retain
+    that erased content in their scrollback, which makes Ctrl+L look like a
+    cosmetic redraw rather than a real terminal clear.  ``CSI 3J`` asks
+    VT-compatible terminals to discard the scrollback first, then the usual
+    screen-and-home sequence repaints the still-typed buffer.
+    """
+    stream.write(CSI + "3J" + CSI + "2J" + CSI + "H")
     stream.flush()
     state._drawn_input_rows = 1
     state._drawn_cursor_row = 0
