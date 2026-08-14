@@ -27,7 +27,7 @@ def _builder_module():
     """Load the utility without requiring its runtime-only imports in tests."""
     source = _BUILDER.read_text(encoding="utf-8")
     start = source.index("FENCE =")
-    end = source.index("\ndef build_errors")
+    end = source.index("\ndef main()")
     namespace: dict[str, object] = {"re": __import__("re")}
     exec(source[start:end], namespace)
     return namespace
@@ -99,6 +99,34 @@ def test_arena_builder_rejects_known_runtime_lifecycle_contract_violations():
     assert builder["body_contract_issues"](
         "Program.cs", "DoScoreboard", "Ui.Scoreboard(W, H, _match, out bool back);"
     ) == []
+
+
+def test_arena_builder_rejects_unbalanced_wrapped_method_before_compiling():
+    builder = _builder_module()
+    signature = "public bool IsWallCell(int x, int z)"
+
+    assert builder["wrapped_body_issue"](
+        "public bool IsWallCell(int x, int z) { return x >= 0;", signature,
+    ) == "returned an unbalanced method wrapper; output statements only"
+    assert builder["wrapped_body_issue"](
+        "public bool IsWallCell(int x, int z) { return x >= 0; }", signature,
+    ) == ""
+    assert builder["extract_body"](
+        "public bool IsWallCell(int x, int z) { return x >= 0; }", signature,
+    ) == "return x >= 0;"
+    assert builder["extract_body"](
+        "public bool IsWallCell(int x, int z) => x >= 0;", signature,
+    ) == "return x >= 0;"
+
+
+def test_arena_builder_rejects_unbalanced_body_braces_but_not_string_content():
+    builder = _builder_module()
+
+    assert builder["body_brace_issue"]("if (x > 0) { return true;") == (
+        "returned unbalanced braces in body statements"
+    )
+    assert builder["body_brace_issue"]("return $\"{{literal}}\";") == ""
+    assert builder["body_brace_issue"]("// }\nreturn true;") == ""
 
 
 def test_arena_builder_keeps_rejected_compiler_feedback_bounded_and_visible():

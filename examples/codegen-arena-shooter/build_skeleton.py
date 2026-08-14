@@ -139,6 +139,82 @@ def strip_fences(text: str) -> str:
     return FENCE.sub("", text or "").strip()
 
 
+def wrapped_body_issue(text: str, signature: str) -> str:
+    """Reject an incomplete method wrapper before it can poison the skeleton.
+
+    The model is asked for bare statements but sometimes returns a complete
+    method.  A balanced wrapper can be recovered by :func:`extract_body`; an
+    unclosed wrapper cannot.  Compiling it only repeats a predictable parser
+    failure, so keep the incumbent untouched and give the next attempt a
+    precise host observation instead.
+    """
+    cleaned = strip_fences(text)
+    head = signature.split("(")[0].strip().split()
+    name = head[-1] if head else ""
+    prefix, marker, tail = cleaned.partition("{")
+    if not name or not marker or name not in prefix:
+        return ""
+    depth = 1
+    for char in tail:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return ""
+    return "returned an unbalanced method wrapper; output statements only"
+
+
+def body_brace_issue(body: str) -> str:
+    """Return a parser-free C# brace error, ignoring ordinary strings/comments."""
+    text = str(body or "")
+    depth, index, state = 0, 0, "normal"
+    while index < len(text):
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        if state == "line-comment":
+            if char in "\r\n":
+                state = "normal"
+        elif state == "block-comment":
+            if char == "*" and nxt == "/":
+                state, index = "normal", index + 1
+        elif state == "string":
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                state = "normal"
+        elif state == "verbatim-string":
+            if char == '"' and nxt == '"':
+                index += 1
+            elif char == '"':
+                state = "normal"
+        elif state == "char":
+            if char == "\\":
+                index += 1
+            elif char == "'":
+                state = "normal"
+        elif char == "/" and nxt == "/":
+            state, index = "line-comment", index + 1
+        elif char == "/" and nxt == "*":
+            state, index = "block-comment", index + 1
+        elif char == "@" and nxt == '"':
+            state, index = "verbatim-string", index + 1
+        elif char == '"':
+            state = "string"
+        elif char == "'":
+            state = "char"
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                return "returned an unexpected closing brace in body statements"
+        index += 1
+    if depth:
+        return "returned unbalanced braces in body statements"
+    return ""
+
+
 def extract_body(text: str, signature: str) -> str:
     """Pull just the statements out of whatever shape the model returned.
 
@@ -153,6 +229,19 @@ def extract_body(text: str, signature: str) -> str:
         return ""
     head = signature.split("(")[0].strip().split()
     name = head[-1] if head else ""
+    # C# permits ``T Method(...) => expression;``.  It is a complete method
+    # wrapper just like the brace form, but has no opening brace for the
+    # recovery logic below to find.  Normalize it into the statements that
+    # belong inside the harness-owned braces instead of splicing a second
+    # signature into the skeleton.
+    arrow = text.find("=>")
+    if name and arrow >= 0 and name in text[:arrow]:
+        expression = text[arrow + 2:].strip()
+        if not expression:
+            return ""
+        if not expression.endswith(";"):
+            expression += ";"
+        return expression if len(head) >= 2 and head[-2] == "void" else "return " + expression
     looks_wrapped = name and name in text.split("{")[0]
     if not looks_wrapped:
         return text
@@ -168,7 +257,9 @@ def extract_body(text: str, signature: str) -> str:
             if depth == 0:
                 inner = text[start + 1:index].strip()
                 return inner or text
-    return text
+    # An incomplete wrapper is not a body.  Its caller reports the precise
+    # shape error and leaves the last known-good skeleton in place.
+    return ""
 
 
 def reply_failed(reply: str) -> str:
@@ -333,9 +424,28 @@ def main():
                       % failure, flush=True)
                 print("Nothing was measured. Fix the runtime and re-run.", flush=True)
                 return 2
+            shape_issue = wrapped_body_issue(reply, signature)
+            if shape_issue:
+                status = "attempt %d rejected: host contract (%s)" % (attempt, shape_issue)
+                feedback = (
+                    "\n\nYOUR PREVIOUS ATTEMPT VIOLATED A HOST-OBSERVED OUTPUT "
+                    "CONTRACT: %s. Do not write a method signature or braces; "
+                    "return statements only." % shape_issue
+                )
+                continue
             body = extract_body(reply, signature)
             if not body:
                 status = "attempt %d: empty reply" % attempt
+                continue
+
+            brace_issue = body_brace_issue(body)
+            if brace_issue:
+                status = "attempt %d rejected: host contract (%s)" % (attempt, brace_issue)
+                feedback = (
+                    "\n\nYOUR PREVIOUS ATTEMPT VIOLATED A HOST-OBSERVED OUTPUT "
+                    "CONTRACT: %s. Balance every block before returning only "
+                    "body statements." % brace_issue
+                )
                 continue
 
             contract_issues = body_contract_issues(name, body_name, body)
