@@ -1,4 +1,4 @@
-import subprocess
+import io
 import json
 
 import compiler_cache
@@ -10,26 +10,36 @@ def test_status_is_fixed_bounded_and_scrubs_paths(monkeypatch):
 
     monkeypatch.setattr(compiler_cache.shutil, "which", lambda name: "C:\\tools\\sccache.exe")
 
-    def fake_run(argv, **kwargs):
-        captured["argv"] = argv
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(
-            argv, 0,
-            stdout=(
+    class FakeProcess:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured.update(kwargs)
+            self.stdout = io.StringIO(
                 "Compile requests                      42\n"
                 "Cache hits                            40\n"
                 "Cache location                  Local disk: C:\\private\\cache\n"
                 "Version (client)                0.16.0\n"
-            ),
-            stderr="secret-looking error text",
-        )
+            )
+            self.stderr = io.StringIO("secret-looking error text")
+            self._returncode = 0
 
-    monkeypatch.setattr(compiler_cache.subprocess, "run", fake_run)
+        def poll(self): return self._returncode
+        def wait(self, timeout=None): return self._returncode
+        def kill(self): self._returncode = -9
+        @property
+        def returncode(self): return self._returncode
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return FakeProcess(argv, **kwargs)
+
+    monkeypatch.setattr(compiler_cache.subprocess, "Popen", fake_popen)
     result = compiler_cache.status()
 
     assert captured["argv"] == ["C:\\tools\\sccache.exe", "--show-stats"]
     assert captured["shell"] is False
-    assert captured["timeout"] == 3
+    assert "timeout" not in captured
     assert result == {
         "ok": True,
         "available": True,
@@ -49,11 +59,32 @@ def test_status_handles_missing_and_timeout(monkeypatch):
     assert compiler_cache.status()["status"] == "not_installed"
 
     monkeypatch.setattr(compiler_cache.shutil, "which", lambda name: "sccache")
-    monkeypatch.setattr(
-        compiler_cache.subprocess, "run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(args[0], 3)),
-    )
+    monkeypatch.setattr(compiler_cache, "_run_bounded", lambda argv: ("timeout", ""))
     assert compiler_cache.status()["status"] == "timeout"
+
+
+def test_bounded_capture_stops_at_shared_output_limit(monkeypatch):
+    class LoudProcess:
+        def __init__(self, *args, **kwargs):
+            self.stdout = io.StringIO("x" * (compiler_cache._MAX_OUTPUT_CHARS + 1))
+            self.stderr = io.StringIO("")
+            self._returncode = None
+            self.killed = False
+
+        def poll(self): return self._returncode
+        def wait(self, timeout=None): return self._returncode
+        def kill(self):
+            self.killed = True
+            self._returncode = -9
+        @property
+        def returncode(self): return self._returncode
+
+    proc = LoudProcess()
+    monkeypatch.setattr(compiler_cache.subprocess, "Popen", lambda *args, **kwargs: proc)
+    outcome, output = compiler_cache._run_bounded(["sccache", "--show-stats"])
+    assert outcome == "output_limit"
+    assert len(output) == compiler_cache._MAX_OUTPUT_CHARS
+    assert proc.killed
 
 
 def test_direct_tool_returns_only_sanitized_cache_metrics(monkeypatch):

@@ -831,6 +831,7 @@ LIVE_RELOAD_MODULES = [
     "sonder_runtime.adapters.recall",
     "summarizer",
     "code_runner",
+    "compiler_cache",
     "isolated_runner",
     "system_profile",
     "emotion_vectors",
