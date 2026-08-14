@@ -16598,10 +16598,15 @@ def _agent_dispatch(
         )
         return refusal
     if tool_name == "ensemble_codegen_build_loop" and not repository_extra_roots:
-        return (
+        # Kept as a named refusal so the error-signal ratchet can distinguish
+        # this deliberate policy boundary from a newly introduced ad-hoc
+        # literal return.  The model must not create a project grant by merely
+        # naming a directory in its tool arguments.
+        refusal = (
             "ERROR: HOST POLICY: ensemble compiler-feedback retries require a "
             "host-selected project root."
         )
+        return refusal
     gate_error = _agent_permission_gate_error(tool_name)
     if gate_error:
         return gate_error
@@ -17594,7 +17599,13 @@ def _agent_dispatch(
                 timeout=args.get("timeout", 120),
             )
         if tool_name == "ensemble_codegen_build_loop":
-            return ensemble_codegen_build_loop(
+            # The project root is host-selected by _agent_dispatch_observed.
+            # The public wrapper intentionally has no ``extra_roots`` argument:
+            # exposing one would let a model turn its tool JSON into a new
+            # filesystem grant.  Thread it only through this internal helper,
+            # where ``repository_extra_roots`` is already the dispatcher's
+            # trusted project scope.
+            return _ensemble_codegen_build_loop(
                 project_dir=args.get("project_dir", "."),
                 files_json=args.get("files_json", ""),
                 build_program=args.get("build_program", ""),
@@ -17602,6 +17613,7 @@ def _agent_dispatch(
                 error_regex=args.get("error_regex", ""),
                 slips_json=args.get("slips_json", ""),
                 timeout=args.get("timeout", 120),
+                extra_roots=repository_extra_roots,
             )
         if tool_name == "build_clean":
             return build_clean(
@@ -19396,15 +19408,19 @@ def _agent_turn(
         return project_error
     wants_ensemble_compiler = intents.requests_ensemble_compiler_retries(prompt)
     if wants_ensemble_compiler and cloud:
-        return (
+        # This remains a host-owned policy denial, rather than an inference
+        # failure the agent might retry or work around.
+        refusal = (
             "ERROR: HOST POLICY: ensemble compiler-feedback retries are local-only; "
             "select a local agent tier."
         )
+        return refusal
     if wants_ensemble_compiler and not project_scope:
-        return (
+        refusal = (
             "ERROR: HOST POLICY: ensemble compiler-feedback retries require "
             "project=<existing project directory>."
         )
+        return refusal
     if cloud:
         default_agent_system = (
             "You are a hosted tool-using coding agent. Use only the tools listed "
@@ -24296,6 +24312,37 @@ def codegen_build_loop(
     )
 
 
+def _ensemble_codegen_build_loop(
+    project_dir: str,
+    files_json: str,
+    build_program: str,
+    build_args_json: str = "[]",
+    error_regex: str = "",
+    slips_json: str = "",
+    timeout: int = 120,
+    *,
+    extra_roots: str = "",
+) -> str:
+    """Run the fixed ensemble/compiler contract under a trusted root scope.
+
+    ``extra_roots`` is deliberately private to the dispatch path.  It is never
+    model-controlled or exposed in the MCP schema: an agent gets it only after
+    the host binds the run to an existing project directory.
+    """
+    return codegen_build_loop(
+        project_dir=project_dir,
+        files_json=files_json,
+        build_program=build_program,
+        build_args_json=build_args_json,
+        tiers="code,reasoning",
+        attempts=2,
+        error_regex=error_regex,
+        slips_json=slips_json,
+        timeout=timeout,
+        extra_roots=extra_roots,
+    )
+
+
 @mcp.tool()
 def ensemble_codegen_build_loop(
     project_dir: str,
@@ -24315,13 +24362,11 @@ def ensemble_codegen_build_loop(
     project's own argv-style build command; no natural-language parser turns
     prose into either a filesystem root or executable.
     """
-    return codegen_build_loop(
+    return _ensemble_codegen_build_loop(
         project_dir=project_dir,
         files_json=files_json,
         build_program=build_program,
         build_args_json=build_args_json,
-        tiers="code,reasoning",
-        attempts=2,
         error_regex=error_regex,
         slips_json=slips_json,
         timeout=timeout,
