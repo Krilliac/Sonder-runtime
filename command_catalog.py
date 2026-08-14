@@ -141,7 +141,7 @@ _CATEGORY_BY_TOOL = {
     "session_export": "context",
     "sonder_sessions": "context",
     "sonder_stats": "memory",
-    "sonder_remember_fact": "memory",
+    "sonder_remember_fact": "memory", "sonder_forget_fact": "memory",
     "hardware_profile": "system",
     "environment_status": "system",
     "toolchain_status": "system",
@@ -253,6 +253,7 @@ _DANGEROUS = frozenset({
     "file_delete", "unload", "sqlite_mutate", "memory_privacy_repair",
     "memory_quality_repair", "admin_set_account", "admin_register",
     "git_merge", "git_cherry_pick", "task_delete", "self_heal_repair",
+    "sonder_forget_fact",
     # Changing routing or the permission policy itself is not an ordinary
     # workspace edit: it alters what every later call is allowed to do, so it
     # must not flow unprompted in acceptEdits/auto. Elevation is the same

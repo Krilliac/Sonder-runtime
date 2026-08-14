@@ -945,7 +945,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   terminal editing   Up/Down history; Ctrl+R search; Left/Right/Home/End; Ctrl+W word; Ctrl+K suffix; Ctrl+L clear
   /project [name]    show/set the active project (scopes facts)
   /fact <text>       remember a durable fact for the active project
-  /facts             list facts for the active project
+  /fact forget <id> confirm  remove one listed active-project fact
+  /facts             list facts and IDs for the active project
   /exit, /quit, /q   leave
 """
 
@@ -1311,7 +1312,7 @@ def _print_facts(project):
         print("(no facts for project '%s')" % project)
         return
     for f in facts:
-        print("  - %s" % f["text"])
+        print("  - %s  %s" % (f["id"], f["text"]))
 
 
 def main():
@@ -2059,7 +2060,15 @@ def main():
             elif cmd == "/fact":
                 a = (arg or "").strip()
                 if not a:
-                    print("usage: /fact <text>")
+                    print("usage: /fact <text> | /fact forget <id> confirm")
+                elif a.lower().startswith("forget "):
+                    bits = a.split()
+                    if len(bits) != 3 or bits[2].lower() != "confirm":
+                        print("usage: /fact forget <id> confirm")
+                    else:
+                        print(server.sonder_forget_fact(
+                            bits[1], project=project, confirm=bits[1],
+                        ))
                 else:
                     print(server.sonder_remember_fact(a, project=project))
             elif cmd == "/facts":

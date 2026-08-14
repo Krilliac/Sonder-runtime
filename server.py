@@ -12992,6 +12992,34 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
 
 
 @mcp.tool()
+def sonder_forget_fact(fact_id: str, project: str = "", confirm: str = "") -> str:
+    """Forget one asserted project fact after an exact confirmation.
+
+    List fact IDs first with ``/facts`` (or the matching MCP/session surface),
+    then pass that same full ID as ``confirm``.  This never deletes learned
+    lessons, conversations, or facts from another project.
+    """
+    _maybe_live_reload()
+    target = str(fact_id or "").strip()
+    project_id = _resolve_project(project) or DEFAULT_PROJECT
+    if not target:
+        return "fact id is required."
+    if str(confirm or "").strip() != target:
+        return (
+            "confirmation required: inspect /facts, then repeat with "
+            "confirm=%s" % target
+        )
+    with _application().unit_of_work(db_path=_DB_PATH) as uow:
+        removed = uow.memory.delete_fact(target, project_id)
+        remaining = uow.memory.count_facts(project_id)
+    if not removed:
+        return "no fact '%s' in project '%s'." % (target, project_id)
+    return "Forgot fact %s from project '%s' (%d remaining)." % (
+        target, project_id, remaining,
+    )
+
+
+@mcp.tool()
 def run_code(
     code: str,
     language: str = "python",

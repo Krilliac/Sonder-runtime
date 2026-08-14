@@ -121,6 +121,18 @@ def test_sonder_remember_fact_rejects_empty(stub):
     assert server.sonder_remember_fact("   ").startswith("ERROR")
 
 
+def test_forget_fact_requires_exact_confirmation_and_project_scope(stub):
+    remembered = server.sonder_remember_fact("stale probe", project="proj")
+    fact_id = remembered.rsplit("id=", 1)[1]
+
+    assert "confirmation required" in server.sonder_forget_fact(fact_id, project="proj")
+    assert "Forgot fact" in server.sonder_forget_fact(
+        fact_id, project="proj", confirm=fact_id,
+    )
+    server.sonder("answer this", session="forget", project="proj")
+    assert "stale probe" not in "\n".join(_contents(_answer_payload(stub, "answer this")))
+
+
 def test_long_thread_summarizes_overflow(stub, monkeypatch):
     import memory_store
     monkeypatch.setattr(server, "MAX_TURNS", 2)  # small cap so overflow triggers fast
