@@ -376,6 +376,30 @@ def test_natural_model_wrappers_preserve_slash_command_refusal(monkeypatch, phra
     assert "cannot wrap a slash command" in out
 
 
+def test_explicit_natural_model_selection_overrides_a_repl_session_pin(monkeypatch):
+    """A request-local model choice cannot silently reuse `/model`'s old pin."""
+    captured = {}
+
+    def fake_impl(prompt, **kwargs):
+        captured.update(prompt=prompt, **kwargs)
+        return "answer"
+
+    monkeypatch.setattr(server, "_sonder_impl", fake_impl)
+    monkeypatch.setattr(server, "_append_activity", lambda result, **_kwargs: result)
+
+    out = server.sonder(
+        "use model qwen2.5-coder:1.5b: answer briefly",
+        tier="code",
+        model_override="gemma3:12b",
+        session="none",
+    )
+
+    assert out == "answer"
+    assert captured["prompt"] == "answer briefly"
+    assert captured["tier"] == "qwen2.5-coder:1.5b"
+    assert captured["model_override"] == ""
+
+
 def test_cloud_only_fanout_is_refused_before_catalog_discovery(monkeypatch):
     monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
     calls = []
