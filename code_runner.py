@@ -282,6 +282,8 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             "stderr": subprocess.PIPE,
             "text": True,
             "env": _child_environment(),
+            # Model-authored code must not inherit ambient server handles.
+            "close_fds": True,
         }
         if os.name == "nt":
             popen_kwargs["creationflags"] = getattr(
@@ -352,6 +354,9 @@ def _launch_console(launcher, cwd, language, timeout):
             cwd=cwd,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             env=_child_environment(),
+            # A detached window is still executing model-authored code.  It
+            # has no legitimate reason to inherit the host's other handles.
+            close_fds=True,
         )
     except FileNotFoundError:
         return _error_result(language, cwd, timeout, "cmd.exe not found")

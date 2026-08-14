@@ -54,6 +54,22 @@ def test_run_process_scrubs_control_plane_secrets(monkeypatch, tmp_path):
     assert out["stdout"].strip() == "||"
 
 
+def test_run_process_closes_unrelated_inherited_handles(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(code_runner.subprocess, "run", fake_run)
+    out = code_runner._run_process(
+        [sys.executable, "-c", "pass"], str(tmp_path), "", 10, "python"
+    )
+
+    assert out["ok"] is True
+    assert seen["close_fds"] is True
+
+
 def test_detached_console_receives_scrubbed_environment(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
@@ -71,6 +87,7 @@ def test_detached_console_receives_scrubbed_environment(monkeypatch, tmp_path):
 
     assert out["ok"] is True
     assert "SONDER_AUTH_SECRET" not in seen["env"]
+    assert seen["close_fds"] is True
 
 
 def test_python_run_failure_captures_stderr():
@@ -257,11 +274,12 @@ def test_run_code_window_launches_python_console(monkeypatch, tmp_path):
     class FakeProc:
         pid = 4321
 
-    def fake_popen(cmd, cwd, creationflags=0, env=None):
+    def fake_popen(cmd, cwd, creationflags=0, env=None, close_fds=False):
         seen["cmd"] = cmd
         seen["cwd"] = cwd
         seen["creationflags"] = creationflags
         seen["env"] = env
+        seen["close_fds"] = close_fds
         return FakeProc()
 
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
@@ -274,6 +292,7 @@ def test_run_code_window_launches_python_console(monkeypatch, tmp_path):
     assert out["detached"] is True
     assert out["pid"] == 4321
     assert seen["cmd"][:2] == ["cmd", "/k"]
+    assert seen["close_fds"] is True
     assert os.path.exists(os.path.join(out["run_dir"], "snippet.py"))
     assert os.path.exists(os.path.join(out["run_dir"], "launch.bat"))
 
