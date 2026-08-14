@@ -222,8 +222,9 @@ def test_managed_pid_repairs_stale_venv_launcher_pid(monkeypatch, tmp_path):
 
 def test_start_sonder_records_real_listener_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
-    monkeypatch.setattr(H, "port_open", lambda host, port: False)
-    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: True)
+    probes = iter((False, True, True))
+    monkeypatch.setattr(H, "port_open", lambda host, port: next(probes))
+    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: fn())
     monkeypatch.setattr(H, "python_exe", lambda: "python")
     monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
     monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
@@ -237,7 +238,7 @@ def test_start_sonder_records_real_listener_pid(monkeypatch, tmp_path):
 
 def test_start_sonder_accepts_a_listener_that_binds_at_wait_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
-    probes = iter((False, True))
+    probes = iter((False, True, True))
     monkeypatch.setattr(H, "port_open", lambda host, port: next(probes))
     monkeypatch.setattr(H, "wait_until", lambda fn, seconds: False)
     monkeypatch.setattr(H, "python_exe", lambda: "python")
@@ -397,10 +398,31 @@ def test_main_start_accepts_a_managed_listener_that_binds_after_readiness_window
         lambda *args, **kwargs: "sonder: start requested pid=7, not reachable yet",
     )
     monkeypatch.setattr(H, "status", lambda *args: "sonder api: listening on http://127.0.0.1:11435")
-    monkeypatch.setattr(H, "_managed_pid", lambda *args: 7)
-    monkeypatch.setattr(H, "port_open", lambda *args: True)
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: 7)
 
     assert H.main(["start"]) == 0
+
+
+def test_start_sonder_rejects_unmanaged_listener_that_appears_after_spawn(monkeypatch, tmp_path):
+    """A live port is not readiness when another process owns it."""
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    probes = iter((False, True, True))
+    monkeypatch.setattr(H, "port_open", lambda *args: next(probes))
+    monkeypatch.setattr(H, "python_exe", lambda: "python")
+    monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
+    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: fn())
+    monkeypatch.setattr(H, "_listener_pid", lambda *args: 222)
+    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: False)
+
+    assert "not reachable yet" in H.start_sonder("127.0.0.1", 11435)
+
+
+def test_status_names_unmanaged_listener_instead_of_calling_it_sonder(monkeypatch):
+    monkeypatch.setattr(H, "ollama_ok", lambda: True)
+    monkeypatch.setattr(H, "port_open", lambda *args: True)
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: None)
+
+    assert "unmanaged listener" in H.status("127.0.0.1", 11435)
 
 
 def test_main_start_rejects_a_managed_child_that_never_binds(monkeypatch):
