@@ -113,13 +113,14 @@ You do **not** need every model or every tier in the catalog.
 | Separate reasoning, reranking, extraction, tool-oriented, speech, or experimental model families | Optional specialist models. Install and bind them only when the matching feature is enabled and supported. |
 | Cloud tiers | No local download, but explicit cloud opt-in is required and prompts leave the machine for those calls. |
 
-The bootstrap and `setup_alias.py` intentionally pull both a base model and the
-default embedding model so a new local installation has memory enabled out of
-the box. They therefore need access to both models (or locally available copies
-when run offline), even though ordinary chat itself needs only the generative
-base model. See the [Model Catalog](docs/wiki/18-model-catalog.md) for tier
-bindings and the [collection runbook](docs/runbooks/assemble-model-collection.md)
-for specialist setups.
+The bootstrap and `setup_alias.py` intentionally **try** to pull both a base
+model and the default embedding model so a new local installation has memory
+enabled out of the box. The generative base model is required; if the optional
+embedding pull is unavailable, bootstrap still creates `sonder:latest` and
+explains how to enable recall/lessons later. See the
+[Model Catalog](docs/wiki/18-model-catalog.md) for tier bindings and the
+[collection runbook](docs/runbooks/assemble-model-collection.md) for specialist
+setups.
 
 > Installing a tag only puts a model in Ollama's catalog; it does not by itself
 > enable a Sonder feature. Bind supported models through `/runtime set ...` and
