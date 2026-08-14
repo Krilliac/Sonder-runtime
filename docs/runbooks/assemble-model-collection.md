@@ -28,6 +28,10 @@ generative model: `fast`, `code`, and `general` may all share it. Add an
 one by default, but chat remains available without it. Add `reasoning` and
 `vision` only if the band supports keeping or swapping them.
 
+For an intentionally chat-only bootstrap, run
+`python setup_alias.py --no-embedding`; `/runtime` will show semantic memory as
+unavailable until you install and bind an embedding model.
+
 The report keeps the largest single accelerator separate from auxiliary GPUs
 and integrated graphics. It never sums mixed-vendor memory or treats an OS
 enumeration as proof that CUDA, ROCm, Vulkan, Metal, or another backend works.

@@ -120,7 +120,8 @@ embedding pull is unavailable, bootstrap still creates `sonder:latest` and
 explains how to enable recall/lessons later. See the
 [Model Catalog](docs/wiki/18-model-catalog.md) for tier bindings and the
 [collection runbook](docs/runbooks/assemble-model-collection.md) for specialist
-setups.
+setups. Use `setup_alias.py --no-embedding` when you intentionally want the
+smallest chat-only installation.
 
 > Installing a tag only puts a model in Ollama's catalog; it does not by itself
 > enable a Sonder feature. Bind supported models through `/runtime set ...` and
