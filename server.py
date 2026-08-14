@@ -22202,7 +22202,8 @@ def _runtime_update_format(data, *, updated=None):
             str(data.get("installed_commit") or "unknown")[:12],
             data.get("installed_commit_time") or "unknown time",
         ),
-        "  newest origin/main: %s (%s)" % (
+        "  newest %sorigin/main: %s (%s)" % (
+            "known " if not data.get("remote_ref_refreshed") else "",
             str(data.get("newest_commit") or "unknown")[:12],
             data.get("newest_commit_time") or "unknown time",
         ),

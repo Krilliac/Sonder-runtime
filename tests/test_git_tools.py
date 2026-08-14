@@ -322,6 +322,31 @@ def test_runtime_update_status_reports_ahead_behind_and_commit_times(tmp_path):
     assert datetime.fromisoformat(result["installed_commit_time"]).tzinfo is not None
     assert datetime.fromisoformat(result["newest_commit_time"]).tzinfo is not None
     assert result["trusted_remote"] is False
+    assert result["remote_ref_refreshed"] is False
+
+
+def test_runtime_update_status_marks_only_explicit_fetches_as_refreshed(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/Krilliac/Sonder-runtime.git")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    calls = []
+    real_checked = git_tools._checked_git
+
+    def observed(root, arguments, **kwargs):
+        calls.append(list(arguments))
+        if "fetch" in arguments:
+            return {"stdout": "", "stderr": "", "returncode": 0, "timed_out": False,
+                    "elapsed_ms": 1, "truncated": False, "output_bytes": 0, "output_limit": 16384}
+        return real_checked(root, arguments, **kwargs)
+
+    monkeypatch.setattr(git_tools, "_checked_git", observed)
+
+    cached = git_tools.runtime_update_status(repo, refresh=False)
+    refreshed = git_tools.runtime_update_status(repo, refresh=True)
+
+    assert cached["remote_ref_refreshed"] is False
+    assert refreshed["remote_ref_refreshed"] is True
+    assert any("fetch" in call for call in calls)
 
 
 def test_runtime_checkout_commit_reads_only_the_current_head(tmp_path):
@@ -553,5 +578,16 @@ def test_repl_startup_banner_reads_cached_update_status(monkeypatch):
     assert seen == [False]
     assert "installed source" in banner
     assert "running source" in banner
+    assert "newest known source" in banner
     assert "restart required" in banner
     assert "/updatecheck | /update" in banner
+
+
+def test_runtime_update_format_marks_cached_remote_ref_as_known():
+    text = server._runtime_update_format({
+        "installed_commit": "a" * 40,
+        "newest_commit": "b" * 40,
+        "remote_ref_refreshed": False,
+    })
+
+    assert "newest known origin/main" in text
