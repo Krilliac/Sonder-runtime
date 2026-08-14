@@ -1649,7 +1649,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         # creating a sibling run.
         return _idempotent_http_action(
             context, idempotency_key, "autopilot\0%s\0%s" % (project, stripped),
-            lambda: server.control_command(stripped, project=project),
+            lambda: server.control_command(
+                stripped,
+                project=project,
+                autopilot_request_owner=_task_account_scope(context),
+            ),
         )
     if cmd in ("/runtime", "/models"):
         return server.control_command(stripped, project=project)

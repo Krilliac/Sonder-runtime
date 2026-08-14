@@ -82,6 +82,23 @@ def test_ready_cancel_is_terminal_and_cannot_be_claimed():
     ) is None
 
 
+def test_account_owned_runs_are_invisible_and_uncontrollable_cross_account():
+    first = autopilot_store.create_run("account one", request_owner="account-one")
+    second = autopilot_store.create_run("account two", request_owner="account-two")
+
+    assert autopilot_store.get_run(first["id"], request_owner="account-two") is None
+    assert autopilot_store.list_runs(request_owner="account-one") == [
+        autopilot_store.get_run(first["id"], request_owner="account-one")
+    ]
+    assert autopilot_store.request_pause(first["id"], request_owner="account-two") is None
+    assert autopilot_store.request_cancel(first["id"], request_owner="account-two") is None
+    assert autopilot_store.claim_run(
+        first["id"], "wrong-account", owner_pid=os.getpid(), request_owner="account-two",
+    ) is None
+    assert autopilot_store.get_run(first["id"])["status"] == "ready"
+    assert autopilot_store.get_run(second["id"])["status"] == "ready"
+
+
 def test_dead_local_owner_is_marked_interrupted_and_requires_resume():
     run = autopilot_store.create_run("survive restart")
     autopilot_store.claim_run(run["id"], "dead-owner", owner_pid=2_147_483_647)

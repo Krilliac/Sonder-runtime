@@ -366,6 +366,13 @@ _UNREGISTERED_BRANCH_WORK = {
     "/convergence": "mcp",
     "/goal": "goal",
     "/goals": "goal",
+    # The persistent autonomy command is native (its lifecycle calls are not
+    # individual catalogued MCP tools), so static tool-call discovery sees no
+    # work below either slash branch.  Keep both aliases on the permission
+    # floor through their registered native command rather than letting an
+    # empty tool set read as allowed.
+    "/autopilot": "autopilot",
+    "/auto": "autopilot",
     "/runwindow": "runwindow",
     "/runnew": "runwindow",
     "/runconsole": "runwindow",
