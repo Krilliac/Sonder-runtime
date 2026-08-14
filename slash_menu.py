@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 
 # --- key tokens and actions ----------------------------------------------
 
@@ -486,13 +487,131 @@ class HistoryCursor:
         return current
 
 
+def _cell_width(character: str) -> int:
+    """Return the terminal-cell width of one printable character.
+
+    ``len`` is not a layout measurement in a terminal: combining marks occupy
+    no cells and common CJK/emoji characters occupy two.  The raw composer
+    needs a conservative stdlib-only approximation so a pasted project name
+    or natural-language prompt cannot push a border into the next row.
+    """
+    if not character or unicodedata.combining(character):
+        return 0
+    # Variation selectors modify their preceding glyph rather than consuming
+    # a separate terminal cell.
+    if "VARIATION SELECTOR" in unicodedata.name(character, ""):
+        return 0
+    return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+
+
+def _grapheme_clusters(text: str):
+    """Yield a small, terminal-focused subset of Unicode grapheme clusters.
+
+    The stdlib has no ``\\X`` grapheme iterator, but terminal input needs the
+    common emoji cases to remain indivisible: combining marks/selectors,
+    skin-tone modifiers, regional-indicator flags, keycaps, and ZWJ sequences.
+    Keeping each sequence together prevents cursor/wrap geometry from counting
+    several code points as several rendered glyphs.
+    """
+    value = str(text or "")
+    index = 0
+    while index < len(value):
+        start = index
+        first = value[index]
+        index += 1
+        regional = 0x1F1E6 <= ord(first) <= 0x1F1FF
+        if regional and index < len(value) and 0x1F1E6 <= ord(value[index]) <= 0x1F1FF:
+            index += 1
+        while index < len(value):
+            character = value[index]
+            codepoint = ord(character)
+            if (
+                unicodedata.combining(character)
+                or 0xFE00 <= codepoint <= 0xFE0F
+                or 0x1F3FB <= codepoint <= 0x1F3FF
+                or codepoint == 0x20E3
+            ):
+                index += 1
+                continue
+            if character == "\u200d" and index + 1 < len(value):
+                # Include the joiner and the following base glyph, then keep
+                # collecting that glyph's modifiers/selectors.
+                index += 2
+                continue
+            break
+        yield value[start:index]
+
+
+def _cluster_width(cluster: str) -> int:
+    """Return one terminal-cell measurement for a complete grapheme cluster."""
+    if not cluster:
+        return 0
+    codepoints = [ord(character) for character in cluster]
+    # Emoji presentation selectors, modifiers, keycaps, flags and joined emoji
+    # each render as a single two-cell glyph on conventional terminals.
+    if (
+        "\u200d" in cluster
+        or 0xFE0F in codepoints
+        or any(0x1F3FB <= codepoint <= 0x1F3FF for codepoint in codepoints)
+        or 0x20E3 in codepoints
+        or sum(0x1F1E6 <= codepoint <= 0x1F1FF for codepoint in codepoints) >= 2
+    ):
+        return 2
+    return max((_cell_width(character) for character in cluster), default=0)
+
+
+def _display_width(text: str) -> int:
+    """Return the terminal-cell width of plain text (without ANSI escapes)."""
+    clean = _ANSI_ESCAPE_RE.sub("", str(text or ""))
+    return sum(_cluster_width(cluster) for cluster in _grapheme_clusters(clean))
+
+
+def _clip_cells(text: str, width: int) -> str:
+    """Keep the longest prefix that fits in ``width`` terminal cells."""
+    limit = max(0, int(width))
+    used = 0
+    kept: list[str] = []
+    for cluster in _grapheme_clusters(text):
+        cells = _cluster_width(cluster)
+        if cells and used + cells > limit:
+            break
+        kept.append(cluster)
+        used += cells
+    return "".join(kept)
+
+
+def _pad_cells(text: str, width: int, fill: str = " ") -> str:
+    """Clip then pad text to exactly ``width`` terminal cells."""
+    clipped = _clip_cells(text, width)
+    return clipped + fill * max(0, int(width) - _display_width(clipped))
+
+
+def _wrap_cells(text: str, width: int) -> list[str]:
+    """Wrap text on terminal-cell boundaries without modifying the buffer."""
+    limit = max(1, int(width))
+    rows: list[str] = []
+    row: list[str] = []
+    used = 0
+    for cluster in _grapheme_clusters(text):
+        cells = _cluster_width(cluster)
+        if cells and used + cells > limit and row:
+            rows.append("".join(row))
+            row = []
+            used = 0
+        row.append(cluster)
+        used += cells
+    if row or not rows:
+        rows.append("".join(row))
+    return rows
+
+
 def _truncate(text: str, width: int) -> str:
     # width - 1: writing into the final column makes some terminals wrap
     # eagerly, which corrupts the redraw exactly like an over-long row does.
     limit = max(1, int(width) - 1)
-    if len(text) <= limit:
+    if _display_width(text) <= limit:
         return text
-    return text[: max(1, limit - 1)] + "…"
+    return _clip_cells(text, max(0, limit - 1)) + "…"
 
 
 def _windows_console_size():
@@ -625,15 +744,19 @@ def _framed_input_lines(frame: str, buffer: str, width: int, stream,
     inner = max(1, outer - 5)
     clean_frame = _ANSI_ESCAPE_RE.sub("", str(frame or "")).strip()
     chars = _frame_chars(stream)
-    title = (" " + clean_frame + " ")[: max(0, outer - 4)]
-    top = chars["tl"] + chars["h"] + title + chars["h"] * max(0, outer - 2 - len(title) - 1) + chars["tr"]
+    title = _clip_cells(" " + clean_frame + " ", max(0, outer - 4))
+    top = (chars["tl"] + chars["h"] + title
+           + chars["h"] * max(0, outer - 3 - _display_width(title))
+           + chars["tr"])
     text = str(buffer or "")
-    content = [text[index:index + inner] for index in range(0, len(text), inner)] or [""]
-    rows = [chars["v"] + " > " + line.ljust(inner) + chars["v"] for line in content]
+    content = _wrap_cells(text, inner)
+    rows = [chars["v"] + " > " + _pad_cells(line, inner) + chars["v"] for line in content]
     footer_text = str(footer_hint or " Enter send %s Up/Down history %s Ctrl+L clear " % (
         chars["dot"], chars["dot"],
     ))
-    footer = chars["bl"] + chars["h"] + footer_text[: max(0, outer - 4)].ljust(max(0, outer - 4), chars["h"]) + chars["h"] + chars["br"]
+    footer = (chars["bl"] + chars["h"]
+              + _pad_cells(footer_text, max(0, outer - 4), chars["h"])
+              + chars["h"] + chars["br"])
     return top, rows, footer
 
 
@@ -651,11 +774,13 @@ def _framed_cursor_cell(buffer: str, cursor: int, width: int,
                         line_count: int) -> tuple[int, int]:
     outer = max(8, int(width) - 1)
     columns = max(1, outer - 5)
-    offset = max(0, min(len(str(buffer or "")), int(cursor)))
-    row = offset // columns
+    prefix = str(buffer or "")[:max(0, int(cursor))]
+    rows = _wrap_cells(prefix, columns)
+    row = len(rows) - 1
+    column = _display_width(rows[-1])
     if row >= max(1, int(line_count)):
         return max(0, int(line_count) - 1), columns
-    return row, min(columns, offset % columns)
+    return row, min(columns, column)
 
 
 def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
