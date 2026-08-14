@@ -2185,7 +2185,7 @@ def _commands_index_payload():
     # so in the payload instead of shipping an empty list the client would
     # render as "this build has no commands".
     try:
-        commands = [command.to_dict() for command in command_catalog.catalog()]
+        commands = [command.to_dict() for command in command_catalog.http_catalog()]
         error = ""
     except command_catalog.CatalogUnavailable as exc:
         commands, error = [], str(exc)
@@ -2203,18 +2203,39 @@ def _commands_index_payload():
 
 def _commands_complete_payload(query, limit=""):
     try:
+        # This endpoint feeds the same HTTP chat composer as the index above.
+        # Search the complete catalog first so filtering cannot make a valid
+        # lower-ranked served command disappear behind console-only matches.
+        http_names = {command.name for command in command_catalog.http_catalog()}
         matches = [
             command.to_dict()
             for command in command_catalog.complete(
-                query, limit=_completion_limit(limit),
+                query, limit=len(command_catalog.catalog()),
             )
+            if command.name in http_names
         ]
     except command_catalog.CatalogUnavailable as exc:
         return {"matches": [], "error": str(exc)}
-    return {"matches": matches}
+    return {"matches": matches[:_completion_limit(limit)]}
 
 
 def _commands_help_payload(topic=""):
+    # A direct help lookup is another form of advertising a command. Do not
+    # tell an HTTP client how to invoke a console-only native control that its
+    # own slash dispatcher will treat as ordinary model input.
+    requested = str(topic or "").strip()
+    catalogued = command_catalog.by_name(requested) if requested else None
+    if catalogued is not None and catalogued.native:
+        wanted = requested.lower()
+        if not wanted.startswith("/"):
+            wanted = "/" + wanted
+        http_spellings = {
+            spelling.lower()
+            for command in command_catalog.http_catalog()
+            for spelling in command.all_names
+        }
+        if wanted not in http_spellings:
+            return {"text": "no HTTP command '%s'." % requested}
     return {"text": command_catalog.help_text(topic)}
 
 

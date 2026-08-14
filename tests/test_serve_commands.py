@@ -71,7 +71,7 @@ def test_commands_index_returns_catalog_categories_and_popular(monkeypatch):
 
     assert status == 200
     assert set(payload) == {"commands", "categories", "popular"}
-    assert len(payload["commands"]) == len(command_catalog.catalog())
+    assert len(payload["commands"]) == len(command_catalog.http_catalog())
     # The whole point of the catalog: far more than the legacy registry's 59.
     assert len(payload["commands"]) > 150
     for entry in payload["commands"]:
@@ -86,8 +86,38 @@ def test_commands_index_entries_match_to_dict_exactly(monkeypatch):
         _, payload = _get(port, "/v1/commands")
 
     by_name = {entry["name"]: entry for entry in payload["commands"]}
-    for command in command_catalog.catalog():
+    for command in command_catalog.http_catalog():
         assert by_name[command.name] == command.to_dict()
+
+
+def test_commands_index_omits_console_only_native_controls(monkeypatch):
+    """The app sends slash choices to the HTTP dispatcher, not the REPL."""
+    assert command_catalog.by_name("/mode") is not None
+    assert "/mode" not in command_catalog.http_native_names()
+    assert ts._handle_slash("/mode plan") is None
+
+    with _http_server(monkeypatch) as port:
+        _, payload = _get(port, "/v1/commands")
+        _, completion = _get(port, "/v1/commands/complete?q=mode&limit=50")
+        _, help_payload = _get(port, "/v1/commands/help?topic=/mode")
+
+    names = {entry["name"] for entry in payload["commands"]}
+    assert "/mode" not in names
+    assert "/model" not in names
+    assert "/project" not in names
+    assert "/mode" not in {entry["name"] for entry in completion["matches"]}
+    assert "no HTTP command" in help_payload["text"]
+
+
+def test_every_advertised_native_spelling_is_handled_by_http_dispatcher(monkeypatch):
+    with _http_server(monkeypatch) as port:
+        _, payload = _get(port, "/v1/commands")
+
+    handled = command_catalog.http_native_names()
+    for entry in payload["commands"]:
+        if entry["native"]:
+            assert entry["name"] in handled
+            assert set(entry["aliases"]) <= handled
 
 
 # --- GET /v1/commands/complete -------------------------------------------
