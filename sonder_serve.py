@@ -3276,7 +3276,7 @@ class Handler(BaseHTTPRequestHandler):
                     if structured_schema is None and reply is None and natural_model and natural_model["kind"] == "ensemble":
                         reply = server.ensemble_answer(
                             natural_model["prompt"], tiers=natural_model["tiers"],
-                            project=storage_project,
+                            project=storage_project, require_all_tiers=True,
                         )
                     if structured_schema is None and reply is None:
                         reply = server.chat_web_response(

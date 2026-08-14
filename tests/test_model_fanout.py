@@ -134,6 +134,29 @@ def test_natural_ensemble_request_is_explicit_and_fixed():
     ) is None
 
 
+def test_natural_ensemble_forwards_output_limit_and_requires_two_models(monkeypatch):
+    called = {}
+    original_ensemble_answer = server.ensemble_answer
+    monkeypatch.setattr(server, "ensemble_answer", lambda prompt, **kwargs: called.update(
+        prompt=prompt, **kwargs
+    ) or "ensemble result")
+
+    assert server.sonder(
+        "use code and reasoning ensemble to review this patch", num_predict=321,
+    ) == "ensemble result"
+    assert called == {
+        "prompt": "review this patch", "tiers": "code,reasoning",
+        "project": "", "num_predict": 321, "require_all_tiers": True,
+    }
+
+    monkeypatch.setattr(server, "_ensemble_targets", lambda _tiers: ([
+        ("code", "code-model"),
+    ], ["reasoning"]))
+    assert "needs two distinct available models" in original_ensemble_answer(
+        "review", tiers="code,reasoning", require_all_tiers=True,
+    )
+
+
 @pytest.mark.parametrize(
     "phrase, expected",
     [

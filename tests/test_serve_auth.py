@@ -1025,6 +1025,7 @@ def test_http_developer_natural_ensemble_uses_fixed_local_tiers(monkeypatch):
     assert status == 200
     assert calls and calls[0][0] == "review this patch"
     assert calls[0][1]["tiers"] == "code,reasoning"
+    assert calls[0][1]["require_all_tiers"] is True
     assert json.loads(body)["choices"][0]["message"]["content"].startswith("two local answers")
 
 

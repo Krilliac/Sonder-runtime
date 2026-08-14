@@ -5533,6 +5533,7 @@ def sonder(
         if natural["kind"] == "ensemble":
             return ensemble_answer(
                 natural["prompt"], tiers=natural["tiers"], project=project,
+                num_predict=num_predict, require_all_tiers=True,
             )
         return model_fanout(
             natural["prompt"], scope=natural["scope"], profile=natural.get("profile", ""),
@@ -23698,6 +23699,7 @@ def ensemble_answer(
     num_predict: int = 700,
     mode: str = "prose",
     project: str = "",
+    require_all_tiers: bool = False,
 ) -> str:
     """Ask several local models the same question, then compound one answer.
 
@@ -23725,6 +23727,9 @@ def ensemble_answer(
             than through the learning orchestrator, so without this it never
             sees the facts -- and code generation is exactly where recorded
             failure modes pay off.
+        require_all_tiers: refuse rather than degrade to a single answer when
+            an explicitly named multi-tier ensemble cannot supply two distinct
+            available models. Natural code-and-reasoning routing enables this.
     """
     _maybe_live_reload()
     question = (prompt or "").strip()
@@ -23740,6 +23745,13 @@ def ensemble_answer(
         return "ERROR: no bound local tiers to poll%s." % (
             " (unknown: %s)" % ", ".join(unknown) if unknown else ""
         )
+    if require_all_tiers and len(targets) < 2:
+        return _format_model_call_error(ModelCallError(
+            "configuration",
+            "requested ensemble needs two distinct available models%s." % (
+                " (unavailable: %s)" % ", ".join(unknown) if unknown else ""
+            ),
+        ))
 
     answers, failures = [], []
     for tier, model in targets:
