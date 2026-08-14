@@ -1041,6 +1041,63 @@ void main() {
     expect(reply.hasReasoning, isFalse);
   });
 
+  test('chatDetailed keeps the server error when an exact model is rejected',
+      () async {
+    final client = MockClient((request) async {
+      expect(request.url.path, '/v1/chat/completions');
+      expect(jsonDecode(request.body)['model'], 'nomic-embed-text:latest');
+      return http.Response(
+        jsonEncode({
+          'error': {
+            'message':
+                "model 'nomic-embed-text:latest' does not support chat",
+            'type': 'invalid_request_error',
+          },
+        }),
+        400,
+      );
+    });
+
+    await expectLater(
+      http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+          const [ChatMessage(role: Role.user, content: 'hello')],
+          model: 'nomic-embed-text:latest',
+        ),
+        () => client,
+      ),
+      throwsA(
+        isA<SonderException>().having(
+          (error) => error.message,
+          'message',
+          "model 'nomic-embed-text:latest' does not support chat",
+        ),
+      ),
+    );
+  });
+
+  test('chatDetailed uses a stable fallback for a malformed error response',
+      () async {
+    final client =
+        MockClient((request) async => http.Response('bad gateway', 502));
+
+    await expectLater(
+      http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+          const [ChatMessage(role: Role.user, content: 'hello')],
+        ),
+        () => client,
+      ),
+      throwsA(
+        isA<SonderException>().having(
+          (error) => error.message,
+          'message',
+          'Server returned HTTP 502.',
+        ),
+      ),
+    );
+  });
+
   test('chat still returns the answer text only', () async {
     final client = MockClient((request) async {
       return http.Response(
