@@ -459,6 +459,7 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
     if (wait_until(lambda: _managed_listener_pid(host, port) is not None, 12)
             or _managed_listener_pid(host, port) is not None):
         pid = _managed_listener_pid(host, port) or pid
+        pid_file("sonder_serve").write_text(str(pid), encoding="ascii")
         return "sonder: started pid=%s at http://%s:%s" % (pid, host, port)
     return "sonder: start requested pid=%s, not reachable yet (see %s)" % (
         pid, log_file("sonder_serve"))
