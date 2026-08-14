@@ -466,6 +466,38 @@ def test_thinking_only_response_reports_sanitized_metadata_without_reasoning(
     assert len(calls) == 1
 
 
+def test_chat_request_strips_inline_reasoning_tags_from_model_content(monkeypatch):
+    private_reasoning = "private chain of thought: bearer inline-hidden-token"
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: {
+            "message": {
+                "content": "<think>\n%s\n</think>\n\nFinal answer.",
+            },
+        },
+    )
+
+    _out, content = server._chat_request({}, model="local")
+
+    assert content == "Final answer."
+    assert private_reasoning not in content
+    assert "<think>" not in content
+
+
+def test_chat_request_keeps_nonleading_literal_think_tags(monkeypatch):
+    literal = "Use the literal <think> tag in this XML example."
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: {"message": {"content": literal}},
+    )
+
+    _out, content = server._chat_request({}, model="local")
+
+    assert content == literal
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

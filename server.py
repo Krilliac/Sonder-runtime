@@ -537,6 +537,27 @@ def _private_cot_rule_allows() -> bool:
 _THINKING_CAPABILITY_CACHE = {}
 _THINKING_CAPABILITY_LOCK = threading.Lock()
 
+# Some local community models serialize deliberation into ordinary ``content``
+# rather than Ollama's separate ``message.thinking`` field.  That field is
+# governed by explicit reasoning exposure policy; a leading closed tag must
+# not become an accidental bypass of the same boundary.
+_INLINE_THINKING_PREFIX_RE = re.compile(
+    r"^\s*(?:<think(?:\s+[^>]*)?>.*?</think>\s*)+", re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_inline_thinking(content):
+    """Drop closed leading model reasoning tags from public assistant text.
+
+    Only leading, syntactically closed blocks are recognized.  This keeps a
+    legitimate answer that discusses literal tags intact while ensuring that
+    untrusted model deliberation cannot be shown, saved to session history, or
+    fed into a later turn as assistant content.
+    """
+    if not isinstance(content, str):
+        return content
+    return _INLINE_THINKING_PREFIX_RE.sub("", content, count=1)
+
 
 def _apply_cloud_thinking_policy(payload, model, *, compact=False):
     """Apply hosted-model thinking controls without changing custom models.
@@ -4364,6 +4385,7 @@ def _chat_request(
             if reasoning_exposure_enabled():
                 activity_tracker.record_reasoning(thinking, model=model)
     content = message.get("content") if isinstance(message, dict) else None
+    content = _strip_inline_thinking(content)
     if not isinstance(content, str) or not content.strip():
         if accept_native_tool_calls:
             native_decision = _native_tool_call_decision(message)
