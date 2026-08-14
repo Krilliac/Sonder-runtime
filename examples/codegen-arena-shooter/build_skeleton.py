@@ -186,8 +186,26 @@ def run_verifier(project: str) -> tuple[bool, str]:
             output = output[:8_000] + "\n... verifier output truncated"
         return output
 
+    def target_path(value) -> str:
+        """Keep an explicit Windows absolute target absolute under Linux CI.
+
+        ``os.path.abspath`` intentionally follows the host platform.  The
+        generator and its tests also accept a Windows project path on a
+        non-Windows controller, where treating ``C:/...`` as a repository
+        relative string points MSBuild at the wrong project.
+        """
+        text = os.fspath(value)
+        if (
+            len(text) >= 3
+            and text[0].isalpha()
+            and text[1] == ":"
+            and text[2] in ("/", "\\")
+        ) or text.startswith("\\\\"):
+            return text
+        return os.path.abspath(text)
+
     verifier = os.path.join(HERE, "Verify")
-    target = "-p:SonderTarget=" + os.path.abspath(project)
+    target = "-p:SonderTarget=" + target_path(project)
     try:
         # A file reference whose HintPath changes via an MSBuild property is
         # not reliably recopied by an incremental `dotnet run`: the previous
