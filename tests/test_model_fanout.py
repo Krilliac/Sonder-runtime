@@ -1951,12 +1951,17 @@ def test_fanout_revoked_cloud_opt_in_cancels_before_provider_send(monkeypatch, t
 
     monkeypatch.setattr(server, "_make_generate", fake_make)
 
-    receipt = server._execute_fanout_run(run["id"])
+    with server.activity_tracker.response_span("chat", "fanout") as activity:
+        receipt = server._execute_fanout_run(run["id"])
 
     assert provider_calls == []
     assert receipt["models_answered"] == 0
-    assert receipt["models_failed"] == 1
-    assert receipt["failures"][0]["model"] == "remote:cloud"
+    assert receipt["models_failed"] == 0
+    assert receipt["models_skipped"] == 1
+    assert receipt["skipped"][0]["model"] == "remote:cloud"
+    assert server.fanout_store.resume_run(run["id"]) is not None
+    event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
+    assert event["cloud_model_calls"] == 0
 
 
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():

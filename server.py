@@ -23215,6 +23215,25 @@ def _execute_fanout_run(run_id):
                 metadata = dict(metadata)
                 metadata["tokens_in"] = usage.get("tokens_in", 0)
                 metadata["tokens_out"] = usage.get("tokens_out", 0)
+            # A cloud-policy revocation that wins the final pre-send fence is
+            # not a provider failure and has not made a metered request. Keep
+            # the row resumable by the normal skipped-result path rather than
+            # forcing an operator to opt into retrying a failed cloud call.
+            if (
+                isinstance(caught, ModelCallError)
+                and caught.kind == "cancelled"
+                and _is_cloud_model_name(model)
+                and (not run.get("cloud_opt_in") or not cloud_allowed())
+            ):
+                return (
+                    row,
+                    "skipped",
+                    "",
+                    "cloud access disabled before provider dispatch",
+                    int((time.monotonic() - started) * 1000),
+                    None,
+                    metadata or {},
+                )
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
             if (
