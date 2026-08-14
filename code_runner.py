@@ -10,6 +10,7 @@ import glob
 import json
 import ntpath
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -231,27 +232,89 @@ def _timeout_result(language, cwd, timeout, exc):
     }
 
 
+def _terminate_process_tree(proc):
+    """Best-effort teardown for a timed-out model-authored process tree.
+
+    ``subprocess.run(..., timeout=...)`` terminates only the direct child.  A
+    snippet can therefore spawn a background process and let it continue after
+    the runner has reported the timeout.  Start every normal runner command in
+    its own process group and tear down that whole group here.  This is still
+    not an OS sandbox, but it makes the advertised execution deadline honest
+    for ordinary descendants on both supported host families.
+    """
+    if os.name == "nt":
+        # ``taskkill /T`` uses the process parent tree rather than a shell, and
+        # the PID came from our own Popen call.  It is intentionally a bounded
+        # best effort: an already-exited parent simply makes the cleanup a no-op.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                env=_child_environment(),
+                check=False,
+            )
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def _run_process(cmd, cwd, stdin, timeout, language):
     if language == "bash" and not sonder_paths.bash_executable():
         return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES[language]["missing"])
     try:
-        proc = subprocess.run(
+        popen_kwargs = {
+            "cwd": cwd,
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "env": _child_environment(),
+            # Model-authored code must not inherit ambient server handles.
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
             cmd,
-            cwd=cwd,
-            input=stdin or "",
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=_child_environment(),
+            **popen_kwargs,
         )
     except FileNotFoundError:
         missing = SUPPORTED_LANGUAGES.get(language, {}).get(
             "missing", "executable not found: %s" % (cmd[0] if cmd else "(empty)")
         )
         return _error_result(language, cwd, timeout, missing)
+    try:
+        stdout, stderr = proc.communicate(input=stdin or "", timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        return _timeout_result(language, cwd, timeout, exc)
-    return _completed_result(proc, language, cwd, timeout)
+        _terminate_process_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout = exc.output if isinstance(exc.output, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        timeout_exc = subprocess.TimeoutExpired(
+            cmd, timeout, output=stdout, stderr=stderr,
+        )
+        return _timeout_result(language, cwd, timeout, timeout_exc)
+    completed = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    return _completed_result(completed, language, cwd, timeout)
 
 
 def _persistent_run_dir():
@@ -291,6 +354,9 @@ def _launch_console(launcher, cwd, language, timeout):
             cwd=cwd,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             env=_child_environment(),
+            # A detached window is still executing model-authored code.  It
+            # has no legitimate reason to inherit the host's other handles.
+            close_fds=True,
         )
     except FileNotFoundError:
         return _error_result(language, cwd, timeout, "cmd.exe not found")

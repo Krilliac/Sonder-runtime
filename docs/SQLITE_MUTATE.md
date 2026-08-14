@@ -24,6 +24,15 @@ for predicates; all functions and every other action are denied. Triggered or
 cross-table mutations are rejected. Foreign-key enforcement remains enabled;
 a statement requiring a denied cross-table cascade fails and rolls back.
 
+An ordinary preview is advisory: another writer may change the database before
+a later apply. Each successful preview also returns a short-lived opaque
+`preview_token`. Supplying that token with the exact same apply request opts
+into optimistic drift fencing. Sonder retains the preview connection only in
+memory for 60 seconds and, after acquiring the apply writer lock, rejects the
+apply if another connection committed in between. Tokens are single-use,
+process-local, and are not an authorization grant; rerun preview if one expires
+or the database changes.
+
 The connection uses zero busy timeout, a monotonic progress deadline, SQLite
 statement/parameter limits, row and database-size ceilings, and identity/path
 revalidation before completion. WAL-mode apply uses a fail-closed worst-case

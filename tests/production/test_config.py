@@ -209,11 +209,22 @@ def test_remote_ollama_requires_consent():
     assert any("remote-Ollama consent" in e for e in excinfo.value.errors)
     config = load_config(
         env={
-            "OLLAMA_HOST": "192.168.1.50:11434",
+            "OLLAMA_HOST": "https://192.168.1.50:11434",
             "SONDER_ALLOW_REMOTE_OLLAMA": "1",
         }
     )
     assert config.ollama.allow_remote is True
+
+
+def test_remote_ollama_requires_https_even_with_consent():
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            env={
+                "OLLAMA_HOST": "http://192.168.1.50:11434",
+                "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+            }
+        )
+    assert any("must use https" in error for error in excinfo.value.errors)
 
 
 def test_redacted_dump_never_contains_secret_values():

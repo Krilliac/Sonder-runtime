@@ -280,6 +280,25 @@ def test_worker_environment_is_explicit_and_scrubs_cloud_credentials(monkeypatch
     assert environment["PYTHONNOUSERSITE"] == "1"
 
 
+def test_worker_environment_drops_conflicting_case_variant_values():
+    environment = npu_broker._worker_environment({
+        "PATH": "C:/trusted-bin",
+        "Path": "C:/untrusted-bin",
+        "QNN_SDK_ROOT": "C:/trusted-qnn",
+        "qnn_sdk_root": "C:/untrusted-qnn",
+        "OPENAI_API_KEY": "never-inherit",
+    })
+
+    # Windows resolves PATH/Path and QNN_SDK_ROOT/qnn_sdk_root as the same
+    # variables.  The broker must not leave their effective child value to the
+    # OS environment-block implementation.
+    assert environment["PATH"] == os.defpath
+    assert "QNN_SDK_ROOT" not in environment
+    assert "Path" not in environment
+    assert "qnn_sdk_root" not in environment
+    assert "OPENAI_API_KEY" not in environment
+
+
 def test_worker_tries_next_allowlisted_provider_after_session_failure(
     monkeypatch, tmp_path,
 ):

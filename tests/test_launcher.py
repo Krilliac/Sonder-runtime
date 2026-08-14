@@ -1032,6 +1032,54 @@ def test_health_token_is_persistent_private_and_passed_without_proxy(
     assert controller.health_token not in header_values.values()
 
 
+def test_health_probe_uses_configured_ipv6_loopback(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path, server_host="::1", server_port=25435)
+    seen = {}
+
+    class Response:
+        status = 200
+
+        def read(self, size):
+            return json.dumps(
+                sonder_launcher.sonder_health.response_payload(
+                    controller.health_token,
+                    seen["nonce"],
+                    controller.server_port,
+                    pid=123,
+                )
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Opener:
+        def open(self, request, timeout):
+            seen["url"] = request.full_url
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            seen["nonce"] = headers[
+                sonder_launcher.sonder_health.NONCE_HEADER.lower()
+            ]
+            return Response()
+
+    def reachable(host, port, timeout=0.4):
+        seen["reachable"] = (host, port, timeout)
+        return True
+
+    monkeypatch.setattr(sonder_launcher, "_reachable", reachable)
+    monkeypatch.setattr(
+        sonder_launcher.urllib.request,
+        "build_opener",
+        lambda handler: Opener(),
+    )
+
+    assert controller._server_state() == "healthy"
+    assert seen["reachable"][:2] == ("::1", 25435)
+    assert seen["url"].startswith("http://[::1]:25435")
+
+
 def test_launcher_status_reports_only_verified_managed_role(monkeypatch, tmp_path):
     controller = make_controller(tmp_path)
     monkeypatch.setattr(controller, "_server_state", lambda: "healthy")

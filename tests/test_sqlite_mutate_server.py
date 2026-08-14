@@ -32,6 +32,25 @@ def test_mcp_activity_preview_apply_and_error(monkeypatch, tmp_path):
     assert server.sqlite_mutate(str(path), "SELECT ?", "[1]").startswith("ERROR:")
 
 
+def test_preview_token_is_returned_but_not_written_to_activity(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    path = tmp_path / "records.db"
+    _database(path)
+    recorded = []
+    monkeypatch.setattr(
+        server, "_record_direct_tool",
+        lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+
+    preview = json.loads(server.sqlite_mutate(
+        str(path), "UPDATE records SET value = ? WHERE id = ?", '["after",1]',
+    ))
+    token = preview["preview_token"]
+    assert token and token != "<redacted>"
+    assert recorded and token not in recorded[-1][1]["output"]
+    assert "<redacted>" in recorded[-1][1]["output"]
+
+
 def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, tmp_path):
     assert "sqlite_mutate" in server.tool_manifest()
     assert "- sqlite_mutate:" in server._agent_tool_help()
@@ -62,6 +81,32 @@ def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, 
         "sqlite_mutate", {"path": str(path), "mode": "apply"},
     )
     assert records[0]["path"] == server._agent_normalized_path(str(path))
+
+
+def test_project_bound_sqlite_mutation_cannot_escape_with_trusted_approval(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = outside / "records.db"
+    _database(path)
+
+    output = server._agent_dispatch_observed(
+        "sqlite_mutate", {
+            "path": str(path),
+            "sql": "UPDATE records SET value = ? WHERE id = ?",
+            "parameters": ["escaped", 1],
+            "mode": "apply",
+        },
+        project=str(project),
+    )
+
+    assert output.startswith("ERROR: agent project path rejected")
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("SELECT value FROM records WHERE id = 1").fetchone() == ("before",)
+    finally:
+        conn.close()
 
 
 def test_sqlite_module_participates_in_live_reload(monkeypatch):

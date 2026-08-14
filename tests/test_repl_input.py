@@ -421,6 +421,19 @@ def test_composer_title_uses_visible_width_not_ansi_bytes(monkeypatch):
     assert "Sonder code" in sonder_repl._ANSI_RE.sub("", title)
 
 
+def test_compact_composer_reports_unknown_execution_status_without_fake_idle(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(
+        sonder_repl.server, "execution_status_data",
+        lambda: {"known": False, "error": "status unavailable"},
+    )
+
+    title = sonder_repl._composer_title("code", width=80)
+
+    assert "L? A?" in title
+    assert "L0 A0" not in title
+
+
 def test_composer_context_and_last_turn_degrade_without_a_fake_value(monkeypatch):
     monkeypatch.setattr(sonder_repl.server, "context_health_data", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {"surface": "chat-api"})
@@ -620,6 +633,29 @@ def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch
     assert calls and calls[0]["prompt"] == prompt
 
 
+def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
+    lines = iter(("/login nate correct-horse-battery-staple", "hello", "/exit"))
+    offered_history = []
+
+    def _read(_prompt, **kwargs):
+        offered_history.append(list(kwargs.get("history") or []))
+        return next(lines)
+
+    monkeypatch.setattr(sonder_repl, "_read_input", _read)
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.server, "admin_login", lambda *_args: "logged in")
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+
+    sonder_repl.main()
+
+    assert offered_history == [[], [], ["hello"]]
+
+
 def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):
     lines = iter(("/model CODE", "/model Gemma3:12B", "hello", "/exit"))
     seen = []
@@ -642,6 +678,45 @@ def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(mo
     assert len(seen) == 1
     assert seen[0]["tier"] == "code"
     assert seen[0]["model_override"] == "gemma3:12b"
+
+
+def test_model_selection_rejects_known_embedding_only_tag_before_next_chat(monkeypatch, capsys):
+    """`/model` must not claim a non-chat tag was successfully selected."""
+    lines = iter(("/model nomic-embed-text:latest", "hello", "/exit"))
+    seen = []
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(
+        sonder_repl, "_installed_models",
+        lambda: [("nomic-embed-text:latest", "0.3 GB")],
+    )
+    monkeypatch.setattr(
+        sonder_repl.server, "resolve_discovered_model_record",
+        lambda selector: (
+            "nomic-embed-text:latest",
+            {"name": "nomic-embed-text:latest", "capabilities": ["embedding"]},
+        ) if selector == "nomic-embed-text:latest" else None,
+    )
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda _prompt, **kwargs: seen.append(kwargs) or "answer",
+    )
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "cannot serve chat (embedding-only capability)" in output
+    # The next turn still uses the prior code tier instead of a pin the
+    # rejected command had falsely claimed to install.
+    assert len(seen) == 1
+    assert seen[0]["tier"] == ""
+    assert seen[0]["model_override"] == ""
 
 
 def test_model_tag_selection_is_used_by_consult(monkeypatch):

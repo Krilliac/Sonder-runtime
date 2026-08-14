@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -53,6 +54,30 @@ def test_run_process_scrubs_control_plane_secrets(monkeypatch, tmp_path):
     assert out["stdout"].strip() == "||"
 
 
+def test_run_process_closes_unrelated_inherited_handles(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+
+        def communicate(self, *, input, timeout):
+            seen["input"] = input
+            seen["timeout"] = timeout
+            return "", ""
+
+    def fake_popen(*args, **kwargs):
+        seen.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(code_runner.subprocess, "Popen", fake_popen)
+    out = code_runner._run_process(
+        [sys.executable, "-c", "pass"], str(tmp_path), "", 10, "python"
+    )
+
+    assert out["ok"] is True
+    assert seen["close_fds"] is True
+
+
 def test_detached_console_receives_scrubbed_environment(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
@@ -70,6 +95,7 @@ def test_detached_console_receives_scrubbed_environment(monkeypatch, tmp_path):
 
     assert out["ok"] is True
     assert "SONDER_AUTH_SECRET" not in seen["env"]
+    assert seen["close_fds"] is True
 
 
 def test_python_run_failure_captures_stderr():
@@ -132,11 +158,33 @@ def test_timeout_is_reported():
     assert "timed out" in out["error"]
 
 
+def test_timeout_terminates_background_descendants(tmp_path):
+    marker = tmp_path / "survived-timeout.txt"
+    child = (
+        "import pathlib, time; time.sleep(1.5); "
+        "pathlib.Path(%r).write_text('survived')" % str(marker)
+    )
+    code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', %r])\n"
+        "while True: time.sleep(.1)\n" % child
+    )
+
+    out = code_runner.run_code(code, timeout=1)
+
+    assert out["ok"] is False
+    assert "timed out" in out["error"]
+    # The child would create this shortly after the parent deadline if the
+    # runner only killed the direct interpreter.
+    time.sleep(2)
+    assert not marker.exists()
+
+
 def test_missing_runtime_is_reported(monkeypatch):
     def missing(*args, **kwargs):
         raise FileNotFoundError("missing")
 
-    monkeypatch.setattr(code_runner.subprocess, "run", missing)
+    monkeypatch.setattr(code_runner.subprocess, "Popen", missing)
     out = code_runner.run_code("console.log(1)", language="js")
     assert out["ok"] is False
     assert "node executable not found" in out["error"]
@@ -234,11 +282,12 @@ def test_run_code_window_launches_python_console(monkeypatch, tmp_path):
     class FakeProc:
         pid = 4321
 
-    def fake_popen(cmd, cwd, creationflags=0, env=None):
+    def fake_popen(cmd, cwd, creationflags=0, env=None, close_fds=False):
         seen["cmd"] = cmd
         seen["cwd"] = cwd
         seen["creationflags"] = creationflags
         seen["env"] = env
+        seen["close_fds"] = close_fds
         return FakeProc()
 
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
@@ -251,6 +300,7 @@ def test_run_code_window_launches_python_console(monkeypatch, tmp_path):
     assert out["detached"] is True
     assert out["pid"] == 4321
     assert seen["cmd"][:2] == ["cmd", "/k"]
+    assert seen["close_fds"] is True
     assert os.path.exists(os.path.join(out["run_dir"], "snippet.py"))
     assert os.path.exists(os.path.join(out["run_dir"], "launch.bat"))
 
@@ -267,11 +317,14 @@ def test_run_code_window_rejects_non_windows(monkeypatch):
 def test_timeout_is_clamped(monkeypatch):
     seen = {}
 
-    def fake_run(*args, **kwargs):
-        seen["timeout"] = kwargs["timeout"]
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+    class Proc:
+        returncode = 0
 
-    monkeypatch.setattr(code_runner.subprocess, "run", fake_run)
+        def communicate(self, *, input, timeout):
+            seen["timeout"] = timeout
+            return "", ""
+
+    monkeypatch.setattr(code_runner.subprocess, "Popen", lambda *args, **kwargs: Proc())
     out = code_runner.run_code("print(1)", timeout=999)
     assert out["ok"] is True
     assert seen["timeout"] == code_runner.MAX_TIMEOUT

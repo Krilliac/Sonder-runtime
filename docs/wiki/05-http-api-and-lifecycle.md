@@ -13,14 +13,20 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /version` | loopback or key | Build version + commit. |
 | `GET /metrics` | loopback or key | Prometheus exposition (or a disabled comment). |
 | `POST /v1/chat/completions` | key | OpenAI-compatible chat. |
-| `GET /v1/models` | key | Advertised tiers. |
+| `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
-| `GET /v1/sonder/status` | key | Rich runtime/stats snapshot. |
+| `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot. Ordinary hosted accounts receive only their account and the model catalog. |
 
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the
 reverse proxy restricts those paths to loopback upstream).
+
+`GET /v1/models` always includes the `sonder` runtime route and configured
+tier IDs. It also includes exact installed/discovered models that declare a
+chat capability; embedding- or vision-only entries are omitted. Cloud models
+appear only after the operator enables cloud use, so clients must treat the
+response as the live allowlist rather than a static catalog.
 
 ## Chat request
 
@@ -35,10 +41,22 @@ POST /v1/chat/completions
 A full chat UI owns conversation state (resends the transcript). A thin
 client that names a `session` but sends only the current message gets
 server-side history rebuilt from the stored session — so both contracts
-work. The reply carries an activity footer of observable actions.
+work. `choices[0].message.content` contains only the answer; bounded
+observable execution metadata is returned separately as `sonder_activity`.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
 `session`, `project`, `context_size`, and the consented location fields.
+
+Non-streaming responses populate standard OpenAI `usage` from the current
+request's observed model counters. For an SSE response, request an additional
+terminal usage chunk with:
+
+```json
+{ "stream": true, "stream_options": { "include_usage": true } }
+```
+
+That final chunk has an empty `choices` array and a `usage` object. It appears
+immediately before `[DONE]`; ordinary streams remain unchanged.
 
 `response_format` is available only for an isolated direct-model turn:
 
@@ -137,7 +155,9 @@ Bounded Prometheus metrics (no high-cardinality labels): `sonder_build_info`,
 `sonder_request_duration_seconds`, `sonder_active_requests`,
 `sonder_model_calls_total{tier,result}`, `sonder_auth_failures_total{reason}`,
 `sonder_backup_age_seconds`, plus content-free measured-inference histograms
-for backend phases and token throughput. Inference labels are closed sets
+for backend phases and token throughput. Model-call `tier` is only `local` or
+`cloud`, and `result` is only `ok` or `error`; exact model names and configured
+aliases are never exported. Inference labels are closed sets
 (`backend`, `phase`, `direction`, and explicit `cold`/`warm` state); prompts,
 responses, model names, and endpoints are never exported. Absent the Prometheus client the
 metric calls are cheap no-ops and `/metrics` returns an explanatory comment.

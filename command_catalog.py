@@ -29,7 +29,7 @@ import functools
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -366,6 +366,13 @@ _UNREGISTERED_BRANCH_WORK = {
     "/convergence": "mcp",
     "/goal": "goal",
     "/goals": "goal",
+    # The persistent autonomy command is native (its lifecycle calls are not
+    # individual catalogued MCP tools), so static tool-call discovery sees no
+    # work below either slash branch.  Keep both aliases on the permission
+    # floor through their registered native command rather than letting an
+    # empty tool set read as allowed.
+    "/autopilot": "autopilot",
+    "/auto": "autopilot",
     "/runwindow": "runwindow",
     "/runnew": "runwindow",
     "/runconsole": "runwindow",
@@ -505,6 +512,39 @@ def _native_groups() -> list[tuple[str, ...]]:
                 groups.append(fresh)
                 claimed.update(fresh)
     return groups
+
+
+@functools.lru_cache(maxsize=1)
+def http_native_names() -> frozenset:
+    """Slash spellings the HTTP chat dispatcher handles directly.
+
+    ``catalog()`` intentionally describes the union of the console and MCP
+    surfaces.  The Flutter client, however, sends its selected slash command
+    to ``sonder_serve._handle_slash``.  Reading that one dispatcher here keeps
+    the HTTP index from advertising console-only controls such as ``/model``
+    and ``/project`` that would otherwise fall through to the model as prose.
+    """
+    path = os.path.join(_HERE, "sonder_serve.py")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+    except (OSError, SyntaxError):
+        return frozenset()
+    dispatch = next(
+        (
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_handle_slash"
+        ),
+        None,
+    )
+    if dispatch is None:
+        return frozenset()
+    names: set[str] = set()
+    for node in ast.walk(dispatch):
+        if isinstance(node, ast.Compare):
+            names.update(_branch_names(node))
+    return frozenset(names)
 
 
 # ``control_command`` is a dispatch chain, not a worker. It is resolved by
@@ -1222,9 +1262,37 @@ def catalog() -> tuple:
     return tuple(filled)
 
 
+@functools.lru_cache(maxsize=1)
+def http_catalog() -> tuple:
+    """Commands the HTTP chat slash dispatcher can actually execute.
+
+    Every registered MCP tool remains reachable over HTTP through
+    ``_dispatch_catalogued_tool``. Native commands are different: some exist
+    only in the local REPL and previously leaked into ``GET /v1/commands``.
+    Keep a native entry only when at least one of its spellings is in the
+    served dispatch chain, preserving aliases shared by both surfaces. The
+    console catalog is deliberately left unchanged.
+    """
+    direct = http_native_names()
+    commands: list[Command] = []
+    for command in catalog():
+        if not command.native:
+            commands.append(command)
+            continue
+        spellings = [name for name in command.all_names if name in direct]
+        if not spellings:
+            continue
+        canonical = command.name if command.name in direct else spellings[0]
+        aliases = tuple(name for name in spellings if name != canonical)
+        commands.append(replace(command, name=canonical, aliases=aliases))
+    return tuple(commands)
+
+
 def reset_cache() -> None:
     """Drop the memoised catalog (used after a live reload adds tools)."""
     catalog.cache_clear()
+    http_catalog.cache_clear()
+    http_native_names.cache_clear()
     console_tools.cache_clear()
     console_disarmed_tools.cache_clear()
     http_slash_tools.cache_clear()

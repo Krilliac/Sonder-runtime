@@ -334,6 +334,17 @@ def main():
                              "models can be compared on identical slots")
     args = parser.parse_args()
 
+    # An unknown file otherwise produces an empty slot list.  The driver then
+    # builds the untouched skeleton and reports ``0 / 0`` as a successful
+    # generation, despite never asking a model to do the requested work.  Keep
+    # this check ahead of project creation and runtime calls so a typo is both
+    # cheap and unambiguous.
+    known_files = {name for name, _skeleton in skeleton.FILES}
+    if args.only and args.only not in known_files:
+        print("no such file in skeleton: %s" % args.only)
+        print("available files: %s" % ", ".join(sorted(known_files)))
+        return 2
+
     if args.model:
         # A/B on the SAME slots is the only comparison worth making here: the
         # remaining bodies are the ones a smaller model already failed, so

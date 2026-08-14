@@ -376,6 +376,24 @@ def test_pause_and_cancel_are_checked_between_tasks():
     assert cancelled["cycles"] == 0
 
 
+def test_cancellation_wins_when_active_work_raises():
+    run = autopilot_store.create_run("cancel an interrupted task")
+
+    def cancel_then_raise(current, _task, _prior):
+        autopilot_store.request_cancel(current["id"])
+        raise RuntimeError("tool process stopped unexpectedly")
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(), work_fn=cancel_then_raise,
+        review_fn=_complete,
+    )
+
+    assert result["status"] == "cancelled"
+    assert result["summary"] == "cancelled while controller unwound an error"
+    assert "tool process stopped unexpectedly" in result["last_error"]
+
+
 def test_per_invocation_cycle_budget_pauses_with_progress():
     run = autopilot_store.create_run("bounded progress")
     result = autopilot_controller.execute_run(
@@ -386,6 +404,49 @@ def test_per_invocation_cycle_budget_pauses_with_progress():
     assert result["status"] == "paused"
     assert result["cycles"] == 1
     assert "cycle budget" in result["summary"]
+
+
+def test_interrupted_running_task_is_not_automatically_replayed():
+    run = autopilot_store.create_run("Never replay an uncertain mutation")
+    claimed = autopilot_store.claim_run(run["id"], "dead-owner", owner_pid=os.getpid())
+    assert claimed is not None
+    plan = [
+        {
+            "id": "task-01", "title": "Mutate workspace", "instruction": "write once",
+            "kind": "implement", "status": "running", "attempts": 1,
+            "output": "", "error": "", "history": [],
+        },
+        {
+            "id": "task-02", "title": "Validate", "instruction": "check",
+            "kind": "validate", "status": "pending", "attempts": 0,
+            "output": "", "error": "", "history": [],
+        },
+    ]
+    saved = autopilot_store.save_progress(
+        run["id"], "dead-owner", plan=plan, criteria=["validated"],
+        status="running", phase="execute",
+    )
+    assert saved is not None
+    # A different process has to recover this exact persisted task state.
+    interrupted = autopilot_store.reconcile_stale_runs(now=saved["lease_until"] + 1)
+    assert interrupted == 1
+
+    result = autopilot_controller.execute_run(
+        run["id"], "recovery-owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: pytest.fail("recovery must not plan"),
+        work_fn=lambda *_args: pytest.fail("recovery must not dispatch tools"),
+        review_fn=lambda *_args: pytest.fail("recovery must not ask the model"),
+    )
+
+    assert result["status"] == "paused"
+    assert result["plan"][0]["status"] == "uncertain"
+    assert "automatic replay is refused" in result["plan"][0]["error"]
+    assert result["plan"][1]["status"] == "pending"
+    assert "operator review" in result["summary"]
+    assert any(
+        event["kind"] == "interrupted_task_uncertain"
+        for event in autopilot_store.events(run["id"])
+    )
 
 
 def test_final_cycle_budget_review_honors_operator_pause():

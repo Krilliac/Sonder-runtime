@@ -264,13 +264,24 @@ def _next_pending(plan: list[dict]) -> tuple[int, dict] | tuple[None, None]:
     return None, None
 
 
-def _repair_interrupted_tasks(plan: list[dict]) -> bool:
-    changed = False
+def _mark_interrupted_tasks_uncertain(plan: list[dict]) -> int:
+    """Fence tasks whose tool-side outcome was lost with the controller.
+
+    A durable controller can know that it persisted ``running`` before calling
+    the workbench, but cannot prove whether a crash happened before, during, or
+    after a mutating tool call.  Re-queuing that task would turn a recovery
+    action into an implicit replay.  Preserve the task as explicit evidence for
+    the operator and stop the run before another model or tool invocation.
+    """
+    changed = 0
     for task in plan:
         if task.get("status") == "running":
-            task["status"] = "pending"
-            task["error"] = "interrupted before a result was committed"
-            changed = True
+            task["status"] = "uncertain"
+            task["error"] = (
+                "tool-side outcome is uncertain after controller interruption; "
+                "automatic replay is refused"
+            )
+            changed += 1
     return changed
 
 
@@ -416,7 +427,7 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
     return "\n".join(lines)
 
 
-def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
+def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str | None = None) -> dict:
     # SPEC-3: first live call-site migrated onto the AutomationRepository port.
     # The composition root's automation repository wraps autopilot_store, so the
     # observable result is identical; the direct root-module dependency is gone.
@@ -424,10 +435,10 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
     from sonder_runtime.bootstrap.app import default_app
 
     automation = default_app().automation
-    data = automation.snapshot(include_finished=include_finished, limit=limit)
+    data = automation.snapshot(include_finished=include_finished, limit=limit, request_owner=request_owner)
     latest = data.get("latest")
     data["events"] = (
-        automation.events(latest["id"], limit=12) if latest else []
+        automation.events(latest["id"], limit=12, request_owner=request_owner) if latest else []
     )
     return data
 
@@ -459,6 +470,7 @@ def execute_run(
     owner_id: str,
     *,
     owner_pid: int,
+    request_owner: str | None = None,
     plan_fn: Callable[[dict], dict],
     work_fn: Callable[[dict, dict, str], str],
     review_fn: Callable[[dict, str], dict],
@@ -473,16 +485,35 @@ def execute_run(
     """
     max_cycles = max(1, min(int(max_cycles or 6), 12))
     run = autopilot_store.claim_run(
-        run_id, owner_id, owner_pid=owner_pid,
+        run_id, owner_id, owner_pid=owner_pid, request_owner=request_owner,
     )
     if not run:
         raise AutopilotError("run is unavailable, terminal, cancelled, or owned elsewhere")
     try:
         plan = [dict(task) for task in (run.get("plan") or [])]
-        if _repair_interrupted_tasks(plan):
+        uncertain_tasks = _mark_interrupted_tasks_uncertain(plan)
+        if uncertain_tasks:
             run = autopilot_store.save_progress(
                 run["id"], owner_id, plan=plan, status="running", phase="execute",
-                event_kind="resume", event_message="interrupted task returned to pending",
+                event_kind="interrupted_task_uncertain",
+                event_message=(
+                    "%d interrupted task(s) retained as uncertain; "
+                    "automatic replay refused" % uncertain_tasks
+                ),
+            ) or run
+            report = format_report(
+                run,
+                "task outcome is uncertain; inspect its external effects, then cancel "
+                "or start a fresh scoped run rather than replaying it automatically",
+            )
+            return autopilot_store.finish_run(
+                run["id"], owner_id, "paused",
+                summary=(
+                    "%d interrupted task(s) need operator review; "
+                    "automatic replay was refused" % uncertain_tasks
+                ),
+                last_error="interrupted task outcome uncertain",
+                final_report=report,
             ) or run
         if not plan:
             proposed = normalize_plan(
@@ -858,6 +889,16 @@ def execute_run(
         ) or run
     except Exception as exc:
         latest = autopilot_store.get_run(run["id"]) or run
+        flags = autopilot_store.control_flags(run["id"], owner_id)
+        if not flags.get("lost") and flags.get("cancel"):
+            stored = autopilot_store.finish_run(
+                run["id"], owner_id, "cancelled",
+                summary="cancelled while controller unwound an error",
+                last_error=str(exc),
+                final_report=format_report(latest, str(exc)),
+            )
+            if stored:
+                return stored
         stored = autopilot_store.finish_run(
             run["id"], owner_id, "failed",
             summary="autopilot controller failed safely",

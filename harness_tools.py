@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import file_ops
+import sonder_logging
 import sonder_paths
 import unsafe_lab
 
@@ -177,7 +178,13 @@ def _require_authorized_root(resolved, extra_roots=""):
 
 
 def _child_env():
-    env = os.environ.copy()
+    # Developer workflow commands execute repository-controlled scripts (test
+    # hooks, package managers, formatters, and build tools).  They must not
+    # inherit the runtime's API keys or approval/bypass controls: those scripts
+    # can print or encode their environment into the tool result.  Keep this
+    # in the shared helper used by the other model-directed execution lanes so
+    # future additions cannot silently diverge from the control-plane policy.
+    env = sonder_logging.child_environment()
     env.pop("CC", None)
     env.pop("CXX", None)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -307,6 +314,12 @@ def test_discover(root=".", framework="auto", extra_roots=""):
             tests = [l for l in lines if "::" in l]
             info["test_files"] = sorted(set(t.split("::")[0] for t in tests))
             info["test_count"] = len(tests)
+        elif result.get("returncode") == 5:
+            # pytest reserves exit code 5 for a completed collection that
+            # found no tests. That is a valid zero-test inventory, not a
+            # broken collector; callers need to distinguish it from syntax,
+            # import, and configuration errors without guessing from text.
+            info["no_tests"] = True
         else:
             info["error"] = result["stderr"] or result["stdout"]
     elif framework in ("jest", "vitest"):
