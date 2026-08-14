@@ -421,6 +421,14 @@ def _fanout_request_owner(context):
     return "fo-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _reasoning_request_owner(context):
+    """Opaque principal bound to private reasoning captured for this request."""
+    if not server._deployment_authenticates_callers():
+        return ""
+    material = "reasoning-owner\0" + _state_principal(context)
+    return "ro-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _fanout_request_role(context):
     account = context.get("account") or {}
     role = str(account.get("role") or "").strip()
@@ -3353,6 +3361,7 @@ class Handler(BaseHTTPRequestHandler):
                     model=model,
                     session=storage_session,
                     project=storage_project,
+                    reasoning_owner=_reasoning_request_owner(context),
                 ) as activity_response:
                     if structured_schema is not None:
                         turn = _run_structured_prompt(
