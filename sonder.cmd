@@ -59,10 +59,10 @@ if /I not "%SONDER_TERMINAL_START_SERVER%"=="0" (
         echo [sonder] NOTE: using an existing local API server that this launch does not manage.
       ) else (
         rem A cold server can become managed/listening in the narrow interval
-        rem after the headless readiness return. Its status block is stronger
-        rem evidence than that stale exit code, so do not print a contradictory
-        rem warning immediately above a verified live endpoint.
-        findstr /C:"sonder api: listening on" "%SONDER_BOOT_LOG%" >nul 2>&1
+        rem after the headless readiness return. Re-probe now instead of trusting
+        rem an older status block in the failed startup log: the child could
+        rem also have exited after that earlier observation.
+        "%SONDER_PYTHON%" "%REPO%sonder_headless.py" status --host "%SONDER_HOST%" --port "%SONDER_PORT%" | findstr /C:"sonder api: listening on" >nul
         if not errorlevel 1 (
           echo [sonder] NOTE: local API server became ready after the startup probe.
         ) else (
