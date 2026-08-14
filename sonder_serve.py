@@ -1441,7 +1441,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
     if cmd in ("/autopilot", "/auto"):
-        return server.control_command(stripped, project=project)
+        return server.control_command(
+            stripped,
+            project=project,
+            autopilot_request_owner=_task_account_scope(context),
+        )
     if cmd in ("/runtime", "/models"):
         return server.control_command(stripped, project=project)
     if cmd in ("/update", "/updatecheck", "/updatesource"):

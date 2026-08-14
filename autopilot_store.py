@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS autopilot_runs (
     id TEXT PRIMARY KEY,
     objective TEXT NOT NULL,
     project TEXT DEFAULT '',
+    request_owner TEXT DEFAULT '',
     tier TEXT NOT NULL,
     policy TEXT NOT NULL,
     allow_web INTEGER NOT NULL DEFAULT 1,
@@ -97,6 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_autopilot_events_run
 """
 
 _RUN_COLUMN_MIGRATIONS = {
+    "request_owner": "TEXT DEFAULT ''",
     "checkpoints": "INTEGER NOT NULL DEFAULT 0",
     "replans": "INTEGER NOT NULL DEFAULT 0",
     "max_replans": "INTEGER NOT NULL DEFAULT 2",
@@ -223,6 +225,7 @@ def create_run(
     objective: str,
     *,
     project: str = "",
+    request_owner: str = "",
     tier: str = "code",
     policy: str = "workspace",
     allow_web: bool = True,
@@ -240,14 +243,15 @@ def create_run(
         conn.execute(
             """
             INSERT INTO autopilot_runs(
-                id, objective, project, tier, policy, allow_web, status, phase,
+                id, objective, project, request_owner, tier, policy, allow_web, status, phase,
                 max_failures, max_tasks, max_replans, adaptive, created_ts, updated_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, 'ready', 'plan', ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', 'plan', ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
                 objective,
                 _clamp_text(project, 200),
+                _clamp_text(request_owner, 128),
                 _clamp_text(tier, 40),
                 _clamp_text(policy, 40),
                 int(bool(allow_web)),
@@ -266,49 +270,55 @@ def create_run(
     return _row_dict(row)
 
 
-def _resolve(conn, selector: str = ""):
+def _resolve(conn, selector: str = "", request_owner: str | None = None):
     selector = str(selector or "").strip()
+    scope_sql = " AND request_owner=?" if request_owner is not None else ""
+    scope_args = (request_owner,) if request_owner is not None else ()
     if not selector or selector == "latest":
         return conn.execute(
-            "SELECT * FROM autopilot_runs ORDER BY updated_ts DESC LIMIT 1"
+            "SELECT * FROM autopilot_runs WHERE 1=1%s ORDER BY updated_ts DESC LIMIT 1" % scope_sql,
+            scope_args,
         ).fetchone()
     exact = conn.execute(
-        "SELECT * FROM autopilot_runs WHERE id=?", (selector,)
+        "SELECT * FROM autopilot_runs WHERE id=?%s" % scope_sql,
+        (selector, *scope_args),
     ).fetchone()
     if exact is not None:
         return exact
     rows = conn.execute(
-        "SELECT * FROM autopilot_runs WHERE id LIKE ? ORDER BY updated_ts DESC LIMIT 2",
-        (selector + "%",),
+        "SELECT * FROM autopilot_runs WHERE id LIKE ?%s ORDER BY updated_ts DESC LIMIT 2" % scope_sql,
+        (selector + "%", *scope_args),
     ).fetchall()
     return rows[0] if len(rows) == 1 else None
 
 
-def get_run(selector: str = "") -> dict | None:
+def get_run(selector: str = "", request_owner: str | None = None) -> dict | None:
     reconcile_stale_runs()
     conn = _connect()
     try:
-        return _row_dict(_resolve(conn, selector))
+        return _row_dict(_resolve(conn, selector, request_owner))
     finally:
         conn.close()
 
 
-def list_runs(include_finished: bool = True, limit: int = 20) -> list[dict]:
+def list_runs(include_finished: bool = True, limit: int = 20, request_owner: str | None = None) -> list[dict]:
     reconcile_stale_runs()
     limit = max(1, min(int(limit or 20), 100))
     conn = _connect()
     try:
+        scope_sql = " AND request_owner=?" if request_owner is not None else ""
+        scope_args = (request_owner,) if request_owner is not None else ()
         if include_finished:
             rows = conn.execute(
-                "SELECT * FROM autopilot_runs ORDER BY updated_ts DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM autopilot_runs WHERE 1=1%s ORDER BY updated_ts DESC LIMIT ?" % scope_sql,
+                (*scope_args, limit),
             ).fetchall()
         else:
             marks = ",".join("?" for _ in TERMINAL_STATUSES)
             rows = conn.execute(
-                "SELECT * FROM autopilot_runs WHERE status NOT IN (%s) "
-                "ORDER BY updated_ts DESC LIMIT ?" % marks,
-                (*TERMINAL_STATUSES, limit),
+                "SELECT * FROM autopilot_runs WHERE status NOT IN (%s)%s "
+                "ORDER BY updated_ts DESC LIMIT ?" % (marks, scope_sql),
+                (*TERMINAL_STATUSES, *scope_args, limit),
             ).fetchall()
         return [_row_dict(row) for row in rows]
     finally:
@@ -320,13 +330,14 @@ def claim_run(
     owner_id: str,
     *,
     owner_pid: int,
+    request_owner: str | None = None,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> dict | None:
     reconcile_stale_runs()
     now = time.time()
     lease = now + max(60, min(int(lease_seconds), 3600))
     with _write_transaction() as conn:
-        found = _resolve(conn, selector)
+        found = _resolve(conn, selector, request_owner)
         if found is None:
             return None
         row = dict(found)
@@ -342,7 +353,8 @@ def claim_run(
                 lease_until=?, pause_requested=0, updated_ts=?
             WHERE id=? AND status NOT IN ('completed', 'failed', 'cancelled')
                 AND cancel_requested=0
-            """,
+                %s
+            """ % ("AND request_owner=?" if request_owner is not None else ""),
             (
                 next_status,
                 "plan" if next_status == "planning" else "execute",
@@ -352,6 +364,7 @@ def claim_run(
                 lease,
                 now,
                 row["id"],
+                *((request_owner,) if request_owner is not None else ()),
             ),
         )
         if cursor.rowcount <= 0:
@@ -436,10 +449,10 @@ def save_progress(
     return _row_dict(row)
 
 
-def request_pause(selector: str) -> dict | None:
+def request_pause(selector: str, request_owner: str | None = None) -> dict | None:
     now = time.time()
     with _write_transaction() as conn:
-        found = _resolve(conn, selector)
+        found = _resolve(conn, selector, request_owner)
         if found is None:
             return None
         row = dict(found)
@@ -469,10 +482,10 @@ def request_pause(selector: str) -> dict | None:
     return _row_dict(stored)
 
 
-def request_cancel(selector: str) -> dict | None:
+def request_cancel(selector: str, request_owner: str | None = None) -> dict | None:
     now = time.time()
     with _write_transaction() as conn:
-        found = _resolve(conn, selector)
+        found = _resolve(conn, selector, request_owner)
         if found is None:
             return None
         row = dict(found)
@@ -614,11 +627,11 @@ def reconcile_stale_runs(now: float | None = None) -> int:
     return changed
 
 
-def events(selector: str = "", limit: int = 20) -> list[dict]:
+def events(selector: str = "", limit: int = 20, request_owner: str | None = None) -> list[dict]:
     limit = max(1, min(int(limit or 20), 100))
     conn = _connect()
     try:
-        found = _resolve(conn, selector)
+        found = _resolve(conn, selector, request_owner)
         if found is None:
             return []
         rows = conn.execute(
@@ -631,19 +644,23 @@ def events(selector: str = "", limit: int = 20) -> list[dict]:
         conn.close()
 
 
-def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
-    rows = list_runs(include_finished=include_finished, limit=limit)
+def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str | None = None) -> dict:
+    rows = list_runs(include_finished=include_finished, limit=limit, request_owner=request_owner)
     conn = _connect()
     try:
+        owner_sql = " AND request_owner=?" if request_owner is not None else ""
+        owner_args = (request_owner,) if request_owner is not None else ()
         active = conn.execute(
             "SELECT COUNT(*) FROM autopilot_runs "
-            "WHERE status IN ('planning', 'running')"
+            "WHERE status IN ('planning', 'running')%s" % owner_sql,
+            owner_args,
         ).fetchone()[0]
         resumable = conn.execute(
             "SELECT COUNT(*) FROM autopilot_runs "
-            "WHERE status IN ('ready', 'paused', 'blocked', 'interrupted')"
+            "WHERE status IN ('ready', 'paused', 'blocked', 'interrupted')%s" % owner_sql,
+            owner_args,
         ).fetchone()[0]
-        total = conn.execute("SELECT COUNT(*) FROM autopilot_runs").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM autopilot_runs WHERE 1=1%s" % owner_sql, owner_args).fetchone()[0]
     finally:
         conn.close()
     latest = rows[0] if rows else None

@@ -1985,15 +1985,15 @@ def _parse_game_campaign_command(arg: str) -> dict | None:
     return kwargs
 
 
-def _autopilot_command(arg: str, project: str = "") -> str:
+def _autopilot_command(arg: str, project: str = "", request_owner: str | None = None) -> str:
     text = str(arg or "").strip()
     if not text:
-        return autopilot_status()
+        return _autopilot_status(request_owner=request_owner)
     action, _, rest = text.partition(" ")
     action = action.lower()
     rest = rest.strip()
     if action in ("status", "show", "list"):
-        return autopilot_status(rest)
+        return _autopilot_status(rest, request_owner=request_owner)
     if action in ("run", "start", "plan"):
         policy = "workspace"
         allow_web = True
@@ -2014,20 +2014,21 @@ def _autopilot_command(arg: str, project: str = "") -> str:
                 "usage: /autopilot %s [--observe] [--no-web] [--static] <objective>"
                 % action
             )
-        return autopilot_start(
+        return _autopilot_start(
             objective=rest,
             project=_resolve_project(project) or "",
+            request_owner=request_owner or "",
             policy=policy,
             allow_web=allow_web,
             adaptive=adaptive,
             plan_only=action == "plan",
         )
     if action == "resume":
-        return autopilot_resume(rest) if rest else "usage: /autopilot resume <run-id>"
+        return _autopilot_resume(rest, request_owner=request_owner) if rest else "usage: /autopilot resume <run-id>"
     if action == "pause":
-        return autopilot_pause(rest) if rest else "usage: /autopilot pause <run-id>"
+        return _autopilot_pause(rest, request_owner=request_owner) if rest else "usage: /autopilot pause <run-id>"
     if action == "cancel":
-        return autopilot_cancel(rest) if rest else "usage: /autopilot cancel <run-id>"
+        return _autopilot_cancel(rest, request_owner=request_owner) if rest else "usage: /autopilot cancel <run-id>"
     if action in ("help", "?"):
         return (
             "autopilot commands:\n"
@@ -2605,7 +2606,7 @@ def _control_tool_refusal(tools, label):
 
 
 def control_command(prompt: str, history=None, session="", project="",
-                    operator_approved=False):
+                    operator_approved=False, autopilot_request_owner: str | None = None):
     """Handle safe slash commands before a prompt reaches the model.
 
     Client layers have richer commands like /run that depend on their local last
@@ -2664,7 +2665,7 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/activity", "/tools"):
         return activity_status()
     if cmd in ("/autopilot", "/auto"):
-        return _autopilot_command(arg, project=project)
+        return _autopilot_command(arg, project=project, request_owner=autopilot_request_owner)
     if cmd in ("/runtime", "/models"):
         return _runtime_command(arg)
     if cmd == "/updatecheck":
@@ -20956,7 +20957,7 @@ def _autopilot_heartbeat(run_id: str, owner_id: str, stop: threading.Event) -> N
             return
 
 
-def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False) -> dict:
+def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False, request_owner: str | None = None) -> dict:
     owner_id = "auto-%s-%s" % (os.getpid(), time.time_ns())
     stop = threading.Event()
     heartbeat = threading.Thread(
@@ -20971,6 +20972,7 @@ def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False) -> dict:
             run_id,
             owner_id,
             owner_pid=os.getpid(),
+            request_owner=request_owner,
             plan_fn=_autopilot_plan_model,
             work_fn=_autopilot_work_model,
             review_fn=_autopilot_review_model,
@@ -20982,8 +20984,8 @@ def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False) -> dict:
         heartbeat.join(timeout=2)
 
 
-def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool) -> None:
-    run = _application().automation.get_run(run_id) or {}
+def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool, request_owner: str | None = None) -> None:
+    run = _application().automation.get_run(run_id, request_owner=request_owner) or {}
     try:
         with activity_tracker.response_span(
             "autopilot:%s" % run_id,
@@ -20993,7 +20995,7 @@ def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool) -> Non
             project=run.get("project", ""),
         ):
             result = _execute_autopilot(
-                run_id, max_cycles=max_cycles, plan_only=plan_only,
+                run_id, max_cycles=max_cycles, plan_only=plan_only, request_owner=request_owner,
             )
             activity_tracker.set_result_summary(
                 "%s: %s" % (result.get("status", "unknown"), result.get("summary", ""))
@@ -21010,14 +21012,14 @@ def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool) -> Non
                 _AUTOPILOT_THREADS.pop(run_id, None)
 
 
-def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False) -> bool:
+def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner: str | None = None) -> bool:
     with _AUTOPILOT_THREADS_LOCK:
         current = _AUTOPILOT_THREADS.get(run_id)
         if current is not None and current.is_alive():
             return False
         thread = threading.Thread(
             target=_autopilot_thread_main,
-            args=(run_id, int(max_cycles), bool(plan_only)),
+            args=(run_id, int(max_cycles), bool(plan_only), request_owner),
             name="sonder-autopilot-%s" % run_id,
             daemon=True,
         )
@@ -21026,10 +21028,10 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False) -> bool:
         return True
 
 
-@mcp.tool()
-def autopilot_start(
+def _autopilot_start(
     objective: str,
     project: str = "",
+    request_owner: str = "",
     tier: str = "auto",
     policy: str = "workspace",
     allow_web: bool = True,
@@ -21050,6 +21052,7 @@ def autopilot_start(
         run = autopilot_store.create_run(
             objective,
             project=project,
+            request_owner=request_owner,
             tier=tier,
             policy=policy,
             allow_web=bool(allow_web),
@@ -21059,12 +21062,14 @@ def autopilot_start(
             adaptive=bool(adaptive),
         )
         if wait:
+            execute_kwargs = {"request_owner": request_owner} if request_owner else {}
             run = _execute_autopilot(
-                run["id"], max_cycles=max_cycles, plan_only=plan_only,
+                run["id"], max_cycles=max_cycles, plan_only=plan_only, **execute_kwargs,
             )
             return autopilot_controller.format_run(run)
+        launch_kwargs = {"request_owner": request_owner} if request_owner else {}
         launched = _launch_autopilot(
-            run["id"], max_cycles=max_cycles, plan_only=plan_only,
+            run["id"], max_cycles=max_cycles, plan_only=plan_only, **launch_kwargs,
         )
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "ERROR: %s" % exc
@@ -21076,25 +21081,27 @@ def autopilot_start(
     )
 
 
-@mcp.tool()
-def autopilot_resume(
+def _autopilot_resume(
     run_id: str,
     max_cycles: int = 12,
     wait: bool = False,
+    request_owner: str | None = None,
 ) -> str:
     """Explicitly resume a paused, blocked, ready, or interrupted run."""
     _maybe_live_reload()
-    run = _application().automation.get_run(run_id)
+    run = _application().automation.get_run(run_id, request_owner=request_owner)
     if not run:
         return "ERROR: no unambiguous autopilot run matches '%s'." % run_id
     if run.get("status") not in autopilot_store.RESUMABLE_STATUSES:
         return "ERROR: run %s is %s and cannot be resumed." % (run["id"], run.get("status"))
     try:
         if wait:
+            execute_kwargs = {"request_owner": request_owner} if request_owner else {}
             return autopilot_controller.format_run(
-                _execute_autopilot(run["id"], max_cycles=max_cycles),
+                _execute_autopilot(run["id"], max_cycles=max_cycles, **execute_kwargs),
             )
-        launched = _launch_autopilot(run["id"], max_cycles=max_cycles)
+        launch_kwargs = {"request_owner": request_owner} if request_owner else {}
+        launched = _launch_autopilot(run["id"], max_cycles=max_cycles, **launch_kwargs)
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
         return "ERROR: %s" % exc
     return "%s\n%s" % (
@@ -21103,37 +21110,73 @@ def autopilot_resume(
     )
 
 
-@mcp.tool()
-def autopilot_pause(run_id: str) -> str:
+def _autopilot_pause(run_id: str, request_owner: str | None = None) -> str:
     """Request a cooperative pause at the next host checkpoint."""
     _maybe_live_reload()
-    run = autopilot_store.request_pause(run_id)
+    run = autopilot_store.request_pause(run_id, request_owner=request_owner)
     return (
         autopilot_controller.format_run(run, include_report=False)
         if run else "ERROR: no unambiguous autopilot run matches '%s'." % run_id
     )
+
+
+def _autopilot_cancel(run_id: str, request_owner: str | None = None) -> str:
+    """Request cancellation; an active task result is discarded."""
+    _maybe_live_reload()
+    run = autopilot_store.request_cancel(run_id, request_owner=request_owner)
+    return (
+        autopilot_controller.format_run(run, include_report=False)
+        if run else "ERROR: no unambiguous autopilot run matches '%s'." % run_id
+    )
+
+
+def _autopilot_status(run_id: str = "", include_finished: bool = True, request_owner: str | None = None) -> str:
+    """Inspect one persistent autonomous run or the controller ledger."""
+    _maybe_live_reload()
+    if run_id.strip():
+        return autopilot_controller.format_run(_application().automation.get_run(run_id, request_owner=request_owner))
+    return autopilot_controller.format_snapshot(
+        autopilot_controller.snapshot(include_finished=include_finished, request_owner=request_owner),
+    )
+
+
+@mcp.tool()
+def autopilot_start(
+    objective: str, project: str = "", tier: str = "auto", policy: str = "workspace",
+    allow_web: bool = True, max_cycles: int = 12, max_failures: int = 3,
+    max_tasks: int = 12, max_replans: int = 2, adaptive: bool = True,
+    plan_only: bool = False, wait: bool = False,
+) -> str:
+    """Create and start a persistent, locally planned autonomous goal run."""
+    return _autopilot_start(
+        objective, project=project, tier=tier, policy=policy, allow_web=allow_web,
+        max_cycles=max_cycles, max_failures=max_failures, max_tasks=max_tasks,
+        max_replans=max_replans, adaptive=adaptive, plan_only=plan_only, wait=wait,
+    )
+
+
+@mcp.tool()
+def autopilot_resume(run_id: str, max_cycles: int = 12, wait: bool = False) -> str:
+    """Explicitly resume a paused, blocked, ready, or interrupted run."""
+    return _autopilot_resume(run_id, max_cycles=max_cycles, wait=wait)
+
+
+@mcp.tool()
+def autopilot_pause(run_id: str) -> str:
+    """Request a cooperative pause at the next host checkpoint."""
+    return _autopilot_pause(run_id)
 
 
 @mcp.tool()
 def autopilot_cancel(run_id: str) -> str:
     """Request cancellation; an active task result is discarded."""
-    _maybe_live_reload()
-    run = autopilot_store.request_cancel(run_id)
-    return (
-        autopilot_controller.format_run(run, include_report=False)
-        if run else "ERROR: no unambiguous autopilot run matches '%s'." % run_id
-    )
+    return _autopilot_cancel(run_id)
 
 
 @mcp.tool()
 def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
     """Inspect one persistent autonomous run or the controller ledger."""
-    _maybe_live_reload()
-    if run_id.strip():
-        return autopilot_controller.format_run(_application().automation.get_run(run_id))
-    return autopilot_controller.format_snapshot(
-        autopilot_controller.snapshot(include_finished=include_finished),
-    )
+    return _autopilot_status(run_id, include_finished=include_finished)
 
 
 def _execution_route_model(

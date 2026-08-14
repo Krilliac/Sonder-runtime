@@ -416,7 +416,7 @@ def format_run(run: dict | None, include_report: bool = True) -> str:
     return "\n".join(lines)
 
 
-def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
+def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str | None = None) -> dict:
     # SPEC-3: first live call-site migrated onto the AutomationRepository port.
     # The composition root's automation repository wraps autopilot_store, so the
     # observable result is identical; the direct root-module dependency is gone.
@@ -424,10 +424,10 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
     from sonder_runtime.bootstrap.app import default_app
 
     automation = default_app().automation
-    data = automation.snapshot(include_finished=include_finished, limit=limit)
+    data = automation.snapshot(include_finished=include_finished, limit=limit, request_owner=request_owner)
     latest = data.get("latest")
     data["events"] = (
-        automation.events(latest["id"], limit=12) if latest else []
+        automation.events(latest["id"], limit=12, request_owner=request_owner) if latest else []
     )
     return data
 
@@ -459,6 +459,7 @@ def execute_run(
     owner_id: str,
     *,
     owner_pid: int,
+    request_owner: str | None = None,
     plan_fn: Callable[[dict], dict],
     work_fn: Callable[[dict, dict, str], str],
     review_fn: Callable[[dict, str], dict],
@@ -473,7 +474,7 @@ def execute_run(
     """
     max_cycles = max(1, min(int(max_cycles or 6), 12))
     run = autopilot_store.claim_run(
-        run_id, owner_id, owner_pid=owner_pid,
+        run_id, owner_id, owner_pid=owner_pid, request_owner=request_owner,
     )
     if not run:
         raise AutopilotError("run is unavailable, terminal, cancelled, or owned elsewhere")
