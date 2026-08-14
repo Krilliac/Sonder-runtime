@@ -2244,6 +2244,10 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))
 
     def do_OPTIONS(self):
+        # BaseHTTPRequestHandler may reuse this Handler for several HTTP/1.1
+        # requests. A correlation ID is a request receipt, never a socket
+        # receipt, so discard the prior request's cached value first.
+        self._correlation_id = ""
         self._request_started = time.monotonic()
         if self._reject_disallowed_origin():
             return
@@ -2479,6 +2483,9 @@ class Handler(BaseHTTPRequestHandler):
         return payload
 
     def do_GET(self):
+        # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
+        # reset before every externally visible request.
+        self._correlation_id = ""
         self._request_started = time.monotonic()
         if self._reject_disallowed_origin():
             return
@@ -2857,6 +2864,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(server.permission_mode_data())
 
     def do_POST(self):
+        # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
+        # reset before every externally visible request.
+        self._correlation_id = ""
         self._request_started = time.monotonic()
         # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive
         # requests. The terminal-metric latch is per request, never per socket.
