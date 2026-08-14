@@ -526,6 +526,10 @@ def _startup_banner(strict, persona, project, tier=None):
             str(source.get("newest_commit") or "unknown")[:12],
             source.get("newest_commit_time") or "unknown time",
         )
+        newest_label = (
+            "newest source" if source.get("remote_ref_refreshed")
+            else "newest known source"
+        )
         update = "%s (behind %s)" % (
             source.get("state") or "unknown", source.get("behind", "?"),
         )
@@ -535,6 +539,7 @@ def _startup_banner(strict, persona, project, tier=None):
             update += "; restart required"
     except Exception as exc:
         revision = newest = "unavailable (%s)" % type(exc).__name__
+        newest_label = "newest source"
         running = "unavailable"
         update = "check unavailable"
 
@@ -549,7 +554,7 @@ def _startup_banner(strict, persona, project, tier=None):
         ("project", str(project or "(none)"), ()),
         ("installed source", revision, ()),
         ("running source", running, (_Ansi.amber,) if source.get("restart_required") else ()),
-        ("newest source", newest, ()),
+        (newest_label, newest, ()),
         ("update", "%s  /updatecheck | /update" % update, (_Ansi.amber,)),
     ]
     if strict:

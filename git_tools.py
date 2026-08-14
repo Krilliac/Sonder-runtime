@@ -387,6 +387,11 @@ def runtime_update_status(root, *, refresh=False, timeout=DEFAULT_TIMEOUT):
         "clean": status.get("clean") is True,
         "remote": remote_url,
         "trusted_remote": _trusted_runtime_origin(remote_url),
+        # A cached remote-tracking ref is useful at REPL startup, but it is not
+        # proof that the network's current origin/main has been observed. Keep
+        # that distinction in structured data so renderers never present a
+        # stale cache as a freshly checked update verdict.
+        "remote_ref_refreshed": bool(refresh),
         "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
