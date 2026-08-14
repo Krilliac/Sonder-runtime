@@ -101,6 +101,26 @@ Sonder is a runtime, not a foundation model. Names such as
 `sonder:latest` are local Ollama aliases; the underlying weights remain managed
 by Ollama. Ollama is the local model server.
 
+## Model requirements
+
+You do **not** need every model or every tier in the catalog.
+
+| What you want to use | What must be available locally |
+|---|---|
+| Normal REPL, API chat, and code work | Ollama plus one generative local model. Bootstrap or `setup_alias.py` chooses/pulls that base model and exposes it as `sonder:latest`. The `fast`, `code`, and `general` roles can all share it. |
+| Semantic memory, lesson recall, and vector search | An embedding model as well (the bootstrap default is `nomic-embed-text`). Core chat still starts without one, but those semantic features are unavailable until an embedding model is configured. |
+| Image or screenshot analysis | An explicitly configured local vision-language model; it is only needed when using a vision-capable feature. |
+| Separate reasoning, reranking, extraction, tool-oriented, speech, or experimental model families | Optional specialist models. Install and bind them only when the matching feature is enabled and supported. |
+| Cloud tiers | No local download, but explicit cloud opt-in is required and prompts leave the machine for those calls. |
+
+The bootstrap and `setup_alias.py` intentionally pull both a base model and the
+default embedding model so a new local installation has memory enabled out of
+the box. They therefore need access to both models (or locally available copies
+when run offline), even though ordinary chat itself needs only the generative
+base model. See the [Model Catalog](docs/wiki/18-model-catalog.md) for tier
+bindings and the [collection runbook](docs/runbooks/assemble-model-collection.md)
+for specialist setups.
+
 ## Quick start
 
 The `app-latest` badges are a mutable prerelease snapshot. They may lag `main`
