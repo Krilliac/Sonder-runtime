@@ -402,6 +402,7 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert "behind=3" in text
     assert "checkout: main" in text
     assert "source root: C:/Sonder-runtime" in text
+    assert "eligible; /update can fast-forward canonical main" in text
 
     monkeypatch.setattr(
         server.git_tools, "runtime_update", lambda _root: {"updated": False, "after": data},
@@ -411,6 +412,28 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert "usage:" in server.control_command("/update check")
     assert not sonder_serve._dangerous_http_slash("/updatecheck")
     assert sonder_serve._dangerous_http_slash("/update")
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({"trusted_remote": False}, "remote is not the canonical Sonder origin"),
+        ({"branch": "feature/demo"}, "checkout must be 'main' (current: 'feature/demo')"),
+        ({"clean": False}, "source checkout is dirty"),
+        ({"ahead": 1}, "local commits require manual reconciliation"),
+    ],
+)
+def test_runtime_update_status_explains_safe_refusal_before_approval(changes, expected):
+    data = {
+        "branch": "main", "trusted_remote": True, "clean": True,
+        "ahead": 0, "state": "behind",
+    }
+    data.update(changes)
+
+    text = server._runtime_update_format(data)
+
+    assert "update: refused;" in text
+    assert expected in text
 
 
 def test_runtime_update_refusal_names_current_branch_and_safe_recovery(monkeypatch, tmp_path):

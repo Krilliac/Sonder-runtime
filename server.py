@@ -21971,7 +21971,39 @@ def _runtime_update_format(data, *, updated=None):
         lines.append("  update: fast-forwarded; restart Sonder to run the new source")
     elif updated is False:
         lines.append("  update: already current; no files changed")
+    else:
+        lines.append("  update: %s" % _runtime_update_eligibility(data))
     return "\n".join(lines)
+
+
+def _runtime_update_eligibility(data):
+    """Describe whether the deliberately narrow update action may run.
+
+    This is presentation-only.  ``git_tools.runtime_update`` remains the
+    authority and repeats every check immediately before modifying a checkout.
+    Giving the same verdict to ``/updatecheck`` avoids a surprising approval
+    prompt followed by a safe refusal for an observable checkout condition.
+    """
+    if not data.get("trusted_remote"):
+        return "refused; remote is not the canonical Sonder origin"
+    branch = str(data.get("branch") or "").strip()
+    if branch != git_tools.RUNTIME_UPDATE_BRANCH:
+        current = branch or "detached HEAD"
+        return "refused; checkout must be %r (current: %r)" % (
+            git_tools.RUNTIME_UPDATE_BRANCH, current,
+        )
+    if not data.get("clean"):
+        return "refused; source checkout is dirty"
+    try:
+        ahead = int(data.get("ahead") or 0)
+    except (TypeError, ValueError):
+        # A malformed status must never be presented as permission to update.
+        return "refused; local commit status is unavailable"
+    if ahead:
+        return "refused; local commits require manual reconciliation"
+    if data.get("state") == "current":
+        return "eligible; already current"
+    return "eligible; /update can fast-forward canonical main"
 
 
 def runtime_source_update_status_data(refresh: bool = True) -> dict:
