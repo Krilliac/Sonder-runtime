@@ -182,6 +182,16 @@ curl http://127.0.0.1:11435/v1/chat/completions \
   -d '{"model":"sonder","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+```powershell
+# PowerShell equivalent (run after `python -m sonder_runtime serve`)
+$body = @{
+  model = "sonder"
+  messages = @(@{ role = "user"; content = "Hello" })
+} | ConvertTo-Json -Depth 4
+Invoke-RestMethod http://127.0.0.1:11435/v1/chat/completions `
+  -Method Post -ContentType "application/json" -Body $body
+```
+
 For a source checkout, prefix the commands with the venv Python shown above;
 for example `./venv/bin/python -m sonder_runtime serve` or
 `.\venv\Scripts\python.exe -m sonder_runtime serve`. For an MCP client, run
