@@ -24,15 +24,6 @@ import sys
 import time
 
 SONDER = os.environ.get("SONDER_RUNTIME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-PROJECT = os.path.abspath(
-    os.path.expanduser(
-        os.environ.get(
-            "SONDER_GAME_PROJECT",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "FpsGame_Sonder"),
-        )
-    )
-)
-
 # A repair that returns less than this fraction of the original file is treated
 # as a deletion, not a fix. Measured need: asked to fix four syntax errors, the
 # ensemble once returned a Program.cs at 49% of its original length -- it had
@@ -44,6 +35,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import specs  # noqa: E402
 import apiextract  # noqa: E402
+import sonder_paths  # noqa: E402
+
+
+def default_project_path() -> str:
+    """Return the per-user destination for model-generated game output."""
+    override = os.environ.get("SONDER_GAME_PROJECT", "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return str(
+        sonder_paths.default_home()
+        / "examples" / "arena-shooter" / "FpsGame_Sonder"
+    )
+
+
+PROJECT = default_project_path()
 
 
 # The game driver asks an ensemble to generate whole source files.  Unlike an
@@ -657,7 +663,10 @@ def main() -> int:
     ap.add_argument(
         "--project",
         default=PROJECT,
-        help="output project directory (default: SONDER_GAME_PROJECT or a sibling directory)",
+        help=(
+            "output project directory (default: SONDER_GAME_PROJECT or the "
+            "per-user Sonder state directory)"
+        ),
     )
     ap.add_argument("--tiers", default="code,reasoning")
     ap.add_argument(

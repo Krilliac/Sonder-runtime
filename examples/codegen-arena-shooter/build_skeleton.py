@@ -56,6 +56,7 @@ import specs  # noqa: E402
 import bodynotes  # noqa: E402
 import codegen_loop  # noqa: E402
 import server  # noqa: E402
+import sonder_paths  # noqa: E402
 
 # ``server``/``codegen_loop`` may legitimately import the runtime's own
 # project_scaffold module. Load this example-local manifest helper under a
@@ -69,6 +70,25 @@ if _SCAFFOLD_SPEC is None or _SCAFFOLD_SPEC.loader is None:
 _SCAFFOLD_MODULE = importlib.util.module_from_spec(_SCAFFOLD_SPEC)
 _SCAFFOLD_SPEC.loader.exec_module(_SCAFFOLD_MODULE)
 ensure_project_file = _SCAFFOLD_MODULE.ensure_project_file
+
+
+def default_project_path() -> str:
+    """Return the per-user destination for generated skeleton output.
+
+    Generated game code is runtime/user state, not source checkout content.
+    Keeping it below the configured Sonder home means an update or a normal
+    ``--prepare-only`` build cannot make the installation look dirty.
+    """
+    override = os.environ.get("SONDER_GAME_SKELETON_PROJECT", "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return str(
+        sonder_paths.default_home()
+        / "examples" / "arena-shooter" / "FpsGame_Skeleton"
+    )
+
+
+PROJECT = default_project_path()
 
 FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
@@ -317,7 +337,16 @@ def dependency_brief(done: list) -> str:
 
 
 def main():
+    global PROJECT
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--project",
+        default=PROJECT,
+        help=(
+            "output project directory (default: SONDER_GAME_SKELETON_PROJECT "
+            "or the per-user Sonder state directory)"
+        ),
+    )
     parser.add_argument("--only", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--tiers", default="code,reasoning")
@@ -344,6 +373,8 @@ def main():
         print("no such file in skeleton: %s" % args.only)
         print("available files: %s" % ", ".join(sorted(known_files)))
         return 2
+
+    PROJECT = os.path.abspath(os.path.expanduser(args.project))
 
     if args.model:
         # A/B on the SAME slots is the only comparison worth making here: the

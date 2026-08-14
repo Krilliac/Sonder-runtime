@@ -22,6 +22,14 @@ def _driver_module():
     spec.loader.exec_module(module)
     return module
 
+
+def _skeleton_driver_module():
+    spec = importlib.util.spec_from_file_location("arena_shooter_skeleton_driver", SKELETON_DRIVER)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
 # The example is intentionally importable without installing the project: its
 # skeleton is a Python source-of-truth used by the generator, while its C# is
 # emitted only for a particular local run.
@@ -74,6 +82,20 @@ def test_model_headroom_allows_a_small_model_with_live_reserves() -> None:
     ok, _detail = driver._model_headroom_report({"qwen2.5-coder:7b": 4.7}, profile)
 
     assert ok
+
+
+def test_generated_projects_default_to_per_user_sonder_home(monkeypatch, tmp_path: Path) -> None:
+    """Example output is runtime state, not untracked checkout content."""
+    home = tmp_path / "sonder-home"
+    monkeypatch.setenv("SONDER_HOME", str(home))
+    monkeypatch.delenv("SONDER_GAME_PROJECT", raising=False)
+    monkeypatch.delenv("SONDER_GAME_SKELETON_PROJECT", raising=False)
+
+    driver = _driver_module()
+    skeleton_driver = _skeleton_driver_module()
+
+    assert Path(driver.default_project_path()) == home / "examples" / "arena-shooter" / "FpsGame_Sonder"
+    assert Path(skeleton_driver.default_project_path()) == home / "examples" / "arena-shooter" / "FpsGame_Skeleton"
 
 
 def test_skeleton_unknown_only_fails_before_generation() -> None:

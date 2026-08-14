@@ -21,7 +21,11 @@ python build_with_sonder.py --resume               # skip files already on disk
 python build_skeleton.py --reset --prepare-only    # create/verify only the deterministic v2 baseline
 ```
 
-Targets `FpsGame_Sonder/` beside it. Needs the .NET SDK and a running Ollama.
+By default, generated projects live under Sonder's per-user state directory:
+`%LOCALAPPDATA%\\sonder\\examples\\arena-shooter\\` on Windows. Use
+`--project <path>` (or `SONDER_GAME_PROJECT` / `SONDER_GAME_SKELETON_PROJECT`)
+to choose an explicit reproducible output location. Needs the .NET SDK and a
+running Ollama.
 
 The v2 skeleton runner writes its harness-owned `FpsGame_Skeleton.csproj`
 automatically before its first baseline build. It is not model output and is
