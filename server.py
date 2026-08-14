@@ -23172,12 +23172,27 @@ def _execute_fanout_run(run_id):
         exc = None
         generate = None
         try:
+            # ``_post_model`` consults this gate immediately before every
+            # provider attempt (including its bounded retry path).  The
+            # earlier check above makes a disabled receipt visibly skipped,
+            # while this closure closes the small check-to-send race: an
+            # operator revoking cloud opt-in after a worker claimed a row must
+            # prevent that sealed prompt from leaving the host.  The immutable
+            # row target is still passed verbatim and cloud fallback remains
+            # disabled, so a policy/default change can neither broaden nor
+            # substitute the selected route.
+            def dispatch_cancelled():
+                if not fanout_store.worker_can_dispatch(run_id, owner_id):
+                    return True
+                return bool(
+                    _is_cloud_model_name(model)
+                    and (not run.get("cloud_opt_in") or not cloud_allowed())
+                )
+
             generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
                                       timeout=limits["timeout"],
                                       allow_cloud_fallback=False,
-                                      cancel_check=lambda: not fanout_store.worker_can_dispatch(
-                                          run_id, owner_id,
-                                      ))
+                                      cancel_check=dispatch_cancelled)
             raw_answer = str(generate(question) or "")
             if not raw_answer.strip():
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))

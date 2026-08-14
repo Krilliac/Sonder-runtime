@@ -1927,6 +1927,38 @@ def test_fanout_cancel_between_claim_and_send_does_not_start_provider_call(monke
     assert receipt["skipped"][0]["model"] == "remote:cloud"
 
 
+def test_fanout_revoked_cloud_opt_in_cancels_before_provider_send(monkeypatch, tmp_path):
+    """A policy revocation after claim must fence the cloud retry/send path."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+    ))
+    run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
+    provider_calls = []
+
+    def fake_make(_model, *_args, **kwargs):
+        # Simulate the operator revoking consent after invoke's initial
+        # admission check but before the provider path's final fence.
+        monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
+
+        def generate(_prompt):
+            if kwargs["cancel_check"]():
+                raise server.ModelCallError("cancelled", "model call cancelled before another request was sent")
+            provider_calls.append(True)
+            return "answer"
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert provider_calls == []
+    assert receipt["models_answered"] == 0
+    assert receipt["models_failed"] == 1
+    assert receipt["failures"][0]["model"] == "remote:cloud"
+
+
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
 
