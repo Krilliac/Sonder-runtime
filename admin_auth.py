@@ -48,14 +48,19 @@ def _secret() -> str:
     if existing:
         return existing
     generated = sonder_secrets.generate_key()
-    sonder_secrets._write_private(path, generated)
-    # Re-read so a concurrent first-run writer's value wins for everyone,
-    # keeping the token->hash mapping stable across processes.
+    if sonder_secrets._create_private_if_missing(path, generated):
+        return generated
+    # Another first-run process won the atomic create.  Re-read its value so
+    # every process uses exactly the same HMAC key for account sessions.
     try:
         persisted = path.read_text(encoding="utf-8").strip()
     except OSError:
         persisted = ""
-    return persisted or generated
+    if persisted:
+        return persisted
+    # Never fall back to a generated-but-unpersisted key: doing so would mint
+    # session hashes no later process can validate after a crash/race.
+    raise RuntimeError("persisted account-session secret is unavailable")
 
 
 def _bootstrap_secret() -> str:
