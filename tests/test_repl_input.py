@@ -585,6 +585,34 @@ def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monk
     assert seen[0]["model_override"] == ""
 
 
+def test_model_selection_refuses_tag_when_verified_catalog_is_empty(monkeypatch, capsys):
+    lines = iter(("/model made-up:latest", "/exit"))
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+
+    sonder_repl.main()
+
+    assert "no installed model named" in capsys.readouterr().out
+
+
+def test_model_completer_does_not_repeat_unavailable_discovery(monkeypatch):
+    calls = []
+    completer = sonder_repl._ModelArgumentCompleter()
+    monkeypatch.setattr(
+        sonder_repl,
+        "_installed_models",
+        lambda: calls.append("discover") or None,
+    )
+
+    completer.refresh(None)
+
+    assert calls == []
+
+
 def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
     lines = iter(("web search to find computer repair shops near 67215", "/exit"))
     calls = []

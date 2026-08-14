@@ -511,6 +511,9 @@ def _installed_models():
     return sorted(out)
 
 
+_MODEL_DISCOVERY_UNSET = object()
+
+
 class _ModelArgumentCompleter:
     """Cached model/tier vocabulary for the interactive ``/model`` palette.
 
@@ -523,8 +526,8 @@ class _ModelArgumentCompleter:
     def __init__(self):
         self._choices = None
 
-    def refresh(self, installed=None):
-        if installed is None:
+    def refresh(self, installed=_MODEL_DISCOVERY_UNSET):
+        if installed is _MODEL_DISCOVERY_UNSET:
             installed = _installed_models()
         try:
             tiers = [str(name) for name in server.TIERS if str(name)]
@@ -1408,7 +1411,7 @@ def main():
         names = [name for name, _size in installed]
         model_names = {str(name).casefold(): name for name in names}
         selected_model = model_names.get(arg.casefold())
-        if installed and selected_model is None:
+        if selected_model is None:
             # Refuse rather than rebind to something that will fail on the next
             # turn with an opaque ollama error. Suggest, because a near miss is
             # usually a tag typo (":7b" vs ":latest").
