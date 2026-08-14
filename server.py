@@ -15173,6 +15173,11 @@ def tool_capability_manifest() -> str:
             "name": str(name),
             "description": str(getattr(tool, "description", "")),
             "parameters": getattr(tool, "parameters", {}),
+            # FastMCP validates and publishes this independently from input
+            # parameters.  It is part of the callable contract too: omit it
+            # here and a client retaining ``sha256`` cannot detect a changed
+            # result shape after a live reload.
+            "output_schema": getattr(tool, "output_schema", {}),
         }
         for name, tool in sorted(registered.items())
     ]
