@@ -404,6 +404,23 @@ def test_runtime_stash_save_untracked_and_clean_only_pop(tmp_path):
     assert (repo / "scratch.txt").read_text(encoding="utf-8") == "restore me\n"
 
 
+def test_runtime_stash_pop_leaves_an_unrelated_newer_stash_untouched(tmp_path):
+    repo = _runtime_repo(tmp_path)
+    (repo / "tracked.txt").write_text("recovery\n", encoding="utf-8")
+    git_tools.runtime_stash(repo, "save")
+
+    (repo / "tracked.txt").write_text("unrelated\n", encoding="utf-8")
+    _git(repo, "stash", "push", "--message", "manual checkpoint")
+
+    restored = git_tools.runtime_stash(repo, "pop")
+
+    assert restored["changed"] is True
+    assert (repo / "tracked.txt").read_text(encoding="utf-8") == "recovery\n"
+    listed = _git(repo, "stash", "list")
+    assert "manual checkpoint" in listed
+    assert "sonder runtime recovery" not in listed
+
+
 def test_runtime_stash_refuses_untrusted_or_invalid_action(tmp_path):
     repo = _repo(tmp_path)
     _git(repo, "remote", "add", "origin", "https://example.invalid/not-sonder.git")

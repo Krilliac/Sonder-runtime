@@ -1461,6 +1461,10 @@ def _http_slash_refusal(cmd, argument="", context=None):
         not read_only_argument or read_only_argument == "status"
     ):
         tools = ("runtime_policy_status",)
+    elif cmd in ("/stash", "/runtime-stash") and (
+        not read_only_argument or read_only_argument in ("status", "list")
+    ):
+        tools = ("runtime_source_stash_status",)
     return _http_tool_refusal(tools, cmd, context=context)
 
 
@@ -1724,6 +1728,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd in ("/runtime", "/models"):
         return server.control_command(stripped, project=project)
     if cmd in ("/update", "/updatecheck", "/updatesource"):
+        return server.control_command(stripped, project=project)
+    if cmd in ("/stash", "/runtime-stash"):
         return server.control_command(stripped, project=project)
     if cmd in ("/selfmod", "/selfmodify"):
         return server.control_command(stripped, project=project)

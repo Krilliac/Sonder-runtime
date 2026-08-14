@@ -484,15 +484,26 @@ def _runtime_mutation_arguments(root, subcommand):
 
 
 def runtime_stash_status(root, *, timeout=DEFAULT_TIMEOUT):
-    """Return bounded, content-free recovery readiness and stash metadata."""
+    """Return bounded, content-free recovery readiness and stash metadata.
+
+    Only stashes bearing the host-created recovery marker are exposed here.
+    A caller must never mistake an unrelated developer stash for a Sonder
+    recovery checkpoint, particularly because ``pop`` both restores and drops
+    its selected stash.
+    """
     top = _require_runtime_checkout(root, timeout=timeout)
     status = repo_status(top, timeout=timeout, max_output=16_384, bypass=True)
     listed = _checked_git(
         top,
-        ["stash", "list", "--format=%gd"],
+        ["stash", "list", "--format=%gd%x00%gs"],
         timeout=timeout, max_output=16_384, operation="stash list",
     )
-    entries = [line.strip() for line in listed["stdout"].splitlines() if line.strip()]
+    entries = []
+    for line in listed["stdout"].splitlines():
+        reference, separator, subject = line.strip().partition("\x00")
+        if not separator or not reference or RUNTIME_STASH_MESSAGE not in subject:
+            continue
+        entries.append(reference)
     return {
         "root": str(top),
         "branch": status.get("branch") or "",
@@ -504,7 +515,7 @@ def runtime_stash_status(root, *, timeout=DEFAULT_TIMEOUT):
 
 
 def runtime_stash(root, action, *, timeout=MAX_TIMEOUT):
-    """Save or restore the top source-recovery stash for canonical main.
+    """Save or restore the most recent source-recovery stash for canonical main.
 
     This is purposefully not a general Git stash wrapper: actions, message,
     checkout, and stash selector are all fixed by the host.  ``pop`` requires
@@ -533,7 +544,7 @@ def runtime_stash(root, action, *, timeout=MAX_TIMEOUT):
             raise ValueError("runtime stash pop requires an existing recovery stash")
         _checked_git(
             top,
-            _runtime_mutation_arguments(top, ["stash", "pop"]),
+            _runtime_mutation_arguments(top, ["stash", "pop", before["top"]]),
             timeout=timeout, max_output=64_000, operation="stash pop",
         )
     return {
