@@ -135,6 +135,28 @@ def test_guarded_update_allows_vision_only_model_for_vision_tier(
     assert "vision: llava:latest" in result
 
 
+def test_guarded_update_rejects_nonvision_model_for_vision_tier(
+    isolated_runtime_policy, monkeypatch,
+):
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda _path: {"models": [
+            {"name": "text-model:latest", "capabilities": ["completion"]},
+        ]},
+    )
+
+    result = server.runtime_policy_update(
+        local_models_json='{"vision":"text-model:latest"}',
+    )
+
+    assert result == (
+        "ERROR: local model(s) are not chat-capable for their tier: "
+        "vision=text-model:latest (must declare vision capability)"
+    )
+    assert runtime_policy.load()["local_models"]["vision"] != "text-model:latest"
+
+
 def test_runtime_slash_parses_models_and_routes(isolated_runtime_policy, monkeypatch):
     calls = []
     monkeypatch.setattr(
