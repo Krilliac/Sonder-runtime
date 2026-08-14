@@ -1,4 +1,5 @@
 import base64
+import hashlib
 
 import pytest
 
@@ -30,6 +31,7 @@ def test_vision_analysis_sends_guarded_png_to_bound_local_model(monkeypatch, tmp
         server.workbench, "image_inspect",
         lambda *_args, **_kwargs: {
             "format": "PNG", "bytes": image.stat().st_size, "width": 1, "height": 1,
+            "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
         },
     )
     seen = {}
@@ -125,10 +127,29 @@ def test_vision_analysis_refuses_oversized_question_before_model_or_image_read(m
 def test_vision_analysis_refuses_pathological_dimensions_before_read(monkeypatch, tmp_path, dimensions):
     image = _png(tmp_path)
     monkeypatch.setattr(server.file_ops, "require_read_access", lambda *_args, **_kwargs: image)
-    metadata = {"format": "PNG", "bytes": image.stat().st_size, **dimensions}
+    metadata = {
+        "format": "PNG", "bytes": image.stat().st_size,
+        "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+        **dimensions,
+    }
     monkeypatch.setattr(server.workbench, "image_inspect", lambda *_args, **_kwargs: metadata)
 
     with pytest.raises(ValueError, match="(pixels|dimensions)"):
+        server._vision_input(str(image))
+
+
+def test_vision_analysis_refuses_same_size_file_replacement(monkeypatch, tmp_path):
+    image = _png(tmp_path)
+    monkeypatch.setattr(server.file_ops, "require_read_access", lambda *_args, **_kwargs: image)
+    original = image.read_bytes()
+    metadata = {
+        "format": "PNG", "bytes": len(original), "width": 1, "height": 1,
+        "sha256": hashlib.sha256(original).hexdigest(),
+    }
+    monkeypatch.setattr(server.workbench, "image_inspect", lambda *_args, **_kwargs: metadata)
+    image.write_bytes(b"x" * len(original))
+
+    with pytest.raises(ValueError, match="changed while"):
         server._vision_input(str(image))
 
 

@@ -12793,6 +12793,15 @@ def _vision_input(path, *, token="", approval="", extra_roots=""):
         raise ValueError("could not read vision input") from exc
     if len(raw) != size or len(raw) > _MAX_VISION_INPUT_BYTES:
         raise ValueError("vision input changed while it was being read")
+    # ``image_inspect`` hashes the guarded resolved file.  A matching size is
+    # not enough to make that inspection meaningful: another process can
+    # replace the file with different bytes of the same length between the
+    # header/dimension check and this read.  Fail closed rather than send an
+    # uninspected local image to the VLM.
+    expected_digest = str(metadata.get("sha256") or "").strip().casefold()
+    actual_digest = hashlib.sha256(raw).hexdigest()
+    if len(expected_digest) != 64 or expected_digest != actual_digest:
+        raise ValueError("vision input changed while it was being read")
     return resolved, metadata, base64.b64encode(raw).decode("ascii")
 
 
