@@ -57,11 +57,19 @@ def test_run_process_scrubs_control_plane_secrets(monkeypatch, tmp_path):
 def test_run_process_closes_unrelated_inherited_handles(monkeypatch, tmp_path):
     seen = {}
 
-    def fake_run(*args, **kwargs):
-        seen.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+    class FakeProc:
+        returncode = 0
 
-    monkeypatch.setattr(code_runner.subprocess, "run", fake_run)
+        def communicate(self, *, input, timeout):
+            seen["input"] = input
+            seen["timeout"] = timeout
+            return "", ""
+
+    def fake_popen(*args, **kwargs):
+        seen.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(code_runner.subprocess, "Popen", fake_popen)
     out = code_runner._run_process(
         [sys.executable, "-c", "pass"], str(tmp_path), "", 10, "python"
     )
