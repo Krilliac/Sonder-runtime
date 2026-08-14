@@ -433,10 +433,17 @@ def test_lease_transfer_marks_old_inflight_result_unknown(monkeypatch):
     store.claim_next_result(run["id"], "old", owner_pid=os.getpid(), lease_seconds=30)
     now[0] += 31
 
-    assert store.claim_run(run["id"], "new", owner_pid=os.getpid())
+    # A claim-time expiry may be discovered after the caller's preceding
+    # stale-reconciliation pass.  Retiring the only in-flight child must
+    # terminalize the parent instead of handing a successor an empty running
+    # receipt for another lease period.
+    assert store.claim_run(run["id"], "new", owner_pid=os.getpid()) is None
     result = store.list_results(run["id"])[0]
     assert result["status"] == "unknown"
     assert result["failure_class"] == "execution_uncertain"
+    parent = store.get_run(run["id"])
+    assert parent["status"] == "interrupted"
+    assert parent["finished_ts"] == now[0]
     assert store.record_result(run["id"], "a", "old", "answered", answer="late") is None
 
 
