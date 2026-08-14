@@ -33,9 +33,9 @@ def _http_server(monkeypatch):
         thread.join(timeout=5)
 
 
-def _get(port, path):
+def _get(port, path, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", path)
+    conn.request("GET", path, headers=headers or {})
     response = conn.getresponse()
     raw = response.read()
     status = response.status
@@ -88,6 +88,60 @@ def test_commands_index_entries_match_to_dict_exactly(monkeypatch):
     by_name = {entry["name"]: entry for entry in payload["commands"]}
     for command in command_catalog.catalog():
         assert by_name[command.name] == command.to_dict()
+
+
+def test_hosted_ordinary_account_cannot_enumerate_privileged_tool_schemas(monkeypatch):
+    """HTTP catalog, help, and manifest all apply the same role boundary."""
+    ordinary = {"username": "ordinary", "role": "user"}
+    context = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": ordinary,
+    }
+
+    with _http_server(monkeypatch) as port:
+        monkeypatch.setattr(ts, "API_KEY", "")
+        monkeypatch.setattr(ts, "AUTH_MODE", "account")
+        monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+        monkeypatch.setattr(ts, "_auth_account", lambda _header: ordinary)
+        headers = {"Authorization": "Bearer ordinary-token"}
+        status, payload = _get(port, "/v1/commands", headers)
+        complete_status, completion = _get(
+            port, "/v1/commands/complete?q=runtime_policy_update", headers,
+        )
+        help_status, help_payload = _get(
+            port, "/v1/commands/help?topic=/runtime_policy_update", headers,
+        )
+
+    names = {entry["name"] for entry in payload["commands"]}
+    assert status == complete_status == help_status == 200
+    assert "/runtime_policy_update" not in names
+    assert "/permission_mode" not in names
+    assert "/admin_accounts" not in names
+    assert "/autopilot_start" not in names
+    assert "/task_list" in names
+    assert completion["matches"] == []
+    assert "available to this account" in help_payload["text"]
+
+    manifest = ts._handle_slash("/tool_manifest", context=context)
+    capability = json.loads(
+        ts._handle_slash("/tool_capability_manifest", context=context)
+    )
+    assert "runtime_policy_update" not in manifest
+    assert "admin_accounts" not in manifest
+    assert "runtime_policy_update" not in capability["manifest"]
+    assert "admin_accounts" not in capability["manifest"]
+
+
+def test_hosted_admin_retains_complete_command_catalog(monkeypatch):
+    admin = {"username": "admin", "role": "admin"}
+    context = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": admin,
+    }
+    names = {command.name for command in ts._served_commands(context)}
+    assert "/runtime_policy_update" in names
+    assert "/admin_accounts" in names
+    assert "/permission_mode" in names
 
 
 # --- GET /v1/commands/complete -------------------------------------------

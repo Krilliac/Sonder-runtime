@@ -1710,6 +1710,15 @@ def _dispatch_catalogued_tool(line, state, context=None):
     task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context)
     if task_boundary_error:
         return task_boundary_error
+    # ``server.tool_manifest`` is intentionally the complete direct-MCP
+    # owner catalog. Do not relay it over an account-backed HTTP request: the
+    # same role filter used by /v1/commands covers both discovery spellings,
+    # including the capability fingerprint endpoint.
+    if context is not None and context.get("mode") != "local-open":
+        if tool_name == "tool_manifest":
+            return _served_tool_manifest(context)
+        if tool_name == "tool_capability_manifest":
+            return _served_tool_capability_manifest(context)
     # Guarded tools take the caller's own token exactly as the explicit
     # branches pass it (/read, /files, /delete); the tool still enforces its
     # own permission rules with it.
@@ -2178,14 +2187,109 @@ def _completion_limit(raw):
     return max(1, min(COMPLETE_MAX_LIMIT, value))
 
 
-def _commands_index_payload():
+def _served_command_visible(command, context=None):
+    """Whether a command's schema belongs in this served caller's catalog.
+
+    The command catalog is more than cosmetic: it contains every argument
+    name, default, and a purpose-built usage string.  Returning that catalog
+    unchanged to an ordinary account made the HTTP authorization gate
+    decorative for discovery -- an account that could not invoke
+    ``/runtime_policy_update`` still received its full mutation schema from
+    ``/v1/commands`` (and again via completion, help, and ``/tool_manifest``).
+
+    Direct MCP and local-open remain deliberate owner surfaces, so their
+    catalogs stay complete.  In an account-backed deployment, hide commands
+    that this context could not invoke because they require developer/admin
+    authority.  Permission modes are intentionally *not* filtered here: they
+    are operator-selected, live state and do not define a caller's standing
+    authority.
+    """
+    if context is None or context.get("mode") == "local-open":
+        return True
+
+    tool = str(getattr(command, "tool", "") or "")
+    if tool:
+        operation = tool_contract.system_operation_for(tool)
+        if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
+            return _admin_authorized(context)
+        if operation and _system_operation_authority_error(operation, context):
+            return False
+
+    # Native branches do not have parameter schemas, but some of them still
+    # create host work or expose privileged operational state.  Keep ordinary
+    # accounts from using the command catalog as an oracle for that surface.
+    if bool(getattr(command, "native", False)):
+        name = str(getattr(command, "name", "") or "")
+        if _dangerous_http_slash(name) and not _developer_authorized(context):
+            return False
+    return True
+
+
+def _served_commands(context=None):
+    """Return catalog rows visible to one HTTP authorization context."""
+    return tuple(
+        command for command in command_catalog.catalog()
+        if _served_command_visible(command, context)
+    )
+
+
+def _served_help_text(topic, context=None):
+    """Render help from the caller-filtered catalog without leaking misses."""
+    commands = _served_commands(context)
+    needle = str(topic or "").strip().lower()
+    if not needle:
+        categories = sorted({command.category for command in commands})
+        return (
+            "Sonder commands available to this account (use /v1/commands for details):\n"
+            + "  " + ", ".join(categories)
+        )
+    if needle in command_catalog.CATEGORIES:
+        rows = [command for command in commands if command.category == needle]
+        if not rows:
+            return "No commands in that category are available to this account."
+        return "%s --\n%s" % (
+            needle,
+            "\n".join("  %s  %s" % (row.name, row.summary) for row in rows),
+        )
+    for command in commands:
+        if needle == command.name or needle in command.aliases:
+            return "%s\nusage: %s\n%s" % (
+                command.name, command.usage, command.summary,
+            )
+    # Do not distinguish an unknown command from one intentionally hidden.
+    return "No command with that name is available to this account."
+
+
+def _served_tool_manifest(context):
+    """Human-readable HTTP manifest that excludes unreachable tool schemas."""
+    rows = _served_commands(context)
+    return "\n".join(
+        "  %s: %s" % (command.name, command.summary) for command in rows
+    )
+
+
+def _served_tool_capability_manifest(context):
+    """Fingerprint the served, caller-visible command schema surface only."""
+    rows = [command.to_dict() for command in _served_commands(context)]
+    canonical = json.dumps(
+        rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return json.dumps({
+        "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "tool_count": len(rows),
+        "manifest": _served_tool_manifest(context),
+        "authority": "informational only; host policy remains authoritative",
+    }, indent=2, sort_keys=True)
+
+
+def _commands_index_payload(context=None):
     # A catalog that cannot read the tool registry now raises rather than
     # quietly returning nothing (command_catalog.CatalogUnavailable). This is
     # a listing endpoint, not an enforcing one, so it degrades -- but it says
     # so in the payload instead of shipping an empty list the client would
     # render as "this build has no commands".
     try:
-        commands = [command.to_dict() for command in command_catalog.catalog()]
+        commands = [command.to_dict() for command in _served_commands(context)]
         error = ""
     except command_catalog.CatalogUnavailable as exc:
         commands, error = [], str(exc)
@@ -2194,28 +2298,38 @@ def _commands_index_payload():
         # The blurb per category, not the commands in it: the client renders
         # these as section headings beside the counts it derives itself.
         "categories": dict(command_catalog.CATEGORIES),
-        "popular": list(command_catalog.POPULAR),
+        "popular": [
+            name for name in command_catalog.POPULAR
+            if any(command.name == name for command in _served_commands(context))
+        ],
     }
     if error:
         payload["error"] = error
     return payload
 
 
-def _commands_complete_payload(query, limit=""):
+def _commands_complete_payload(query, limit="", context=None):
     try:
+        visible = {command.name for command in _served_commands(context)}
         matches = [
             command.to_dict()
             for command in command_catalog.complete(
-                query, limit=_completion_limit(limit),
+                query, limit=COMPLETE_MAX_LIMIT,
             )
+            if command.name in visible
         ]
     except command_catalog.CatalogUnavailable as exc:
         return {"matches": [], "error": str(exc)}
-    return {"matches": matches}
+    return {"matches": matches[:_completion_limit(limit)]}
 
 
-def _commands_help_payload(topic=""):
-    return {"text": command_catalog.help_text(topic)}
+def _commands_help_payload(topic="", context=None):
+    if context is None or context.get("mode") == "local-open":
+        return {"text": command_catalog.help_text(topic)}
+    try:
+        return {"text": _served_help_text(topic, context)}
+    except command_catalog.CatalogUnavailable as exc:
+        return {"text": "Command catalog unavailable: %s" % exc}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2644,12 +2758,15 @@ class Handler(BaseHTTPRequestHandler):
             values = query.get(name) or [""]
             return values[0]
 
+        context = self._request_auth_context()
         if route == "/v1/commands/complete":
-            payload = _commands_complete_payload(first("q"), first("limit"))
+            payload = _commands_complete_payload(
+                first("q"), first("limit"), context=context,
+            )
         elif route == "/v1/commands/help":
-            payload = _commands_help_payload(first("topic"))
+            payload = _commands_help_payload(first("topic"), context=context)
         else:
-            payload = _commands_index_payload()
+            payload = _commands_index_payload(context=context)
         self._send_json_payload(payload)
         return True
 
