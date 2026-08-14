@@ -700,6 +700,30 @@ def test_framed_composer_uses_a_stable_rectangle_without_content_truncation():
     assert "".join(row[4:-1].rstrip() for row in rows) == "x" * 60
 
 
+def test_framed_composer_keeps_unicode_text_inside_its_cell_rectangle():
+    out = _FakeStdout()
+    top, rows, footer = slash_menu._framed_input_lines(
+        "Sonder 🤖 東京", "🚀東京́" * 4, 20, out)
+
+    assert slash_menu._display_width(top) == 19
+    assert slash_menu._display_width(footer) == 19
+    assert all(slash_menu._display_width(row) == 19 for row in rows)
+    assert "".join(row[4:-1].rstrip() for row in rows) == "🚀東京́" * 4
+
+
+def test_emoji_graphemes_are_one_two_cell_glyph_for_layout_and_clipping():
+    for glyph in ("👩\u200d💻", "👋🏽", "❤️", "🇺🇸"):
+        assert slash_menu._display_width(glyph) == 2
+        assert slash_menu._clip_cells(glyph + "x", 2) == glyph
+        assert slash_menu._wrap_cells(glyph + "x", 2) == [glyph, "x"]
+
+
+def test_framed_cursor_uses_cells_for_wide_unicode_at_a_wrap_boundary():
+    # The 11-column frame has six editable cells.  Three CJK glyphs fill it
+    # exactly, so the cursor remains at the first row's right edge.
+    assert slash_menu._framed_cursor_cell("東京大", 3, 12, 1) == (0, 6)
+
+
 def test_framed_composer_tracks_a_cursor_in_a_wrapped_buffer(monkeypatch):
     monkeypatch.setattr(slash_menu, "_terminal_size", lambda: (12, 12))
     # 6 editable cells per row in the 11-column visual frame. Move left into
