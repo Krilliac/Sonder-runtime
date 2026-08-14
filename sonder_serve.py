@@ -708,6 +708,15 @@ def _is_loopback_host(host):
         return False
 
 
+def _http_server_location_lookup_allowed(context):
+    """Allow server-IP location lookup only for genuinely local-open use."""
+    return (
+        isinstance(context, dict)
+        and context.get("mode") == "local-open"
+        and _is_loopback_host(HOST)
+    )
+
+
 def _validate_bind_security(
     host,
     api_key=None,
@@ -3449,6 +3458,7 @@ class Handler(BaseHTTPRequestHandler):
                                 location_consent
                                 and bool(self.client_address)
                                 and _is_loopback_host(self.client_address[0])
+                                and _http_server_location_lookup_allowed(context)
                             ),
                         )
                         web_routed = reply is not None
