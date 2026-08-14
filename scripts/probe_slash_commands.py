@@ -35,6 +35,10 @@ MUTATING = {
     "/asset", "/assetgen", "/assets", "/artifact", "/groundartifact",
     "/verifyartifact",
     "/selfmod", "/selfmodify",
+    # These aliases currently require a question, but model fanout is an
+    # expensive operation.  Do not let a future default prompt turn this
+    # read-only probe into an unattended model-spending loop.
+    "/ensemble", "/council",
     # These mutate the source checkout itself.  A read-only contract probe
     # must never fast-forward a clean runtime merely because it accepts the
     # alias as a slash command.
