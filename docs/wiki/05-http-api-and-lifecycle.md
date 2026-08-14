@@ -13,7 +13,7 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /version` | loopback or key | Build version + commit. |
 | `GET /metrics` | loopback or key | Prometheus exposition (or a disabled comment). |
 | `POST /v1/chat/completions` | key | OpenAI-compatible chat. |
-| `GET /v1/models` | key | Advertised tiers. |
+| `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
 | `GET /v1/sonder/status` | key | Rich runtime/stats snapshot. |
@@ -21,6 +21,12 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the
 reverse proxy restricts those paths to loopback upstream).
+
+`GET /v1/models` always includes the `sonder` runtime route and configured
+tier IDs. It also includes exact installed/discovered models that declare a
+chat capability; embedding- or vision-only entries are omitted. Cloud models
+appear only after the operator enables cloud use, so clients must treat the
+response as the live allowlist rather than a static catalog.
 
 ## Chat request
 
