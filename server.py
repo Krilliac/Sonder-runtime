@@ -18209,6 +18209,7 @@ _WORK_MUTATION_TOOLS = frozenset({
     "sqlite_mutate", "scaffold_project", "archive_extract", "archive_create",
     "fetch_artifact",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
+    "ensemble_codegen_build_loop",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
     "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",

@@ -119,3 +119,9 @@ def test_only_the_codegen_report_success_verdict_counts_as_a_success():
         "ensemble_codegen_build_loop",
         "BUILD MEASUREMENT INCOMPLETE: output was truncated",
     )
+
+
+def test_ensemble_codegen_loop_is_recorded_as_a_workspace_mutation():
+    assert server._agent_tool_mutates(
+        "ensemble_codegen_build_loop", {"files_json": "{}"},
+    )
