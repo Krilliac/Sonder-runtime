@@ -82,6 +82,32 @@ def test_repository_worker_result_still_fails_closed_on_real_scope_mismatch(
         master_orchestrator.repository_worker_result(receipt, str(requested))
 
 
+def test_agent_stops_when_a_route_declares_failed_tool_fatal(monkeypatch):
+    """Research does not burn remaining steps after its sole source fails."""
+    calls = []
+    monkeypatch.setenv("SONDER_SPECULATION", "0")
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: True)
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *args, **kwargs: lambda prompt, history=None: calls.append(prompt) or (
+            '{"tool":"web_search","args":{"query":"repair shops near 67215"}}'
+        ),
+    )
+    monkeypatch.setattr(
+        server, "_agent_dispatch_observed",
+        lambda *args, **kwargs: "ERROR: search providers returned no sufficiently relevant results",
+    )
+
+    output = server._agent_impl(
+        "find a repair shop", max_steps=5, allow_web=True,
+        tool_allowlist=("web_search",),
+        abort_on_tool_failure_names=("web_search",),
+    )
+
+    assert output.startswith("ERROR: required web_search failed")
+    assert len(calls) == 1
+
+
 def test_host_receipt_uses_latest_validator_result(monkeypatch):
     # Keep the test about validator ordering: a predictor trained by an earlier
     # test may otherwise schedule an additional speculative inspection first.
