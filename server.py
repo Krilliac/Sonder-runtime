@@ -8684,6 +8684,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
 
 def format_improvement_report(report: dict) -> str:
     acceptance = report.get("acceptance_percent")
+    unknown_outcomes = max(0, int(report.get("unknown_source_outcomes", 0) or 0))
     caller_judged = (
         "unmeasured" if acceptance is None else "%s%% of %s reviewed" % (
             acceptance, report.get("reviewed_outcomes", 0),
@@ -8700,10 +8701,12 @@ def format_improvement_report(report: dict) -> str:
         # Never show the blended rate alone: it is dominated by the runtime
         # marking its own curriculum, and reads as a quality score when it
         # is not one.
-        "    caller-judged: %s | autograded: %s%% of %s | blended: %s%%" % (
+        "    caller-judged: %s | autograded: %s%% of %s | "
+        "legacy/unknown provenance: %s | blended: %s%%" % (
             caller_judged,
             report.get("learning_health", {}).get("autograded_positive_percent", 0),
             report.get("autograded_outcomes", 0),
+            unknown_outcomes,
             report.get("learning_health", {}).get("positive_percent", 0),
         ),
         "  memory: %s lessons, %s facts, duplicate rows=%s, vague=%s, missing embeddings=%s" % (
