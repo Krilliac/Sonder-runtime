@@ -189,6 +189,11 @@ def main(argv=None) -> int:
         "--embed-model",
         default=os.environ.get("SONDER_EMBED_MODEL", DEFAULT_EMBED_MODEL),
     )
+    parser.add_argument(
+        "--no-embedding",
+        action="store_true",
+        help="skip the optional embedding-model check/pull; semantic memory can be enabled later",
+    )
     parser.add_argument("--ollama", default="")
     parser.add_argument(
         "--offline",
@@ -214,7 +219,7 @@ def main(argv=None) -> int:
         help="additional mount path to scan for a .gguf (repeatable)",
     )
     args = parser.parse_args(argv)
-    embed_model = args.embed_model.strip()
+    embed_model = "" if args.no_embedding else args.embed_model.strip()
 
     try:
         env = ollama_endpoint.client_environment(os.environ)
@@ -242,30 +247,51 @@ def main(argv=None) -> int:
         print(f"  import: {message}")
         if not ok:
             return 2
-        ok, message = ensure_model(
-            ollama, embed_model, offline=True, env=env,
-        )
-        print(f"  embedding: {message}")
-        if not ok:
-            print("  note: recall/lessons need an embedding model; pull "
-                  "nomic-embed-text when back online, or set SONDER_EMBED_MODEL.")
+        if embed_model:
+            ok, message = ensure_model(
+                ollama, embed_model, offline=True, env=env,
+            )
+            print(f"  embedding: {message}")
+            if not ok:
+                print("  note: recall/lessons need an embedding model; pull "
+                      "nomic-embed-text when back online, or set SONDER_EMBED_MODEL.")
+        else:
+            print("  embedding: skipped; recall/lessons can be enabled later")
         print("Done. %s now serves the imported model. Verify: ollama list"
               % STABLE_ALIAS)
         return 0
 
     base_model = args.model.strip() or default_base_model()
-    if not base_model or not embed_model:
-        parser.error("model names may not be empty")
+    if not base_model:
+        parser.error("base model name may not be empty")
 
-    for model, label in ((base_model, "base"), (embed_model, "embedding")):
-        ok, message = ensure_model(ollama, model, offline=args.offline, env=env)
-        print(f"  {label}: {message}")
+    ok, message = ensure_model(ollama, base_model, offline=args.offline, env=env)
+    print(f"  base: {message}")
+    if not ok:
+        return 2
+
+    # Core REPL/API chat needs the generative base model only.  Try to make a
+    # fresh setup feature-complete by acquiring the default embedder too, but
+    # do not discard a usable local chat installation when an optional pull is
+    # offline, unavailable, or rejected by the provider.
+    embedding_note = ""
+    if embed_model:
+        ok, message = ensure_model(ollama, embed_model, offline=args.offline, env=env)
+        print(f"  embedding: {message}")
         if not ok:
-            return 2
+            embedding_note = (
+                "  note: core chat is ready; recall/lessons need an embedding model. Pull %s later, "
+                "or set SONDER_EMBED_MODEL." % embed_model
+            )
+    else:
+        print("  embedding: skipped; semantic memory can be enabled later")
+        embedding_note = "  note: core chat is ready without semantic memory"
     ok, message = create_alias(ollama, base_model, env=env)
     print(f"  alias: {message}")
     if not ok:
         return 3
+    if embedding_note:
+        print(embedding_note)
     print("Done. Verify with: ollama list")
     return 0
 
