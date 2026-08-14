@@ -55,6 +55,19 @@ def _builder_build_errors():
     return namespace["build_errors"], namespace
 
 
+def _builder_verifier():
+    source = _BUILDER.read_text(encoding="utf-8")
+    start = source.index("def run_verifier")
+    end = source.index("\ndef strip_fences", start)
+    namespace: dict[str, object] = {
+        "os": __import__("os"),
+        "subprocess": __import__("subprocess"),
+        "HERE": "C:/example",
+    }
+    exec(source[start:end], namespace)
+    return namespace["run_verifier"], namespace
+
+
 def test_arena_skeleton_scaffold_creates_verifier_compatible_project_once(tmp_path):
     path = scaffold.ensure_project_file(tmp_path / "FpsGame_Skeleton")
 
@@ -193,3 +206,44 @@ def test_arena_builder_treats_restore_failure_as_a_failed_baseline():
     assert errors == [
         "error: dotnet build exited 1: error NU1301: unable to load the service index"
     ]
+
+
+def test_arena_builder_runs_held_out_verifier_against_explicit_project():
+    run_verifier, namespace = _builder_verifier()
+    calls = {}
+
+    class Result:
+        returncode = 0
+        stdout = "=== 33 passed, 0 failed ===\n"
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return Result()
+
+    namespace["subprocess"] = type("Subprocess", (), {"run": staticmethod(fake_run)})
+    ok, output = run_verifier("C:/state/FpsGame_Skeleton")
+
+    assert ok is True
+    assert "33 passed" in output
+    assert "-p:SonderTarget=C:" in calls["args"][-1]
+    assert calls["kwargs"]["timeout"] == 300
+
+
+def test_arena_builder_bounds_failed_verifier_output():
+    run_verifier, namespace = _builder_verifier()
+
+    class Result:
+        returncode = 1
+        stdout = "x" * 9_000
+        stderr = ""
+
+    namespace["subprocess"] = type(
+        "Subprocess", (), {"run": staticmethod(lambda *_args, **_kwargs: Result())},
+    )
+    ok, output = run_verifier("C:/state/FpsGame_Skeleton")
+
+    assert ok is False
+    assert output.endswith("... verifier output truncated")
+    assert len(output) < 8_100

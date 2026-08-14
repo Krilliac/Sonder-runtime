@@ -173,6 +173,30 @@ def compiler_error_preview(errors: list[str], *, limit: int = 3) -> str:
     return "\n      " + "\n      ".join(row[:240] for row in shown) + suffix
 
 
+def run_verifier(project: str) -> tuple[bool, str]:
+    """Run the held-out assembly verifier against one generated project.
+
+    The verifier is deliberately a separate executable so a broken generated
+    assembly cannot break its own build.  It receives the exact project path
+    instead of relying on a source-tree-relative default.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "dotnet", "run", "--project", os.path.join(HERE, "Verify"),
+                "-c", "Release", "--nologo",
+                "-p:SonderTarget=" + os.path.abspath(project),
+            ],
+            cwd=HERE, capture_output=True, text=True, timeout=300,
+        )
+    except Exception as exc:
+        return False, "verifier could not run: %s" % exc
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if len(output) > 8_000:
+        output = output[:8_000] + "\n... verifier output truncated"
+    return proc.returncode == 0, output or "verifier produced no output"
+
+
 def strip_fences(text: str) -> str:
     return FENCE.sub("", text or "").strip()
 
@@ -358,6 +382,8 @@ def main():
                         help="rewrite every skeleton before filling")
     parser.add_argument("--prepare-only", action="store_true",
                         help="write the deterministic project/skeleton and verify its baseline build; never call a model")
+    parser.add_argument("--verify", action="store_true",
+                        help="after generation, run Verify/ against this exact project and fail on held-out checks")
     parser.add_argument("--model", default="",
                         help="override the ollama model behind --tiers, so two "
                              "models can be compared on identical slots")
@@ -581,6 +607,14 @@ def main():
     print("elapsed            : %.1f min" % ((time.time() - started) / 60.0))
     print("\nNOTE: a green build is not proof the game works. Every unfilled "
           "body still throws NotImplementedException at runtime.")
+    if not ran or errors:
+        return 1
+    if args.verify:
+        verified, output = run_verifier(PROJECT)
+        print("\n=== HELD-OUT VERIFIER: %s ===" % ("PASSED" if verified else "FAILED"))
+        print(output)
+        if not verified:
+            return 1
     return 0
 
 

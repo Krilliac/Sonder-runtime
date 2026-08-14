@@ -19,6 +19,7 @@ python build_with_sonder.py --only GameMap.cs      # one file
 python build_with_sonder.py --repair-only          # skip generation
 python build_with_sonder.py --resume               # skip files already on disk
 python build_skeleton.py --reset --prepare-only    # create/verify only the deterministic v2 baseline
+python build_skeleton.py --verify                  # require build + held-out runtime verification
 ```
 
 By default, generated projects live under Sonder's per-user state directory:
@@ -32,6 +33,10 @@ After a successful skeleton build, run its held-out verifier with:
 ```bash
 dotnet run --project Verify
 ```
+
+The generator's `--verify` flag performs this same check automatically against
+the exact project it generated and returns a nonzero exit code on a build or
+held-out verification failure.
 
 `Verify/Verify.csproj` resolves the same default user-state location on
 Windows. On another platform or a custom output directory, pass the target
