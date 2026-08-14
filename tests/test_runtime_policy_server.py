@@ -11,6 +11,12 @@ import sonder_serve
 def isolated_runtime_policy(monkeypatch, tmp_path):
     original_tiers = dict(server.TIERS)
     original_policy = dict(server._RUNTIME_POLICY)
+    original_embedding = (
+        server.embeddings.EMBED_MODEL,
+        server.embeddings.EMBED_IDENTITY,
+        server.embeddings.EMBED_REVISION,
+        server.embeddings.EXPECTED_DIMENSION,
+    )
     path = tmp_path / "runtime_policy.json"
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(path))
     monkeypatch.setenv("SONDER_HOME", str(tmp_path / "sonder-home"))
@@ -18,6 +24,12 @@ def isolated_runtime_policy(monkeypatch, tmp_path):
     server.TIERS.clear()
     server.TIERS.update(original_tiers)
     server._RUNTIME_POLICY = original_policy
+    (
+        server.embeddings.EMBED_MODEL,
+        server.embeddings.EMBED_IDENTITY,
+        server.embeddings.EMBED_REVISION,
+        server.embeddings.EXPECTED_DIMENSION,
+    ) = original_embedding
 
 
 def test_server_refresh_applies_external_policy_edit(isolated_runtime_policy):
@@ -144,6 +156,72 @@ def test_runtime_slash_parses_models_and_routes(isolated_runtime_policy, monkeyp
     assert calls[-1] == {"reset": True}
 
 
+def test_runtime_embedding_binding_is_capability_checked_and_does_not_rewrite_vectors(
+    isolated_runtime_policy, monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda _path: {"models": [
+            {"name": "bge-m3:latest", "capabilities": ["embedding"]},
+            {"name": "qwen2.5:7b", "capabilities": ["completion"]},
+        ]},
+    )
+    monkeypatch.setattr(
+        server.embeddings, "configure_model", lambda model: calls.append(model) or {},
+    )
+
+    accepted = server.runtime_policy_update(embedding_model="bge-m3:latest")
+    refused = server.runtime_policy_update(embedding_model="qwen2.5:7b")
+
+    assert "embeddings: bge-m3:latest" in accepted
+    assert runtime_policy.load()["embedding_model"] == "bge-m3:latest"
+    assert calls[-1] == "bge-m3:latest"
+    assert refused == (
+        "ERROR: embedding model must declare embedding capability: qwen2.5:7b"
+    )
+    assert "embeddings: bge-m3:latest" in server.control_command(
+        "/runtime set embedding=bge-m3:latest"
+    )
+
+
+def test_runtime_embedding_binding_uses_show_when_tags_omit_capabilities(
+    isolated_runtime_policy, monkeypatch,
+):
+    show_calls = []
+    monkeypatch.setattr(
+        server, "_get", lambda _path: {"models": [{"name": "bge-m3:latest"}]},
+    )
+    monkeypatch.setattr(
+        server, "_post",
+        lambda path, payload, timeout=30: show_calls.append((path, payload, timeout)) or {
+            "capabilities": ["embedding"],
+        },
+    )
+
+    result = server.runtime_policy_update(embedding_model="bge-m3:latest")
+
+    assert "embeddings: bge-m3:latest" in result
+    assert show_calls == [("/api/show", {"name": "bge-m3:latest"}, 30)]
+
+
+def test_runtime_slash_applies_embedding_with_other_bindings(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server, "runtime_policy_update", lambda **kwargs: calls.append(kwargs) or "updated",
+    )
+
+    assert server.control_command(
+        "/runtime set embedding=bge-m3:latest general=gemma3:4b review=general"
+    ) == "updated"
+    assert calls == [{
+        "local_models_json": '{"general": "gemma3:4b"}',
+        "embedding_model": "bge-m3:latest",
+        "routing_json": '{"review": "general"}',
+    }]
+
+
 def test_runtime_http_status_is_safe_but_updates_require_developer():
     assert sonder_serve._dangerous_http_slash("/runtime") is False
     assert sonder_serve._dangerous_http_slash("/runtime status") is False
@@ -172,7 +250,9 @@ def test_runtime_policy_data_reports_missing_models(
     data = server.runtime_policy_data()
 
     assert data["error"] == ""
-    assert data["missing_models"] == ["missing-general:latest"]
+    assert data["missing_models"] == [
+        "missing-general:latest", "nomic-embed-text",
+    ]
     assert "" not in data["missing_models"]
     assert data["path"] == str(isolated_runtime_policy)
 

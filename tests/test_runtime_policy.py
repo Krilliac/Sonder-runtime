@@ -29,6 +29,7 @@ def test_default_policy_prefers_shared_sonder_alias():
         "reasoning": "",
         "vision": "",
     }
+    assert policy["embedding_model"] == "nomic-embed-text"
     assert policy["routing"]["router"] == "fast"
     assert policy["routing"]["autopilot"] == "code"
 
@@ -49,6 +50,15 @@ def test_environment_seeds_first_policy_without_allowing_cloud(policy_file, monk
         "reasoning": "",
         "vision": "",
     }
+    assert policy["embedding_model"] == "nomic-embed-text"
+
+
+def test_environment_does_not_seed_cloud_embedding_model(policy_file, monkeypatch):
+    monkeypatch.setenv("SONDER_EMBED_MODEL", "provider-embed:cloud")
+
+    policy = runtime_policy.load(create=True)
+
+    assert policy["embedding_model"] == "nomic-embed-text"
 
 
 def test_environment_only_seeds_first_policy_creation(policy_file, monkeypatch):
