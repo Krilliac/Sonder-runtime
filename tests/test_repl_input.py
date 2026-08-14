@@ -13,6 +13,18 @@ def test_normal_repl_input_is_unchanged_except_whitespace():
     assert sonder_repl._normalize_input_line("  hello sonder  ") == "hello sonder"
 
 
+def test_repl_history_never_retains_native_or_explicit_credentials():
+    assert sonder_repl._history_safe("/login nate correct-horse-battery-staple") is False
+    assert sonder_repl._history_safe("/register nate correct-horse-battery-staple") is False
+    assert sonder_repl._history_safe("/file_write path=x token=developer-secret") is False
+    assert sonder_repl._history_safe("use Authorization: Bearer developer-secret") is False
+
+
+def test_repl_history_keeps_ordinary_chat_and_commands():
+    assert sonder_repl._history_safe("explain this compiler error") is True
+    assert sonder_repl._history_safe("/model gemma3:12b") is True
+
+
 def test_completion_timing_uses_a_compact_elapsed_display(monkeypatch):
     monkeypatch.setattr(sonder_repl.time, "monotonic", lambda: 12.345)
     assert sonder_repl._completion_timing(12.0) == "Sonder completed in 345ms"
@@ -464,6 +476,29 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     assert len(seen) == 1
     assert seen[0]["tier"] == "code"
     assert seen[0]["model_override"] == "gemma3:12b"
+
+
+def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
+    lines = iter(("/login nate correct-horse-battery-staple", "hello", "/exit"))
+    offered_history = []
+
+    def _read(_prompt, **kwargs):
+        offered_history.append(list(kwargs.get("history") or []))
+        return next(lines)
+
+    monkeypatch.setattr(sonder_repl, "_read_input", _read)
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.server, "admin_login", lambda *_args: "logged in")
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+
+    sonder_repl.main()
+
+    assert offered_history == [[], [], ["hello"]]
 
 
 def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):
