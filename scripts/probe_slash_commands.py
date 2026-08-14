@@ -40,7 +40,7 @@ MUTATING = {
     # alias as a slash command.
     "/update", "/updatesource",
     "/admin", "/register", "/login", "/setaccount", "/accounts", "/whoami",
-    "/autopilot", "/auto", "/goal", "/goals", "/plan", "/work",
+    "/autopilot", "/auto", "/goal", "/goals", "/plan", "/work", "/agent",
     "/master", "/agentcancel", "/cancelagents", "/agentretry", "/retryagent",
     "/qualityfix", "/privacyfix", "/embedfix",
     "/strict", "/filepolicy", "/contextsize", "/ctxsize", "/compact",
