@@ -23178,6 +23178,12 @@ def _execute_fanout_run(run_id):
                                       cancel_check=lambda: not fanout_store.worker_can_dispatch(
                                           run_id, owner_id,
                                       ))
+            # Persist a host-owned handoff fence immediately before invoking
+            # the provider closure.  Cancellation can still stop the transport
+            # if it wins before its own pre-send check, but after this point we
+            # must conservatively treat the call as potentially billable.
+            if not fanout_store.mark_result_dispatched(run_id, model, owner_id):
+                return row, "skipped", "", "dispatch ownership lost before provider request", 0, None, {}
             raw_answer = str(generate(question) or "")
             if not raw_answer.strip():
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))

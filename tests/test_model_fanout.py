@@ -1927,6 +1927,60 @@ def test_fanout_cancel_between_claim_and_send_does_not_start_provider_call(monke
     assert receipt["skipped"][0]["model"] == "remote:cloud"
 
 
+def test_fanout_cancellation_after_dispatch_fence_marks_result_unknown(monkeypatch, tmp_path):
+    """Cancellation must not claim a possibly billed cloud call was skipped."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    run = server.fanout_store.create_run("private prompt", ["remote:cloud"], scope="cloud")
+    owner = "worker"
+    assert server.fanout_store.claim_run(run["id"], owner, owner_pid=server.os.getpid())
+    assert server.fanout_store.claim_next_result(run["id"], owner, owner_pid=server.os.getpid())
+    assert server.fanout_store.mark_result_dispatched(run["id"], "remote:cloud", owner)
+
+    cancelled = server.fanout_store.request_cancel(run["id"])
+    result = server.fanout_store.list_results(run["id"])[0]
+
+    assert cancelled["status"] == "cancelled"
+    assert result["status"] == "unknown"
+    assert result["failure_class"] == "execution_uncertain"
+    assert "may have been dispatched" in result["error"]
+    # Unknown calls remain non-replayable unless the caller makes that spend
+    # decision explicitly.
+    assert server.fanout_store.resume_run(run["id"]) is None
+    assert server.fanout_store.resume_run(run["id"], retry_unknown=True) is not None
+
+
+def test_fanout_cancel_after_dispatch_fence_stops_transport_and_keeps_truthful_receipt(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+    ))
+    run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
+    original_mark = server.fanout_store.mark_result_dispatched
+    cancelled = False
+
+    def mark_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        marked = original_mark(*args, **kwargs)
+        if marked and not cancelled:
+            cancelled = True
+            server.fanout_store.request_cancel(run["id"])
+        return marked
+
+    provider_calls = []
+    monkeypatch.setattr(server.fanout_store, "mark_result_dispatched", mark_then_cancel)
+    monkeypatch.setattr(server, "_post", lambda *args, **kwargs: provider_calls.append(args) or {})
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert cancelled is True
+    assert provider_calls == []
+    assert receipt["status"] == "cancelled"
+    assert receipt["models_unknown"] == 1
+    assert receipt["models_skipped"] == 0
+    assert receipt["failures"][0]["failure_class"] == "execution_uncertain"
+
+
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
 
