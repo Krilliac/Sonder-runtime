@@ -1,8 +1,11 @@
 import io
 import subprocess
 
+import pytest
+
 import sonder_headless as H
 import sonder_serve
+import unsafe_lab
 
 
 class GateInput:
@@ -29,6 +32,41 @@ def test_start_ollama_skips_when_already_reachable(monkeypatch):
     monkeypatch.setattr(H, "ollama_ok", lambda: True)
 
     assert H.start_ollama() == "ollama: already reachable"
+
+
+def test_unsafe_headless_hosted_request_fails_before_sidecars(monkeypatch, capsys):
+    monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, unsafe_lab.ACKNOWLEDGEMENT)
+    monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    monkeypatch.setattr(
+        H,
+        "start_ollama",
+        lambda: (_ for _ in ()).throw(AssertionError("Ollama must not start")),
+    )
+    monkeypatch.setattr(
+        H,
+        "ensure_sonder_alias",
+        lambda: (_ for _ in ()).throw(AssertionError("alias must not bootstrap")),
+    )
+
+    assert H.main(["start", "--allow-hosted"]) == 2
+    assert "unsafe lab mode refuses hosted/cloud" in capsys.readouterr().err
+
+
+def test_start_sonder_checks_effective_hosted_override_before_spawn(monkeypatch):
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, unsafe_lab.ACKNOWLEDGEMENT)
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    monkeypatch.setattr(
+        H,
+        "port_open",
+        lambda *args: (_ for _ in ()).throw(AssertionError("must not probe")),
+    )
+
+    with pytest.raises(unsafe_lab.UnsafeLabError, match="hosted/cloud"):
+        H.start_sonder("127.0.0.1", 11435, env={"SONDER_ALLOW_CLOUD": "1"})
 
 
 def test_start_ollama_reports_missing_binary(monkeypatch):
