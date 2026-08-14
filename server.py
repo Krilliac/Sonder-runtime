@@ -21038,6 +21038,9 @@ def agent(
     allow_location: bool = False,
 ) -> str:
     """Run a visible local tool-using agent loop with checklist/reporting."""
+    refusal = intents.containment_egress_refusal(prompt)
+    if refusal:
+        return refusal
     nested = activity_tracker.current() is not None
     with activity_tracker.response_span(
         "agent:%s" % (tier or "code"),
@@ -21938,6 +21941,9 @@ def route_work_request(prompt: str, project: str = "") -> str | None:
 
 def _route_work_request(prompt: str, project: str = "") -> str | None:
     _maybe_live_reload()
+    refusal = intents.containment_egress_refusal(prompt)
+    if refusal:
+        return refusal
     explicit_worker_cap = master_orchestrator.requested_worker_cap(prompt)
     decision = (
         {

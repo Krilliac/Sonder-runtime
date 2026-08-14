@@ -106,6 +106,30 @@ _PATH_LIKE_RE = re.compile(
     r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
 )
 
+# This is deliberately narrower than a generic "security" or "sandbox"
+# classifier.  Security reviews and tests remain legitimate workspace work.
+# The host must, however, never turn a request to evade containment *and*
+# contact something beyond the runtime into an autonomous tool run.  Such a
+# request receives a deterministic refusal before a planner/model can decide
+# which tools to try.
+_CONTAINMENT_EVASION_RE = re.compile(
+    r"\b(?:breach|escape|break\s+out\s+of|bypass|circumvent|evade)\s+"
+    r"(?:the\s+)?(?:containment|sandbox|environment|isolation|guardrails?)\b",
+    re.I,
+)
+_EXTERNAL_CONTACT_RE = re.compile(
+    r"\b(?:send|message|notify|contact|post|deliver)\b.*\b"
+    r"(?:outside|external|off[-\s]?host|another\s+(?:app|process)|"
+    r"windows\s+notifications?|email|sms|webhook|slack|discord)\b",
+    re.I | re.S,
+)
+
+CONTAINMENT_EGRESS_REFUSAL = (
+    "Refused: autonomous runs cannot attempt containment evasion or send "
+    "messages outside Sonder. I can help review the configured tool policy "
+    "or add a safe, local containment test instead."
+)
+
 _EXECUTION_NO_TOOLS_RE = re.compile(
     r"\b(?:no tools?|do not use (?:any )?tools?|don't use (?:any )?tools?|"
     r"just answer|answer only|explain only)\b"
@@ -260,6 +284,22 @@ def classify_work(text):
     if not _WORK_ACTION_RE.search(candidate):
         return False
     return bool(_WORK_TARGET_RE.search(candidate) or _PATH_LIKE_RE.search(value))
+
+
+def containment_egress_refusal(text):
+    """Return the fixed refusal for explicit containment-escape egress asks.
+
+    This is a host routing fence, not a model safety judgment.  It covers the
+    combined dangerous request only, so ordinary security audits and local
+    notification implementation work are still eligible for their normal,
+    separately-gated routes.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or len(value) > 12000:
+        return None
+    if _CONTAINMENT_EVASION_RE.search(value) and _EXTERNAL_CONTACT_RE.search(value):
+        return CONTAINMENT_EGRESS_REFUSAL
+    return None
 
 
 def classify_execution(text):
