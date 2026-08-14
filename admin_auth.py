@@ -313,22 +313,33 @@ def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1) ->
         return True, ""
     username = account["username"]
     window = (_now() // RATE_WINDOW_SECONDS) * RATE_WINDOW_SECONDS
-    row = conn.execute(
-        "SELECT count FROM account_rate WHERE username=? AND window_start=?",
-        (username, window),
-    ).fetchone()
-    count = int(row["count"] if row else 0) + max(1, int(cost or 1))
-    if row:
-        conn.execute(
-            "UPDATE account_rate SET count=? WHERE username=? AND window_start=?",
-            (count, username, window),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO account_rate(username, window_start, count) VALUES(?, ?, ?)",
-            (username, window, count),
-        )
-    conn.commit()
+    units = max(1, int(cost or 1))
+    # Each HTTP request owns a separate SQLite connection.  A plain SELECT
+    # followed by UPDATE lets simultaneous requests read the same old count,
+    # then each write the same incremented value.  Begin the short
+    # read-modify-write transaction with a reserved write lock so a limit is
+    # a real per-account budget under concurrent requests, not a best effort.
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT count FROM account_rate WHERE username=? AND window_start=?",
+            (username, window),
+        ).fetchone()
+        count = int(row["count"] if row else 0) + units
+        if row:
+            conn.execute(
+                "UPDATE account_rate SET count=? WHERE username=? AND window_start=?",
+                (count, username, window),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO account_rate(username, window_start, count) VALUES(?, ?, ?)",
+                (username, window, count),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     if count > limit:
         return False, "rate limit exceeded for tier %s (%d/min)" % (account.get("tier"), limit)
     return True, ""
