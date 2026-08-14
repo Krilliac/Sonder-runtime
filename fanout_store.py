@@ -421,6 +421,31 @@ def claim_run(run_id: str, owner_id: str, *, owner_pid: int, lease_seconds: int 
             # retire any old in-flight result before taking the run, otherwise
             # a delayed prior worker can commit after its lease has ended.
             conn.execute("UPDATE fanout_results SET status='unknown',error='worker lease transferred; request was not replayed',failure_class='execution_uncertain',retry_after_ts=NULL,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status='running'", (now, now, str(run_id)))
+            # A lease can expire immediately after a caller's stale-run
+            # reconciliation and before this claim transaction.  If retiring
+            # that predecessor's last in-flight child leaves no executable
+            # rows, do not hand the successor a parent that misleadingly
+            # remains ``running`` for another full lease.  The child receipt
+            # is durable in this same transaction before the parent becomes
+            # terminal, and ``interrupted`` preserves the no-replay contract.
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM fanout_results "
+                "WHERE run_id=? AND status IN ('pending','running')",
+                (str(run_id),),
+            ).fetchone()[0]
+            if not remaining:
+                conn.execute(
+                    "UPDATE fanout_runs SET status='interrupted',owner_id='',owner_pid=0,"
+                    "owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? "
+                    "WHERE id=? AND status NOT IN ('completed','cancelled','interrupted')",
+                    (now, now, str(run_id)),
+                )
+                _event(
+                    conn, str(run_id), "interrupted",
+                    "worker lease transferred after all child receipts became terminal; request was not replayed",
+                    now,
+                )
+                return None
         changed = conn.execute("UPDATE fanout_runs SET status='running',owner_id=?,owner_pid=?,owner_host=?,lease_until=?,updated_ts=? WHERE id=? AND status NOT IN ('completed','cancelled','interrupted') AND cancel_requested=0",
                                (_safe_text(owner_id, 200), int(owner_pid), socket.gethostname(), lease, now, str(run_id))).rowcount
         if not changed: return None
