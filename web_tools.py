@@ -29,6 +29,10 @@ BING_SEARCH_RSS_URL = "https://www.bing.com/search?q={query}&format=rss"
 USER_AGENT = "sonder-local-agent/1.0"
 MAX_REDIRECTS = 5
 MAX_DECOMPRESSED_BYTES = 2_000_000
+# A DNS response is attacker-controlled for arbitrary fetched URLs.  Trying an
+# unbounded number of individually pinned addresses turns one fetch into many
+# sequential connection timeouts, even though every address is public.
+MAX_DNS_ADDRESSES = 16
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _NUMERIC_HOST_PART = re.compile(r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)$")
 _MEDIA_TYPE = re.compile(
@@ -349,6 +353,11 @@ def _resolve_public_addresses(host, port):
         if not _is_globally_routable(ip):
             raise ValueError("URL hostname must resolve only to globally routable addresses")
         addresses.add(ip.compressed)
+        if len(addresses) > MAX_DNS_ADDRESSES:
+            raise ValueError(
+                "URL hostname resolved to too many addresses "
+                "(max %d)" % MAX_DNS_ADDRESSES
+            )
     if not addresses:
         raise ValueError("URL hostname did not resolve to an address")
     return tuple(sorted(addresses))

@@ -65,6 +65,32 @@ def test_request_pins_first_validated_dns_answer(monkeypatch):
     assert opened == [("93.184.216.34",)]
 
 
+def test_dns_answer_set_is_bounded_before_any_connection(monkeypatch):
+    opened = []
+    addresses = [
+        "8.8.8.%d" % number
+        for number in range(1, web_tools.MAX_DNS_ADDRESSES + 2)
+    ]
+
+    def resolve(_host, port, *args, **kwargs):
+        return [
+            (web_tools.socket.AF_INET, web_tools.socket.SOCK_STREAM, 6, "", (address, port))
+            for address in addresses
+        ]
+
+    monkeypatch.setattr(web_tools.socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(
+        web_tools,
+        "_urlopen",
+        lambda req, timeout=10: opened.append(req.full_url) or Response(),
+    )
+
+    with pytest.raises(ValueError, match="too many addresses"):
+        web_tools.web_fetch("https://many-addresses.example/test")
+
+    assert opened == []
+
+
 def test_urlopen_connects_to_pinned_address_and_preserves_host(monkeypatch):
     seen = {}
 
