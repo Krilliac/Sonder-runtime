@@ -3,4 +3,4 @@
 # probe and the runtime test suite; do not turn this into a floating range.
 # MCP 2.x removed mcp.server.fastmcp, which Sonder currently imports.
 mcp==1.29.0
-cryptography==45.0.7
+cryptography==50.0.0
