@@ -17765,7 +17765,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect",
+    "process_memory_risk_inspect", "image_inspect",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
