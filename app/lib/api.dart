@@ -23,6 +23,36 @@ String resolveCatalogModel(Iterable<String> models, String selected) {
   return available.isEmpty ? selected : available.first;
 }
 
+/// Return a bounded, user-facing error message from a Sonder/OpenAI response.
+///
+/// The HTTP API uses the OpenAI-compatible `{error: {message: ...}}` shape for
+/// rejected chat requests. Keeping that explanation lets the chat surface say
+/// *why* an exact model or policy request was rejected instead of reducing all
+/// failures to an unhelpful status code. A few older routes use a top-level
+/// `message` or string `error`, so accept those shapes as well.
+String _responseErrorMessage(http.Response response, String fallback) {
+  try {
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is Map) {
+      final error = decoded['error'];
+      final candidate = error is Map
+          ? error['message']
+          : (error is String ? error : decoded['message']);
+      final message = candidate?.toString().trim() ?? '';
+      if (message.isNotEmpty) {
+        // Error responses are untrusted server input; keep a malformed proxy
+        // response from turning into an unbounded chat transcript entry.
+        return message.length <= 1024
+            ? message
+            : '${message.substring(0, 1024)}…';
+      }
+    }
+  } catch (_) {
+    // A non-JSON response still gets the stable status-code fallback.
+  }
+  return fallback;
+}
+
 class LauncherOperation {
   static const terminalPhases = {
     'succeeded',
@@ -1179,7 +1209,10 @@ class SonderApi {
       throw SonderException('Unauthorized — check the API key.');
     }
     if (resp.statusCode != 200) {
-      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+      throw SonderException(_responseErrorMessage(
+        resp,
+        'Server returned HTTP ${resp.statusCode}.',
+      ));
     }
 
     try {
