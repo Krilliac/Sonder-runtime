@@ -395,6 +395,30 @@ def test_composer_title_compacts_when_full_status_exceeds_a_wide_frame(monkeypat
     assert "calls" not in title
 
 
+def test_composer_title_compaction_keeps_live_status_snapshot(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x" * 120}, raising=False)
+    monkeypatch.setattr(
+        sonder_repl.server, "execution_status_data",
+        lambda: {"known": True, "running_lanes": 2, "running_agents": 3, "queued_agents": 0},
+    )
+
+    title = sonder_repl._composer_title("code", width=120)
+
+    assert "L2 A3" in title
+
+
+def test_composer_title_uses_visible_width_not_ansi_bytes(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x" * 79}, raising=False)
+    status = {"known": True, "running_lanes": 0, "running_agents": 0, "queued_agents": 0}
+    full = sonder_repl._composer_title("code", status, width=None)
+
+    title = sonder_repl._composer_title("code", status, width=120)
+
+    assert "Sonder code" in sonder_repl._ANSI_RE.sub("", title)
+
+
 def test_composer_context_and_last_turn_degrade_without_a_fake_value(monkeypatch):
     monkeypatch.setattr(sonder_repl.server, "context_health_data", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {"surface": "chat-api"})
