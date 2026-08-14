@@ -872,6 +872,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /runtime ...       shared local model mappings and execution-lane tiers
+  /stash ...         save/restore this install's source edits for a guarded update
   /hardware          detect RAM, GPU runtime, VRAM, and offload support
   /training ...      plan/start/status/deploy/rollback attended weight training
   /selfmod ...       inspect/plan/test/approve/deploy/rollback isolated improvements
@@ -1813,6 +1814,7 @@ def main():
             elif cmd in (
                 "/runtime", "/models", "/mcp", "/convergence",
                 "/update", "/updatecheck", "/updatesource",
+                "/stash", "/runtime-stash",
                 "/hardware", "/training", "/weighttraining",
                 "/selfmod", "/selfmodify",
                 "/learning", "/learnhealth", "/metrics",
