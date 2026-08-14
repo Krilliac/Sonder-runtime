@@ -8,7 +8,6 @@ recoverable without replaying an unknown cloud request.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import os
 import re
 import socket
@@ -30,6 +29,12 @@ MAX_EVENT_CHARS = 1_000
 MAX_MODELS = 128
 MAX_PROVIDER_RETRY_SECONDS = 3600
 DEFAULT_LEASE_SECONDS = 300
+# A durable fanout may need its original prompt to resume, but that payload is
+# held exclusively in ``execution_prompt_ciphertext``.  The legacy columns are
+# kept for schema compatibility only; retaining even a redacted free-text copy
+# or a stable digest there leaks private prose / enables offline guessing when
+# the SQLite receipt is copied.
+_PROMPT_REDACTED = "sealed-fanout-prompt:redacted"
 # A queued receipt should normally be claimed immediately by its caller.  If a
 # process dies in that narrow handoff window, leave enough time for ordinary
 # scheduling then make the never-started run explicitly recoverable.
@@ -190,13 +195,13 @@ def _ensure_schema(path: str) -> None:
                 # Before sealed prompts existed this database retained a best-effort
                 # redacted copy plus a stable digest.  That is not an acceptable
                 # durable prompt store: a redactor cannot safely classify arbitrary
-                # private prose, and a digest enables offline guessing.  Old runs
-                # cannot be resumed without their sealed payload, so scrub them in
-                # the same migration that introduces the vault column.
+                # private prose, and a digest enables offline guessing.  Sealed
+                # rows do not need either legacy field to resume, so scrub *all*
+                # existing rows rather than leaving newer vault-backed rows behind.
                 conn.execute(
-                    "UPDATE fanout_runs SET prompt='legacy-fanout-prompt:redacted', "
-                    "prompt_sha256='' WHERE COALESCE(execution_prompt_ciphertext, '')='' "
-                    "AND prompt NOT LIKE 'legacy-fanout-prompt:%'"
+                    "UPDATE fanout_runs SET prompt=?, prompt_sha256='' "
+                    "WHERE prompt<>? OR prompt_sha256<>''",
+                    (_PROMPT_REDACTED, _PROMPT_REDACTED),
                 )
                 conn.commit()
             except sqlite3.OperationalError as exc:
@@ -279,12 +284,11 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
     if len(ciphertext) > 64_000:
         raise ValueError("fanout sealed prompt exceeds 64000 characters")
     now = time.time(); run_id = "fan-%s" % uuid.uuid4().hex[:16]
-    stored_prompt = _safe_text(raw_prompt, MAX_PROMPT_CHARS)
     with _write_transaction() as conn:
         conn.execute("""INSERT INTO fanout_runs(id,request_owner,request_role,prompt,prompt_sha256,models_json,execution_prompt_ciphertext,scope,cloud_opt_in,limits_json,status,created_ts,updated_ts)
                         VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
-                     (run_id, _safe_text(request_owner, 200), _safe_text(request_role, 80), stored_prompt,
-                      hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest(), _json(clean_models),
+                     (run_id, _safe_text(request_owner, 200), _safe_text(request_role, 80), _PROMPT_REDACTED,
+                      "", _json(clean_models),
                       ciphertext, _safe_text(scope, 40),
                       int(bool(cloud_opt_in)), _json(limits or {}), now, now))
         conn.executemany("INSERT INTO fanout_results(run_id,model,status,updated_ts) VALUES(?,?,'pending',?)",
