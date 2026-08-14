@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+import command_router
 import git_tools
 import server
 import sonder_serve
@@ -411,6 +412,21 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert "usage:" in server.control_command("/update check")
     assert not sonder_serve._dangerous_http_slash("/updatecheck")
     assert sonder_serve._dangerous_http_slash("/update")
+
+
+def test_natural_update_check_reuses_guarded_refresh_dispatch(monkeypatch):
+    seen = {}
+
+    def status(refresh=True):
+        seen["refresh"] = refresh
+        return "Sonder source update status: current"
+
+    monkeypatch.setattr(server, "runtime_source_update_status", status)
+    line = command_router.resolve("check whether Sonder is up to date")
+
+    assert line == "/updatecheck"
+    assert server.control_command(line) == "Sonder source update status: current"
+    assert seen == {"refresh": True}
 
 
 def test_runtime_update_refusal_names_current_branch_and_safe_recovery(monkeypatch, tmp_path):

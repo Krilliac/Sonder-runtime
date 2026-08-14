@@ -17,6 +17,21 @@ def test_status_and_info_phrasings():
     assert cr.resolve("what can you do") == "/help"
 
 
+def test_explicit_source_update_check_phrasings_stay_whole_turn_only():
+    assert cr.resolve("check whether Sonder is up to date") == "/updatecheck"
+    assert cr.resolve("please check for Sonder updates!") == "/updatecheck"
+
+    # Do not drop a follow-up action or route quoted/retrieved prose into a
+    # network refresh. The exact slash command remains available when wanted.
+    for text in (
+        "check for Sonder updates and update it",
+        "the web page says check for Sonder updates",
+        '"check whether Sonder is up to date"',
+        "how do I check whether Sonder is up to date",
+    ):
+        assert cr.resolve(text) is None, text
+
+
 def test_session_lifecycle_phrasings():
     assert cr.resolve("new session") == "/new"
     assert cr.resolve("start over") == "/new"
