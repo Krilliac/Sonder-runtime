@@ -20728,7 +20728,13 @@ def _agent_turn(
                 # guard into a synthetic task failure.  This is deliberately
                 # not an extra hosted request, and it never applies after a
                 # mutation where an invented completion would be unsafe.
-                if read_only and not cloud and not mutated:
+                if (
+                    read_only
+                    and not cloud
+                    and not mutated
+                    and not required_tools
+                    and not require_file_evidence
+                ):
                     finalize_prompt = transcript
                     if observations:
                         finalize_prompt += "\n\n" + _agent_observation_prompt(observations)
@@ -20741,8 +20747,9 @@ def _agent_turn(
                     forced, _forced_raw, _forced_error = _agent_generate_decision(
                         gen, finalize_prompt,
                     )
-                    if isinstance(forced, dict) and "final" in forced:
-                        return finish_final(str(forced.get("final") or ""))
+                    forced_final = str(forced.get("final") or "") if isinstance(forced, dict) else ""
+                    if forced_final and not _AGENT_NEGATIVE_CLAIM_RE.search(forced_final):
+                        return finish_final(forced_final)
                 if auto_checklist:
                     _agent_checklist_fail(
                         checklist_id, checklist_states,

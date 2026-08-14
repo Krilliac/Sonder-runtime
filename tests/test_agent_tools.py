@@ -1055,6 +1055,36 @@ def test_mutating_agent_still_stops_repeated_identical_successful_inspection(mon
     assert len(dispatches) == 1
 
 
+def test_repeat_guard_does_not_bypass_required_or_file_evidence_gates(monkeypatch):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+    ]
+    dispatches = []
+    monkeypatch.setattr(
+        server,
+        "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append(a) or "README evidence",
+    )
+
+    output = server._agent_impl(
+        "search and summarize", max_steps=4, read_only=True,
+        required_tool_names=("web_search",), require_file_evidence=True,
+    )
+
+    assert output.startswith(
+        "ERROR: agent repeated the same already-successful inspection 3 times"
+    )
+    assert len(dispatches) == 1
+
+
 def test_agent_dry_run_does_not_invalidate_cached_inspection(monkeypatch, without_standing):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
