@@ -58,8 +58,17 @@ if /I not "%SONDER_TERMINAL_START_SERVER%"=="0" (
       if not errorlevel 1 (
         echo [sonder] NOTE: using an existing local API server that this launch does not manage.
       ) else (
-        echo [sonder] WARNING: local API server did not start cleanly.
-        if exist "%SONDER_BOOT_LOG%" type "%SONDER_BOOT_LOG%"
+        rem A cold server can become managed/listening in the narrow interval
+        rem after the headless readiness return. Its status block is stronger
+        rem evidence than that stale exit code, so do not print a contradictory
+        rem warning immediately above a verified live endpoint.
+        findstr /C:"sonder api: listening on" "%SONDER_BOOT_LOG%" >nul 2>&1
+        if not errorlevel 1 (
+          echo [sonder] NOTE: local API server became ready after the startup probe.
+        ) else (
+          echo [sonder] WARNING: local API server did not start cleanly.
+          if exist "%SONDER_BOOT_LOG%" type "%SONDER_BOOT_LOG%"
+        )
       )
     )
   )

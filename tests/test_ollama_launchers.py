@@ -24,6 +24,13 @@ def test_terminal_launcher_distinguishes_an_existing_unmanaged_server_from_failu
     assert "using an existing local API server" in text
 
 
+def test_terminal_launcher_accepts_managed_server_verified_by_late_status_probe():
+    text = (ROOT / "sonder.cmd").read_text(encoding="utf-8")
+
+    assert 'findstr /C:"sonder api: listening on"' in text
+    assert "became ready after the startup probe" in text
+
+
 def test_windows_launcher_uses_a_per_invocation_bootstrap_log():
     text = (ROOT / "sonder.cmd").read_text(encoding="utf-8")
 
