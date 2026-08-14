@@ -34,6 +34,21 @@ _TOOLCHAINS = (
     "7z", "unzip", "pip", "uv", "ruff", "pytest",
 )
 
+# Optional host tools that are useful to an agent but are not language
+# toolchains.  Keep this list small and deterministic: these are discovered
+# only, never started or version-probed, so a wedged/third-party binary cannot
+# slow down every workbench turn.  The full /env report makes their presence
+# explicit and the compact agent brief gives a model enough evidence to choose
+# an appropriate guarded tool invocation when a task calls for it.
+_SPECIALIST_TOOLS = (
+    "sccache",       # compiler cache; useful for diagnosing build throughput
+    "clcache",       # Windows compiler-cache alternative
+    "doxygen",       # documentation generation/validation
+    "xperf",         # Windows Performance Toolkit trace control
+    "wpaexporter",   # Windows Performance Analyzer export utility
+    "nssm",          # Windows service wrapper inspection
+)
+
 _cache = None
 
 
@@ -51,7 +66,8 @@ def probe(refresh=False):
 
     Keys: os, os_release, machine, is_windows/is_linux/is_mac, python_version,
     python_executable, cwd, temp_dir, path_separator, cpu_count, shells
-    {name: path}, toolchains {name: path}, preferred_shell.
+    {name: path}, toolchains {name: path}, specialist_tools {name: path},
+    preferred_shell.
     """
     global _cache
     if _cache is not None and not refresh:
@@ -83,6 +99,7 @@ def probe(refresh=False):
         "cpu_count": os.cpu_count() or 1,
         "shells": shells,
         "toolchains": _which_map(_TOOLCHAINS),
+        "specialist_tools": _which_map(_SPECIALIST_TOOLS),
         "preferred_shell": preferred,
     }
     return _cache
@@ -131,5 +148,10 @@ def format_profile(refresh=False):
     for name in sorted(env["toolchains"]):
         lines.append("    %-12s %s" % (name, env["toolchains"][name]))
     if not env["toolchains"]:
+        lines.append("    (none found)")
+    lines.append("  specialist tools:")
+    for name in sorted(env["specialist_tools"]):
+        lines.append("    %-12s %s" % (name, env["specialist_tools"][name]))
+    if not env["specialist_tools"]:
         lines.append("    (none found)")
     return "\n".join(lines)
