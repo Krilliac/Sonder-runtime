@@ -155,7 +155,9 @@ Bounded Prometheus metrics (no high-cardinality labels): `sonder_build_info`,
 `sonder_request_duration_seconds`, `sonder_active_requests`,
 `sonder_model_calls_total{tier,result}`, `sonder_auth_failures_total{reason}`,
 `sonder_backup_age_seconds`, plus content-free measured-inference histograms
-for backend phases and token throughput. Inference labels are closed sets
+for backend phases and token throughput. Model-call `tier` is only `local` or
+`cloud`, and `result` is only `ok` or `error`; exact model names and configured
+aliases are never exported. Inference labels are closed sets
 (`backend`, `phase`, `direction`, and explicit `cold`/`warm` state); prompts,
 responses, model names, and endpoints are never exported. Absent the Prometheus client the
 metric calls are cheap no-ops and `/metrics` returns an explanatory comment.

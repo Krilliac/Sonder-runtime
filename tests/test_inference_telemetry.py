@@ -57,3 +57,20 @@ def test_metrics_output_uses_only_fixed_content_free_labels():
         assert 'backend="ollama",state="cold"' in rendered
     else:
         assert "metrics disabled" in rendered
+
+
+def test_model_call_metrics_reduce_models_to_fixed_route_labels():
+    registry = MetricsRegistry()
+    registry.observe_model_call(
+        cloud=False, result="ok", elapsed_seconds=1.25,
+    )
+    registry.observe_model_call(
+        cloud=True, result="arbitrary-provider-error", elapsed_seconds=-5,
+    )
+    rendered = registry.render().decode("utf-8")
+    if registry.enabled:
+        assert 'tier="local",result="ok"' in rendered
+        assert 'tier="cloud",result="error"' in rendered
+        assert "private-model-name" not in rendered
+    else:
+        assert "metrics disabled" in rendered

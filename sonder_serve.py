@@ -2007,7 +2007,7 @@ def _turn_reasoning():
 
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
-    state=None, return_result=False,
+    state=None, return_result=False, metrics=None,
 ):
     """Call Sonder Runtime's learning loop with the UI's prior turns; returns UI text."""
     state = _state_or_legacy(state)
@@ -2019,12 +2019,26 @@ def _run_prompt(
         # constrain them before presenting a receipt to an HTTP caller.
         resolved_target["model"] = _receipt_text(model)
         resolved_target["tier"] = _receipt_text(tier_label)
+        resolved_target["cloud"] = bool(_cloud)
 
-    out = server.answer_with_history(
-        prompt, history, trace=state.trace, strict=state.strict, tier=tier,
-        context_size=context_size, session=session, project=project,
-        raise_model_errors=True, target_observer=record_target,
-    )
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        out = server.answer_with_history(
+            prompt, history, trace=state.trace, strict=state.strict, tier=tier,
+            context_size=context_size, session=session, project=project,
+            raise_model_errors=True, target_observer=record_target,
+        )
+        outcome = "error" if out.startswith("ERROR") else "ok"
+    finally:
+        # This is the primary generation selected for an HTTP turn. Keep the
+        # exported labels independent of exact models and configured aliases.
+        # A control route has no target and must not masquerade as a model call.
+        if metrics is not None and "cloud" in resolved_target:
+            metrics.observe_model_call(
+                cloud=resolved_target["cloud"], result=outcome,
+                elapsed_seconds=time.monotonic() - started,
+            )
     if out.startswith("ERROR"):
         result = TurnResult(out, None, "")
         return result if return_result else result.content
@@ -2040,18 +2054,31 @@ def _run_prompt(
     return result if return_result else result.content
 
 
-def _run_structured_prompt(prompt, history, tier, schema, context_size=""):
+def _run_structured_prompt(
+    prompt, history, tier, schema, context_size="", metrics=None,
+):
     """Run the isolated structured path; never add a footer or activity text."""
     resolved_target = {}
 
     def record_target(model, tier_label, _cloud):
         resolved_target["model"] = _receipt_text(model)
         resolved_target["tier"] = _receipt_text(tier_label)
+        resolved_target["cloud"] = bool(_cloud)
 
-    content = server.structured_answer_with_history(
-        prompt, history, schema, tier=tier, context_size=context_size,
-        target_observer=record_target,
-    )
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        content = server.structured_answer_with_history(
+            prompt, history, schema, tier=tier, context_size=context_size,
+            target_observer=record_target,
+        )
+        outcome = "ok"
+    finally:
+        if metrics is not None and "cloud" in resolved_target:
+            metrics.observe_model_call(
+                cloud=resolved_target["cloud"], result=outcome,
+                elapsed_seconds=time.monotonic() - started,
+            )
     return TurnResult(
         content, None, content, "", resolved_target.get("model", ""),
         resolved_target.get("tier", ""),
@@ -3426,7 +3453,7 @@ class Handler(BaseHTTPRequestHandler):
                     if structured_schema is not None:
                         turn = _run_structured_prompt(
                             prompt, history, model_selector, structured_schema,
-                            context_size=context_size,
+                            context_size=context_size, metrics=_lifecycle.metrics,
                         )
                         content = turn.content
                         response_model = turn.resolved_model
@@ -3496,6 +3523,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project,
                             state=state,
                             return_result=True,
+                            metrics=_lifecycle.metrics,
                         )
                         content = turn.content
                         response_iid = turn.iid

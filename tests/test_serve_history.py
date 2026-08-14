@@ -407,6 +407,56 @@ def test_run_prompt_passes_session_and_project(monkeypatch):
     assert seen == {"session": "chat-1", "project": "app"}
 
 
+def test_run_prompt_emits_bounded_primary_model_outcome(monkeypatch):
+    class Metrics:
+        def __init__(self):
+            self.calls = []
+
+        def observe_model_call(self, **kwargs):
+            self.calls.append(kwargs)
+
+    def fake_answer(prompt, history, *, target_observer=None, **kwargs):
+        target_observer("private-model-name:latest", "model:private-model-name:latest", False)
+        return "ok"
+
+    metrics = Metrics()
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    monkeypatch.setattr(ts.server, "parse_interaction_id", lambda out: None)
+    monkeypatch.setattr(ts, "_strip_footer", lambda out: out)
+
+    assert ts._run_prompt("hi", metrics=metrics) == "ok"
+    assert len(metrics.calls) == 1
+    assert metrics.calls[0]["cloud"] is False
+    assert metrics.calls[0]["result"] == "ok"
+    assert metrics.calls[0]["elapsed_seconds"] >= 0
+
+
+def test_run_prompt_records_error_outcome_after_target_selected(monkeypatch):
+    class Metrics:
+        def __init__(self):
+            self.calls = []
+
+        def observe_model_call(self, **kwargs):
+            self.calls.append(kwargs)
+
+    def fake_answer(prompt, history, *, target_observer=None, **kwargs):
+        target_observer("cloud-private-model:latest", "model:cloud-private-model:latest", True)
+        raise RuntimeError("simulated backend failure")
+
+    metrics = Metrics()
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+
+    try:
+        ts._run_prompt("hi", metrics=metrics)
+    except RuntimeError as error:
+        assert str(error) == "simulated backend failure"
+    else:
+        raise AssertionError("expected backend failure")
+    assert len(metrics.calls) == 1
+    assert metrics.calls[0]["cloud"] is True
+    assert metrics.calls[0]["result"] == "error"
+
+
 def test_cot_slash_is_denied(monkeypatch):
     """Two refusals now, and the outer one is the point.
 
