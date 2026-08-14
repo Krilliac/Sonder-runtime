@@ -101,6 +101,33 @@ Sonder is a runtime, not a foundation model. Names such as
 `sonder:latest` are local Ollama aliases; the underlying weights remain managed
 by Ollama. Ollama is the local model server.
 
+## Model requirements
+
+You do **not** need every model or every tier in the catalog.
+
+| What you want to use | What must be available locally |
+|---|---|
+| Normal REPL, API chat, and code work | Ollama plus one generative local model. Bootstrap or `setup_alias.py` chooses/pulls that base model and exposes it as `sonder:latest`. The `fast`, `code`, and `general` roles can all share it. |
+| Semantic memory, lesson recall, and vector search | An embedding model as well (the bootstrap default is `nomic-embed-text`). Core chat still starts without one, but those semantic features are unavailable until an embedding model is configured. |
+| Image or screenshot analysis | An explicitly configured local vision-language model; it is only needed when using a vision-capable feature. |
+| Separate reasoning, reranking, extraction, tool-oriented, speech, or experimental model families | Optional specialist models. Install and bind them only when the matching feature is enabled and supported. |
+| Cloud tiers | No local download, but explicit cloud opt-in is required and prompts leave the machine for those calls. |
+
+The bootstrap and `setup_alias.py` intentionally **try** to pull both a base
+model and the default embedding model so a new local installation has memory
+enabled out of the box. The generative base model is required; if the optional
+embedding pull is unavailable, bootstrap still creates `sonder:latest` and
+explains how to enable recall/lessons later. See the
+[Model Catalog](docs/wiki/18-model-catalog.md) for tier bindings and the
+[collection runbook](docs/runbooks/assemble-model-collection.md) for specialist
+setups. Use `setup_alias.py --no-embedding` when you intentionally want the
+smallest chat-only installation.
+
+> Installing a tag only puts a model in Ollama's catalog; it does not by itself
+> enable a Sonder feature. Bind supported models through `/runtime set ...` and
+> use the matching tool or route. A downloaded speech or reranker tag remains
+> optional until Sonder has a provider-backed integration for that capability.
+
 ## Quick start
 
 The `app-latest` badges are a mutable prerelease snapshot. They may lag `main`
@@ -175,6 +202,15 @@ sonder
 python -m sonder_runtime repl
 # sonder > explain this repository's test layout
 ```
+
+<p align="center">
+  <img src="docs/assets/repl/terminal-repl.png" alt="Sonder terminal REPL with a framed dark-blue composer, live context and token statistics, and activity summary" width="1000">
+</p>
+
+The terminal REPL keeps the current model, active lanes, context budget, token
+usage, and elapsed time visible while you work. Type normally, use `/help` to
+discover guarded commands, and use `/model <tag-or-tier>` to choose an
+installed chat model.
 
 ### Check or update this source checkout
 
