@@ -114,16 +114,14 @@ def agent_brief(refresh=False):
     """
     env = probe(refresh)
     tools = sorted(env["toolchains"])
-    specialists = sorted(env["specialist_tools"])
     return (
         "environment: %s %s (%s) | preferred shell: %s | shells: %s | "
-        "tools: %s | specialist tools: %s | python %s | %d cpus"
+        "tools: %s | python %s | %d cpus"
         % (
             env["os"], env["os_release"], env["machine"],
             env["preferred_shell"] or "(none found)",
             ",".join(sorted(env["shells"])) or "(none)",
             ",".join(tools) or "(none)",
-            ",".join(specialists) or "(none)",
             env["python_version"], env["cpu_count"],
         )
     )

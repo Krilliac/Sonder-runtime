@@ -65,6 +65,10 @@ def test_probe_exposes_specialist_tools_without_subprocesses(monkeypatch):
     env = ep.probe(refresh=True)
     assert env["specialist_tools"] == {"sccache": "C:\\tools\\sccache.exe"}
     assert "sccache" in seen
-    assert "sccache" in ep.agent_brief()
+    # These optional utilities are reported through the read-only environment
+    # surface, but not injected into autonomous prompts: the autonomous runner
+    # allowlist deliberately does not authorize arbitrary tool arguments.
+    assert "sccache" not in ep.agent_brief()
     assert "sccache" in ep.format_profile()
+    monkeypatch.undo()
     ep.probe(refresh=True)  # restore a real probe for later tests
