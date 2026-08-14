@@ -153,6 +153,8 @@ _CATEGORY_BY_TOOL = {
     # `/git` completion cohesive rather than surfacing unrelated system rows.
     "runtime_source_update": "repo",
     "runtime_source_update_status": "repo",
+    "runtime_source_stash": "repo",
+    "runtime_source_stash_status": "repo",
     "data_convert": "data",
     "elevate": "security",
 }
@@ -233,6 +235,7 @@ _CATEGORY_BY_SLASH = {
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/goal": "system", "/improve": "system", "/append": "filesystem",
     "/updatecheck": "repo", "/update": "repo", "/updatesource": "repo",
+    "/stash": "repo", "/runtime-stash": "repo",
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
@@ -258,6 +261,7 @@ _DANGEROUS = frozenset({
     # Fast-forwarding the source tree changes the bytes enforcing every later
     # request.  The paired status tool is separately marked read-only below.
     "runtime_source_update",
+    "runtime_source_stash",
     # `admin_login` is the console's elevation primitive by that same
     # definition, and was missing from this set because it looks like a read:
     # the login call mutates nothing itself. What it *returns* does. It is the
@@ -293,6 +297,7 @@ _READ_ONLY = frozenset({
     "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
     "memory_export", "policy_explain",
     "runtime_source_update_status",
+    "runtime_source_stash_status",
 })
 
 # Branches whose real work is done by module-level functions that front no

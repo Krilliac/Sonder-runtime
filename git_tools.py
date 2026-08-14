@@ -32,6 +32,7 @@ MAX_DIFF_CONTEXT = 20
 # a general "pull whatever remote the model names" capability.
 RUNTIME_UPDATE_REMOTE = "origin"
 RUNTIME_UPDATE_BRANCH = "main"
+RUNTIME_STASH_MESSAGE = "sonder runtime recovery"
 _TRUSTED_RUNTIME_ORIGINS = frozenset({
     "https://github.com/krilliac/sonder-runtime",
     "git@github.com:krilliac/sonder-runtime",
@@ -455,6 +456,92 @@ def runtime_update(root, *, timeout=MAX_TIMEOUT):
     )
     after = runtime_update_status(root, refresh=False, timeout=timeout)
     return {"updated": True, "before": before, "after": after}
+
+
+def _require_runtime_checkout(root, *, timeout):
+    """Resolve the one checkout runtime-maintenance may ever modify."""
+    top = _require_repository_root(Path(root).resolve(), timeout=timeout, max_output=16_384)
+    if not _trusted_runtime_origin(_runtime_remote_url(top)):
+        raise PermissionError("runtime recovery requires the canonical Sonder origin remote")
+    branch = _runtime_git_text(top, ["branch", "--show-current"], operation="branch probe")
+    if branch != RUNTIME_UPDATE_BRANCH:
+        raise PermissionError(
+            "runtime recovery requires branch %r (current checkout: %r)"
+            % (RUNTIME_UPDATE_BRANCH, branch or "detached HEAD")
+        )
+    return top
+
+
+def _runtime_mutation_arguments(root, subcommand):
+    """Keep checkout filters and hooks inert for runtime recovery actions."""
+    hooks_path = str(Path(root) / ".sonder-disabled-git-hooks")
+    return [
+        *_neutralized_filter_arguments(Path(root), timeout=MAX_TIMEOUT, max_output=65_536),
+        "-c", "core.hooksPath=" + hooks_path,
+        "-c", "core.sshCommand=",
+        *subcommand,
+    ]
+
+
+def runtime_stash_status(root, *, timeout=DEFAULT_TIMEOUT):
+    """Return bounded, content-free recovery readiness and stash metadata."""
+    top = _require_runtime_checkout(root, timeout=timeout)
+    status = repo_status(top, timeout=timeout, max_output=16_384, bypass=True)
+    listed = _checked_git(
+        top,
+        ["stash", "list", "--format=%gd"],
+        timeout=timeout, max_output=16_384, operation="stash list",
+    )
+    entries = [line.strip() for line in listed["stdout"].splitlines() if line.strip()]
+    return {
+        "root": str(top),
+        "branch": status.get("branch") or "",
+        "clean": status.get("clean") is True,
+        "change_count": int(status.get("change_count") or 0),
+        "stash_count": len(entries),
+        "top": entries[0] if entries else "",
+    }
+
+
+def runtime_stash(root, action, *, timeout=MAX_TIMEOUT):
+    """Save or restore the top source-recovery stash for canonical main.
+
+    This is purposefully not a general Git stash wrapper: actions, message,
+    checkout, and stash selector are all fixed by the host.  ``pop`` requires
+    an empty checkout to avoid merging an old recovery into fresh local edits.
+    """
+    selected = str(action or "").strip().lower().replace("_", "-")
+    if selected not in {"save", "save-untracked", "pop"}:
+        raise ValueError("runtime stash action must be save, save-untracked, or pop")
+    top = _require_runtime_checkout(root, timeout=timeout)
+    before = runtime_stash_status(top, timeout=timeout)
+    if selected.startswith("save"):
+        if before["clean"]:
+            return {"action": selected, "changed": False, "before": before, "after": before}
+        command = ["stash", "push", "--message", RUNTIME_STASH_MESSAGE]
+        if selected == "save-untracked":
+            command.append("--include-untracked")
+        _checked_git(
+            top,
+            _runtime_mutation_arguments(top, command),
+            timeout=timeout, max_output=64_000, operation="stash save",
+        )
+    else:
+        if not before["clean"]:
+            raise PermissionError("runtime stash pop requires a clean source checkout")
+        if not before["stash_count"]:
+            raise ValueError("runtime stash pop requires an existing recovery stash")
+        _checked_git(
+            top,
+            _runtime_mutation_arguments(top, ["stash", "pop"]),
+            timeout=timeout, max_output=64_000, operation="stash pop",
+        )
+    return {
+        "action": selected,
+        "changed": True,
+        "before": before,
+        "after": runtime_stash_status(top, timeout=timeout),
+    }
 
 
 def _resolve_diff_path(root, path, *, extra_roots):

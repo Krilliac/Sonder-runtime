@@ -817,6 +817,7 @@ SYSTEM_OPERATION_TOOLS = {
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
     "runtime_source_update": "selfmod_deploy",
+    "runtime_source_stash": "selfmod_deploy",
     # These mutate process-wide runtime behaviour or durable prompt inputs.
     # They must not be reachable by ordinary served accounts through their
     # registered ``/<tool>`` names when the curated aliases are gated.
@@ -961,7 +962,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
     "/agentretry", "/retryagent",
     "/runtime", "/models",
-    "/update", "/updatecheck", "/updatesource",
+    "/update", "/updatecheck", "/updatesource", "/stash", "/runtime-stash",
     "/selfmod", "/selfmodify",
     "/elevate",
     # Spends several full model load+generate cycles per call.
@@ -986,6 +987,9 @@ def _dangerous_http_slash(content):
             return False
         action = pieces[1].lower() if len(pieces) > 1 else "apply"
         return action in ("apply", "now")
+    if command in ("/stash", "/runtime-stash"):
+        action = pieces[1].lower() if len(pieces) > 1 else "status"
+        return action in ("save", "save-untracked", "pop")
     if command in ("/selfmod", "/selfmodify"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "history", "inspect", "diff", "tests", "backups", "verify-backup", "opportunities", "help", "?")
@@ -994,7 +998,7 @@ def _dangerous_http_slash(content):
 
 # Slash names gated by action rather than by membership in the frozenset above.
 _CONDITIONALLY_GATED_SLASH = frozenset({
-    "/autopilot", "/auto", "/runtime", "/models", "/update", "/updatecheck", "/updatesource", "/selfmod", "/selfmodify",
+    "/autopilot", "/auto", "/runtime", "/models", "/update", "/updatecheck", "/updatesource", "/stash", "/runtime-stash", "/selfmod", "/selfmodify",
 })
 
 # Who clears _developer_authorized() in each mode. Keep in step with it.
@@ -1577,6 +1581,8 @@ def _slash_system_operation(command, argument):
     if command in ("/runtime", "/models") and action in ("set", "reset"):
         return "runtime_policy_change"
     if command in ("/update", "/updatesource") and action in ("", "apply", "now"):
+        return "selfmod_deploy"
+    if command in ("/stash", "/runtime-stash") and action in ("save", "save-untracked", "pop"):
         return "selfmod_deploy"
     return ""
 

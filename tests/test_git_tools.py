@@ -38,6 +38,12 @@ def _repo(tmp_path):
     return repo
 
 
+def _runtime_repo(tmp_path):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/Krilliac/Sonder-runtime.git")
+    return repo
+
+
 def _status(repo, **kwargs):
     return git_tools.repo_status(str(repo), bypass=True, **kwargs)
 
@@ -364,6 +370,64 @@ def test_runtime_update_refuses_untrusted_or_dirty_checkout(tmp_path):
 
     with pytest.raises(PermissionError, match="canonical Sonder origin"):
         git_tools.runtime_update(repo)
+
+
+def test_runtime_stash_saves_tracked_edits_without_stashing_untracked(tmp_path):
+    repo = _runtime_repo(tmp_path)
+    (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    (repo / "scratch.txt").write_text("keep local\n", encoding="utf-8")
+
+    before = git_tools.runtime_stash_status(repo)
+    saved = git_tools.runtime_stash(repo, "save")
+
+    assert before["clean"] is False
+    assert saved["changed"] is True
+    assert saved["after"]["stash_count"] == 1
+    assert (repo / "tracked.txt").read_text(encoding="utf-8") == "first\n"
+    assert (repo / "scratch.txt").exists()
+    with pytest.raises(PermissionError, match="requires a clean"):
+        git_tools.runtime_stash(repo, "pop")
+
+
+def test_runtime_stash_save_untracked_and_clean_only_pop(tmp_path):
+    repo = _runtime_repo(tmp_path)
+    (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    (repo / "scratch.txt").write_text("restore me\n", encoding="utf-8")
+
+    saved = git_tools.runtime_stash(repo, "save-untracked")
+    assert saved["after"]["clean"] is True
+    restored = git_tools.runtime_stash(repo, "pop")
+
+    assert restored["changed"] is True
+    assert restored["after"]["clean"] is False
+    assert (repo / "tracked.txt").read_text(encoding="utf-8") == "changed\n"
+    assert (repo / "scratch.txt").read_text(encoding="utf-8") == "restore me\n"
+
+
+def test_runtime_stash_refuses_untrusted_or_invalid_action(tmp_path):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/not-sonder.git")
+    with pytest.raises(PermissionError, match="canonical Sonder origin"):
+        git_tools.runtime_stash_status(repo)
+
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    trusted = _runtime_repo(trusted_root)
+    with pytest.raises(ValueError, match="must be save"):
+        git_tools.runtime_stash(trusted, "drop")
+
+
+def test_runtime_stash_commands_are_explicitly_gated(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.git_tools, "runtime_stash_status", lambda _root: {
+        "clean": False, "change_count": 2, "stash_count": 1,
+    })
+    text = server.control_command("/stash")
+    assert "changes: 2" in text
+    assert "save-untracked" in text
+    assert not sonder_serve._dangerous_http_slash("/stash")
+    assert sonder_serve._dangerous_http_slash("/stash save")
+    assert sonder_serve.SYSTEM_OPERATION_TOOLS["runtime_source_stash"] == "selfmod_deploy"
 
 
 def test_runtime_update_status_refuses_untrusted_origin_before_fetch(monkeypatch, tmp_path):

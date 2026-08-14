@@ -2752,6 +2752,13 @@ def control_command(prompt: str, history=None, session="", project="",
         if action in ("", "apply", "now"):
             return runtime_source_update()
         return "usage: /update [apply]  (check first with /updatecheck)"
+    if cmd in ("/stash", "/runtime-stash"):
+        action = arg.strip().casefold().replace("_", "-")
+        if action in ("", "status", "list"):
+            return runtime_source_stash_status()
+        if action in ("save", "save-untracked", "pop"):
+            return runtime_source_stash(action)
+        return "usage: /stash [status|save|save-untracked|pop]"
     if cmd in ("/hardware",):
         return _training_command("hardware")
     if cmd in ("/training", "/weighttraining"):
@@ -17033,7 +17040,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
     "elevate", "permission_mode", "permission_rule_set",
     "runtime_policy_update", "update_system_profile",
-    "runtime_source_update",
+    "runtime_source_update", "runtime_source_stash",
     "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
     "self_heal_repair", "memory_export", "memory_privacy_repair",
     "memory_quality_repair", "workflow_list", "workflow_save", "workflow_delete", "workflow_run",
@@ -22899,6 +22906,61 @@ def runtime_source_update() -> str:
     except (OSError, ValueError, PermissionError, TimeoutError) as exc:
         return "runtime source update refused: %s" % exc
     return _runtime_update_format(result["after"], updated=bool(result["updated"]))
+
+
+def _runtime_stash_format(data, *, action="status"):
+    """Render recovery state without echoing changed paths or stash prose."""
+    if action == "status":
+        return "\n".join((
+            "Sonder source recovery stash:",
+            "  checkout: %s" % ("clean" if data.get("clean") else "dirty"),
+            "  changes: %s" % data.get("change_count", 0),
+            "  recovery stashes: %s" % data.get("stash_count", 0),
+            "  commands: /stash save | /stash save-untracked | /stash pop",
+        ))
+    before = data.get("before") or {}
+    after = data.get("after") or {}
+    if not data.get("changed"):
+        return "runtime source stash: checkout already clean; no stash created"
+    if action.startswith("save"):
+        return "runtime source stash: saved changes; checkout is now %s" % (
+            "clean" if after.get("clean") else "not clean",
+        )
+    return "runtime source stash: restored top recovery stash; checkout is now %s" % (
+        "clean" if after.get("clean") else "dirty",
+    )
+
+
+@mcp.tool()
+def runtime_source_stash_status() -> str:
+    """Show whether canonical Sonder source edits can be stashed safely.
+
+    This is read-only and never names changed paths or stash messages.
+    """
+    _maybe_live_reload()
+    try:
+        return _runtime_stash_format(
+            git_tools.runtime_stash_status(_runtime_source_root())
+        )
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return "runtime source stash status unavailable: %s" % exc
+
+
+@mcp.tool()
+def runtime_source_stash(action: str) -> str:
+    """Save or restore canonical runtime source edits through a fixed stash.
+
+    Allowed actions are ``save``, ``save-untracked``, and ``pop``.  The tool
+    cannot choose a repository, remote, revision, stash selector, or command.
+    ``pop`` refuses unless the canonical main checkout is clean.
+    """
+    _maybe_live_reload()
+    try:
+        selected = str(action or "").strip().casefold().replace("_", "-")
+        result = git_tools.runtime_stash(_runtime_source_root(), selected)
+        return _runtime_stash_format(result, action=selected)
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return "runtime source stash refused: %s" % exc
 
 
 # Ensemble ("ask several models, compound one answer") -------------------------
