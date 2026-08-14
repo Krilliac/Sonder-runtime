@@ -111,9 +111,9 @@ ollama pull <embedding-model>
 /runtime set router=fast workbench=code autopilot=code review=general
 ```
 
-`reasoning` and `vision` are live policy tiers, bound by default and
-repointable with `/runtime set reasoning=<model> vision=<model>`; assign an
-empty value to leave one unset on a smaller collection, and the router degrades
+`reasoning` and `vision` are live optional policy tiers, deliberately **unbound
+by default** and configured with `/runtime set reasoning=<model>
+vision=<model>`. Leave either unset on a smaller collection and the router degrades
 to `general`/`code` automatically — nothing breaks. `oracle` remains
 consent-gated escalation, not a policy tier. Full procedure:
 [assemble-model-collection](../runbooks/assemble-model-collection.md).
