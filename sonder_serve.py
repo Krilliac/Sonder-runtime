@@ -1874,16 +1874,27 @@ def _openai_model_rows():
         seen.add(key)
         rows.append({"id": identifier, "object": "model", "owned_by": owned_by})
 
-    # ``sonder`` is a runtime route ID, not weights.  Tier IDs are retained for
-    # compatibility, then exact live catalog names make valid installed models
-    # discoverable to standard OpenAI clients.
-    add("sonder", "local")
-    for tier_name, model in server.available_tiers().items():
-        add(tier_name, "cloud" if server._is_cloud_tier(tier_name, model) else "local")
     try:
         records = server.discovered_model_records()
     except Exception:
         records = ()
+
+    # ``sonder`` is a runtime route ID, not weights.  Tier IDs are retained for
+    # compatibility, then exact live catalog names make valid installed models
+    # discoverable to standard OpenAI clients.  Do not nevertheless advertise
+    # a local tier that a legacy/manual policy points at an explicitly
+    # non-chat-capable catalog record: `/runtime set` now rejects that state,
+    # while this keeps pre-existing policy files honest too.  Missing or
+    # capability-less metadata remains listed rather than converting a catalog
+    # outage into a false claim that the whole runtime has no model routes.
+    add("sonder", "local")
+    for tier_name, model in server.available_tiers().items():
+        cloud = server._is_cloud_tier(tier_name, model)
+        if not cloud and server._runtime_model_capability_error(
+            tier_name, model, records,
+        ):
+            continue
+        add(tier_name, "cloud" if cloud else "local")
     for name, record in records:
         if server._fanout_nonchat_reason(record):
             continue

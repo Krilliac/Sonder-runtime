@@ -21485,14 +21485,24 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
     )
 
 
-def _runtime_installed_models() -> set[str]:
+def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
+    """Read one coherent local catalog snapshot for policy validation."""
     payload = _get("/api/tags")
-    names = set()
-    for item in payload.get("models", []):
+    rows = payload.get("models", []) if isinstance(payload, dict) else []
+    records, seen = [], set()
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
         name = str(item.get("name") or item.get("model") or "").strip()
-        if name:
-            names.add(name)
-    return names
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            records.append((name, item))
+    return tuple(records)
+
+
+def _runtime_installed_models() -> set[str]:
+    return {name for name, _record in _runtime_installed_model_records()}
 
 
 def _runtime_model_is_installed(model: str, installed) -> bool:
@@ -21507,6 +21517,27 @@ def _runtime_model_is_installed(model: str, installed) -> bool:
     if requested.endswith(":latest"):
         return requested[:-len(":latest")] in available
     return False
+
+
+def _runtime_model_capability_error(tier: str, model: str, records) -> str:
+    """Return a proven capability mismatch for a local tier binding.
+
+    Installation alone is not enough to make a model usable by a chat tier:
+    an embedding model can be present in Ollama's catalog but cannot satisfy a
+    workbench/code request.  Keep unknown catalog metadata compatible with
+    existing local models, but reject an explicit non-chat declaration before
+    persisting an unusable policy.  A vision tier is the one intentional
+    exception: image-conditioned models may declare only ``vision`` while
+    still being the correct target for a vision route.
+    """
+    for name, record in records:
+        if not _runtime_model_is_installed(model, (name,)):
+            continue
+        reason = _fanout_nonchat_reason(record)
+        if reason and not (tier == "vision" and "vision-only" in reason):
+            return reason
+        return ""
+    return ""
 
 
 def runtime_policy_data() -> dict:
@@ -21637,7 +21668,8 @@ def runtime_policy_update(
                 )
             }
             if models_to_validate:
-                installed = _runtime_installed_models()
+                records = _runtime_installed_model_records()
+                installed = {name for name, _record in records}
                 missing = [
                     str(model) for model in models_to_validate.values()
                     if not _runtime_model_is_installed(model, installed)
@@ -21646,6 +21678,23 @@ def runtime_policy_update(
                     raise ValueError(
                         "local model(s) are not installed: %s"
                         % ", ".join(sorted(set(missing)))
+                    )
+                # ``/api/tags`` is the authoritative cheap capability source
+                # for local models.  Do not bind a tier whose catalog record
+                # positively says it cannot chat; doing so previously made
+                # `/runtime set code=<embedding>` succeed and only failed at
+                # the first model request.  Unknown metadata remains allowed
+                # because many valid Ollama catalogs omit capabilities.
+                unusable = [
+                    "%s=%s (%s)" % (tier, model, reason)
+                    for tier, model in models_to_validate.items()
+                    for reason in (_runtime_model_capability_error(tier, model, records),)
+                    if reason
+                ]
+                if unusable:
+                    raise ValueError(
+                        "local model(s) are not chat-capable for their tier: %s"
+                        % ", ".join(unusable)
                     )
         runtime_policy.update(
             local_models=local_models,
