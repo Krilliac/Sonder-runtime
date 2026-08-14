@@ -27,7 +27,7 @@ Drift is visible in two places:
 - `diagnostics()` prints `tool capability shadow: ERROR ...` when descriptors
   disagree with the live MCP/help/allow-list/dispatch/inspection surfaces.
 
-The initial slice covers `environment_status`, `hardware_profile`, and common
+The initial slice covers `environment_status`, `toolchain_status`, `hardware_profile`, and common
 repository reads. Add tools only after all of their current surfaces and policy
 semantics are represented. A later, separately reviewed phase may generate
 selected policy surfaces from the registry after coverage is complete.

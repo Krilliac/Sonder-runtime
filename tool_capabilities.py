@@ -181,6 +181,12 @@ _DESCRIPTORS = (
         inspection=False, secrets=SecretPolicy.NO_SECRET_INPUT,
     ),
     _read_tool(
+        "toolchain_status", root=RootRequirement.NONE,
+        mode=ExecutionMode.BOUNDED_SUBPROCESS,
+        resources=frozenset({ResourceClass.CPU}),
+        inspection=True, secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
         "hardware_profile", root=RootRequirement.NONE,
         mode=ExecutionMode.MIXED,
         resources=frozenset({ResourceClass.CPU, ResourceClass.GPU, ResourceClass.RAM}),
