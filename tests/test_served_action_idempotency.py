@@ -72,3 +72,20 @@ def test_natural_execution_retry_reuses_only_the_same_caller_action(monkeypatch)
     ) == "started"
     assert calls == [("build and test the app", "demo")]
     sonder_lifecycle.reset_for_tests()
+
+
+def test_non_work_chat_does_not_consume_action_replay_cache(monkeypatch):
+    calls = []
+
+    class Lifecycle:
+        def idempotent(self, *_args):
+            calls.append(_args)
+            raise AssertionError("ordinary chat must not enter action cache")
+
+    monkeypatch.setattr(sonder_lifecycle, "get", lambda: Lifecycle())
+
+    assert serve._handle_work_intent(
+        "tell me a joke", authorized=True, context=_account("alice"),
+        idempotency_key="ordinary-chat-key",
+    ) is None
+    assert calls == []

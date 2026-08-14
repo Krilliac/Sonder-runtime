@@ -1840,6 +1840,16 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
     """Route developer work through the bounded execution-mode chooser."""
     if not authorized:
         return None
+    # Do not let ordinary keyed chat occupy the bounded replay cache.  The
+    # work router itself returns None for those turns, but caching that miss
+    # would evict a completed mutating action which a client may still retry.
+    # This is a pure host-side preflight; route_work_request repeats the same
+    # classification under its stable execution context before any work starts.
+    if not (
+        server.master_orchestrator.requested_worker_cap(content)
+        or intents.classify_execution(content)
+    ):
+        return None
     return _idempotent_http_action(
         context, idempotency_key, "natural-work\0%s\0%s" % (project, content),
         lambda: server.route_work_request(content, project=project),
