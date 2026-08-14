@@ -35,12 +35,16 @@ MUTATING = {
     "/asset", "/assetgen", "/assets", "/artifact", "/groundartifact",
     "/verifyartifact",
     "/selfmod", "/selfmodify",
+    # These aliases currently require a question, but model fanout is an
+    # expensive operation.  Do not let a future default prompt turn this
+    # read-only probe into an unattended model-spending loop.
+    "/ensemble", "/council",
     # These mutate the source checkout itself.  A read-only contract probe
     # must never fast-forward a clean runtime merely because it accepts the
     # alias as a slash command.
     "/update", "/updatesource",
     "/admin", "/register", "/login", "/setaccount", "/accounts", "/whoami",
-    "/autopilot", "/auto", "/goal", "/goals", "/plan", "/work",
+    "/autopilot", "/auto", "/goal", "/goals", "/plan", "/work", "/agent",
     "/master", "/agentcancel", "/cancelagents", "/agentretry", "/retryagent",
     "/qualityfix", "/privacyfix", "/embedfix",
     "/strict", "/filepolicy", "/contextsize", "/ctxsize", "/compact",
@@ -98,6 +102,12 @@ def classify(command: str, status: str, reply: str) -> str:
     text = reply.strip()
     if not text:
         return "empty"
+    # Every command admitted by MUTATING is supposed to answer without a model
+    # call.  The host-observed activity footer catches a confident model
+    # fall-through that prose-only heuristics cannot distinguish from a report.
+    model_calls = re.search(r"(?im)^model calls:\s*(\d+)", text)
+    if model_calls and int(model_calls.group(1)) > 0:
+        return "model_fallthrough"
     # The model, handed an unknown slash token, explains or asks about it
     # instead of executing it. Handled commands emit reports, not prose
     # addressed to the reader.
@@ -110,6 +120,24 @@ def classify(command: str, status: str, reply: str) -> str:
     if any(t in lowered for t in tells):
         return "fellthrough?"
     return "handled"
+
+
+def probe_exit_code(missing: list[str], rows: list[dict]) -> int:
+    """Return a CI-friendly failure for a palette or handling contract break."""
+    failures = [
+        row for row in rows
+        if str(row.get("verdict") or "") != "handled"
+    ]
+    if missing or failures:
+        if missing:
+            print("FAIL: app commands missing from server: %s" % ", ".join(missing))
+        if failures:
+            print("FAIL: command probe failures: " + ", ".join(
+                "%s=%s" % (row.get("command"), row.get("verdict"))
+                for row in failures
+            ))
+        return 1
+    return 0
 
 
 def main() -> int:
@@ -159,7 +187,7 @@ def main() -> int:
                        indent=2),
             encoding="utf-8")
         print("wrote", out_path)
-    return 0
+    return probe_exit_code(missing, rows)
 
 
 if __name__ == "__main__":
