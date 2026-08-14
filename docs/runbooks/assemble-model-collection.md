@@ -22,10 +22,15 @@ python sonder_hardware.py          # cross-vendor inventory + resident/hybrid pl
 ```
 
 Use the reported band with the [Model Catalog](../wiki/18-model-catalog.md)
-tables to choose one model per role. A minimal viable collection is **three**
-models: a `fast` router model, one `code`/`general` workhorse, and an
-**embedding** model (required for memory/recall). Add `reasoning` and `vision`
-only if the band supports keeping or swapping them.
+tables to choose models per role. The minimum for normal local chat is **one**
+generative model: `fast`, `code`, and `general` may all share it. Add an
+**embedding** model when you want semantic memory/recall; bootstrap installs
+one by default, but chat remains available without it. Add `reasoning` and
+`vision` only if the band supports keeping or swapping them.
+
+For an intentionally chat-only bootstrap, run
+`python setup_alias.py --no-embedding`; `/runtime` will show semantic memory as
+unavailable until you install and bind an embedding model.
 
 The report keeps the largest single accelerator separate from auxiliary GPUs
 and integrated graphics. It never sums mixed-vendor memory or treats an OS
@@ -37,11 +42,12 @@ CPU/unified-memory spill, so prefer the resident class for interactive work.
 ## 2. Pull the collection
 
 ```bash
-ollama pull <fast-model>          # small general instruct  -> fast
-ollama pull <coder-model>         # code-specialized        -> code
-ollama pull <general-model>       # mid-size general        -> general
-ollama pull <embedding-model>     # embeddings (required)
+ollama pull <base-model>          # may serve fast + code + general
+ollama pull <embedding-model>     # optional for core chat; enables semantic memory
 # optional, band permitting:
+ollama pull <fast-model>          # separate low-latency router model
+ollama pull <coder-model>         # separate code specialist
+ollama pull <general-model>       # separate general specialist
 ollama pull <reasoning-model>     # reasoning/"thinking"    -> reasoning
 ollama pull <vision-model>        # vision-language         -> vision
 ```
@@ -53,10 +59,16 @@ Portable/offline instead? Import a GGUF directly (including from a USB) with
 
 ```bash
 # tiers -> concrete models
-/runtime set fast=<fast-model> code=<coder-model> general=<general-model>
+/runtime set fast=<base-model> code=<base-model> general=<base-model>
+/runtime set embedding=<embedding-model>
 # lanes -> tiers
 /runtime set router=fast workbench=code autopilot=code fleet=code review=general
 ```
+
+When you later install separate specialist models, replace only the role you
+want to specialize, for example `/runtime set code=<coder-model>` or
+`/runtime set fast=<fast-model>`. Do not bind a model name before it is
+installed: runtime policy deliberately rejects unavailable local models.
 
 `reasoning` and `vision` are first-class optional tiers in the policy. They are
 unbound by default; bind models suited to the live host with
