@@ -2210,3 +2210,72 @@ def test_stalled_connection_is_dropped_rather_than_holding_its_thread(monkeypatc
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("headers, message", [
+    (
+        b"Content-Length: 2\r\nContent-Length: 2\r\n",
+        b"multiple Content-Length headers are not supported",
+    ),
+    (
+        b"Transfer-Encoding: \r\nContent-Length: 2\r\n",
+        b"transfer encoding is not supported",
+    ),
+])
+def test_http_body_parser_rejects_ambiguous_framing_headers(
+    monkeypatch, headers, message,
+):
+    """Raw duplicate/empty framing fields must fail before routing.
+
+    ``http.client`` collapses request headers, so exercise the wire-level
+    boundary directly. The endpoint itself is intentionally unknown: a
+    correctly framed request would reach routing and return 404, whereas a
+    malformed request must return its framing error first.
+    """
+    with _http_server(monkeypatch) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(
+                b"POST /not-a-route HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                + headers
+                + b"Connection: close\r\n\r\n{}"
+            )
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+
+    assert response.startswith(b"HTTP/1.0 400"), response
+    assert message in response
+
+
+def test_admin_drain_rejects_ambiguous_framing_before_dispatch(monkeypatch):
+    called = []
+
+    def drain(self):
+        called.append(True)
+        self._send_json_payload({"drained": True})
+
+    monkeypatch.setattr(ts.Handler, "_handle_admin_drain", drain)
+    with _http_server(monkeypatch) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(
+                b"POST /v1/admin/drain HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Length: 0\r\n"
+                b"Content-Length: 0\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+
+    assert response.startswith(b"HTTP/1.0 400"), response
+    assert b"multiple Content-Length headers are not supported" in response
+    assert called == []
