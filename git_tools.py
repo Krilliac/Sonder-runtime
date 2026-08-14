@@ -320,6 +320,27 @@ def _trusted_runtime_origin(value):
     return _normalise_remote_url(value) in _TRUSTED_RUNTIME_ORIGINS
 
 
+def _runtime_fetch_arguments():
+    """Return the fixed, configuration-neutral update fetch command.
+
+    The canonical remote check prevents a substituted origin, but Git still
+    reads repository configuration while it fetches.  Do not let a writable
+    checkout turn a routine update check into credential-helper/askpass code
+    execution, nor let a configured remote refspec create additional refs.
+    The explicit refspec below is the sole ref update this operation permits.
+    """
+    return [
+        "-c", "remote.%s.uploadpack=" % RUNTIME_UPDATE_REMOTE,
+        "-c", "core.sshCommand=",
+        "-c", "credential.helper=",
+        "-c", "core.askPass=",
+        "fetch", "--no-tags", "--prune", "--refmap=", RUNTIME_UPDATE_REMOTE,
+        "+refs/heads/%s:refs/remotes/%s/%s" % (
+            RUNTIME_UPDATE_BRANCH, RUNTIME_UPDATE_REMOTE, RUNTIME_UPDATE_BRANCH,
+        ),
+    ]
+
+
 def runtime_update_status(root, *, refresh=False, timeout=DEFAULT_TIMEOUT):
     """Return bounded source-tree update evidence for Sonder itself.
 
@@ -335,14 +356,7 @@ def runtime_update_status(root, *, refresh=False, timeout=DEFAULT_TIMEOUT):
     if refresh:
         _checked_git(
             top,
-            [
-                "-c", "remote.%s.uploadpack=" % RUNTIME_UPDATE_REMOTE,
-                "-c", "core.sshCommand=",
-                "fetch", "--no-tags", "--prune", RUNTIME_UPDATE_REMOTE,
-                "+refs/heads/%s:refs/remotes/%s/%s" % (
-                    RUNTIME_UPDATE_BRANCH, RUNTIME_UPDATE_REMOTE, RUNTIME_UPDATE_BRANCH,
-                ),
-            ],
+            _runtime_fetch_arguments(),
             timeout=timeout, max_output=16_384, operation="update fetch",
         )
     local = _runtime_git_text(top, ["rev-parse", "HEAD"], operation="HEAD probe")
