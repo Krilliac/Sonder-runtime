@@ -35,6 +35,9 @@ DEFAULT_MODELS = {
     "reasoning": "",
     "vision": "",
 }
+# Embeddings are intentionally not a routing tier: they produce a separate
+# vector space for memory/indexing and must never be picked for chat work.
+DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 RESERVED_PERSONAL_MODEL = "sonder-personal:latest"
 DEFAULT_ROUTING = {
     "router": "fast",
@@ -109,12 +112,21 @@ def seed_model(env, tier: str) -> str:
     return DEFAULT_MODELS[tier]
 
 
+def seed_embedding_model(env) -> str:
+    """Seed the independent local embedding binding without accepting cloud."""
+    configured = str(env.get("SONDER_EMBED_MODEL", "") or "").strip()
+    if configured and not is_cloud_name(configured):
+        return validate_model(configured, DEFAULT_EMBEDDING_MODEL)
+    return DEFAULT_EMBEDDING_MODEL
+
+
 def default_policy(env) -> dict:
     """Built-in policy seeded from an explicit environment mapping."""
     return {
         "version": VERSION,
         "revision": 0,
         "local_models": {tier: seed_model(env, tier) for tier in LOCAL_TIERS},
+        "embedding_model": seed_embedding_model(env),
         "routing": dict(DEFAULT_ROUTING),
         "npu": dict(DEFAULT_NPU),
         "updated_ts": 0,
@@ -171,6 +183,10 @@ def normalize(payload, defaults=None) -> dict:
         )
         for tier in LOCAL_TIERS
     }
+    embedding_model = validate_model(
+        payload.get("embedding_model"),
+        base.get("embedding_model", DEFAULT_EMBEDDING_MODEL),
+    )
     routing = {}
     for lane in ROUTING_LANES:
         tier = str(raw_routing.get(lane) or base["routing"][lane]).strip().lower()
@@ -187,6 +203,7 @@ def normalize(payload, defaults=None) -> dict:
         "version": VERSION,
         "revision": max(0, int(payload.get("revision") or 0)),
         "local_models": local_models,
+        "embedding_model": embedding_model,
         "routing": routing,
         "npu": normalize_npu(payload.get("npu"), base.get("npu")),
         "updated_ts": max(0, int(payload.get("updated_ts") or 0)),
@@ -225,6 +242,6 @@ def npu_mode(capability, policy) -> str:
 
 def disk_payload(policy: dict) -> dict:
     return {key: policy[key] for key in (
-        "version", "revision", "local_models", "routing", "npu", "updated_ts",
+        "version", "revision", "local_models", "embedding_model", "routing", "npu", "updated_ts",
         "source",
     )}

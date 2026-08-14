@@ -29,6 +29,7 @@ BASE_LOCAL_TIERS = _rules.BASE_LOCAL_TIERS
 OPTIONAL_LOCAL_TIERS = _rules.OPTIONAL_LOCAL_TIERS
 ROUTING_LANES = _rules.ROUTING_LANES
 DEFAULT_MODELS = _rules.DEFAULT_MODELS
+DEFAULT_EMBEDDING_MODEL = _rules.DEFAULT_EMBEDDING_MODEL
 RESERVED_PERSONAL_MODEL = _rules.RESERVED_PERSONAL_MODEL
 DEFAULT_ROUTING = _rules.DEFAULT_ROUTING
 NPU_MODES = _rules.NPU_MODES
@@ -72,6 +73,7 @@ _is_cloud_name = _rules.is_cloud_name
 _is_reserved_personal_alias = _rules.is_reserved_personal_alias
 _model = _rules.validate_model
 _seed_model = _rules.seed_model
+_seed_embedding_model = _rules.seed_embedding_model
 _normalize_npu = _rules.normalize_npu
 normalize = _rules.normalize
 bound_tiers = _rules.bound_tiers
@@ -188,7 +190,7 @@ def finish_transition(transition_id, token) -> bool:
 
 
 def update(
-    local_models=None, routing=None, npu=None, reset=False,
+    local_models=None, embedding_model=None, routing=None, npu=None, reset=False,
     source="user update", expected_revision=None, transition_token=None,
 ) -> dict:
     path = policy_path().resolve()
@@ -232,6 +234,8 @@ def update(
             "routing": dict(base["routing"]),
             "npu": dict(base.get("npu") or DEFAULT_NPU),
         }
+        if embedding_model is not None:
+            candidate["embedding_model"] = embedding_model
         if local_models:
             if not isinstance(local_models, dict):
                 raise ValueError("local_models update must be a JSON object")
@@ -303,6 +307,7 @@ def format_policy(policy=None) -> str:
             )
             continue
         lines.append("    %s: %s" % (tier, model))
+    lines.append("  embeddings: %s" % policy.get("embedding_model", DEFAULT_EMBEDDING_MODEL))
     lines.append("  execution lanes:")
     for lane in ROUTING_LANES:
         tier = policy["routing"][lane]

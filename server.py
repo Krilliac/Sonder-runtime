@@ -713,6 +713,7 @@ def _refresh_runtime_policy(create=True):
     """Apply the shared local-only policy without touching cloud configuration."""
     global _RUNTIME_POLICY
     policy = runtime_policy.load(create=create)
+    prior_embedding = str(_RUNTIME_POLICY.get("embedding_model") or "").strip()
     for tier in runtime_policy.LOCAL_TIERS:
         model = str(policy["local_models"].get(tier) or "").strip()
         if model:
@@ -723,6 +724,14 @@ def _refresh_runtime_policy(create=True):
             # `/v1/models` honest, and the capability router sees it as
             # unavailable and degrades to a base tier.
             TIERS.pop(tier, None)
+    # Embeddings intentionally live outside ``TIERS`` so an embedding-only
+    # model can never become a chat target. Only an actual policy transition
+    # reconfigures the process binding: a routine status/live-reload refresh
+    # must not overwrite a bounded backfill's immutable snapshot or a caller's
+    # deliberate temporary test/runtime override. Stored vectors remain
+    # untouched; their provenance triggers explicit backfill.
+    if prior_embedding != str(policy["embedding_model"] or "").strip():
+        embeddings.configure_model(policy["embedding_model"])
     _RUNTIME_POLICY = policy
     return policy
 
@@ -2104,6 +2113,7 @@ def _runtime_command(arg: str) -> str:
     if action == "set":
         local_models = {}
         routing = {}
+        embedding_model = ""
         for item in rest.split():
             if "=" not in item:
                 return "ERROR: runtime assignment must use key=value: %s" % item
@@ -2111,18 +2121,28 @@ def _runtime_command(arg: str) -> str:
             key, value = key.strip().lower(), value.strip()
             if key in runtime_policy.LOCAL_TIERS:
                 local_models[key] = value
+            elif key == "embedding":
+                if not value:
+                    refusal = "ERROR: embedding model cannot be empty."
+                    return refusal
+                embedding_model = value
             elif key in runtime_policy.ROUTING_LANES:
                 routing[key] = value
             else:
                 return "ERROR: unknown runtime policy key '%s'." % key
-        if not local_models and not routing:
+        if not local_models and not routing and not embedding_model:
             return (
                 "usage: /runtime set code=<local-model> reasoning=<local-model> "
-                "workbench=<fast|code|general>"
+                "embedding=<local-embedding-model> workbench=<fast|code|general>"
             )
+        update_args = {
+            "local_models_json": json.dumps(local_models),
+            "routing_json": json.dumps(routing),
+        }
+        if embedding_model:
+            update_args["embedding_model"] = embedding_model
         return runtime_policy_update(
-            local_models_json=json.dumps(local_models),
-            routing_json=json.dumps(routing),
+            **update_args,
         )
     if action in {"help", "?"}:
         return (
@@ -2131,11 +2151,13 @@ def _runtime_command(arg: str) -> str:
             "  /runtime set fast=<model> code=<model> general=<model>\n"
             "  /runtime set reasoning=<model> vision=<model>   (specialist "
             "tiers; assign an empty value to leave one unset)\n"
+            "  /runtime set embedding=<installed-embedding-model>\n"
             "  /runtime set router=<tier> workbench=<tier> autopilot=<tier> "
             "fleet=<tier> review=<tier>\n"
             "  /runtime reset\n"
-            "Only installed local models are accepted, and execution lanes route "
-            "to fast/code/general only."
+            "Only installed local models are accepted. Embedding changes affect "
+            "future vectors only; use /embeddings apply to refresh stored memory. "
+            "Execution lanes route to fast/code/general only."
         )
     return "ERROR: unknown runtime action '%s'; try /runtime help." % action
 
@@ -21915,18 +21937,49 @@ def _runtime_model_capability_error(tier: str, model: str, records) -> str:
     return ""
 
 
+def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
+    """Verify a local specialist capability without trusting absent tag metadata.
+
+    Standard Ollama ``/api/tags`` records often omit capabilities entirely.
+    A meaningful declaration is authoritative; absent metadata triggers one
+    narrow ``/api/show`` lookup for the selected installed local model, just as
+    durable fanout synthesis does.  This avoids rejecting a valid embedder
+    solely because a cheap catalog response was sparse.
+    """
+    wanted = str(capability or "").strip().lower()
+    selected = None
+    for name, record in records:
+        if _runtime_model_is_installed(model, (name,)):
+            selected = name
+            capabilities = _fanout_capabilities(record)
+            if capabilities:
+                return wanted in capabilities
+            break
+    if not selected or _is_cloud_model_name(selected):
+        return False
+    try:
+        details = _post("/api/show", {"name": selected}, timeout=30)
+    except ModelCallError:
+        return False
+    return isinstance(details, dict) and wanted in _fanout_capabilities(details)
+
+
 def runtime_policy_data() -> dict:
     policy = _refresh_runtime_policy(create=True)
     data = {
         **policy,
         "local_models": dict(policy["local_models"]),
         "routing": dict(policy["routing"]),
+        "embedding_model": policy["embedding_model"],
         "missing_models": [],
     }
     try:
         installed = _runtime_installed_models()
+        configured = list(data["local_models"].values()) + [
+            data["embedding_model"],
+        ]
         data["missing_models"] = list(dict.fromkeys(
-            model for model in data["local_models"].values()
+            model for model in configured
             # An optional tier left unset has no model, so it cannot be missing.
             if str(model or "").strip()
             and not _runtime_model_is_installed(model, installed)
@@ -22020,13 +22073,17 @@ def _runtime_update_object(value, label):
 @mcp.tool()
 def runtime_policy_update(
     local_models_json: str = "",
+    embedding_model: str = "",
     routing_json: str = "",
     npu_json: str = "",
     reset: bool = False,
 ) -> str:
     """Guarded-edit shared local mappings; cloud configuration is never accepted.
 
-    npu_json may set only the accelerator behavior modes, e.g.
+    ``embedding_model`` must be an installed local model positively declared
+    as embedding-capable. It changes only future vectors; run the existing
+    explicit ``/embeddings apply`` refresh to migrate stored memory safely.
+    ``npu_json`` may set only the accelerator behavior modes, e.g.
     {"mode": "shadow", "routing": "prefer"} with modes off|shadow|prefer.
     """
     _maybe_live_reload()
@@ -22034,6 +22091,19 @@ def runtime_policy_update(
         local_models = _runtime_update_object(local_models_json, "local_models_json")
         routing = _runtime_update_object(routing_json, "routing_json")
         npu = _runtime_update_object(npu_json, "npu_json")
+        selected_embedding = str(embedding_model or "").strip()
+        if selected_embedding:
+            records = _runtime_installed_model_records()
+            installed = {name for name, _record in records}
+            if not _runtime_model_is_installed(selected_embedding, installed):
+                raise ValueError("embedding model is not installed: %s" % selected_embedding)
+            if not _runtime_model_has_capability(
+                selected_embedding, "embedding", records,
+            ):
+                raise ValueError(
+                    "embedding model must declare embedding capability: %s"
+                    % selected_embedding
+                )
         if local_models:
             models_to_validate = {
                 tier: model for tier, model in local_models.items()
@@ -22073,6 +22143,7 @@ def runtime_policy_update(
                     )
         runtime_policy.update(
             local_models=local_models,
+            embedding_model=selected_embedding or None,
             routing=routing,
             npu=npu,
             reset=bool(reset),

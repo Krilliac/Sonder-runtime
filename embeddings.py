@@ -178,6 +178,34 @@ EXPECTED_DIMENSION = expected_dimension()
 _EMBED_STATE = threading.local()
 
 
+def configure_model(model):
+    """Apply a validated local embedding model selected by runtime policy.
+
+    The caller owns catalog/capability validation.  This deliberately changes
+    only future vector production: stored vectors retain their model/revision
+    metadata and are refreshed only through the existing explicit backfill.
+    """
+    value = canonical_model_name(model)
+    if not value:
+        raise ValueError("embedding model must be non-empty")
+    global EMBED_MODEL, EMBED_IDENTITY, EMBED_REVISION, EXPECTED_DIMENSION
+    EMBED_MODEL = value
+    EMBED_IDENTITY = value
+    EXPECTED_DIMENSION = expected_dimension(value)
+    # Policy reloads must remain a cheap local configuration operation. The
+    # normal embedding request refreshes serving provenance before use; here
+    # use only a local manifest/env hint and never probe an endpoint.
+    EMBED_REVISION = (
+        os.environ.get("SONDER_EMBED_REVISION", "").strip()
+        or local_manifest_revision(model=value)
+    )
+    return {
+        "model": EMBED_IDENTITY,
+        "revision": EMBED_REVISION,
+        "expected_dimension": EXPECTED_DIMENSION,
+    }
+
+
 def provenance(vector=None):
     """Metadata stored beside vectors so model migrations are detectable.
 
