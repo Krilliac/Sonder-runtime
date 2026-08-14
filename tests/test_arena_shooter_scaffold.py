@@ -33,6 +33,15 @@ def _builder_module():
     return namespace
 
 
+def _builder_error_preview():
+    source = _BUILDER.read_text(encoding="utf-8")
+    start = source.index("def compiler_error_preview")
+    end = source.index("\ndef strip_fences", start)
+    namespace: dict[str, object] = {}
+    exec(source[start:end], namespace)
+    return namespace["compiler_error_preview"]
+
+
 def test_arena_skeleton_scaffold_creates_verifier_compatible_project_once(tmp_path):
     path = scaffold.ensure_project_file(tmp_path / "FpsGame_Skeleton")
 
@@ -90,3 +99,14 @@ def test_arena_builder_rejects_known_runtime_lifecycle_contract_violations():
     assert builder["body_contract_issues"](
         "Program.cs", "DoScoreboard", "Ui.Scoreboard(W, H, _match, out bool back);"
     ) == []
+
+
+def test_arena_builder_keeps_rejected_compiler_feedback_bounded_and_visible():
+    preview = _builder_error_preview()
+
+    rendered = preview(["first error", "second error", "third error", "fourth error"], limit=2)
+
+    assert "first error" in rendered
+    assert "second error" in rendered
+    assert "fourth error" not in rendered
+    assert "and 2 more" in rendered

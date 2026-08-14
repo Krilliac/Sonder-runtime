@@ -119,6 +119,22 @@ def build_errors():
     return errors, codegen_loop.build_ran(out)
 
 
+def compiler_error_preview(errors: list[str], *, limit: int = 3) -> str:
+    """Render a bounded diagnostic for a rejected body attempt.
+
+    A count tells the runner that a candidate is unsafe to keep, but it does
+    not tell the operator whether the model ignored the body-only contract,
+    recalled a wrong API, or hit a harness issue.  Preserve the count as the
+    acceptance authority and show only a small compiler excerpt for diagnosis.
+    """
+    rows = [str(error).strip() for error in (errors or []) if str(error).strip()]
+    if not rows:
+        return "(compiler reported no captured error lines)"
+    shown = rows[:max(1, int(limit))]
+    suffix = "\n      ... and %d more" % (len(rows) - len(shown)) if len(rows) > len(shown) else ""
+    return "\n      " + "\n      ".join(row[:240] for row in shown) + suffix
+
+
 def strip_fences(text: str) -> str:
     return FENCE.sub("", text or "").strip()
 
@@ -363,6 +379,8 @@ def main():
                 kept += 1
                 status = "KEPT (attempt %d)" % attempt
                 break
+
+            print("      compiler:" + compiler_error_preview(errors), flush=True)
 
             with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(before)
