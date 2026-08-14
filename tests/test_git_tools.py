@@ -357,6 +357,45 @@ def test_runtime_update_status_refuses_untrusted_origin_before_fetch(monkeypatch
     assert not any("fetch" in call for call in calls)
 
 
+def test_runtime_update_fetch_neutralizes_credential_and_refspec_configuration(
+    monkeypatch, tmp_path,
+):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/Krilliac/Sonder-runtime.git")
+    calls = []
+
+    def fake_checked(_root, arguments, **_kwargs):
+        calls.append(list(arguments))
+        if "rev-parse" in arguments:
+            return {"stdout": "a" * 40 + "\n", "elapsed_ms": 1}
+        if "rev-list" in arguments:
+            return {"stdout": "0 0\n", "elapsed_ms": 1}
+        if "show" in arguments:
+            return {"stdout": "2026-08-13T00:00:00Z\n", "elapsed_ms": 1}
+        if "status" in arguments:
+            return {
+                "stdout": "# branch.oid " + "a" * 40 + "\n# branch.head main\n",
+                "elapsed_ms": 1, "truncated": False, "output_bytes": 0,
+                "output_limit": 16_384,
+            }
+        return {"stdout": "", "elapsed_ms": 1}
+
+    monkeypatch.setattr(git_tools, "_checked_git", fake_checked)
+    monkeypatch.setattr(git_tools, "_require_repository_root", lambda *_args, **_kwargs: repo)
+    monkeypatch.setattr(
+        git_tools, "_runtime_remote_url",
+        lambda _root: "https://github.com/Krilliac/Sonder-runtime.git",
+    )
+    result = git_tools.runtime_update_status(repo, refresh=True)
+
+    fetch = next(call for call in calls if "fetch" in call)
+    assert "credential.helper=" in fetch
+    assert "core.askPass=" in fetch
+    assert "--refmap=" in fetch
+    assert fetch[-1] == "+refs/heads/main:refs/remotes/origin/main"
+    assert result["state"] == "current"
+
+
 def test_runtime_update_neutralizes_checkout_filter_processes(monkeypatch, tmp_path):
     repo = _repo(tmp_path)
     _git(repo, "remote", "add", "origin", "https://github.com/Krilliac/Sonder-runtime.git")
