@@ -894,6 +894,25 @@ def test_served_source_update_requires_admin_but_check_remains_read_only(monkeyp
     assert ts._handle_slash("/updatecheck", context=developer).startswith("ran ")
 
 
+def test_served_runtime_stash_aliases_delegate_after_action_sensitive_gates(monkeypatch):
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "developer", "role": "developer"},
+    }
+    admin = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "admin", "role": "admin"},
+    }
+    monkeypatch.setattr(ts.server, "control_command", lambda prompt, **_kwargs: "ran " + prompt)
+
+    assert ts._handle_slash("/stash", context=developer) == "ran /stash"
+    for command in ("/stash save", "/runtime-stash pop"):
+        refused = ts._handle_slash(command, context=developer)
+        assert refused.startswith("refused "), refused
+        assert "administrator" in refused
+        assert ts._handle_slash(command, context=admin).startswith("ran ")
+
+
 def test_system_status_uses_projected_activity_and_shared_feed(
     monkeypatch, tmp_path,
 ):

@@ -9,14 +9,47 @@ from sonder_runtime.adapters.filesystem import workflow_store as packaged_workfl
 def test_ensure_workflows_creates_defaults(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     workflows, path = workflow_store.ensure_workflows()
     assert path.endswith("workflows.json")
     assert "status_sweep" in workflows
+    assert path == str(tmp_path / "state" / "workflows.json")
+    assert not (tmp_path / "workflows.json").exists()
+
+
+def test_default_workflows_copy_legacy_install_file_without_rewriting_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
+    legacy = tmp_path / "workflows.json"
+    legacy.write_text(json.dumps({
+        "legacy_flow": {"description": "keep", "actions": [{"type": "status"}]},
+    }), encoding="utf-8")
+
+    workflows, path = workflow_store.ensure_workflows()
+
+    assert workflows["legacy_flow"]["description"] == "keep"
+    assert path == str(tmp_path / "state" / "workflows.json")
+    assert legacy.read_text(encoding="utf-8").startswith("{")
+    workflow_store.save_workflow("new_flow", [{"type": "status"}])
+    assert "new_flow" not in legacy.read_text(encoding="utf-8")
+
+
+def test_explicit_workflow_override_stays_inside_workspace(monkeypatch, tmp_path):
+    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.setenv("SONDER_WORKFLOWS", "operator-workflows.json")
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
+
+    workflows, path = workflow_store.ensure_workflows()
+
+    assert "status_sweep" in workflows
+    assert path == str(tmp_path / "operator-workflows.json")
 
 
 def test_save_and_delete_workflow(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     wf, _ = workflow_store.save_workflow(
         "my_flow",
         [{"type": "code", "code": "print(1)"}],
@@ -43,6 +76,7 @@ def test_server_workflow_save_and_run(monkeypatch, tmp_path):
 
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     actions = json.dumps([{"type": "code", "language": "python", "code": "print('wf')"}])
     assert "Saved workflow" in server.workflow_save("demo_flow", actions, "demo")
     out = server.workflow_run("demo_flow")
@@ -55,6 +89,7 @@ def test_server_workflow_list(monkeypatch, tmp_path):
 
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     out = server.workflow_list()
     assert "status_sweep" in out
 
@@ -110,6 +145,7 @@ def test_workflow_path_rejects_symlink_escape(monkeypatch, tmp_path):
 def test_concurrent_workflow_saves_do_not_lose_updates(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
 
     def save(index):
         workflow_store.save_workflow(
@@ -124,6 +160,7 @@ def test_concurrent_workflow_saves_do_not_lose_updates(monkeypatch, tmp_path):
 
 def test_workflow_storage_and_action_bounds(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     too_many = [{"type": "status"}] * (
         workflow_store.MAX_ACTIONS_PER_WORKFLOW + 1
     )
@@ -149,6 +186,7 @@ def test_server_reports_corrupt_workflow_storage_as_typed_error(monkeypatch, tmp
 
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     (tmp_path / "workflows.json").write_text("{broken", encoding="utf-8")
     output = server.workflow_list()
     assert output.startswith("ERROR: ")
@@ -160,6 +198,7 @@ def test_server_failed_workflow_preserves_legacy_wire_text(monkeypatch, tmp_path
 
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     server.workflow_save("failing_flow", '[{"type":"not_a_real_action"}]')
     output = server.workflow_run("failing_flow")
     assert output.startswith("workflow: failing_flow\n")

@@ -222,6 +222,15 @@ it refuses feature branches, local commits, and dirty trees. Restart Sonder
 after a successful source update. These REPL commands are separate from the
 signed release-manager commands documented in the update guide.
 
+If local workflow edits make a source checkout dirty, `/stash` shows the
+recovery state; `/stash save` preserves tracked edits, `/stash save-untracked`
+also preserves generated files, and `/stash pop` restores the most recent
+recovery stash only onto a clean canonical `main` checkout. Saved workflows
+now live in the normal per-user state directory (for example,
+`%LOCALAPPDATA%\sonder\workflows.json` on Windows), so new workflow saves no
+longer dirty an installed source tree. Existing root `workflows.json` files are
+copied once on first use; the original is left untouched for review.
+
 Start the loopback OpenAI-compatible API in a second terminal when another
 client needs it. Run `doctor` first if this is a new machine.
 

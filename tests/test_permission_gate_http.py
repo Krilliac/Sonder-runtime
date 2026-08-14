@@ -440,6 +440,15 @@ def test_the_window_runner_is_refused_at_the_app_surface_too(monkeypatch):
         assert reply.startswith("refused %s:" % name), (name, reply)
 
 
+def test_runtime_stash_status_is_read_only_but_mutations_stay_gated(monkeypatch):
+    monkeypatch.setattr(server, "control_command", lambda command, **_kwargs: "ran " + command)
+    pm.set_mode(pm.PLAN)
+
+    assert ts._handle_slash("/stash") == "ran /stash"
+    assert ts._handle_slash("/runtime-stash status") == "ran /runtime-stash status"
+    assert ts._handle_slash("/stash save").startswith("refused /stash:")
+
+
 def test_the_wrapper_backed_writes_are_refused_here_as_at_the_console(monkeypatch):
     """`/emotion` and `/prefer` write, and this surface resolved them to nothing.
 
