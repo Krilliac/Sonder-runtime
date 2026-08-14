@@ -538,6 +538,45 @@ def _private_cot_rule_allows() -> bool:
 _THINKING_CAPABILITY_CACHE = {}
 _THINKING_CAPABILITY_LOCK = threading.Lock()
 
+# Some local community models serialize deliberation into ordinary ``content``
+# rather than Ollama's separate ``message.thinking`` field.  That field is
+# governed by explicit reasoning exposure policy; a leading closed tag must
+# not become an accidental bypass of the same boundary.
+_INLINE_THINKING_OPEN_RE = re.compile(r"^\s*<(think|thinking)(?:\s+[^>]*)?>", re.IGNORECASE)
+_INLINE_THINKING_TAG_RE = re.compile(r"</?(think|thinking)(?:\s+[^>]*)?>", re.IGNORECASE)
+
+
+def _strip_inline_thinking(content):
+    """Drop closed leading model reasoning tags from public assistant text.
+
+    Only leading, syntactically closed blocks are recognized.  This keeps a
+    legitimate answer that discusses literal tags intact while ensuring that
+    untrusted model deliberation cannot be shown, saved to session history, or
+    fed into a later turn as assistant content.
+    """
+    if not isinstance(content, str):
+        return content
+    value = content
+    while True:
+        opening = _INLINE_THINKING_OPEN_RE.match(value)
+        if not opening:
+            return value
+        depth = 0
+        end = None
+        for tag in _INLINE_THINKING_TAG_RE.finditer(value, opening.start()):
+            if tag.group(0).startswith("</"):
+                depth -= 1
+                if depth == 0:
+                    end = tag.end()
+                    break
+            else:
+                depth += 1
+        # A leading unterminated reasoning block is private by default; never
+        # trade an incomplete delimiter for a reasoning exposure.
+        if end is None:
+            return ""
+        value = value[end:].lstrip()
+
 
 def _apply_cloud_thinking_policy(payload, model, *, compact=False):
     """Apply hosted-model thinking controls without changing custom models.
@@ -605,7 +644,7 @@ def _known_thinking_model(model) -> bool:
         return _THINKING_CAPABILITY_CACHE.get(str(model or "").strip(), False)
 
 
-def _thinking_exhausted_budget(out, message) -> bool:
+def _thinking_exhausted_budget(out, message, *, inline_thinking=False) -> bool:
     """Did the model spend its whole output budget thinking, leaving no answer?
 
     The signature is exact: thinking present, content absent, and Ollama
@@ -614,7 +653,7 @@ def _thinking_exhausted_budget(out, message) -> bool:
     if not isinstance(message, dict):
         return False
     thinking = message.get("thinking")
-    if not isinstance(thinking, str) or not thinking.strip():
+    if not inline_thinking and (not isinstance(thinking, str) or not thinking.strip()):
         return False
     done_reason = out.get("done_reason") if isinstance(out, dict) else None
     return str(done_reason or "").strip().casefold() == "length"
@@ -4371,13 +4410,19 @@ def _chat_request(
             _remember_thinking_model(model)
             if reasoning_exposure_enabled():
                 activity_tracker.record_reasoning(thinking, model=model)
-    content = message.get("content") if isinstance(message, dict) else None
+    raw_content = message.get("content") if isinstance(message, dict) else None
+    content = _strip_inline_thinking(raw_content)
+    inline_thinking = isinstance(raw_content, str) and content != raw_content
+    if inline_thinking:
+        _remember_thinking_model(model)
     if not isinstance(content, str) or not content.strip():
         if accept_native_tool_calls:
             native_decision = _native_tool_call_decision(message)
             if native_decision is not None:
                 return out, native_decision
-        if not cloud and not _budget_retried and _thinking_exhausted_budget(out, message):
+        if not cloud and not _budget_retried and _thinking_exhausted_budget(
+            out, message, inline_thinking=inline_thinking,
+        ):
             # The model reasoned right up to the cap and never got to an answer.
             # Now that the response has identified it, retry once with the
             # headroom it needed rather than reporting an empty response.
@@ -24012,7 +24057,7 @@ def _fanout_synthesis_generate(model, source_bundle):
     if not isinstance(out, dict):
         raise ModelCallError("protocol", "local synthesis model returned a non-JSON response")
     message = out.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
+    content = _strip_inline_thinking(message.get("content") if isinstance(message, dict) else None)
     if not isinstance(content, str) or not content.strip():
         raise ModelCallError("empty_response", "local synthesis model returned no answer")
     # Do not expose or store provider reasoning, response metadata, or the
