@@ -2460,7 +2460,7 @@ def _served_help_text(topic, context=None):
     for command in commands:
         if needle == command.name or needle in command.aliases:
             return "%s\nusage: %s\n%s" % (
-                command.name, command.usage, command.summary,
+                command.name, command.usage(), command.summary,
             )
     # Do not distinguish an unknown command from one intentionally hidden.
     return "No command with that name is available to this account."
@@ -2532,25 +2532,23 @@ def _commands_complete_payload(query, limit="", context=None):
 
 
 def _commands_help_payload(topic="", context=None):
+    if context is None or context.get("mode") == "local-open":
+        requested = str(topic or "").strip()
+        catalogued = command_catalog.by_name(requested) if requested else None
+        if catalogued is not None and catalogued.native:
+            wanted = requested.lower()
+            if not wanted.startswith("/"):
+                wanted = "/" + wanted
+            http_spellings = {
+                spelling.lower()
+                for command in command_catalog.http_catalog()
+                for spelling in command.all_names
+            }
+            if wanted not in http_spellings:
+                return {"text": "no HTTP command '%s'." % requested}
+        return {"text": command_catalog.help_text(topic)}
     try:
-        commands = _served_http_commands(context)
-        needle = str(topic or "").strip().lower()
-        if not needle:
-            categories = sorted({command.category for command in commands})
-            return {"text": "Sonder HTTP commands:\n  " + ", ".join(categories)}
-        if needle in command_catalog.CATEGORIES:
-            rows = [command for command in commands if command.category == needle]
-            if not rows:
-                return {"text": "No commands in that category are available to this account."}
-            return {"text": "%s --\n%s" % (
-                needle, "\n".join("  %s  %s" % (row.name, row.summary) for row in rows),
-            )}
-        for command in commands:
-            if needle == command.name or needle in command.aliases:
-                return {"text": "%s\nusage: %s\n%s" % (
-                    command.name, command.usage, command.summary,
-                )}
-        return {"text": "No HTTP command '%s'." % topic}
+        return {"text": _served_help_text(topic, context)}
     except command_catalog.CatalogUnavailable as exc:
         return {"text": "Command catalog unavailable: %s" % exc}
 

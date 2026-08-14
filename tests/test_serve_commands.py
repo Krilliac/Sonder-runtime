@@ -33,9 +33,9 @@ def _http_server(monkeypatch):
         thread.join(timeout=5)
 
 
-def _get(port, path):
+def _get(port, path, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", path)
+    conn.request("GET", path, headers=headers or {})
     response = conn.getresponse()
     raw = response.read()
     status = response.status
