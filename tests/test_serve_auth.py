@@ -1468,6 +1468,26 @@ def test_stream_exposes_same_elapsed_header_as_terminal_chunk():
     assert body.endswith("data: [DONE]\n\n")
 
 
+def test_json_payload_swallows_a_client_disconnect_during_headers():
+    class JsonProbe:
+        def __init__(self):
+            self.headers = {}
+
+        def send_response(self, status):
+            assert status == 200
+
+        def _cors(self):
+            return None
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            raise ConnectionAbortedError("client closed the socket")
+
+    assert ts.Handler._send_json_payload(JsonProbe(), {"ok": True}) is False
+
+
 def test_stream_preserves_long_normal_assistant_content():
     class StreamProbe:
         def __init__(self):
