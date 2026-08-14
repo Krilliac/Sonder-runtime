@@ -217,6 +217,56 @@ def _event(conn, run_id: str, kind: str, message: str, now=None) -> None:
     )
 
 
+def _completion_evidence_reason(row: sqlite3.Row) -> str:
+    """Return why a durable row cannot be terminally marked completed.
+
+    The controller performs richer, in-memory completion checks, but this
+    repository is also the persistence boundary exposed through the application
+    port.  A direct caller must not be able to turn model prose (or an empty
+    ledger) into a durable completed run by bypassing the controller.  Read the
+    row inside the same write transaction that will publish the terminal event.
+    """
+    try:
+        plan = json.loads(row["plan_json"] or "[]")
+        criteria = json.loads(row["criteria_json"] or "[]")
+    except (TypeError, ValueError):
+        return "persisted completion ledger is not valid JSON"
+    if not isinstance(plan, list) or not plan:
+        return "no persisted task ledger"
+    if not isinstance(criteria, list) or not any(str(item).strip() for item in criteria):
+        return "no persisted success criteria"
+
+    validation_seen = False
+    for task in plan:
+        if not isinstance(task, dict):
+            return "persisted task ledger contains a malformed task"
+        status = str(task.get("status") or "")
+        if status not in ("passed", "superseded"):
+            return "task %s is not durably passed" % (task.get("id") or "?")
+        if status == "superseded":
+            continue
+        receipt = task.get("host_receipt")
+        if not isinstance(receipt, dict) or not receipt.get("tools"):
+            return "task %s has no durable host receipt" % (task.get("id") or "?")
+        kind = str(task.get("kind") or "")
+        if kind == "implement" and receipt.get("mutation_observed") is not True:
+            return "implementation task %s lacks a durable mutation receipt" % (
+                task.get("id") or "?"
+            )
+        if kind == "validate":
+            if (
+                receipt.get("validation_attempted") is not True
+                or receipt.get("validation_passed") is not True
+            ):
+                return "validation task %s lacks a durable passing receipt" % (
+                    task.get("id") or "?"
+                )
+            validation_seen = True
+    if not validation_seen:
+        return "no durably passing validation receipt"
+    return ""
+
+
 def _pid_alive(pid: int) -> bool:
     return _process_pid_alive(pid)
 
@@ -565,6 +615,21 @@ def finish_run(
     now = time.time()
     finished = now if status in TERMINAL_STATUSES else None
     with _write_transaction() as conn:
+        if status == "completed":
+            existing = conn.execute(
+                "SELECT * FROM autopilot_runs WHERE id=? AND owner_id=? "
+                "AND status IN ('planning', 'running')",
+                (run_id, owner_id),
+            ).fetchone()
+            if existing is None:
+                return None
+            evidence_reason = _completion_evidence_reason(existing)
+            if evidence_reason:
+                _event(
+                    conn, run_id, "completion_refused",
+                    "completion refused: %s" % evidence_reason, now,
+                )
+                return None
         cursor = conn.execute(
             """
             UPDATE autopilot_runs
