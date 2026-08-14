@@ -560,6 +560,59 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     assert seen[0]["model_override"] == "gemma3:12b"
 
 
+def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monkeypatch, capsys):
+    lines = iter(("/model made-up:latest", "hello", "/exit"))
+    seen = []
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda _prompt, **kwargs: seen.append(kwargs) or "answer",
+    )
+
+    sonder_repl.main()
+
+    assert "cannot verify installed models" in capsys.readouterr().out
+    assert len(seen) == 1
+    assert seen[0]["tier"] == ""
+    assert seen[0]["model_override"] == ""
+
+
+def test_model_selection_refuses_tag_when_verified_catalog_is_empty(monkeypatch, capsys):
+    lines = iter(("/model made-up:latest", "/exit"))
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+
+    sonder_repl.main()
+
+    assert "no installed model named" in capsys.readouterr().out
+
+
+def test_model_completer_does_not_repeat_unavailable_discovery(monkeypatch):
+    calls = []
+    completer = sonder_repl._ModelArgumentCompleter()
+    monkeypatch.setattr(
+        sonder_repl,
+        "_installed_models",
+        lambda: calls.append("discover") or None,
+    )
+
+    completer.refresh(None)
+
+    assert calls == []
+
+
 def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
     lines = iter(("web search to find computer repair shops near 67215", "/exit"))
     calls = []
