@@ -19,6 +19,7 @@ from pathlib import Path
 
 import engine_bundle
 import ollama_endpoint
+import unsafe_lab
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 import sonder_health
 import sonder_paths
@@ -350,7 +351,23 @@ def ensure_sonder_alias() -> tuple[bool, str]:
     )
 
 
+def _require_safe_unsafe_lab_start(host, overrides=None) -> bool:
+    """Validate the exact environment a managed API child will receive.
+
+    ``sonder_serve`` repeats this gate at bind time, but the headless command
+    used to start/probe Ollama and bootstrap its alias first.  An invalid lab
+    request must not get any sidecar work merely because rejection happens in
+    the later API child.  Explicit launcher arguments win over stale parent
+    variables, matching the child environment below.
+    """
+    effective = dict(os.environ)
+    effective.update(dict(overrides or {}))
+    effective["SONDER_HOST"] = str(host)
+    return unsafe_lab.require_startup(env=effective, host=host)
+
+
 def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
+    _require_safe_unsafe_lab_start(host, env)
     if port_open(host, port):
         pid = _managed_pid("sonder_serve", host, port)
         suffix = " pid=%s" % pid if pid else " (unmanaged listener)"
@@ -520,6 +537,14 @@ def main(argv=None) -> int:
         print(stopped)
         if not _stop_succeeded(stopped):
             return 1
+    try:
+        # Validate before touching Ollama or the bootstrap subprocess.  The
+        # API child validates again at bind time; this protects the launcher
+        # sequence itself and includes --allow-hosted in the effective env.
+        _require_safe_unsafe_lab_start(args.host, env)
+    except unsafe_lab.UnsafeLabError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
     print(start_ollama())
     alias_ok, alias_message = ensure_sonder_alias()
     print(alias_message)
