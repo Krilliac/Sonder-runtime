@@ -119,6 +119,20 @@ def test_search_relevance_uses_a_provider_snippet():
     assert score >= required
 
 
+def test_web_search_returns_best_concise_provider_result_when_exact_overlap_is_low(monkeypatch):
+    rows = [{
+        "title": "Computer repairs in Wichita",
+        "url": "https://example.test/repair",
+        "snippet": "Same-day service.",
+    }]
+    monkeypatch.setattr(web_tools, "_request", lambda *_args, **_kwargs: (
+        json.dumps({"results": rows}).encode("utf-8"), "application/json",
+    ))
+    monkeypatch.setenv("SONDER_SEARCH_URL", "https://search.example.test/?q={query}")
+
+    assert web_tools.web_search("computer repair shops near 67215") == rows
+
+
 def test_web_search_retries_distinctive_query_after_blocks_and_irrelevant_rows(
     monkeypatch,
 ):

@@ -1,5 +1,7 @@
 import re
 
+import pytest
+
 import sonder_headless
 import sonder_repl
 
@@ -590,6 +592,28 @@ def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypat
         sonder_repl.server, "sonder",
         lambda *_args, **_kwargs: pytest.fail("mixed request must not use web-only route"),
     )
+
+    sonder_repl.main()
+
+    assert calls and calls[0]["prompt"] == prompt
+
+
+@pytest.mark.parametrize("prompt", [
+    "search the web for the logo and put it in assets/logo.png",
+    "search the web for the logo and import it into assets",
+])
+def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch, prompt):
+    lines = iter((prompt, "/exit"))
+    calls = []
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.server, "workbench_agent", lambda **kwargs: calls.append(kwargs) or "work result")
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: pytest.fail("mixed request must not use web-only route"))
 
     sonder_repl.main()
 

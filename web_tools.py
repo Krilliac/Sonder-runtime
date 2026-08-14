@@ -631,10 +631,21 @@ def _search_query_variants(query):
 
 
 def _search_relevance(query, results):
-    terms = {
-        term for term in re.findall(r"[a-z0-9]+", query.lower())
-        if len(term) >= 3 and term not in _SEARCH_STOPWORDS
-    }
+    def normalized_terms(value):
+        normalized = set()
+        for term in re.findall(r"[a-z0-9]+", str(value or "").lower()):
+            if len(term) < 3 or term in _SEARCH_STOPWORDS:
+                continue
+            # Keep relevance lexical and bounded, but do not reject a useful
+            # listing merely because it uses a normal English plural.
+            if term.endswith("ies") and len(term) > 4:
+                term = term[:-3] + "y"
+            elif term.endswith("s") and len(term) > 3 and not term.endswith("ss"):
+                term = term[:-1]
+            normalized.add(term)
+        return normalized
+
+    terms = normalized_terms(query)
     if not terms:
         return 0, 0
     best = 0
@@ -646,7 +657,7 @@ def _search_relevance(query, results):
         text = "%s %s %s" % (
             row.get("title", ""), row.get("url", ""), row.get("snippet", ""),
         )
-        words = set(re.findall(r"[a-z0-9]+", text.lower()))
+        words = normalized_terms(text)
         best = max(best, len(terms & words))
     return best, min(2, len(terms))
 
@@ -781,10 +792,8 @@ def web_search(query, limit=5, timeout=10):
                 )
                 break
     # Do not turn a weak provider fallback into a plausible-looking answer.
-    # In particular, a local-intent query such as "computer repair shops near
-    # 67215" can overlap generic pages on just "computer". Returning those
-    # pages is worse than a typed no-result: the agent may claim it searched
-    # for nearby businesses when it did not obtain any relevant evidence.
+    # The scorer normalizes straightforward inflections first, so concise
+    # listings such as "computer repairs" still count for "computer repair".
     _best, required = _search_relevance(query, best_results)
     if best_results and best_relevance >= required:
         return best_results

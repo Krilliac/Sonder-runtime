@@ -382,6 +382,7 @@ _SEARCH_THEN_WORK = re.compile(
     r"install(?:ing)?|configur(?:e|ing)|refactor(?:ing)?|chang(?:e|ing)|"
     r"commit(?:ting)?|sav(?:e|ing)|delet(?:e|ing)|remov(?:e|ing)|"
     r"renam(?:e|ing)|mov(?:e|ing)|cop(?:y|ying)|download(?:ing)?|"
+    r"import(?:ing)?|put(?:ting)?|plac(?:e|ing)|attach(?:ing)?|"
     r"run(?:ning)?|execut(?:e|ing)|"
     r"test(?:ing)?|verif(?:y|ying)|deploy(?:ing)?|publish(?:ing)?|"
     r"upload(?:ing)?|push(?:ing)?|patch(?:ing)?|repair(?:ing)?|"
