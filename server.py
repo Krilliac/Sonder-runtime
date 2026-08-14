@@ -56,6 +56,7 @@ import embeddings
 import personas
 import summarizer
 import code_runner
+import compiler_cache
 import isolated_runner
 import live_reload
 import system_profile
@@ -24878,6 +24879,20 @@ def environment_status(refresh: bool = False) -> str:
     """
     _maybe_live_reload()
     return environment_probe.format_profile(refresh=refresh)
+
+
+@mcp.tool()
+def compiler_cache_status() -> str:
+    """Return bounded local sccache health metrics without paths or raw diagnostics."""
+    _maybe_live_reload()
+    started = time.time()
+    data = compiler_cache.status()
+    output = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "compiler_cache_status", {}, ok=bool(data.get("ok")), started=started,
+        summary="sccache %s" % data.get("status", "unknown"), output=output,
+    )
+    return output
 
 
 @mcp.tool()
