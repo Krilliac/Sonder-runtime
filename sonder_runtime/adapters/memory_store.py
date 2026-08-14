@@ -2615,9 +2615,24 @@ def _normalize_task_status(status):
 
 
 def _normalize_task_status_filter(status):
-    """Parse the task-list status filter, including documented ``a|b`` sets."""
+    """Parse task-list statuses from the legacy string or typed list form.
+
+    A string keeps the original pipe-delimited contract (``pending|blocked``).
+    MCP clients may instead send a JSON array such as
+    ``["pending", "blocked"]``.  Do not stringify arbitrary JSON here: a
+    list rendered as Python text used to become an opaque, invalid status and
+    turn a requested multi-status inspection into a failed tool call.
+    """
+    if isinstance(status, str):
+        items = status.split("|")
+    elif isinstance(status, (list, tuple)):
+        items = status
+    else:
+        raise ValueError("task status filter must be a string or a list of strings")
     values = []
-    for item in str(status or "").split("|"):
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError("task status filter entries must be strings")
         item = item.strip()
         if item:
             normalized = _normalize_task_status(item)

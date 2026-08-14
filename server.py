@@ -7212,7 +7212,7 @@ def task_create(
 
 @mcp.tool()
 def task_list(
-    status: str = "",
+    status: str | list[str] = "",
     project: str = "",
     owner: str = "",
     include_done: bool = False,
@@ -7220,9 +7220,10 @@ def task_list(
 ) -> str:
     """List visible task/todo rows, pending and active by default.
 
-    ``status`` accepts one normalized status or a pipe-delimited set, such as
-    ``pending|blocked``.  This filters tasks with either status in one call;
-    it is not a literal status name.
+    ``status`` accepts one normalized status, a pipe-delimited set such as
+    ``pending|blocked``, or a typed JSON array such as
+    ``["pending", "blocked"]``.  Each form filters tasks with either status
+    in one call; the legacy string remains supported for existing clients.
     """
     _maybe_live_reload()
     conn = _open_db()
@@ -15311,7 +15312,7 @@ AGENT_TOOL_HELP = """Available tools:
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
 - sqlite_mutate: {"path": "data/app.db", "sql": "UPDATE records SET status = ? WHERE id = ?", "parameters_json": ["done", 42], "mode": "preview|apply", "max_rows": 1000, "timeout": 2, "max_db_bytes": 67108864}
 - task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
-- task_list: {"status": "pending|in_progress|blocked|done|canceled", "project": "", "include_done": false, "limit": 50}
+- task_list: {"status": ["pending", "blocked"], "project": "", "include_done": false, "limit": 50} -- also accepts legacy "pending|blocked"
 - task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
 - task_show: {"task_id": "..."}
 - task_delete: {"task_id": "..."}
