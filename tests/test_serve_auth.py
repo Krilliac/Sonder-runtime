@@ -1768,6 +1768,7 @@ def test_cors_denies_hostile_origin_and_echoes_only_allowlisted(monkeypatch):
         assert headers["Access-Control-Expose-Headers"] == (
             "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id"
         )
+        assert "Idempotency-Key" in headers["Access-Control-Allow-Headers"]
         status, _, _ = _request(
             port,
             "POST",
