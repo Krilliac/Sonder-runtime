@@ -15327,6 +15327,7 @@ AGENT_TOOL_HELP = """Available tools:
 - git_merge: {"root": ".", "branch": "feature/x", "no_ff": true, "message": "", "timeout": 30}
 - git_cherry_pick: {"root": ".", "commits_json": "[\"abc123\"]", "timeout": 30}
 - build_run: {"root": ".", "command": "", "timeout": 120} -- auto-detects Make/Cargo/CMake/Go/npm/Gradle/Maven; command overrides
+- ensemble_codegen_build_loop: {"project_dir": ".", "files_json": "{\"src/main.py\": \"task-specific file contract\"}", "build_program": "python", "build_args_json": "[\"-m\", \"pytest\", \"-q\"]", "timeout": 120} -- local code + reasoning ensemble with two compiler-feedback attempts per file; requires a project
 - build_clean: {"root": ".", "timeout": 30} -- clean build artifacts
 - rename_symbol: {"root": ".", "old_name": "foo", "new_name": "bar", "glob": "**/*.py", "dry_run": true} -- rename across files; dry_run=false to apply
 - find_references: {"root": ".", "symbol": "MyClass", "glob": "**/*.py"} -- find all occurrences of a symbol
@@ -16624,6 +16625,16 @@ def _agent_dispatch(
             "surface with explicit operator intent." % tool_name
         )
         return refusal
+    if tool_name == "ensemble_codegen_build_loop" and not repository_extra_roots:
+        # Kept as a named refusal so the error-signal ratchet can distinguish
+        # this deliberate policy boundary from a newly introduced ad-hoc
+        # literal return.  The model must not create a project grant by merely
+        # naming a directory in its tool arguments.
+        refusal = (
+            "ERROR: HOST POLICY: ensemble compiler-feedback retries require a "
+            "host-selected project root."
+        )
+        return refusal
     gate_error = _agent_permission_gate_error(tool_name)
     if gate_error:
         return gate_error
@@ -17615,6 +17626,23 @@ def _agent_dispatch(
                 command=args.get("command", ""),
                 timeout=args.get("timeout", 120),
             )
+        if tool_name == "ensemble_codegen_build_loop":
+            # The project root is host-selected by _agent_dispatch_observed.
+            # The public wrapper intentionally has no ``extra_roots`` argument:
+            # exposing one would let a model turn its tool JSON into a new
+            # filesystem grant.  Thread it only through this internal helper,
+            # where ``repository_extra_roots`` is already the dispatcher's
+            # trusted project scope.
+            return _ensemble_codegen_build_loop(
+                project_dir=args.get("project_dir", "."),
+                files_json=args.get("files_json", ""),
+                build_program=args.get("build_program", ""),
+                build_args_json=args.get("build_args_json", "[]"),
+                error_regex=args.get("error_regex", ""),
+                slips_json=args.get("slips_json", ""),
+                timeout=args.get("timeout", 120),
+                extra_roots=repository_extra_roots,
+            )
         if tool_name == "build_clean":
             return build_clean(
                 root=args.get("root", "."),
@@ -17712,6 +17740,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
     "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
     "build_run", "build_clean",
+    "ensemble_codegen_build_loop",
     "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
 })
 _PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
@@ -17780,6 +17809,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
 _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "offload", "master_orchestrate", "master_retry", "workflow_run",
     "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
+    "ensemble_codegen_build_loop",
 })
 _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "environment_status", "hardware_profile", "file_policy",
@@ -17875,6 +17905,8 @@ def _canonical_agent_tool_name(tool_name):
 
 
 def _project_scoped_path_key(tool_name):
+    if tool_name == "ensemble_codegen_build_loop":
+        return "project_dir"
     if tool_name == "archive_extract":
         return "destination"
     if tool_name == "fetch_artifact":
@@ -18037,6 +18069,16 @@ def _project_scope_args(tool_name, args, project):
             scoped["cwd"] = os.path.join(project, raw_cwd)
         return scoped
 
+    if tool_name == "ensemble_codegen_build_loop":
+        raw_project = str(scoped.get("project_dir") or ".").strip()
+        is_abs = os.path.isabs(raw_project) or bool(
+            re.match(r"^[A-Za-z]:[\\/]", raw_project)
+        )
+        scoped["project_dir"] = (
+            raw_project if is_abs else os.path.join(project, raw_project)
+        )
+        return scoped
+
     key = _project_scoped_path_key(tool_name)
     raw = str(scoped.get(key) or "").strip()
     is_abs = os.path.isabs(raw) or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
@@ -18129,7 +18171,13 @@ def _agent_dispatch_observed(
             )
         dispatched = True
         ok = not str(observation).startswith("ERROR:")
-        if ok and tool_name in _RENDERED_VERDICT_TOOLS:
+        if tool_name == "ensemble_codegen_build_loop":
+            # This report is rendered by codegen_loop, not by the generic
+            # key/value run-result formatter.  Do not let an ordinary
+            # ``BUILD FAILED`` body be recorded as a successful dispatcher
+            # call merely because it did not start with ``ERROR:``.
+            ok = _ensemble_codegen_build_succeeded(observation)
+        elif ok and tool_name in _RENDERED_VERDICT_TOOLS:
             # `ok` above is a statement about the DISPATCHER, not the work:
             # these tools emit `ERROR:` only when they never ran, so a genuinely
             # failing run arrives here as True. Measured on a project holding
@@ -18189,6 +18237,7 @@ _WORK_MUTATION_TOOLS = frozenset({
     "sqlite_mutate", "scaffold_project", "archive_extract", "archive_create",
     "fetch_artifact",
     "artifact_generate", "game_generate_and_test", "game_generation_campaign",
+    "ensemble_codegen_build_loop",
     "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
     "memory_interaction_embedding_backfill",
     "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
@@ -18632,6 +18681,8 @@ def _agent_observation_ok(observation):
 
 def _agent_tool_observation_ok(tool_name, observation):
     """Apply evidence-quality checks that are specific to a tool contract."""
+    if str(tool_name or "") == "ensemble_codegen_build_loop":
+        return _ensemble_codegen_build_succeeded(observation)
     if str(tool_name or "") == "web_fetch" and observation is None:
         return False
     if not _agent_observation_ok(observation):
@@ -18650,6 +18701,17 @@ def _agent_tool_observation_ok(tool_name, observation):
     # execution and inspection tools.
     text = str(observation or "").strip()
     return bool(text and any(character.isalnum() for character in text))
+
+
+def _ensemble_codegen_build_succeeded(observation):
+    """Read only the host-rendered terminal verdict from the codegen loop."""
+    lines = {line.strip() for line in str(observation or "").splitlines()}
+    return (
+        "BUILD SUCCEEDED" in lines
+        and not any(line.startswith("BUILD FAILED") for line in lines)
+        and "BUILD DID NOT RUN" not in lines
+        and not any(line.startswith("BUILD MEASUREMENT INCOMPLETE") for line in lines)
+    )
 
 
 def _agent_normalized_path(value):
@@ -19375,6 +19437,21 @@ def _agent_turn(
                 project_scope="",
             )
         return project_error
+    wants_ensemble_compiler = intents.requests_ensemble_compiler_retries(prompt)
+    if wants_ensemble_compiler and cloud:
+        # This remains a host-owned policy denial, rather than an inference
+        # failure the agent might retry or work around.
+        refusal = (
+            "ERROR: HOST POLICY: ensemble compiler-feedback retries are local-only; "
+            "select a local agent tier."
+        )
+        return refusal
+    if wants_ensemble_compiler and not project_scope:
+        refusal = (
+            "ERROR: HOST POLICY: ensemble compiler-feedback retries require "
+            "project=<existing project directory>."
+        )
+        return refusal
     if cloud:
         default_agent_system = (
             "You are a hosted tool-using coding agent. Use only the tools listed "
@@ -19451,6 +19528,8 @@ def _agent_turn(
     abort_on_tool_failure = frozenset(
         _canonical_agent_tool_name(name) for name in abort_on_tool_failure_names if name
     )
+    if wants_ensemble_compiler:
+        required_tools = required_tools | frozenset({"ensemble_codegen_build_loop"})
     allowed_tools = (
         None if tool_allowlist is None
         else frozenset(
@@ -20458,7 +20537,7 @@ def _agent_turn(
         ))
     if required_tools and not (required_tools & used_tool_names):
         return _early_exit(
-            "ERROR: agent reached max_steps=%d without using a required web tool (%s)."
+            "ERROR: agent reached max_steps=%d without using a required tool (%s)."
             % (max_steps, ", ".join(sorted(required_tools)))
         )
     if auto_checklist and not used_tool:
@@ -20597,6 +20676,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     # branches.  Keeping them in the workspace lane gives a completion claim
     # a reachable, host-observed way to satisfy its verification standing.
     "test_run", "build_run", "lint_run", "typecheck_run",
+    "ensemble_codegen_build_loop",
     "process_list", "process_memory_risk_inspect", "task_progress",
     "task_delete", "task_plan", "task_depend",
     # Other developer-workflow tools remain absent until their agent dispatch
@@ -24356,6 +24436,67 @@ def codegen_build_loop(
         rows, final,
         ok=not final and build_state["ran"] and build_state["exit_ok"],
         ran=build_state["ran"],
+    )
+
+
+def _ensemble_codegen_build_loop(
+    project_dir: str,
+    files_json: str,
+    build_program: str,
+    build_args_json: str = "[]",
+    error_regex: str = "",
+    slips_json: str = "",
+    timeout: int = 120,
+    *,
+    extra_roots: str = "",
+) -> str:
+    """Run the fixed ensemble/compiler contract under a trusted root scope.
+
+    ``extra_roots`` is deliberately private to the dispatch path.  It is never
+    model-controlled or exposed in the MCP schema: an agent gets it only after
+    the host binds the run to an existing project directory.
+    """
+    return codegen_build_loop(
+        project_dir=project_dir,
+        files_json=files_json,
+        build_program=build_program,
+        build_args_json=build_args_json,
+        tiers="code,reasoning",
+        attempts=2,
+        error_regex=error_regex,
+        slips_json=slips_json,
+        timeout=timeout,
+        extra_roots=extra_roots,
+    )
+
+
+@mcp.tool()
+def ensemble_codegen_build_loop(
+    project_dir: str,
+    files_json: str,
+    build_program: str,
+    build_args_json: str = "[]",
+    error_regex: str = "",
+    slips_json: str = "",
+    timeout: int = 120,
+) -> str:
+    """Use local code + reasoning candidates and compiler-feedback retries.
+
+    This is the natural-workflow counterpart of ``codegen_build_loop``.  Its
+    model selection and retry count are deliberately host-owned: two attempts
+    per file, using only the configured local ``code`` and ``reasoning``
+    tiers.  A caller still supplies an inspected file contract and the
+    project's own argv-style build command; no natural-language parser turns
+    prose into either a filesystem root or executable.
+    """
+    return _ensemble_codegen_build_loop(
+        project_dir=project_dir,
+        files_json=files_json,
+        build_program=build_program,
+        build_args_json=build_args_json,
+        error_regex=error_regex,
+        slips_json=slips_json,
+        timeout=timeout,
     )
 
 
