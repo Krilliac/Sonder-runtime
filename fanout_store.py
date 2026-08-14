@@ -368,9 +368,28 @@ def recent_run_summaries(*, request_owner: str | None = None,
          GROUP BY runs.id
          ORDER BY runs.updated_ts DESC
     """
+    # The history index deliberately omits prompts, model names, and answer
+    # material, but duration is a useful, non-sensitive scalar for comparing
+    # recent campaigns and noticing an active run that has stalled.  Compute
+    # it at projection time so an active receipt continues to age even when a
+    # worker has not emitted a fresh database event.
+    now = time.time()
     conn = _connect()
     try:
-        return [dict(row) for row in conn.execute(query, (*values, limit))]
+        summaries = []
+        for result in conn.execute(query, (*values, limit)):
+            row = dict(result)
+            try:
+                ended = row["finished_ts"] if row["finished_ts"] is not None else now
+                row["total_elapsed_ms"] = max(
+                    0, int((float(ended) - float(row["created_ts"])) * 1000)
+                )
+            except (TypeError, ValueError, OverflowError):
+                # A corrupt legacy timestamp must not prevent safe recovery
+                # of the otherwise content-free index.
+                row["total_elapsed_ms"] = None
+            summaries.append(row)
+        return summaries
     finally:
         conn.close()
 
