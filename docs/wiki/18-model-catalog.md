@@ -48,6 +48,23 @@ semantic retrieval rather than core chat.
 > transcription or retrieval reranking; those remain optional until their
 > provider-backed feature is available.
 
+### Specialist integration backlog
+
+The following is the implementation checklist for optional model families. It
+is intentionally capability-first: no item is considered enabled merely because
+a similarly named tag is installed.
+
+| Priority | Capability | Completion boundary |
+|---|---|---|
+| 1 | Local speech transcription | A bounded audio-input adapter, duration/byte/decoder limits, a provider contract verified on the installed Ollama version, and a local-only transcript route. |
+| 1 | Provider-backed reranking | A confirmed rerank endpoint and score contract; bounded candidate count/text, deterministic fallback when unavailable, and no silent chat-model substitution. |
+| 2 | Specialist structured extraction | An explicit local extraction binding only where it materially improves the existing schema-verified extraction path; exact schema validation, source-span grounding, and no untrusted-output authority. |
+| 2 | Native tool-oriented models | A validated tool-call protocol with strict JSON/schema checks, host-owned permission decisions, and regression coverage for malformed or injected calls. |
+| 3 | Capability evaluation and routing | Reproducible per-model evaluations, latency/quality evidence, and routing changes only after the corresponding provider feature and safety contract pass. |
+
+Until a row is complete, use the existing local text, schema, and host-tool
+paths rather than treating a specialist tag as a substitute.
+
 ## 2. Find your band
 
 | VRAM | Largest comfortable model | What the collection looks like |
