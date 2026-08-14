@@ -68,9 +68,12 @@ def test_recent_run_summaries_are_owner_scoped_and_never_return_sensitive_rows()
     assert row["models_selected"] == 2
     assert row["models_answered"] == row["models_failed"] == row["models_unknown"] == row["models_running"] == row["models_skipped"] == 0
     assert row["models_pending"] == 2
+    assert isinstance(row["total_elapsed_ms"], int)
+    assert row["total_elapsed_ms"] >= 0
     assert set(row) == {
         "run_id", "status", "scope", "created_ts", "updated_ts", "finished_ts",
         "models_selected", "models_answered", "models_failed", "models_unknown", "models_pending", "models_running", "models_skipped",
+        "total_elapsed_ms",
     }
     rendered = repr(summaries)
     for secret in ("private prompt", "cipher", "owner-a", "models_json", "prompt_sha256"):
@@ -87,6 +90,24 @@ def test_recent_run_summaries_reconcile_stale_receipts_before_projecting(monkeyp
 
     assert reconciled == [True]
     assert summaries[0]["run_id"] == run["id"]
+
+
+def test_recent_run_summaries_keep_terminal_duration_stable(monkeypatch):
+    run = store.create_run("private prompt", ["local"], request_owner="owner-a")
+    conn = store._connect()
+    try:
+        conn.execute(
+            "UPDATE fanout_runs SET status='completed', created_ts=?, finished_ts=? WHERE id=?",
+            (100.0, 104.25, run["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(store.time, "time", lambda: 999.0)
+
+    summaries = store.recent_run_summaries(request_owner="owner-a", limit=1)
+
+    assert summaries[0]["total_elapsed_ms"] == 4250
 
 
 def test_schema_migration_scrubs_pre_vault_prompt_and_digest(isolated):
