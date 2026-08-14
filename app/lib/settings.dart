@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -42,6 +43,11 @@ class Settings {
   static const _kLauncherUrl = 'sonder_launcher_url';
   static const _kLauncherToken = 'sonder_launcher_token';
   static const _credentials = PlatformCredentialStore();
+
+  /// Test-only override: widget tests do not load desktop/mobile plugins, and
+  /// must never wait indefinitely on an unimplemented credential channel.
+  @visibleForTesting
+  static CredentialStore? testingCredentialStore;
 
   static const defaultModel = 'sonder';
 
@@ -110,7 +116,7 @@ class Settings {
   /// if the keychain is unavailable, do not fall back to that plaintext value.
   static Future<Settings> load({CredentialStore? credentialStore}) async {
     final p = await SharedPreferences.getInstance();
-    final credentials = credentialStore ?? _credentials;
+    final credentials = credentialStore ?? testingCredentialStore ?? _credentials;
     final apiKey = await _readCredential(
       credentials: credentials,
       preferences: p,
@@ -138,7 +144,7 @@ class Settings {
   /// Writes bearer credentials only to the platform credential store.
   Future<void> save({CredentialStore? credentialStore}) async {
     final p = await SharedPreferences.getInstance();
-    final credentials = credentialStore ?? _credentials;
+    final credentials = credentialStore ?? testingCredentialStore ?? _credentials;
     // Empty fields are not enough evidence that an existing credential should
     // be erased: Settings is also constructed for first-run preferences and
     // platform/test environments that do not have a credential provider.
@@ -181,11 +187,17 @@ class Settings {
   /// server has no logout route, so a separately copied bearer token remains
   /// valid until its normal expiry or server-side revocation.
   static Future<void> clearApiKey({CredentialStore? credentialStore}) =>
-      _deleteCredential(credentialStore ?? _credentials, _kKey);
+      _deleteCredential(
+        credentialStore ?? testingCredentialStore ?? _credentials,
+        _kKey,
+      );
 
   /// Removes the distinct launcher-control credential from the device.
   static Future<void> clearLauncherToken({CredentialStore? credentialStore}) =>
-      _deleteCredential(credentialStore ?? _credentials, _kLauncherToken);
+      _deleteCredential(
+        credentialStore ?? testingCredentialStore ?? _credentials,
+        _kLauncherToken,
+      );
 
   static Future<String> _readCredential({
     required CredentialStore credentials,
