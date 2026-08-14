@@ -1862,6 +1862,50 @@ def test_chat_forwards_consent_and_client_location_to_web_router(monkeypatch):
     assert calls[0][1]["allow_server_location_lookup"] is True
 
 
+def test_chat_hosted_proxy_request_never_uses_server_ip_for_location(monkeypatch):
+    """A loopback TLS proxy is not evidence that its caller is local."""
+    monkeypatch.setattr(ts, "API_KEY", "x" * 32)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    calls = []
+
+    def fake_web(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        return "LOCATION REQUIRED"
+
+    monkeypatch.setattr(ts.server, "chat_web_response", fake_web)
+    request = json.dumps({
+        "model": "sonder",
+        "messages": [{"role": "user", "content": "weather in my area"}],
+        "location_consent": True,
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=request,
+            headers={
+                "Authorization": "Bearer " + "x" * 32,
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert status == 200
+    assert "LOCATION REQUIRED" in json.loads(body)["choices"][0]["message"]["content"]
+    assert calls[0][1]["location_consent"] is True
+    assert calls[0][1]["location_hint"] is None
+    assert calls[0][1]["allow_server_location_lookup"] is False
+
+
 def test_dangerous_slash_denied_before_handler(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "account")

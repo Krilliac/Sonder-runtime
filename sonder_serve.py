@@ -659,6 +659,25 @@ def _is_loopback_host(host):
         return False
 
 
+def _http_server_location_lookup_allowed(context):
+    """Whether an HTTP request may resolve this server's public egress IP.
+
+    ``client_address`` only identifies the immediate TCP peer.  In a hosted
+    deployment that peer is commonly a loopback TLS reverse proxy, while an
+    IP-geolocation request from this process would resolve the *server's*
+    datacenter location, not the authenticated caller's location.  The app
+    already performs an opt-in client-side lookup and sends a minimized place
+    hint for that case.  Keep the server lookup for the genuinely local-open
+    single-user profile only, where the process and caller intentionally share
+    the same host/network identity.
+    """
+    return (
+        isinstance(context, dict)
+        and context.get("mode") == "local-open"
+        and _is_loopback_host(HOST)
+    )
+
+
 def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None):
     # Unsafe lab acknowledgement tightens exposure: unlike normal served mode,
     # there is deliberately no authenticated non-loopback topology available.
@@ -3233,6 +3252,7 @@ class Handler(BaseHTTPRequestHandler):
                                 location_consent
                                 and bool(self.client_address)
                                 and _is_loopback_host(self.client_address[0])
+                                and _http_server_location_lookup_allowed(context)
                             ),
                         )
                         web_routed = reply is not None
