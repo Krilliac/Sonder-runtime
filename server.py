@@ -16784,6 +16784,20 @@ def _agent_dispatch(
     )
     if root_refusal:
         return root_refusal
+    # Project-bound model calls reach this terminal dispatcher through more
+    # than the full agent loop.  The loop validates its proposed arguments
+    # before it calls us, but `_agent_dispatch_observed` is also the shared
+    # observed-dispatch seam used by workbench-style callers.  In particular,
+    # a write-enabled `sqlite_mutate` call receives an in-process-only
+    # approval sentinel so it can use the host-selected project root; without
+    # this check an absolute model argument could turn that sentinel into a
+    # general filesystem bypass.  Keep confinement at the final dispatch
+    # choke point as well as the higher-level planning path.
+    scope_error = _repository_scope_path_error(
+        tool_name, args, repository_extra_roots,
+    )
+    if scope_error:
+        return scope_error
     if read_only:
         if repository_extra_roots:
             # Defense in depth for direct/internal dispatch callers.  The
