@@ -642,6 +642,29 @@ def test_framed_composer_uses_a_stable_rectangle_without_content_truncation():
     assert "".join(row[4:-1].rstrip() for row in rows) == "x" * 60
 
 
+def test_composer_wraps_wide_unicode_by_terminal_cells_not_codepoints():
+    # Emoji and CJK glyphs normally consume two terminal cells.  Counting
+    # Python characters let the terminal auto-wrap a supposedly in-frame row,
+    # then the raw redraw moved the cursor relative to the wrong row.
+    assert slash_menu._input_lines("> ", "ab界cd", 7) == ["> ab界", "cd"]
+    assert slash_menu._cursor_cell("> ", "ab界cd", 3, 7, 2) == (1, 0)
+
+    out = _FakeStdout()
+    _top, rows, _footer = slash_menu._framed_input_lines(
+        "sonder", "ab界cde", 12, out)
+    assert len(rows) == 2
+    assert "ab界cd" in rows[0] and "e" in rows[1]
+    assert all(slash_menu._display_width(row) == 11 for row in rows)
+    assert slash_menu._framed_cursor_cell("ab界cde", 5, 12, len(rows)) == (1, 0)
+
+
+def test_composer_keeps_combining_accents_with_their_base_cell():
+    # A combining accent is part of the preceding display cell, not a second
+    # column that can force a phantom wrap.
+    assert slash_menu._input_lines("> ", "ae\u0301bc", 7) == ["> ae\u0301bc"]
+    assert slash_menu._cursor_cell("> ", "ae\u0301bc", 3, 7, 1) == (0, 4)
+
+
 def test_framed_composer_tracks_a_cursor_in_a_wrapped_buffer(monkeypatch):
     monkeypatch.setattr(slash_menu, "_terminal_size", lambda: (12, 12))
     # 6 editable cells per row in the 11-column visual frame. Move left into

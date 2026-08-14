@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 
 # --- key tokens and actions ----------------------------------------------
 
@@ -514,10 +515,65 @@ def _input_lines(prompt: str, buffer: str, width: int) -> list[str]:
     """
     visible_prompt = _ANSI_ESCAPE_RE.sub("", str(prompt or ""))
     text = visible_prompt + str(buffer or "")
-    columns = max(1, int(width) - 1)
-    if not text:
-        return [""]
-    return [text[index:index + columns] for index in range(0, len(text), columns)]
+    return _wrap_display_cells(text, max(1, int(width) - 1))
+
+
+def _cell_width(char: str) -> int:
+    """Return the conservative terminal-cell width of one input character.
+
+    The raw composer used to use Python string length as terminal width.  That
+    is wrong for ordinary pasted CJK text and emoji (usually two cells) and
+    combining accents (zero cells), so a line that looked inside the frame
+    could actually wrap in Windows Terminal and put the cursor on a different
+    row.  Keep ambiguous-width characters narrow: it is the convention used
+    by current Windows Terminal and avoids changing ASCII geometry.
+    """
+    if not char or unicodedata.category(char).startswith("C"):
+        return 0
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def _display_width(text: str) -> int:
+    return sum(_cell_width(char) for char in str(text or ""))
+
+
+def _wrap_display_cells(text: str, columns: int) -> list[str]:
+    """Wrap text by display cells without altering the accepted buffer."""
+    limit = max(1, int(columns))
+    rows, row, used = [], [], 0
+    for char in str(text or ""):
+        cells = _cell_width(char)
+        # A wide character starts on a fresh row when only one cell remains.
+        # Zero-width combining marks remain with their preceding base.
+        if cells and row and used + cells > limit:
+            rows.append("".join(row))
+            row, used = [], 0
+        row.append(char)
+        used += cells
+    if row or not rows:
+        rows.append("".join(row))
+    return rows
+
+
+def _pad_display(text: str, columns: int) -> str:
+    """Pad a rendered row to exactly ``columns`` terminal cells."""
+    return str(text or "") + " " * max(0, int(columns) - _display_width(text))
+
+
+def _cursor_display_cell(text: str, cursor: int, columns: int) -> tuple[int, int]:
+    """Return the logical row/cell of ``cursor`` in display-cell wrapping."""
+    limit = max(1, int(columns))
+    row, used = 0, 0
+    for char in str(text or "")[:max(0, int(cursor))]:
+        cells = _cell_width(char)
+        if cells and used and used + cells > limit:
+            row, used = row + 1, 0
+        used += cells
+    if used >= limit:
+        return row + 1, 0
+    return row, used
 
 
 def _frame_chars(stream) -> dict[str, str]:
@@ -544,8 +600,8 @@ def _framed_input_lines(frame: str, buffer: str, width: int, stream,
     title = (" " + clean_frame + " ")[: max(0, outer - 4)]
     top = chars["tl"] + chars["h"] + title + chars["h"] * max(0, outer - 2 - len(title) - 1) + chars["tr"]
     text = str(buffer or "")
-    content = [text[index:index + inner] for index in range(0, len(text), inner)] or [""]
-    rows = [chars["v"] + " > " + line.ljust(inner) + chars["v"] for line in content]
+    content = _wrap_display_cells(text, inner)
+    rows = [chars["v"] + " > " + _pad_display(line, inner) + chars["v"] for line in content]
     footer_text = str(footer_hint or " Enter send %s Up/Down history %s Ctrl+L clear " % (
         chars["dot"], chars["dot"],
     ))
@@ -567,11 +623,10 @@ def _framed_cursor_cell(buffer: str, cursor: int, width: int,
                         line_count: int) -> tuple[int, int]:
     outer = max(8, int(width) - 1)
     columns = max(1, outer - 5)
-    offset = max(0, min(len(str(buffer or "")), int(cursor)))
-    row = offset // columns
+    row, column = _cursor_display_cell(buffer, cursor, columns)
     if row >= max(1, int(line_count)):
         return max(0, int(line_count) - 1), columns
-    return row, min(columns, offset % columns)
+    return row, min(columns, column)
 
 
 def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
@@ -584,8 +639,7 @@ def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
     visible_prompt = _ANSI_ESCAPE_RE.sub("", str(prompt or ""))
     prefix = visible_prompt + str(buffer or "")[:max(0, int(cursor))]
     columns = max(1, int(width) - 1)
-    row = len(prefix) // columns
-    column = len(prefix) % columns
+    row, column = _cursor_display_cell(prefix, len(prefix), columns)
     if row >= max(1, int(line_count)):
         row = max(0, int(line_count) - 1)
         column = columns
