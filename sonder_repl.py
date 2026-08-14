@@ -43,6 +43,20 @@ except ImportError:  # pragma: no cover - the REPL must never hard-depend on it
 CURRENT_TOKEN = ""
 REPL_HISTORY_LIMIT = 200
 
+# The raw composer history is deliberately process-local, but that is not a
+# reason to retain credentials for the lifetime of the terminal.  Ctrl+R
+# redraws entries in clear text, which makes a successfully typed `/login`
+# password visible again to anyone at the console.  These names cover the two
+# native commands whose positional arguments are credentials; the assignment
+# pattern covers the catalogue commands that accept an explicitly supplied
+# bearer token.
+_HISTORY_SECRET_COMMANDS = frozenset(("/login", "/register"))
+_HISTORY_SECRET_ASSIGNMENT = re.compile(
+    r"(?:^|[\s,;])(?:api[_-]?key|authorization|credential|password|passwd|"
+    r"secret|token)\s*(?:=|:)\s*\S+",
+    re.IGNORECASE,
+)
+
 
 class _Ansi:
     """Small dependency-free palette; automatically disappears when piped."""
@@ -357,6 +371,21 @@ def _normalize_input_line(line):
             value = value[len(prefix):]
             break
     return value.strip()
+
+
+def _history_safe(line):
+    """Whether a submitted REPL line may be retained for Ctrl+R recall.
+
+    This is intentionally a deny-only privacy boundary: it never rewrites a
+    command into something that could be recalled and rerun with changed
+    semantics.  Sensitive turns are simply absent from the in-memory history;
+    normal command and chat recall remain unchanged.
+    """
+    value = str(line or "").strip()
+    command = value.split(None, 1)[0].lower() if value else ""
+    return bool(value) and command not in _HISTORY_SECRET_COMMANDS and not (
+        _HISTORY_SECRET_ASSIGNMENT.search(value)
+    )
 
 
 def _rule(char="─", width=56):
@@ -1567,7 +1596,7 @@ def main():
         line = _normalize_input_line(line)
         if not line:
             continue
-        if not input_history or input_history[-1] != line:
+        if _history_safe(line) and (not input_history or input_history[-1] != line):
             input_history.append(line)
             if len(input_history) > REPL_HISTORY_LIMIT:
                 del input_history[:-REPL_HISTORY_LIMIT]

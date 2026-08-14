@@ -633,6 +633,29 @@ def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch
     assert calls and calls[0]["prompt"] == prompt
 
 
+def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
+    lines = iter(("/login nate correct-horse-battery-staple", "hello", "/exit"))
+    offered_history = []
+
+    def _read(_prompt, **kwargs):
+        offered_history.append(list(kwargs.get("history") or []))
+        return next(lines)
+
+    monkeypatch.setattr(sonder_repl, "_read_input", _read)
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.server, "admin_login", lambda *_args: "logged in")
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+
+    sonder_repl.main()
+
+    assert offered_history == [[], [], ["hello"]]
+
+
 def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):
     lines = iter(("/model CODE", "/model Gemma3:12B", "hello", "/exit"))
     seen = []
