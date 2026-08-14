@@ -102,6 +102,7 @@ def test_python_dependency_install_uses_runtime_contract_and_reprobes(
             "-m",
             "pip",
             "install",
+            "--only-binary=:all:",
             "-r",
             str(requirements),
         ],
