@@ -42,6 +42,19 @@ def _builder_error_preview():
     return namespace["compiler_error_preview"]
 
 
+def _builder_build_errors():
+    source = _BUILDER.read_text(encoding="utf-8")
+    start = source.index("def build_errors")
+    end = source.index("\ndef compiler_error_preview", start)
+    namespace: dict[str, object] = {
+        "PROJECT": ".",
+        "subprocess": __import__("subprocess"),
+        "codegen_loop": type("Loop", (), {"build_ran": staticmethod(lambda _out: True)}),
+    }
+    exec(source[start:end], namespace)
+    return namespace["build_errors"], namespace
+
+
 def test_arena_skeleton_scaffold_creates_verifier_compatible_project_once(tmp_path):
     path = scaffold.ensure_project_file(tmp_path / "FpsGame_Skeleton")
 
@@ -161,3 +174,22 @@ def test_arena_builder_keeps_rejected_compiler_feedback_bounded_and_visible():
     assert "second error" in rendered
     assert "fourth error" not in rendered
     assert "and 2 more" in rendered
+
+
+def test_arena_builder_treats_restore_failure_as_a_failed_baseline():
+    build_errors, namespace = _builder_build_errors()
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "error NU1301: unable to load the service index"
+
+    namespace["subprocess"] = type(
+        "Subprocess", (), {"run": staticmethod(lambda *_args, **_kwargs: Result())},
+    )
+    errors, ran = build_errors()
+
+    assert ran is True
+    assert errors == [
+        "error: dotnet build exited 1: error NU1301: unable to load the service index"
+    ]

@@ -124,6 +124,16 @@ def build_errors():
     except Exception as exc:
         return ["error: build could not run: %s" % exc], False
     errors = sorted({ln.strip() for ln in out.splitlines() if "error CS" in ln})
+    if proc.returncode and not errors:
+        # Restore/evaluation failures (for example NU1301) do not use a C#
+        # compiler diagnostic prefix, but they still mean no assembly was
+        # produced. Never turn a nonzero build into a verified baseline.
+        detail = next((line.strip() for line in out.splitlines() if line.strip()), "")
+        errors = [
+            "error: dotnet build exited %d%s" % (
+                proc.returncode, ": " + detail[:240] if detail else "",
+            )
+        ]
     return errors, codegen_loop.build_ran(out)
 
 
