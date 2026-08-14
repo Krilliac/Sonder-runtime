@@ -279,6 +279,57 @@ def test_runtime_policy_data_reports_missing_models(
     assert data["path"] == str(isolated_runtime_policy)
 
 
+def test_runtime_model_readiness_distinguishes_core_memory_and_optional_models():
+    data = {
+        "local_models": {
+            "fast": "sonder:latest",
+            "code": "sonder:latest",
+            "general": "missing-general:latest",
+            "reasoning": "",
+            "vision": "missing-vision:latest",
+        },
+        "embedding_model": "nomic-embed-text",
+        "missing_models": [
+            "missing-general:latest", "nomic-embed-text", "missing-vision:latest",
+        ],
+    }
+
+    assert server._runtime_model_readiness_lines(data) == [
+        "  readiness:",
+        "    local chat/code: requires general=missing-general:latest",
+        "    semantic memory: requires embedding model nomic-embed-text",
+        "    reasoning: not configured (optional)",
+        "    vision: requires missing-vision:latest",
+    ]
+
+
+def test_runtime_model_readiness_is_unknown_without_inventory():
+    assert server._runtime_model_readiness_lines({
+        "inventory_error": "OSError: offline",
+    }) == ["  readiness: unknown (local model inventory unavailable)"]
+
+
+def test_runtime_policy_status_includes_live_model_readiness(
+    isolated_runtime_policy, monkeypatch,
+):
+    policy = runtime_policy.load(create=True)
+    runtime_policy.update(local_models={"reasoning": "", "vision": ""})
+    monkeypatch.setattr(
+        server, "_runtime_installed_models",
+        lambda: {
+            *policy["local_models"].values(), policy["embedding_model"],
+        },
+    )
+
+    status = server.runtime_policy_status()
+
+    assert "  readiness:" in status
+    assert "    local chat/code: ready" in status
+    assert "    semantic memory: ready (%s)" % policy["embedding_model"] in status
+    assert "    reasoning: not configured (optional)" in status
+    assert "    vision: not configured (optional)" in status
+
+
 def test_installed_model_check_requires_the_requested_tag():
     installed = {"qwen2.5:3b", "sonder:latest", "bare-model"}
 

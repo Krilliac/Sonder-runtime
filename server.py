@@ -22218,12 +22218,69 @@ def runtime_policy_data() -> dict:
     return data
 
 
+def _runtime_model_readiness_lines(data: dict) -> list[str]:
+    """Render a bounded operator-facing readiness summary for `/runtime`.
+
+    Runtime policy is allowed to map several base tiers to one local model, so
+    merely listing mappings does not tell an operator whether the minimum chat
+    path is usable.  Keep this projection local to the server: it is derived
+    from the live inventory that ``runtime_policy_data`` already collected and
+    does not make another model-provider request.
+    """
+    if data.get("inventory_error"):
+        return [
+            "  readiness: unknown (local model inventory unavailable)",
+        ]
+
+    local_models = data.get("local_models") or {}
+    missing = {
+        str(model or "").strip().casefold()
+        for model in data.get("missing_models") or ()
+        if str(model or "").strip()
+    }
+
+    def unavailable(model) -> bool:
+        return str(model or "").strip().casefold() in missing
+
+    base_missing = [
+        "%s=%s" % (tier, local_models.get(tier) or "(unset)")
+        for tier in runtime_policy.BASE_LOCAL_TIERS
+        if not str(local_models.get(tier) or "").strip()
+        or unavailable(local_models.get(tier))
+    ]
+    lines = ["  readiness:"]
+    if base_missing:
+        lines.append("    local chat/code: requires %s" % ", ".join(base_missing))
+    else:
+        lines.append("    local chat/code: ready")
+
+    embedding = str(data.get("embedding_model") or "").strip()
+    if not embedding or unavailable(embedding):
+        lines.append(
+            "    semantic memory: requires embedding model%s"
+            % (" %s" % embedding if embedding else "")
+        )
+    else:
+        lines.append("    semantic memory: ready (%s)" % embedding)
+
+    for tier in runtime_policy.OPTIONAL_LOCAL_TIERS:
+        model = str(local_models.get(tier) or "").strip()
+        if not model:
+            lines.append("    %s: not configured (optional)" % tier)
+        elif unavailable(model):
+            lines.append("    %s: requires %s" % (tier, model))
+        else:
+            lines.append("    %s: configured (%s)" % (tier, model))
+    return lines
+
+
 @mcp.tool()
 def runtime_policy_status() -> str:
     """Show shared local model mappings and execution-lane tier choices."""
     _maybe_live_reload()
     data = runtime_policy_data()
     output = runtime_policy.format_policy(data)
+    output += "\n" + "\n".join(_runtime_model_readiness_lines(data))
     if data.get("missing_models"):
         output += "\n  WARNING missing local model(s): %s" % ", ".join(
             sorted(set(data["missing_models"]))
