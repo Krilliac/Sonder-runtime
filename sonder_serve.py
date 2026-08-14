@@ -2979,7 +2979,22 @@ class Handler(BaseHTTPRequestHandler):
                 dev_flags=req.get("dev_flags", ""),
                 banned=str(req.get("banned", "")),
             )
-            self._send_json_payload({"ok": not out.startswith("ERROR:"), "message": out})
+            # ``admin_set_account`` is also the REPL/MCP-facing legacy
+            # wrapper, where a readable ``ERROR:`` string is the established
+            # contract.  Do not carry that stringly failure over the direct
+            # HTTP boundary as a successful 200 response: API clients need a
+            # non-2xx status and the standard machine-readable error shape to
+            # distinguish a rejected mutation from a completed one.
+            if out.startswith("ERROR:"):
+                self._send_json_payload(
+                    {"error": {
+                        "message": out.removeprefix("ERROR:").strip() or "account update failed",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            self._send_json_payload({"ok": True, "message": out})
             return
         if path != "/v1/chat/completions":
             self._send_json_payload(
