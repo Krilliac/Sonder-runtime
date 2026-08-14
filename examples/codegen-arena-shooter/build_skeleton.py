@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import os
 import re
@@ -44,6 +45,9 @@ SONDER = os.environ.get(
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.join(HERE, "FpsGame_Skeleton")
 
+# The example owns small helper modules (``skeleton``, ``bodynotes`` and the
+# project scaffold). Keep its directory ahead of the runtime root: otherwise
+# a same-named runtime helper can silently shadow an example contract.
 sys.path.insert(0, SONDER)
 sys.path.insert(0, HERE)
 
@@ -53,7 +57,55 @@ import bodynotes  # noqa: E402
 import codegen_loop  # noqa: E402
 import server  # noqa: E402
 
+# ``server``/``codegen_loop`` may legitimately import the runtime's own
+# project_scaffold module. Load this example-local manifest helper under a
+# distinct module identity so that existing ``sys.modules`` entries cannot
+# redirect a generated game to unrelated runtime scaffolding.
+_SCAFFOLD_SPEC = importlib.util.spec_from_file_location(
+    "arena_shooter_project_scaffold", os.path.join(HERE, "project_scaffold.py"),
+)
+if _SCAFFOLD_SPEC is None or _SCAFFOLD_SPEC.loader is None:
+    raise RuntimeError("arena shooter project scaffold is unavailable")
+_SCAFFOLD_MODULE = importlib.util.module_from_spec(_SCAFFOLD_SPEC)
+_SCAFFOLD_SPEC.loader.exec_module(_SCAFFOLD_MODULE)
+ensure_project_file = _SCAFFOLD_MODULE.ensure_project_file
+
 FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
+
+# Compilation alone cannot see two Raylib lifecycle bugs observed in the
+# generated entrypoint: a match can start without a local player, and screen
+# handlers can incorrectly nest BeginDrawing/EndDrawing inside Main's frame.
+# These narrow body-local checks are derived from the published skeleton
+# contract. They do not attempt to grade gameplay or replace the real build.
+_REQUIRED_BODY_TEXT = {
+    ("Program.cs", "StartMatch"): ("_match.AddLocalPlayer(",),
+    # Cell indices outside the map are solid.  Wrapping with modulo both
+    # breaks that collision boundary and can still yield a negative index.
+    ("GameMap.cs", "IsWallCell"): ("Width", "Depth", "_walls"),
+    # IsWallCell owns bounds behavior.  Reimplementing `_walls` directly has
+    # already produced a compiling but inverted/out-of-range IsWallAt body;
+    # preserve the one source of truth rather than grading it only by syntax.
+    ("GameMap.cs", "IsWallAt"): ("MathF.Floor", "CellSize", "IsWallCell("),
+}
+_FORBIDDEN_BODY_TEXT = {
+    ("Program.cs", "DoLobby"): ("Raylib.BeginDrawing", "Raylib.EndDrawing"),
+    ("Program.cs", "DoScoreboard"): ("Raylib.BeginDrawing", "Raylib.EndDrawing"),
+    ("GameMap.cs", "IsWallCell"): ("%",),
+}
+
+
+def body_contract_issues(name: str, body_name: str, body: str) -> list[str]:
+    """Return deterministic, body-local contract violations before compiling."""
+    source = str(body or "")
+    key = (name, body_name)
+    issues = []
+    for required in _REQUIRED_BODY_TEXT.get(key, ()):
+        if required not in source:
+            issues.append("must contain %s" % required)
+    for forbidden in _FORBIDDEN_BODY_TEXT.get(key, ()):
+        if forbidden in source:
+            issues.append("must not contain %s" % forbidden)
+    return issues
 
 
 def build_errors():
@@ -72,11 +124,113 @@ def build_errors():
     except Exception as exc:
         return ["error: build could not run: %s" % exc], False
     errors = sorted({ln.strip() for ln in out.splitlines() if "error CS" in ln})
+    if proc.returncode and not errors:
+        # Restore/evaluation failures (for example NU1301) do not use a C#
+        # compiler diagnostic prefix, but they still mean no assembly was
+        # produced. Never turn a nonzero build into a verified baseline.
+        detail = next((line.strip() for line in out.splitlines() if line.strip()), "")
+        errors = [
+            "error: dotnet build exited %d%s" % (
+                proc.returncode, ": " + detail[:240] if detail else "",
+            )
+        ]
     return errors, codegen_loop.build_ran(out)
+
+
+def compiler_error_preview(errors: list[str], *, limit: int = 3) -> str:
+    """Render a bounded diagnostic for a rejected body attempt.
+
+    A count tells the runner that a candidate is unsafe to keep, but it does
+    not tell the operator whether the model ignored the body-only contract,
+    recalled a wrong API, or hit a harness issue.  Preserve the count as the
+    acceptance authority and show only a small compiler excerpt for diagnosis.
+    """
+    rows = [str(error).strip() for error in (errors or []) if str(error).strip()]
+    if not rows:
+        return "(compiler reported no captured error lines)"
+    shown = rows[:max(1, int(limit))]
+    suffix = "\n      ... and %d more" % (len(rows) - len(shown)) if len(rows) > len(shown) else ""
+    return "\n      " + "\n      ".join(row[:240] for row in shown) + suffix
 
 
 def strip_fences(text: str) -> str:
     return FENCE.sub("", text or "").strip()
+
+
+def wrapped_body_issue(text: str, signature: str) -> str:
+    """Reject an incomplete method wrapper before it can poison the skeleton.
+
+    The model is asked for bare statements but sometimes returns a complete
+    method.  A balanced wrapper can be recovered by :func:`extract_body`; an
+    unclosed wrapper cannot.  Compiling it only repeats a predictable parser
+    failure, so keep the incumbent untouched and give the next attempt a
+    precise host observation instead.
+    """
+    cleaned = strip_fences(text)
+    head = signature.split("(")[0].strip().split()
+    name = head[-1] if head else ""
+    prefix, marker, tail = cleaned.partition("{")
+    if not name or not marker or name not in prefix:
+        return ""
+    depth = 1
+    for char in tail:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return ""
+    return "returned an unbalanced method wrapper; output statements only"
+
+
+def body_brace_issue(body: str) -> str:
+    """Return a parser-free C# brace error, ignoring ordinary strings/comments."""
+    text = str(body or "")
+    depth, index, state = 0, 0, "normal"
+    while index < len(text):
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        if state == "line-comment":
+            if char in "\r\n":
+                state = "normal"
+        elif state == "block-comment":
+            if char == "*" and nxt == "/":
+                state, index = "normal", index + 1
+        elif state == "string":
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                state = "normal"
+        elif state == "verbatim-string":
+            if char == '"' and nxt == '"':
+                index += 1
+            elif char == '"':
+                state = "normal"
+        elif state == "char":
+            if char == "\\":
+                index += 1
+            elif char == "'":
+                state = "normal"
+        elif char == "/" and nxt == "/":
+            state, index = "line-comment", index + 1
+        elif char == "/" and nxt == "*":
+            state, index = "block-comment", index + 1
+        elif char == "@" and nxt == '"':
+            state, index = "verbatim-string", index + 1
+        elif char == '"':
+            state = "string"
+        elif char == "'":
+            state = "char"
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                return "returned an unexpected closing brace in body statements"
+        index += 1
+    if depth:
+        return "returned unbalanced braces in body statements"
+    return ""
 
 
 def extract_body(text: str, signature: str) -> str:
@@ -93,6 +247,19 @@ def extract_body(text: str, signature: str) -> str:
         return ""
     head = signature.split("(")[0].strip().split()
     name = head[-1] if head else ""
+    # C# permits ``T Method(...) => expression;``.  It is a complete method
+    # wrapper just like the brace form, but has no opening brace for the
+    # recovery logic below to find.  Normalize it into the statements that
+    # belong inside the harness-owned braces instead of splicing a second
+    # signature into the skeleton.
+    arrow = text.find("=>")
+    if name and arrow >= 0 and name in text[:arrow]:
+        expression = text[arrow + 2:].strip()
+        if not expression:
+            return ""
+        if not expression.endswith(";"):
+            expression += ";"
+        return expression if len(head) >= 2 and head[-2] == "void" else "return " + expression
     looks_wrapped = name and name in text.split("{")[0]
     if not looks_wrapped:
         return text
@@ -108,7 +275,9 @@ def extract_body(text: str, signature: str) -> str:
             if depth == 0:
                 inner = text[start + 1:index].strip()
                 return inner or text
-    return text
+    # An incomplete wrapper is not a body.  Its caller reports the precise
+    # shape error and leaves the last known-good skeleton in place.
+    return ""
 
 
 def reply_failed(reply: str) -> str:
@@ -158,6 +327,8 @@ def main():
                              "compiler errors before the next try")
     parser.add_argument("--reset", action="store_true",
                         help="rewrite every skeleton before filling")
+    parser.add_argument("--prepare-only", action="store_true",
+                        help="write the deterministic project/skeleton and verify its baseline build; never call a model")
     parser.add_argument("--model", default="",
                         help="override the ollama model behind --tiers, so two "
                              "models can be compared on identical slots")
@@ -172,6 +343,8 @@ def main():
         print("model override: %s -> %s" % (args.tiers, args.model), flush=True)
 
     os.makedirs(PROJECT, exist_ok=True)
+    project_file = ensure_project_file(PROJECT)
+    print("project scaffold: %s" % project_file, flush=True)
     # v1 per-file contracts are deliberately NOT used: they describe a design
     # this skeleton replaced, and carrying both put two contradictory contracts
     # in one prompt. bodynotes.py is the single source now.
@@ -194,6 +367,12 @@ def main():
     print("baseline: %d error(s) across %d skeleton file(s)\n"
           % (len(errors), len(skeleton.FILES)))
     baseline = len(errors)
+    if args.prepare_only:
+        if errors:
+            print("ABORT: harness-owned baseline must compile before model work.")
+            return 1
+        print("baseline build succeeded; no model bodies were requested.")
+        return 0
 
     slots = []
     for name, skel in skeleton.FILES:
@@ -263,9 +442,40 @@ def main():
                       % failure, flush=True)
                 print("Nothing was measured. Fix the runtime and re-run.", flush=True)
                 return 2
+            shape_issue = wrapped_body_issue(reply, signature)
+            if shape_issue:
+                status = "attempt %d rejected: host contract (%s)" % (attempt, shape_issue)
+                feedback = (
+                    "\n\nYOUR PREVIOUS ATTEMPT VIOLATED A HOST-OBSERVED OUTPUT "
+                    "CONTRACT: %s. Do not write a method signature or braces; "
+                    "return statements only." % shape_issue
+                )
+                continue
             body = extract_body(reply, signature)
             if not body:
                 status = "attempt %d: empty reply" % attempt
+                continue
+
+            brace_issue = body_brace_issue(body)
+            if brace_issue:
+                status = "attempt %d rejected: host contract (%s)" % (attempt, brace_issue)
+                feedback = (
+                    "\n\nYOUR PREVIOUS ATTEMPT VIOLATED A HOST-OBSERVED OUTPUT "
+                    "CONTRACT: %s. Balance every block before returning only "
+                    "body statements." % brace_issue
+                )
+                continue
+
+            contract_issues = body_contract_issues(name, body_name, body)
+            if contract_issues:
+                status = "attempt %d rejected: host contract (%s)" % (
+                    attempt, "; ".join(contract_issues))
+                feedback = (
+                    "\n\nYOUR PREVIOUS ATTEMPT VIOLATED A HOST-OBSERVED "
+                    "METHOD CONTRACT: %s. Rewrite only this body; do not "
+                    "start or end a drawing frame here."
+                    % "; ".join(contract_issues)
+                )
                 continue
 
             candidate = skeleton.splice(before, body_name, body)
@@ -297,6 +507,8 @@ def main():
                 kept += 1
                 status = "KEPT (attempt %d)" % attempt
                 break
+
+            print("      compiler:" + compiler_error_preview(errors), flush=True)
 
             with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(before)
