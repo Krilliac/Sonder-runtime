@@ -3395,22 +3395,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None):
         iid = iid or uuid.uuid4().hex[:12]
-        self.send_response(200)
-        self._cors()
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        if elapsed_ms is None:
-            started = getattr(self, "_request_started", None)
-            elapsed_ms = int((time.monotonic() - started) * 1000) if started else 0
-        self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
-        if getattr(self, "_correlation_id", ""):
-            self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
-        # No Content-Length on an SSE body — signal end-of-response by closing the
-        # connection, otherwise HTTP/1.1 keep-alive leaves clients blocked on read().
-        self.send_header("Connection", "close")
-        self.close_connection = True
-        self.end_headers()
         try:
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            if elapsed_ms is None:
+                started = getattr(self, "_request_started", None)
+                elapsed_ms = int((time.monotonic() - started) * 1000) if started else 0
+            self.send_header("X-Sonder-Elapsed-Ms", str(max(0, int(elapsed_ms))))
+            if getattr(self, "_correlation_id", ""):
+                self.send_header("X-Sonder-Correlation-Id", self._correlation_id)
+            # No Content-Length on an SSE body — signal end-of-response by closing the
+            # connection, otherwise HTTP/1.1 keep-alive leaves clients blocked on read().
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
             self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
             self.wfile.write(_chunk(
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
@@ -3419,6 +3419,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
             return True
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # Header writes can fail before the first event just as body writes
+            # can.  Return the same cancellation signal so the caller records
+            # one truthful terminal metric instead of leaking a socket error.
+            self.close_connection = True
             return False
 
 
