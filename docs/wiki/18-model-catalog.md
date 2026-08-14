@@ -102,6 +102,28 @@ keep their original model/revision provenance until the operator explicitly runs
 `/embeddings apply` to refresh them. This prevents a model swap from silently
 mixing incompatible vector spaces.
 
+### Local image analysis
+
+After binding an installed VLM that explicitly declares the `vision`
+capability, analyze a guarded local image without sending its pixels to a cloud
+provider:
+
+```text
+/runtime set vision=qwen2.5vl:3b
+/contextsize 4k
+/vision path/to/screenshot.png | What is the visible error and likely cause?
+```
+
+`vision_analyze(path, prompt)` is also available to direct MCP callers. It
+accepts PNG, JPEG, and BMP up to 8 MiB, checks the normal file-root and
+secret/control-plane read policy, requires a loopback Ollama endpoint, and
+refuses an unconfigured, cloud, or non-vision target. Image text is explicitly
+treated as untrusted data; it cannot issue tools or override the requested
+analysis. It needs at least 4k of the operator-selected native context and
+does not silently widen the context/VRAM policy. This initial surface is
+direct/REPL only—agents do not receive an
+image channel until their local-input transcript contract is separately wired.
+
 ## 5. Scaling up: multi-GPU
 
 Multi-GPU LLM inference does **not** use SLI or NVLink — those are irrelevant
