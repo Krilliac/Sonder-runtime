@@ -4486,10 +4486,24 @@ def prewarm_model(tier: str = "") -> bool:
 
 
 def _get(path: str) -> dict:
+    """Fetch a bounded JSON control-plane response from Ollama.
+
+    Discovery and residency checks use GET, but they still cross the configured
+    Ollama trust boundary (which may be an explicitly approved remote endpoint).
+    Keep their response budget identical to model POST responses so a malformed
+    catalog cannot make a chat request allocate an unbounded body before model
+    selection or prewarm has a chance to fail safely.
+    """
     _require_ollama_endpoint()
     req = urllib.request.Request(f"{BASE}{path}")
     with ollama_endpoint.open_url(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+        if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+            raise ModelCallError(
+                "protocol",
+                "Ollama response exceeded the 16 MiB safety limit",
+            )
+        return json.loads(raw.decode("utf-8"))
 
 
 def _parse_schema_arg(schema):
@@ -24297,7 +24311,7 @@ def unload(tier: str = "all") -> str:
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.25)
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+    except (ModelCallError, urllib.error.URLError, TimeoutError, ValueError) as exc:
         residency_error = _transport_error_detail(exc)
     remaining = [model for model in requested if model.casefold() in resident]
 
