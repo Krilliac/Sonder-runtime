@@ -33,7 +33,7 @@ fresh installation, but embedding is not a prerequisite for ordinary chat.
 | Embedding model (`nomic-embed-text`, BGE, E5, mxbai) | No | Semantic memory, lesson recall, and vector search |
 | Separate `fast`, `code`, or `general` models | No | Only when you want different quality/latency tradeoffs; one model can fill all three |
 | `reasoning` model | No | Explicit hard-reasoning routing |
-| `vision` model | No | Local `/vision` image analysis |
+| `vision` model | No | A configured local vision/image-input feature |
 | Reranker, extraction, tool-oriented, speech, or experimental models | No | Only after their matching integration is enabled and configured |
 | Cloud model | No | Explicit cloud-tier work; it is separately consent-gated |
 

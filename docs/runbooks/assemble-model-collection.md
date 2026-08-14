@@ -55,11 +55,16 @@ Portable/offline instead? Import a GGUF directly (including from a USB) with
 
 ```bash
 # tiers -> concrete models
-/runtime set fast=<fast-model> code=<coder-model> general=<general-model>
+/runtime set fast=<base-model> code=<base-model> general=<base-model>
 /runtime set embedding=<embedding-model>
 # lanes -> tiers
 /runtime set router=fast workbench=code autopilot=code fleet=code review=general
 ```
+
+When you later install separate specialist models, replace only the role you
+want to specialize, for example `/runtime set code=<coder-model>` or
+`/runtime set fast=<fast-model>`. Do not bind a model name before it is
+installed: runtime policy deliberately rejects unavailable local models.
 
 `reasoning` and `vision` are first-class optional tiers in the policy. They are
 unbound by default; bind models suited to the live host with
