@@ -16,7 +16,7 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/models` | key | Advertised tiers. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
-| `GET /v1/sonder/status` | key | Rich runtime/stats snapshot. |
+| `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot. Ordinary hosted accounts receive only their account and the model catalog. |
 
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the

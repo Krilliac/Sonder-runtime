@@ -2563,6 +2563,37 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_auth_error()
                 return
             account = context["account"]
+            # This endpoint is a host-wide operations dashboard, not a
+            # per-account session view.  Its agent, activity, learning and
+            # durable-store sections have no principal boundary to apply at
+            # this adapter.  Returning a redacted *global* snapshot would
+            # still disclose another account's workload and timing, so keep
+            # it available to the local owner / administrator only.
+            if not _admin_authorized(context):
+                self._send_json_payload({
+                    "status": "restricted",
+                    "account": account or {},
+                    "models": [
+                        {"id": "sonder", "owned_by": "local"},
+                        *[
+                            {
+                                "id": tier_name,
+                                "owned_by": "cloud"
+                                if server._is_cloud_tier(tier_name, model)
+                                else "local",
+                            }
+                            for tier_name, model in server.available_tiers().items()
+                        ],
+                    ],
+                    "operational": {
+                        "available": False,
+                        "reason": (
+                            "host-wide diagnostics require administrator "
+                            "authorization"
+                        ),
+                    },
+                })
+                return
             agents = server.master_orchestrator.snapshot()
             activity_source = server.activity_tracker.snapshot()
             detail_allowed = _execution_feed_detail_allowed(context)
