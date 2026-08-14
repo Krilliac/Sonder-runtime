@@ -1220,6 +1220,17 @@ def test_fanout_synthesis_refuses_incomplete_source_previews(monkeypatch, field,
     assert expected in server.model_fanout_synthesize("fan-test", "synth-local")
 
 
+def test_fanout_synthesis_strips_inline_reasoning(monkeypatch):
+    monkeypatch.setattr(server, "_fanout_synthesis_prompt", lambda _bundle: ("prompt", 4096))
+    monkeypatch.setattr(
+        server, "_post_model", lambda *_args, **_kwargs: (
+            {"message": {"content": "<think>private synthesis reasoning</think>Final."}}, 1,
+        ),
+    )
+
+    assert server._fanout_synthesis_generate("local", "{}") == "Final."
+
+
 def test_fanout_synthesis_rejects_cloud_before_vault_or_source_construction(monkeypatch):
     monkeypatch.setattr(server, "_direct_fanout_access", lambda *_args: ({"id": "fan-test", "status": "completed"}, None))
     monkeypatch.setattr(
