@@ -1293,6 +1293,10 @@ def test_fanout_synthesis_uses_nested_tag_capability_without_show(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("positively declared nested capability must avoid /api/show"),
     )
 
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan == {"scope": "local", "selected": ["nested-chat"], "skipped": []}
     assert server._fanout_nonchat_reason({
         "name": "nested-chat", "capabilities": [],
         "details": {"capabilities": ["completion"]},
