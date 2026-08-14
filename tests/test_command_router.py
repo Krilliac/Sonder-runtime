@@ -108,6 +108,8 @@ def test_grounded_self_inspection_uses_the_host_report_not_chat_memory():
     assert cr.resolve(
         "please could you audit yourself and show me the next improvements?"
     ) == "/improve"
+    assert cr.resolve("can you give me grounded improvements?") == "/improve"
+    assert cr.resolve("give me the next grounded improvements") == "/improve"
     assert cr.resolve("could you find something to do?") == "/improve"
     # The rule is whole-turn anchored: a quoted or scoped sentence is not a
     # privileged self-inspection request.
