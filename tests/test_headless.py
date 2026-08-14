@@ -54,7 +54,7 @@ def test_ollama_probe_uses_canonical_client_environment(monkeypatch):
 
 def test_unavailable_remote_ollama_never_starts_local_daemon(monkeypatch):
     started = []
-    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     monkeypatch.setattr(H, "ollama_ok", lambda: False)
     monkeypatch.setattr(H, "ollama_exe", lambda: "ollama-test")

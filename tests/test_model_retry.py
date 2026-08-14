@@ -187,7 +187,7 @@ def test_cloud_model_name_cannot_bypass_cloud_opt_in(monkeypatch):
 
 def test_remote_ollama_requires_separate_opt_in_before_request(monkeypatch):
     calls = []
-    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
     monkeypatch.setattr(
@@ -209,7 +209,7 @@ def test_remote_opt_in_is_single_attempt_even_for_transient_failure(monkeypatch)
         calls.append(1)
         raise urllib.error.URLError(ConnectionResetError("reset"))
 
-    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     monkeypatch.setenv("SONDER_LOCAL_RETRIES", "2")
     monkeypatch.setattr(server, "_post", fail)
@@ -247,7 +247,7 @@ def test_cloud_model_on_remote_endpoint_requires_both_opt_ins(monkeypatch):
 
 
 def test_status_labels_explicit_remote_endpoint(monkeypatch):
-    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     monkeypatch.setattr(
         server,
