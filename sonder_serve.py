@@ -292,6 +292,7 @@ def _state_or_legacy(state):
 
 
 def _state_principal(context):
+    context = context or {}
     account = context.get("account") or {}
     if account:
         identity = account.get("username") or account.get("id") or "unknown"
@@ -318,6 +319,42 @@ def _request_idempotency_key(context, endpoint, supplied_key):
         str(endpoint or ""), _state_principal(context), supplied_key,
     )
     return "hi-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _http_action_idempotency_key(context, supplied_key, action):
+    """Return a principal- and action-bound replay key for HTTP work controls.
+
+    HTTP clients commonly retry after a connection disappears while a long
+    agent/autopilot request is still running.  A bare client key is not a safe
+    cache key: two accounts can choose the same value, and the same client can
+    accidentally reuse it for a different operation.  Hash the opaque client
+    value together with the authenticated principal and the exact canonical
+    control text before handing it to the process-local lifecycle coordinator.
+    Nothing secret, account-controlled, or request text is retained in the
+    coordinator's bounded idempotency map.
+    """
+    key = str(supplied_key or "").strip()
+    if not key:
+        return ""
+    # HTTP headers are already bounded by the server, but keep this helper's
+    # behavior explicit when it is called directly in tests or embeddings.
+    if len(key) > 512:
+        return ""
+    material = "\0".join((
+        "served-action-idempotency-v1",
+        _state_principal(context),
+        key,
+        str(action or ""),
+    ))
+    return "act-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _idempotent_http_action(context, supplied_key, action, factory):
+    """Run an opt-in long-running action once for this caller and request."""
+    cache_key = _http_action_idempotency_key(context, supplied_key, action)
+    if not cache_key:
+        return factory()
+    return sonder_lifecycle.get().idempotent(cache_key, factory)
 
 
 def _task_account_scope(context):
@@ -1402,7 +1439,8 @@ def _slash_system_operation(command, argument):
     return ""
 
 
-def _handle_slash(content, messages=None, state=None, project="", context=None):
+def _handle_slash(content, messages=None, state=None, project="", context=None,
+                  idempotency_key=""):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
 
@@ -1523,7 +1561,14 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
     if cmd in ("/autopilot", "/auto"):
-        return server.control_command(stripped, project=project)
+        # Starting a persistent run is a side effect.  A caller may not know
+        # whether its connection died before or after the controller accepted
+        # it, so an opt-in replay key returns the first result rather than
+        # creating a sibling run.
+        return _idempotent_http_action(
+            context, idempotency_key, "autopilot\0%s\0%s" % (project, stripped),
+            lambda: server.control_command(stripped, project=project),
+        )
     if cmd in ("/runtime", "/models"):
         return server.control_command(stripped, project=project)
     if cmd in ("/update", "/updatecheck", "/updatesource"):
@@ -1531,7 +1576,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/selfmod", "/selfmodify"):
         return server.control_command(stripped, project=project)
     if cmd in ("/goal", "/goals"):
-        return server.control_command(stripped, project=project)
+        return _idempotent_http_action(
+            context, idempotency_key, "goal\0%s\0%s" % (project, stripped),
+            lambda: server.control_command(stripped, project=project),
+        )
     if cmd in ("/mcp", "/convergence"):
         return server.control_command(stripped, project=project)
     if cmd in ("/learning", "/learnhealth", "/metrics"):
@@ -1548,8 +1596,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
         )
         if task_boundary_error:
             return task_boundary_error
-        return server.workbench_agent(
-            prompt=arg.strip(), tier="auto", max_steps=12, project=project,
+        return _idempotent_http_action(
+            context, idempotency_key, "workbench\0%s\0%s" % (project, arg.strip()),
+            lambda: server.workbench_agent(
+                prompt=arg.strip(), tier="auto", max_steps=12, project=project,
+            ),
         )
     if cmd in (
         "/report", "/endreport", "/checklist", "/plan",
@@ -1866,11 +1917,25 @@ def _handle_intent(content, messages=None, state=None):
     return "\n".join(replies)
 
 
-def _handle_work_intent(content, project="", authorized=False):
+def _handle_work_intent(content, project="", authorized=False, context=None,
+                        idempotency_key=""):
     """Route developer work through the bounded execution-mode chooser."""
     if not authorized:
         return None
-    return server.route_work_request(content, project=project)
+    # Do not let ordinary keyed chat occupy the bounded replay cache.  The
+    # work router itself returns None for those turns, but caching that miss
+    # would evict a completed mutating action which a client may still retry.
+    # This is a pure host-side preflight; route_work_request repeats the same
+    # classification under its stable execution context before any work starts.
+    if not (
+        server.master_orchestrator.requested_worker_cap(content)
+        or intents.classify_execution(content)
+    ):
+        return None
+    return _idempotent_http_action(
+        context, idempotency_key, "natural-work\0%s\0%s" % (project, content),
+        lambda: server.route_work_request(content, project=project),
+    )
 
 
 def _model_to_tier(model):
@@ -2386,7 +2451,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
-                "X-Sonder-Bootstrap-Secret",
+                "X-Sonder-Bootstrap-Secret, Idempotency-Key",
             )
             self.send_header(
                 "Access-Control-Expose-Headers",
@@ -3462,6 +3527,7 @@ class Handler(BaseHTTPRequestHandler):
                         reply = _handle_slash(
                             prompt, messages=messages, state=state,
                             project=storage_project, context=context,
+                            idempotency_key=self.headers.get("Idempotency-Key", ""),
                         )
                     if (structured_schema is None and reply is None
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
@@ -3509,6 +3575,8 @@ class Handler(BaseHTTPRequestHandler):
                             prompt,
                             project=storage_project,
                             authorized=_developer_authorized(context),
+                            context=context,
+                            idempotency_key=self.headers.get("Idempotency-Key", ""),
                         )
                         execution_routed = reply is not None
                     if structured_schema is None and reply is not None:
