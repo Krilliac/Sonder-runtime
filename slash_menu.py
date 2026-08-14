@@ -705,6 +705,57 @@ def available() -> bool:
 # --- the raw reader -------------------------------------------------------
 
 
+def _cell_width(ch: str) -> int:
+    """Return the terminal-cell width of one Unicode code point.
+
+    The raw, unframed composer cannot delegate wrapping to the console: doing
+    so makes its redraw bookkeeping depend on terminal-specific eager-wrap
+    behaviour.  Python string indexes are code points, though, while a CJK
+    character or ordinary emoji consumes two terminal cells and combining
+    marks consume none.  Keep the conservative width rule here, where it is
+    used only by the unframed renderer; framed rendering deliberately retains
+    its existing fixed-character geometry.
+    """
+    if not ch or unicodedata.combining(ch) or ch in ("\u200c", "\u200d"):
+        return 0
+    # Variation selectors and emoji skin-tone modifiers modify the preceding
+    # glyph rather than occupying a cursor cell of their own.
+    codepoint = ord(ch)
+    if 0xFE00 <= codepoint <= 0xFE0F or 0xE0100 <= codepoint <= 0xE01EF:
+        return 0
+    if 0x1F3FB <= codepoint <= 0x1F3FF:
+        return 0
+    if unicodedata.category(ch).startswith("C"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+
+
+def _display_width(text: str) -> int:
+    """Return the approximate number of terminal cells used by *text*."""
+    return sum(_cell_width(ch) for ch in str(text or ""))
+
+
+def _input_lines_by_cells(text: str, columns: int) -> list[str]:
+    """Wrap raw input by terminal cells without splitting combining glyphs."""
+    limit = max(1, int(columns))
+    lines: list[str] = []
+    current: list[str] = []
+    used = 0
+    for ch in str(text or ""):
+        cells = _cell_width(ch)
+        # A zero-width mark must remain with the rendered character before it
+        # even at a wrap boundary.  It has no cursor cell of its own.
+        if cells and current and used + cells > limit:
+            lines.append("".join(current))
+            current = []
+            used = 0
+        current.append(ch)
+        used += cells
+    if current or not lines:
+        lines.append("".join(current))
+    return lines
+
+
 def _input_lines(prompt: str, buffer: str, width: int) -> list[str]:
     """Return the complete visible input, wrapped without eliding it.
 
@@ -718,9 +769,7 @@ def _input_lines(prompt: str, buffer: str, width: int) -> list[str]:
     visible_prompt = _ANSI_ESCAPE_RE.sub("", str(prompt or ""))
     text = visible_prompt + str(buffer or "")
     columns = max(1, int(width) - 1)
-    if not text:
-        return [""]
-    return [text[index:index + columns] for index in range(0, len(text), columns)]
+    return _input_lines_by_cells(text, columns)
 
 
 def _frame_chars(stream) -> dict[str, str]:
@@ -793,8 +842,9 @@ def _cursor_cell(prompt: str, buffer: str, cursor: int, width: int,
     visible_prompt = _ANSI_ESCAPE_RE.sub("", str(prompt or ""))
     prefix = visible_prompt + str(buffer or "")[:max(0, int(cursor))]
     columns = max(1, int(width) - 1)
-    row = len(prefix) // columns
-    column = len(prefix) % columns
+    cells = _display_width(prefix)
+    row = cells // columns
+    column = cells % columns
     if row >= max(1, int(line_count)):
         row = max(0, int(line_count) - 1)
         column = columns
