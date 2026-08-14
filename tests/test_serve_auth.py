@@ -181,6 +181,37 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
+@pytest.mark.parametrize(
+    ("stream_options", "message"),
+    [
+        (None, "stream_options must be an object"),
+        ([], "stream_options must be an object"),
+        ({"include_usage": "yes"}, "stream_options.include_usage must be a boolean"),
+    ],
+)
+def test_chat_rejects_invalid_stream_options_before_response_routing(
+        monkeypatch, stream_options, message):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = json.dumps({
+        "model": "sonder", "stream": True, "stream_options": stream_options,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": message, "type": "invalid_request",
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
 @pytest.mark.parametrize("response_format", [
     {"type": "json_schema", "json_schema": {"name": "result", "schema": {"type": "object"}}},
     {"type": "json_schema", "json_schema": {
