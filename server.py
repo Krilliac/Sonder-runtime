@@ -21938,13 +21938,30 @@ def _runtime_model_capability_error(tier: str, model: str, records) -> str:
 
 
 def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
-    """Require a positive local catalog declaration for specialist bindings."""
+    """Verify a local specialist capability without trusting absent tag metadata.
+
+    Standard Ollama ``/api/tags`` records often omit capabilities entirely.
+    A meaningful declaration is authoritative; absent metadata triggers one
+    narrow ``/api/show`` lookup for the selected installed local model, just as
+    durable fanout synthesis does.  This avoids rejecting a valid embedder
+    solely because a cheap catalog response was sparse.
+    """
     wanted = str(capability or "").strip().lower()
-    return any(
-        _runtime_model_is_installed(model, (name,))
-        and wanted in _fanout_capabilities(record)
-        for name, record in records
-    )
+    selected = None
+    for name, record in records:
+        if _runtime_model_is_installed(model, (name,)):
+            selected = name
+            capabilities = _fanout_capabilities(record)
+            if capabilities:
+                return wanted in capabilities
+            break
+    if not selected or _is_cloud_model_name(selected):
+        return False
+    try:
+        details = _post("/api/show", {"name": selected}, timeout=30)
+    except ModelCallError:
+        return False
+    return isinstance(details, dict) and wanted in _fanout_capabilities(details)
 
 
 def runtime_policy_data() -> dict:

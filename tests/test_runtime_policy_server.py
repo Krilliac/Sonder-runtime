@@ -186,6 +186,26 @@ def test_runtime_embedding_binding_is_capability_checked_and_does_not_rewrite_ve
     )
 
 
+def test_runtime_embedding_binding_uses_show_when_tags_omit_capabilities(
+    isolated_runtime_policy, monkeypatch,
+):
+    show_calls = []
+    monkeypatch.setattr(
+        server, "_get", lambda _path: {"models": [{"name": "bge-m3:latest"}]},
+    )
+    monkeypatch.setattr(
+        server, "_post",
+        lambda path, payload, timeout=30: show_calls.append((path, payload, timeout)) or {
+            "capabilities": ["embedding"],
+        },
+    )
+
+    result = server.runtime_policy_update(embedding_model="bge-m3:latest")
+
+    assert "embeddings: bge-m3:latest" in result
+    assert show_calls == [("/api/show", {"name": "bge-m3:latest"}, 30)]
+
+
 def test_runtime_slash_applies_embedding_with_other_bindings(monkeypatch):
     calls = []
     monkeypatch.setattr(
