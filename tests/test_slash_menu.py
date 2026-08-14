@@ -383,6 +383,23 @@ def test_cursor_cell_tracks_wrapped_input_without_terminal_autowrap():
     ) == (1, 0)
 
 
+def test_unframed_input_wraps_cjk_emoji_and_combining_marks_by_display_cells():
+    # Width 7 reserves its last cell, leaving six.  The prompt consumes two;
+    # each of the CJK glyph and emoji consumes two, while the combining acute
+    # stays with ``e`` without claiming another terminal cell.
+    lines = slash_menu._input_lines("> ", "\u754c\U0001f642e\u0301x", width=7)
+
+    assert lines == ["> \u754c\U0001f642", "e\u0301x"]
+
+
+def test_unframed_cursor_uses_display_cells_not_codepoint_count():
+    # CJK and emoji each use two cells; the combining acute uses zero.  This
+    # verifies cursor placement independently of the wrapped text renderer.
+    assert slash_menu._cursor_cell(
+        "> ", "\u754c\U0001f642e\u0301x", 4, 20, 1,
+    ) == (0, 7)
+
+
 def test_live_redraw_keeps_only_a_viewport_sized_tail_of_wrapped_input():
     lines = [str(index) for index in range(10)]
 
