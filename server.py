@@ -15665,7 +15665,7 @@ def tool_manifest() -> str:
         "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
         "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
         "record_outcome": "Feed grounded outcomes back into learning.",
-        "sonder_stats/sonder_sessions/sonder_remember_fact": "Memory observability and durable facts.",
+        "sonder_stats/sonder_sessions/sonder_remember_fact/sonder_forget_fact": "Memory observability and durable facts.",
     }
     return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
 
