@@ -2250,3 +2250,32 @@ def test_http_body_parser_rejects_ambiguous_framing_headers(
 
     assert response.startswith(b"HTTP/1.0 400"), response
     assert message in response
+
+
+def test_admin_drain_rejects_ambiguous_framing_before_dispatch(monkeypatch):
+    called = []
+
+    def drain(self):
+        called.append(True)
+        self._send_json_payload({"drained": True})
+
+    monkeypatch.setattr(ts.Handler, "_handle_admin_drain", drain)
+    with _http_server(monkeypatch) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(
+                b"POST /v1/admin/drain HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Length: 0\r\n"
+                b"Content-Length: 0\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+
+    assert response.startswith(b"HTTP/1.0 400"), response
+    assert b"multiple Content-Length headers are not supported" in response
+    assert called == []

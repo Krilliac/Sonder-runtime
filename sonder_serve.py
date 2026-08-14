@@ -2476,17 +2476,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_json(self):
         # HTTP framing must be unambiguous before this handler reads a body.
-        # BaseHTTPRequestHandler preserves duplicate fields, but ``get()``
-        # returns only one of them. Accepting that value would let a proxy and
-        # this server disagree about where the request ends. We deliberately
-        # support neither transfer coding nor duplicate content lengths, so
-        # reject the fields by presence/count rather than their first value.
-        transfer_encodings = self.headers.get_all("Transfer-Encoding") or ()
-        if transfer_encodings:
-            raise HTTPRequestError(400, "transfer encoding is not supported")
+        self._validate_request_framing()
         content_lengths = self.headers.get_all("Content-Length") or ()
-        if len(content_lengths) > 1:
-            raise HTTPRequestError(400, "multiple Content-Length headers are not supported")
         raw_length = content_lengths[0] if content_lengths else None
         if raw_length is None:
             raise HTTPRequestError(411, "Content-Length is required")
@@ -2508,6 +2499,20 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise HTTPRequestError(400, "request JSON must be an object")
         return payload
+
+    def _validate_request_framing(self):
+        """Reject ambiguous body framing before any POST route dispatches."""
+        # BaseHTTPRequestHandler preserves duplicate fields, but ``get()``
+        # returns only one of them. Accepting that value would let a proxy and
+        # this server disagree about where the request ends. We deliberately
+        # support neither transfer coding nor duplicate content lengths, so
+        # reject the fields by presence/count rather than their first value.
+        transfer_encodings = self.headers.get_all("Transfer-Encoding") or ()
+        if transfer_encodings:
+            raise HTTPRequestError(400, "transfer encoding is not supported")
+        content_lengths = self.headers.get_all("Content-Length") or ()
+        if len(content_lengths) > 1:
+            raise HTTPRequestError(400, "multiple Content-Length headers are not supported")
 
     def do_GET(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
@@ -2911,6 +2916,15 @@ class Handler(BaseHTTPRequestHandler):
         _maybe_live_reload()
         path = _request_route(self.path)
         self._correlation()
+        try:
+            self._validate_request_framing()
+        except HTTPRequestError as error:
+            record_early_chat_metric("malformed_request")
+            self._send_json_payload(
+                {"error": {"message": error.message, "type": error.error_type}},
+                status=error.status,
+            )
+            return
         if path == "/v1/admin/drain":
             self._handle_admin_drain()
             return
