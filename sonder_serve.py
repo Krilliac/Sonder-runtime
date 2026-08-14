@@ -3084,10 +3084,10 @@ class Handler(BaseHTTPRequestHandler):
                     status=400,
                 )
                 return
-            # A single selected model rewrites the ordinary model prompt. A
-            # fanout wrapper must remain intact until its dedicated dispatch
-            # below; otherwise its extracted text could be misclassified by
-            # feedback/work-intent handlers and execute before fanout gating.
+            # A single selected model rewrites the ordinary model prompt.
+            # Fanout and ensemble wrappers remain intact until their dedicated
+            # dispatch below; otherwise extracted text could be misclassified
+            # by feedback/work-intent handlers and execute before gating.
             if natural_model["kind"] == "model":
                 prompt = selected_prompt
         if structured_schema is not None and prompt.lstrip().startswith("/"):
@@ -3143,14 +3143,14 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
-        if natural_model and natural_model["kind"] == "fanout":
-            # A whole-catalog request spends several model calls.  Local-open
-            # keeps its single-user/full-tool behavior; shared deployments
-            # require the same developer authority as /ensemble.
+        if natural_model and natural_model["kind"] in ("fanout", "ensemble"):
+            # These routes spend several model calls. Local-open keeps its
+            # single-user/full-tool behavior; shared deployments require the
+            # same developer authority as the explicit /ensemble command.
             if not _developer_authorized(context):
-                record_early_chat_metric("fanout_forbidden")
+                record_early_chat_metric("ensemble_forbidden" if natural_model["kind"] == "ensemble" else "fanout_forbidden")
                 self._send_json_payload(
-                    {"error": {"message": "developer or admin authentication is required for model fanout", "type": "forbidden_command"}},
+                    {"error": {"message": "developer or admin authentication is required for model ensembles", "type": "forbidden_command"}},
                     status=403,
                 )
                 return
@@ -3253,11 +3253,11 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, context=context,
                         )
                     if (structured_schema is None and reply is None
-                            and not (natural_model and natural_model["kind"] == "fanout")):
+                            and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_feedback(prompt, state=state)
                     if (structured_schema is None and reply is None
                             and _developer_authorized(context)
-                            and not (natural_model and natural_model["kind"] == "fanout")):
+                            and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state
                         )
@@ -3272,6 +3272,11 @@ class Handler(BaseHTTPRequestHandler):
                             profile=natural_model.get("profile", ""),
                             request_owner=_fanout_request_owner(context),
                             request_role=_fanout_request_role(context),
+                        )
+                    if structured_schema is None and reply is None and natural_model and natural_model["kind"] == "ensemble":
+                        reply = server.ensemble_answer(
+                            natural_model["prompt"], tiers=natural_model["tiers"],
+                            project=storage_project, require_all_tiers=True,
                         )
                     if structured_schema is None and reply is None:
                         reply = server.chat_web_response(
