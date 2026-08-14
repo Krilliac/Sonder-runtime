@@ -458,6 +458,21 @@ def test_rows_never_exceed_the_terminal_height():
     assert state.render_rows(height=2) == []
 
 
+def test_navigation_and_tab_never_select_a_height_clipped_row():
+    entries = [_Entry("/c%d" % i, "summary %d" % i) for i in range(8)]
+    state = slash_menu.MenuState(completer=lambda _p, limit=8: entries[:limit])
+    state.feed("/c")
+    assert len(state.render_rows(width=200, height=5)) == 3
+
+    for _ in range(8):
+        state.handle_key(slash_menu.KEY_DOWN)
+
+    assert state.selected == 2
+    assert state.selection() is entries[2]
+    state.handle_key("\t")
+    assert state.buffer == "/c2"
+
+
 def test_render_rows_accepts_an_explicit_prefix():
     state = _state("")
     rows = state.render_rows("/rea", width=200)

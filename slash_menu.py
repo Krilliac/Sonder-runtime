@@ -147,6 +147,10 @@ class MenuState:
         self._cache: list = []
         self._argument_cache_key = None
         self._argument_cache: list = []
+        # The raw reader renders before processing the next key.  Retain the
+        # current height-derived selection ceiling so Tab and arrows cannot
+        # refer to an entry that was clipped off the visible palette.
+        self._visible_row_limit = self.limit
         # Rendering state only.  The pure key/menu state above never relies on
         # it; retaining the number of drawn physical rows lets the raw reader
         # erase a wrapped message before redrawing it after the next key.
@@ -221,9 +225,12 @@ class MenuState:
     def _selection_matches(self) -> list:
         return self.argument_matches() if self.argument_context else self.matches()
 
+    def _visible_selection_matches(self) -> list:
+        return self._selection_matches()[:self._visible_row_limit]
+
     def selection(self):
         """The highlighted entry, or None when nothing is highlighted."""
-        rows = self._selection_matches()
+        rows = self._visible_selection_matches()
         if not rows:
             return None
         return rows[max(0, min(self.selected, len(rows) - 1))]
@@ -238,12 +245,13 @@ class MenuState:
 
     def has_palette_matches(self) -> bool:
         """Whether arrows should select a completion instead of recall history."""
-        return bool(self._selection_matches())
+        return bool(self._visible_selection_matches())
 
     # -- transitions ------------------------------------------------------
 
     def _reset_selection(self) -> None:
         self.selected = 0
+        self._visible_row_limit = self.limit
 
     def handle_key(self, ch: str) -> str:
         if ch == KEY_LEFT:
@@ -270,7 +278,7 @@ class MenuState:
                 self.selected = max(0, self.selected - 1)
             return CONTINUE
         if ch == KEY_DOWN:
-            rows = self._selection_matches() if self.menu_active else []
+            rows = self._visible_selection_matches() if self.menu_active else []
             if rows:
                 self.selected = min(len(rows) - 1, self.selected + 1)
             return CONTINUE
@@ -378,6 +386,7 @@ class MenuState:
                 width = int(width) if width else cols
                 height = int(height) if height else lines
                 budget = max(0, min(self.limit, MAX_ROWS, height - 2))
+                self._visible_row_limit = budget
                 entries = entries[:budget]
                 if not entries:
                     return []
@@ -401,6 +410,7 @@ class MenuState:
         # Never claim more rows than the screen has: the reader has to move the
         # cursor back up over exactly this many lines.
         budget = max(0, min(self.limit, MAX_ROWS, height - 2))
+        self._visible_row_limit = budget
         entries = entries[:budget]
         if not entries:
             return []
