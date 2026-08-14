@@ -454,6 +454,35 @@ def test_catalogued_global_controls_require_admin_on_shared_http(
     ) == ""
 
 
+def test_shared_workflow_inventory_requires_lifecycle_authority(monkeypatch):
+    """A saved workflow is shared operator data, not a user's status view."""
+    monkeypatch.setattr(
+        ts.permission_modes, "decide_for_caller", lambda *_args, **_kwargs: None,
+    )
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "ordinary", "role": "user"},
+    }
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "developer", "role": "developer"},
+    }
+    calls = []
+    monkeypatch.setattr(ts.server, "workflow_list", lambda: calls.append(True) or "workflows")
+
+    refused = ts._dispatch_catalogued_tool(
+        "/workflow_list", ts.ConversationState(), context=ordinary,
+    )
+    assert "developer or administrator authorization is required" in refused
+    assert calls == []
+
+    allowed = ts._dispatch_catalogued_tool(
+        "/workflow_list", ts.ConversationState(), context=developer,
+    )
+    assert allowed == "workflows"
+    assert calls == [True]
+
+
 @pytest.mark.parametrize(
     "command, mutation",
     (
