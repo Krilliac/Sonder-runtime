@@ -3219,6 +3219,37 @@ def test_build_system_puts_the_identity_facts_first():
         "", False, "").startswith("Facts about what is serving")
 
 
+def test_build_system_does_not_export_mutable_local_context_to_cloud(monkeypatch):
+    """Cloud consent covers the request, never hidden local control-plane text."""
+    monkeypatch.setattr(
+        server,
+        "_read_system_context",
+        lambda: (
+            "LOCAL PROFILE SECRET",
+            "LOCAL EMOTION SECRET",
+            "LOCAL GOAL SECRET",
+        ),
+    )
+    monkeypatch.setattr(server.personas, "get", lambda _name: "LOCAL PERSONA SECRET")
+
+    local = server._build_system(
+        "request instruction", False, "custom", model="local:latest", cloud=False,
+    )
+    hosted = server._build_system(
+        "request instruction", False, "custom", model="cloud:latest", cloud=True,
+    )
+
+    assert "LOCAL PERSONA SECRET" in local
+    assert "LOCAL PROFILE SECRET" in local
+    assert "LOCAL EMOTION SECRET" in local
+    assert "LOCAL GOAL SECRET" in local
+    assert "LOCAL PROFILE SECRET" not in hosted
+    assert "LOCAL EMOTION SECRET" not in hosted
+    assert "LOCAL GOAL SECRET" not in hosted
+    assert "request instruction" in hosted
+    assert "cloud:latest" in hosted
+
+
 # --- #49: the identity block must name the model the call site resolved ----
 #
 # `_ACTIVE_MODEL_HINT` was only ever written by `_resolve_model_and_system`,
@@ -3280,3 +3311,4 @@ def test_identity_block_does_not_place_a_cloud_model_on_this_machine():
     assert "not on this machine" in block
     local = server._runtime_identity_block("sonder:latest", cloud=False)
     assert _LOCAL_CLAIM in local
+    assert "LOCAL PERSONA SECRET" not in hosted

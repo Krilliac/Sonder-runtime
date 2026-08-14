@@ -1751,10 +1751,23 @@ def _build_system(system, trace, persona, model="", cloud=False):
     `model`/`cloud` describe the target the caller resolved for THIS request;
     they are threaded to the runtime identity block. Callers that genuinely do
     not know the target omit them, and the identity block is then left out
-    rather than guessing one."""
+    rather than guessing one.
+
+    A hosted model receives only request-scoped instructions and the
+    non-sensitive runtime identity. Personas, the editable profile, emotion
+    vectors, and active goal are disk-backed local control-plane context;
+    enabling a cloud tier consents to that request's messages, not to silently
+    exporting those instructions on every cloud turn. Hosted agents already
+    follow this same boundary. Keeping it here covers ordinary chat and
+    structured output too.
+    """
     effective_system = system
     if trace:
         effective_system = "%s\n\n%s" % (system, TRACE_SYSTEM) if system else TRACE_SYSTEM
+    if cloud:
+        return _join_system_parts(
+            _runtime_identity_block(model, cloud=True), effective_system,
+        )
     if persona and persona.strip():
         persona_prompt = personas.get(persona)
         effective_system = (
