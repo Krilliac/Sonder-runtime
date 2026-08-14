@@ -35,10 +35,22 @@ POST /v1/chat/completions
 A full chat UI owns conversation state (resends the transcript). A thin
 client that names a `session` but sends only the current message gets
 server-side history rebuilt from the stored session — so both contracts
-work. The reply carries an activity footer of observable actions.
+work. `choices[0].message.content` contains only the answer; bounded
+observable execution metadata is returned separately as `sonder_activity`.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
 `session`, `project`, `context_size`, and the consented location fields.
+
+Non-streaming responses populate standard OpenAI `usage` from the current
+request's observed model counters. For an SSE response, request an additional
+terminal usage chunk with:
+
+```json
+{ "stream": true, "stream_options": { "include_usage": true } }
+```
+
+That final chunk has an empty `choices` array and a `usage` object. It appears
+immediately before `[DONE]`; ordinary streams remain unchanged.
 
 `response_format` is available only for an isolated direct-model turn:
 
