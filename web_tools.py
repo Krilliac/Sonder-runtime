@@ -639,7 +639,13 @@ def _search_relevance(query, results):
         return 0, 0
     best = 0
     for row in results:
-        text = "%s %s" % (row.get("title", ""), row.get("url", ""))
+        # Providers preserve an extracted snippet precisely because a concise
+        # title/URL may not contain the terms that make the result relevant.
+        # Score that bounded result field too; it is returned to the caller and
+        # is not fetched or interpreted as a control instruction here.
+        text = "%s %s %s" % (
+            row.get("title", ""), row.get("url", ""), row.get("snippet", ""),
+        )
         words = set(re.findall(r"[a-z0-9]+", text.lower()))
         best = max(best, len(terms & words))
     return best, min(2, len(terms))

@@ -106,6 +106,19 @@ def test_search_rss_parser_returns_direct_links_and_plain_snippets():
     }]
 
 
+def test_search_relevance_uses_a_provider_snippet():
+    score, required = web_tools._search_relevance(
+        "What is the capital of France?",
+        [{
+            "title": "Paris",
+            "url": "https://en.wikipedia.org/wiki/Paris",
+            "snippet": "Paris is the capital of France.",
+        }],
+    )
+
+    assert score >= required
+
+
 def test_web_search_retries_distinctive_query_after_blocks_and_irrelevant_rows(
     monkeypatch,
 ):
