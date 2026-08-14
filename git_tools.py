@@ -62,13 +62,20 @@ def _git_environment():
     # add back only explicit noninteractive safety controls.
     env = {
         key: value for key, value in sonder_logging.child_environment().items()
-        if not key.upper().startswith("GIT_")
+        if not key.upper().startswith("GIT_") and key.upper() != "SSH_ASKPASS"
     }
     env.update({
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
         "PAGER": "cat",
         "GIT_TERMINAL_PROMPT": "0",
+        # SSH treats a closed stdin as a reason to fall back to an askpass
+        # program when DISPLAY and SSH_ASKPASS are inherited.  Runtime update
+        # checks must fail instead of executing that ambient helper or opening
+        # a credential-manager prompt.  This still permits noninteractive
+        # public-key authentication for the canonical GitHub remote.
+        "SSH_ASKPASS_REQUIRE": "never",
+        "GCM_INTERACTIVE": "never",
     })
     return env
 
