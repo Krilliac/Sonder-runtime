@@ -136,6 +136,32 @@ _EXECUTION_SEQUENCE_RE = re.compile(
     r"\b(?:then|after that|afterward|next|finally|and then|all the way through)\b"
 )
 
+# This is a routing cue, not a general-purpose text classifier.  It accepts a
+# complete, imperative user turn with a concrete task after an explicit
+# delimiter.  In particular, it does not scan quoted/retrieved material for a
+# fragment such as "compiler-feedback retries" and it does not turn a request
+# to *explain* the workflow into execution.
+_ENSEMBLE_COMPILER_RETRY_RE = re.compile(
+    r"^\s*(?:(?:please\s+)?(?:use|run|start|enable)\s+)?(?:an?\s+)?"
+    r"ensemble\s*(?:\(\s*)?code\s*(?:and|\+|plus)\s*reasoning\s*(?:\)\s*)?"
+    r"with\s+compiler(?:[-\s]+)feedback\s+retries(?:\s+enabled)?\s+"
+    r"(?:to|for|on)\s+(.+?)\s*[.!]?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def requests_ensemble_compiler_retries(text):
+    """Whether a whole user turn explicitly requests the bounded code loop.
+
+    The returned task is deliberately not interpreted here: the host pins the
+    model set, retry count, project root, permission mode, and executable
+    policy later.  This recognizer simply prevents a loose phrase match from
+    upgrading ordinary/retrieved prose into an execution request.
+    """
+    value = str(text or "")
+    match = _ENSEMBLE_COMPILER_RETRY_RE.match(value)
+    return bool(match and match.group(1).strip())
+
 
 def classify(text):
     """Return a dict of detected control intents, or {} for a normal task turn.
@@ -246,6 +272,13 @@ def classify_execution(text):
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     if not value or value.startswith("/") or _EXECUTION_NO_TOOLS_RE.search(value.lower()):
         return None
+    if requests_ensemble_compiler_retries(value):
+        return {
+            "mode": "workbench",
+            "reason": "explicit bounded local ensemble/compiler-retry request",
+            "plan_only": False,
+            "actions": ["ensemble_codegen_build_loop"],
+        }
     if not classify_work(value):
         return None
     lowered = value.lower()

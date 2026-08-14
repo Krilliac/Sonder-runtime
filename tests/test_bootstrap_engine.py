@@ -102,6 +102,7 @@ def test_python_dependency_install_uses_runtime_contract_and_reprobes(
             "-m",
             "pip",
             "install",
+            "--only-binary=:all:",
             "-r",
             str(requirements),
         ],
@@ -216,7 +217,7 @@ def test_ensure_ollama_running_does_not_start_daemon_for_remote(monkeypatch):
     ok, message = bootstrap_engine.ensure_ollama_running(
         "ollama-test",
         env={
-            "OLLAMA_HOST": "http://models.example.test:11434",
+            "OLLAMA_HOST": "https://models.example.test:11434",
             "SONDER_ALLOW_REMOTE_OLLAMA": "1",
         },
     )

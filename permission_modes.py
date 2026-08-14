@@ -660,9 +660,21 @@ def _default_rule_lookup(tool_name: str) -> dict | None:
         from sonder_runtime.domain.execution import policy as _policy
 
         home = sonder_paths.default_home()
-        rule = permission_rules.check(home, tool_name)
+        rule, report = permission_rules.check_report(home, tool_name)
     except Exception:
         return None
+    # A corrupt, unreadable, or partially accepted policy must not silently
+    # turn an operator's explicit deny into an unattended allow.  The normal
+    # first-run absence is deliberately healthy (``report.degraded`` is
+    # false), so local defaults continue to work as before.  Read-only status
+    # tools stay available during recovery; every other class is refused until
+    # the artifact is repaired rather than inheriting a permissive default.
+    if report.degraded and risk_of(tool_name) != "safe":
+        return {
+            "pattern": "<degraded permission policy>",
+            "action": DENY,
+            "note": "permission policy could not be enforced safely",
+        }
     if not isinstance(rule, dict):
         return None
     if rule == dict(_policy.NO_MATCH_RULE):

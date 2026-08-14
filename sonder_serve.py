@@ -12,6 +12,7 @@ Run:
 Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key).
 """
 import json
+import contextlib
 import hmac
 import hashlib
 import ipaddress
@@ -45,11 +46,36 @@ import debug_dump
 import sonder_health
 import sonder_lifecycle
 import sonder_secrets
+import served_action_receipts
 import tool_contract
 import unsafe_lab
 
 DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
+
+
+class _DuplicateJsonObjectKey(ValueError):
+    """A request JSON object repeated a member name.
+
+    JSON decoders conventionally accept repeated object members and silently
+    keep the final value.  That is unsafe at an HTTP trust boundary: a proxy,
+    audit record, or future validator could observe a different occurrence
+    from the application.  Reject them before request routing instead.
+    """
+
+
+def _reject_duplicate_json_object_key(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonObjectKey("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_number(value):
+    """Keep the HTTP boundary to standard finite JSON numbers."""
+    raise ValueError("non-finite JSON number is not allowed")
 
 
 def _local_server_log_tail():
@@ -292,6 +318,7 @@ def _state_or_legacy(state):
 
 
 def _state_principal(context):
+    context = context or {}
     account = context.get("account") or {}
     if account:
         identity = account.get("username") or account.get("id") or "unknown"
@@ -299,6 +326,105 @@ def _state_principal(context):
     if context.get("api_key"):
         return "api-key"
     return "local-open"
+
+
+def _request_idempotency_key(context, endpoint, supplied_key):
+    """Return an opaque idempotency key bound to one HTTP principal.
+
+    Idempotency keys are client-chosen and the lifecycle cache is process-wide.
+    Reusing a key across two hosted accounts must not replay one administrator's
+    response to another, even when they happen to choose the same key.  Hashing
+    also keeps the cache bounded by a fixed-size key rather than retaining a
+    potentially large HTTP header verbatim.  A missing key preserves the
+    lifecycle's existing non-idempotent behavior.
+    """
+    supplied_key = str(supplied_key or "").strip()
+    if not supplied_key:
+        return ""
+    material = "http-idempotency\0%s\0%s\0%s" % (
+        str(endpoint or ""), _state_principal(context), supplied_key,
+    )
+    return "hi-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _http_action_idempotency_key(context, supplied_key, action):
+    """Return a principal- and action-bound replay key for HTTP work controls.
+
+    HTTP clients commonly retry after a connection disappears while a long
+    agent/autopilot request is still running.  A bare client key is not a safe
+    cache key: two accounts can choose the same value, and the same client can
+    accidentally reuse it for a different operation.  Hash the opaque client
+    value together with the authenticated principal and the exact canonical
+    control text before handing it to the process-local lifecycle coordinator.
+    Nothing secret, account-controlled, or request text is retained in the
+    coordinator's bounded idempotency map.
+    """
+    key = str(supplied_key or "").strip()
+    if not key:
+        return ""
+    # HTTP headers are already bounded by the server, but keep this helper's
+    # behavior explicit when it is called directly in tests or embeddings.
+    if len(key) > 512:
+        return ""
+    material = "\0".join((
+        "served-action-idempotency-v1",
+        _state_principal(context),
+        key,
+        str(action or ""),
+    ))
+    return "act-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _idempotent_http_action(context, supplied_key, action, factory):
+    """Run an opt-in action once, preserving uncertainty across restarts."""
+    cache_key = _http_action_idempotency_key(context, supplied_key, action)
+    if not cache_key:
+        return factory()
+
+    def durable_factory():
+        try:
+            state = served_action_receipts.claim(cache_key)
+        except (OSError, sqlite3.Error, ValueError):
+            # An explicit replay key promises no duplicate side effect.  If its
+            # durable guard is unavailable, refusing is safer than executing a
+            # long-running mutation without a recoverable receipt.
+            refusal = (
+                "idempotency receipt unavailable: the action was not started. "
+                "Retry after restoring local runtime storage."
+            )
+            return refusal
+        if state == "completed":
+            refusal = (
+                "idempotent action refused: it already completed before the "
+                "current server process. It was not run again; query its "
+                "status or submit a new action with a new Idempotency-Key."
+            )
+            return refusal
+        if state in {"started", "uncertain"}:
+            refusal = (
+                "idempotent action refused: it has an uncertain prior outcome "
+                "after an interrupted server process. It was not run again; "
+                "inspect the affected project/status before submitting a new action."
+            )
+            return refusal
+        try:
+            result = factory()
+        except BaseException:
+            # An exception after tool admission is not proof of no side
+            # effect. Preserve the receipt as uncertain so the next process
+            # cannot blindly replay it.
+            with contextlib.suppress(OSError, sqlite3.Error):
+                served_action_receipts.finish(cache_key, uncertain=True)
+            raise
+        try:
+            served_action_receipts.finish(cache_key)
+        except (OSError, sqlite3.Error):
+            # The side effect returned but its terminal record did not commit.
+            # Leaving `started` is intentionally conservative on retry.
+            pass
+        return result
+
+    return sonder_lifecycle.get().idempotent(cache_key, durable_factory)
 
 
 def _task_account_scope(context):
@@ -329,7 +455,15 @@ _SCOPED_TASK_TOOLS = frozenset((
 # fail closed here rather than create durable state in the shared namespace.
 _ACCOUNT_UNSCOPED_TASK_TOOLS = frozenset((
     "agent", "workbench_agent", "master_orchestrate", "master_retry",
-    "agent_retry", "workflow_run", "self_heal_repair",
+    "agent_retry", "self_heal_repair",
+))
+_ACCOUNT_UNSCOPED_SAVED_WORKFLOW_TOOLS = frozenset((
+    # Saved workflows live in one operator-owned workflows.json.  Letting a
+    # hosted account list it exposes another account's action payloads, and
+    # save/delete/run would let one account overwrite, remove, or execute
+    # another account's durable automation.  Do not pretend the file is
+    # account-scoped until the repository has a first-class owner boundary.
+    "workflow_list", "workflow_save", "workflow_delete", "workflow_run",
 ))
 _ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
     "checklist_create", "checklist_update", "checklist_show",
@@ -339,6 +473,53 @@ _ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
     # a fresh master run, even though the retry itself names no task row.
     "master_retry", "agent_retry", "self_heal_repair",
 ))
+
+# The legacy memory database predates hosted accounts.  Sessions and projects
+# supplied through /v1/chat/completions are principal-namespaced before they
+# reach it, but these direct tools still read or mutate global lesson,
+# interaction, preference, evaluation, and training state.  Letting an
+# authenticated account reach one would either disclose another account's
+# material or let it influence the shared learning corpus.  Direct MCP and a
+# loopback local-open deployment deliberately retain the complete single-user
+# surface; hosted deployments need a first-class per-account memory store
+# before these operations can safely be enabled.
+_ACCOUNT_GLOBAL_MEMORY_TOOLS = frozenset((
+    "apply_learned",
+    "evaluation_history_status",
+    "learn_from_example",
+    "learning_health_status",
+    "memory_embedding_backfill",
+    "memory_export",
+    "memory_interaction_embedding_backfill",
+    "memory_privacy_review",
+    "memory_quality_report",
+    "memory_search",
+    "recall",
+    "record_outcome",
+    "session_export",
+    "sonder_remember_fact",
+    "sonder_sessions",
+    "sonder_stats",
+))
+
+
+def _account_global_memory_refusal(tool, context):
+    """Refuse legacy global-memory tools for a hosted account.
+
+    This guard intentionally lives at the HTTP boundary rather than relying on
+    each legacy tool to remember account authorization.  The tools do not
+    accept an account scope, so passing caller-provided IDs or treating a
+    project name as an authorization boundary would be a false isolation
+    guarantee.
+    """
+    if not (context or {}).get("account"):
+        return ""
+    if str(tool or "").lstrip("/") not in _ACCOUNT_GLOBAL_MEMORY_TOOLS:
+        return ""
+    return (
+        "hosted account memory is isolated to chat sessions and projects; "
+        "this global memory tool is local-operator only"
+    )
 
 
 def _account_task_boundary_refusal(tool_name, kwargs, context):
@@ -358,6 +539,11 @@ def _account_task_boundary_refusal(tool_name, kwargs, context):
         return (
             "refused /%s: account-scoped task state is not available for "
             "this autonomous tool; use the scoped task/checklist commands."
+        ) % name
+    if name in _ACCOUNT_UNSCOPED_SAVED_WORKFLOW_TOOLS:
+        return (
+            "refused /%s: account-scoped saved workflows are not available; "
+            "use an operator-managed local workflow session."
         ) % name
     if name != "loop":
         return ""
@@ -400,6 +586,14 @@ def _fanout_request_owner(context):
     """
     material = "fanout-owner\0" + _state_principal(context)
     return "fo-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _reasoning_request_owner(context):
+    """Opaque principal bound to private reasoning captured for this request."""
+    if not server._deployment_authenticates_callers():
+        return ""
+    material = "reasoning-owner\0" + _state_principal(context)
+    return "ro-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _fanout_request_role(context):
@@ -643,6 +837,11 @@ SYSTEM_OPERATION_TOOLS = {
     "autopilot_resume": "automation_lifecycle",
     "autopilot_pause": "automation_lifecycle",
     "autopilot_cancel": "automation_lifecycle",
+    # The workflow store is process-wide.  Listing it reveals every saved
+    # action payload and description, which can include repository paths,
+    # command arguments, and operator-authored context.  It is therefore not
+    # an ordinary account's read-only status view on a shared deployment.
+    "workflow_list": "automation_lifecycle",
     "workflow_save": "automation_lifecycle",
     "workflow_delete": "automation_lifecycle",
     # A saved workflow can contain any loop action, including the shared
@@ -676,7 +875,22 @@ def _is_loopback_host(host):
         return False
 
 
-def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None):
+def _http_server_location_lookup_allowed(context):
+    """Allow server-IP location lookup only for genuinely local-open use."""
+    return (
+        isinstance(context, dict)
+        and context.get("mode") == "local-open"
+        and _is_loopback_host(HOST)
+    )
+
+
+def _validate_bind_security(
+    host,
+    api_key=None,
+    auth_mode=None,
+    auth_secret=None,
+    tls_terminated_by_proxy=None,
+):
     # Unsafe lab acknowledgement tightens exposure: unlike normal served mode,
     # there is deliberately no authenticated non-loopback topology available.
     unsafe_lab.require_startup(host=host)
@@ -689,6 +903,20 @@ def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None
         raise RuntimeError("both auth mode requires API key and account auth secret")
     if _is_loopback_host(host):
         return
+    # ``sonder_runtime serve`` reaches this module after validating the typed
+    # config.  This script is also a supported direct entrypoint, though, so it
+    # must not silently turn ``SONDER_HOST=0.0.0.0`` plus a key into a plaintext
+    # public listener.  The exported declaration is intentionally checked at
+    # the last responsible moment, immediately before ``serve_forever`` can
+    # bind.  An operator who uses the direct entrypoint must make the same
+    # explicit reverse-proxy assertion as a configured deployment.
+    if tls_terminated_by_proxy is None:
+        tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
+    if not tls_terminated_by_proxy:
+        raise RuntimeError(
+            "non-loopback bind requires SONDER_TLS_TERMINATED_BY_PROXY=1 "
+            "for a TLS-terminating reverse proxy"
+        )
     # The same policy sonder_config.validate enforces, read from the same
     # constant. It was restated here as a bare 24, so raising the named
     # MIN_API_KEY_LENGTH -- the obvious single-point edit -- would have
@@ -828,10 +1056,14 @@ class HTTPRequestError(Exception):
 
 
 def _strip_footer(text):
-    idx = text.find(server.FOOTER_PREFIX)
+    value = str(text or "")
+    idx = value.find(server.FOOTER_PREFIX)
     if idx == -1:
-        return text
-    return text[:idx]
+        return server._strip_activity_block(value)
+    # ``server.with_footer`` appends the activity block before its invisible
+    # interaction token. Terminal users receive that human-readable evidence;
+    # OpenAI-compatible `message.content` must remain only the model answer.
+    return server._strip_activity_block(value[:idx])
 
 
 def _strip_trace(text):
@@ -942,7 +1174,13 @@ def _history_from_messages(messages):
     user) message. A full chat UI owns conversation state here, so we thread
     exactly what it sends rather than a DB session; thin clients that name a
     session without resending a transcript fall back to
-    _server_side_history()."""
+    _server_side_history().  Sonder-generated assistant decoration is not
+    conversational content, however: older HTTP replies can contain an
+    observable activity block, trace, or interaction footer.  Normalize only
+    those assistant turns just as the server-side replay path does, so a
+    client that faithfully resends prior API responses does not feed telemetry
+    back to the model on a concise follow-up.
+    """
     msgs = messages or []
     last_user_idx = None
     for i in range(len(msgs) - 1, -1, -1):
@@ -955,6 +1193,8 @@ def _history_from_messages(messages):
             continue
         role = m.get("role")
         content = m.get("content") or ""
+        if role == "assistant":
+            content = server._strip_activity_block(_answer_only(content)).strip()
         if role in ("user", "assistant") and content:
             history.append({"role": role, "content": content})
     return history
@@ -1286,6 +1526,9 @@ def _http_tool_refusal(tools, label, context=None):
     remembering a second map.
     """
     for tool in tools:
+        memory_error = _account_global_memory_refusal(tool, context)
+        if memory_error:
+            return "refused %s: %s" % (label, memory_error)
         operation = tool_contract.system_operation_for(tool)
         if operation and context is not None:
             if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
@@ -1337,7 +1580,8 @@ def _slash_system_operation(command, argument):
     return ""
 
 
-def _handle_slash(content, messages=None, state=None, project="", context=None):
+def _handle_slash(content, messages=None, state=None, project="", context=None,
+                  idempotency_key=""):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
 
@@ -1458,7 +1702,18 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
     if cmd in ("/autopilot", "/auto"):
-        return server.control_command(stripped, project=project)
+        # Starting a persistent run is a side effect.  A caller may not know
+        # whether its connection died before or after the controller accepted
+        # it, so an opt-in replay key returns the first result rather than
+        # creating a sibling run.
+        return _idempotent_http_action(
+            context, idempotency_key, "autopilot\0%s\0%s" % (project, stripped),
+            lambda: server.control_command(
+                stripped,
+                project=project,
+                autopilot_request_owner=_task_account_scope(context),
+            ),
+        )
     if cmd in ("/runtime", "/models"):
         return server.control_command(stripped, project=project)
     if cmd in ("/update", "/updatecheck", "/updatesource"):
@@ -1466,7 +1721,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
     if cmd in ("/selfmod", "/selfmodify"):
         return server.control_command(stripped, project=project)
     if cmd in ("/goal", "/goals"):
-        return server.control_command(stripped, project=project)
+        return _idempotent_http_action(
+            context, idempotency_key, "goal\0%s\0%s" % (project, stripped),
+            lambda: server.control_command(stripped, project=project),
+        )
     if cmd in ("/mcp", "/convergence"):
         return server.control_command(stripped, project=project)
     if cmd in ("/learning", "/learnhealth", "/metrics"):
@@ -1483,8 +1741,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None):
         )
         if task_boundary_error:
             return task_boundary_error
-        return server.workbench_agent(
-            prompt=arg.strip(), tier="auto", max_steps=12, project=project,
+        return _idempotent_http_action(
+            context, idempotency_key, "workbench\0%s\0%s" % (project, arg.strip()),
+            lambda: server.workbench_agent(
+                prompt=arg.strip(), tier="auto", max_steps=12, project=project,
+            ),
         )
     if cmd in (
         "/report", "/endreport", "/checklist", "/plan",
@@ -1727,6 +1988,15 @@ def _dispatch_catalogued_tool(line, state, context=None):
     task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context)
     if task_boundary_error:
         return task_boundary_error
+    # ``server.tool_manifest`` is intentionally the complete direct-MCP
+    # owner catalog. Do not relay it over an account-backed HTTP request: the
+    # same role filter used by /v1/commands covers both discovery spellings,
+    # including the capability fingerprint endpoint.
+    if context is not None and context.get("mode") != "local-open":
+        if tool_name == "tool_manifest":
+            return _served_tool_manifest(context)
+        if tool_name == "tool_capability_manifest":
+            return _served_tool_capability_manifest(context)
     # Guarded tools take the caller's own token exactly as the explicit
     # branches pass it (/read, /files, /delete); the tool still enforces its
     # own permission rules with it.
@@ -1801,11 +2071,25 @@ def _handle_intent(content, messages=None, state=None):
     return "\n".join(replies)
 
 
-def _handle_work_intent(content, project="", authorized=False):
+def _handle_work_intent(content, project="", authorized=False, context=None,
+                        idempotency_key=""):
     """Route developer work through the bounded execution-mode chooser."""
     if not authorized:
         return None
-    return server.route_work_request(content, project=project)
+    # Do not let ordinary keyed chat occupy the bounded replay cache.  The
+    # work router itself returns None for those turns, but caching that miss
+    # would evict a completed mutating action which a client may still retry.
+    # This is a pure host-side preflight; route_work_request repeats the same
+    # classification under its stable execution context before any work starts.
+    if not (
+        server.master_orchestrator.requested_worker_cap(content)
+        or intents.classify_execution(content)
+    ):
+        return None
+    return _idempotent_http_action(
+        context, idempotency_key, "natural-work\0%s\0%s" % (project, content),
+        lambda: server.route_work_request(content, project=project),
+    )
 
 
 def _model_to_tier(model):
@@ -1891,16 +2175,27 @@ def _openai_model_rows():
         seen.add(key)
         rows.append({"id": identifier, "object": "model", "owned_by": owned_by})
 
-    # ``sonder`` is a runtime route ID, not weights.  Tier IDs are retained for
-    # compatibility, then exact live catalog names make valid installed models
-    # discoverable to standard OpenAI clients.
-    add("sonder", "local")
-    for tier_name, model in server.available_tiers().items():
-        add(tier_name, "cloud" if server._is_cloud_tier(tier_name, model) else "local")
     try:
         records = server.discovered_model_records()
     except Exception:
         records = ()
+
+    # ``sonder`` is a runtime route ID, not weights.  Tier IDs are retained for
+    # compatibility, then exact live catalog names make valid installed models
+    # discoverable to standard OpenAI clients.  Do not nevertheless advertise
+    # a local tier that a legacy/manual policy points at an explicitly
+    # non-chat-capable catalog record: `/runtime set` now rejects that state,
+    # while this keeps pre-existing policy files honest too.  Missing or
+    # capability-less metadata remains listed rather than converting a catalog
+    # outage into a false claim that the whole runtime has no model routes.
+    add("sonder", "local")
+    for tier_name, model in server.available_tiers().items():
+        cloud = server._is_cloud_tier(tier_name, model)
+        if not cloud and server._runtime_model_capability_error(
+            tier_name, model, records,
+        ):
+            continue
+        add(tier_name, "cloud" if cloud else "local")
     for name, record in records:
         if server._fanout_nonchat_reason(record):
             continue
@@ -1942,7 +2237,7 @@ def _turn_reasoning():
 
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
-    state=None, return_result=False,
+    state=None, return_result=False, metrics=None, augment=True,
 ):
     """Call Sonder Runtime's learning loop with the UI's prior turns; returns UI text."""
     state = _state_or_legacy(state)
@@ -1954,12 +2249,26 @@ def _run_prompt(
         # constrain them before presenting a receipt to an HTTP caller.
         resolved_target["model"] = _receipt_text(model)
         resolved_target["tier"] = _receipt_text(tier_label)
+        resolved_target["cloud"] = bool(_cloud)
 
-    out = server.answer_with_history(
-        prompt, history, trace=state.trace, strict=state.strict, tier=tier,
-        context_size=context_size, session=session, project=project,
-        raise_model_errors=True, target_observer=record_target,
-    )
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        out = server.answer_with_history(
+            prompt, history, trace=state.trace, strict=state.strict, tier=tier,
+            context_size=context_size, session=session, project=project,
+            raise_model_errors=True, target_observer=record_target, augment=augment,
+        )
+        outcome = "error" if out.startswith("ERROR") else "ok"
+    finally:
+        # This is the primary generation selected for an HTTP turn. Keep the
+        # exported labels independent of exact models and configured aliases.
+        # A control route has no target and must not masquerade as a model call.
+        if metrics is not None and "cloud" in resolved_target:
+            metrics.observe_model_call(
+                cloud=resolved_target["cloud"], result=outcome,
+                elapsed_seconds=time.monotonic() - started,
+            )
     if out.startswith("ERROR"):
         result = TurnResult(out, None, "")
         return result if return_result else result.content
@@ -1975,18 +2284,31 @@ def _run_prompt(
     return result if return_result else result.content
 
 
-def _run_structured_prompt(prompt, history, tier, schema, context_size=""):
+def _run_structured_prompt(
+    prompt, history, tier, schema, context_size="", metrics=None,
+):
     """Run the isolated structured path; never add a footer or activity text."""
     resolved_target = {}
 
     def record_target(model, tier_label, _cloud):
         resolved_target["model"] = _receipt_text(model)
         resolved_target["tier"] = _receipt_text(tier_label)
+        resolved_target["cloud"] = bool(_cloud)
 
-    content = server.structured_answer_with_history(
-        prompt, history, schema, tier=tier, context_size=context_size,
-        target_observer=record_target,
-    )
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        content = server.structured_answer_with_history(
+            prompt, history, schema, tier=tier, context_size=context_size,
+            target_observer=record_target,
+        )
+        outcome = "ok"
+    finally:
+        if metrics is not None and "cloud" in resolved_target:
+            metrics.observe_model_call(
+                cloud=resolved_target["cloud"], result=outcome,
+                elapsed_seconds=time.monotonic() - started,
+            )
     return TurnResult(
         content, None, content, "", resolved_target.get("model", ""),
         resolved_target.get("tier", ""),
@@ -2129,11 +2451,30 @@ def _receipt_text(value):
     )
 
 
+def _chat_usage(response=None):
+    """Return bounded OpenAI usage fields from this request's activity span."""
+    try:
+        prompt = max(0, int((response or {}).get("tokens_in") or 0))
+        completion = max(0, int((response or {}).get("tokens_out") or 0))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        prompt = completion = 0
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+
+
 def _chat_completion_object(
     content, model="sonder", iid=None, reasoning="", elapsed_ms=None,
-    receipt=None,
+    receipt=None, activity_response=None,
 ):
     iid = iid or uuid.uuid4().hex[:12]
+    activity = server.activity_tracker.public_response(
+        activity_response, include_detail=False,
+    ) if isinstance(activity_response, dict) else (
+        server.activity_tracker.public_snapshot(include_detail=False) or {}
+    ).get("latest")
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion",
@@ -2144,10 +2485,8 @@ def _chat_completion_object(
             "message": {"role": "assistant", "content": content},
             "finish_reason": "stop",
         }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "sonder_activity": (
-            server.activity_tracker.public_snapshot(include_detail=False) or {}
-        ).get("latest"),
+        "usage": _chat_usage(activity_response),
+        "sonder_activity": activity,
     }
     # Mirrors sonder_activity: present only when there is something to show, so
     # clients can treat absence as "this deployment does not expose reasoning".
@@ -2162,18 +2501,29 @@ def _chat_completion_object(
     return obj
 
 
-def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None):
+def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
+           usage=None, activity=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        "choices": (
+            [] if usage is not None and not delta and finish_reason is None else
+            [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+        ),
     }
     if elapsed_ms is not None:
         obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
     if receipt:
         obj["sonder_receipt"] = receipt
+    if usage is not None:
+        obj["usage"] = usage
+    if activity is not None:
+        # The streaming counterpart of the bounded vendor extension returned
+        # by _chat_completion_object.  Keep execution evidence out of content
+        # so callers can safely replay assistant text as conversation history.
+        obj["sonder_activity"] = activity
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -2195,14 +2545,118 @@ def _completion_limit(raw):
     return max(1, min(COMPLETE_MAX_LIMIT, value))
 
 
-def _commands_index_payload():
+def _served_command_visible(command, context=None):
+    """Whether a command's schema belongs in this served caller's catalog.
+
+    The command catalog is more than cosmetic: it contains every argument
+    name, default, and a purpose-built usage string.  Returning that catalog
+    unchanged to an ordinary account made the HTTP authorization gate
+    decorative for discovery -- an account that could not invoke
+    ``/runtime_policy_update`` still received its full mutation schema from
+    ``/v1/commands`` (and again via completion, help, and ``/tool_manifest``).
+
+    Direct MCP and local-open remain deliberate owner surfaces, so their
+    catalogs stay complete.  In an account-backed deployment, hide commands
+    that this context could not invoke because they require developer/admin
+    authority.  Permission modes are intentionally *not* filtered here: they
+    are operator-selected, live state and do not define a caller's standing
+    authority.
+    """
+    if context is None or context.get("mode") == "local-open":
+        return True
+
+    tool = str(getattr(command, "tool", "") or "")
+    if tool:
+        operation = tool_contract.system_operation_for(tool)
+        if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
+            return _admin_authorized(context)
+        if operation and _system_operation_authority_error(operation, context):
+            return False
+
+    # Native branches do not have parameter schemas, but some of them still
+    # create host work or expose privileged operational state.  Keep ordinary
+    # accounts from using the command catalog as an oracle for that surface.
+    if bool(getattr(command, "native", False)):
+        name = str(getattr(command, "name", "") or "")
+        if _dangerous_http_slash(name) and not _developer_authorized(context):
+            return False
+    return True
+
+
+def _served_commands(context=None):
+    """Return catalog rows visible to one HTTP authorization context."""
+    return tuple(
+        command for command in command_catalog.catalog()
+        if _served_command_visible(command, context)
+    )
+
+
+def _served_http_commands(context=None):
+    """Return the caller-visible catalog commands the HTTP dispatcher handles."""
+    http_names = {command.name for command in command_catalog.http_catalog()}
+    return tuple(
+        command for command in _served_commands(context)
+        if command.name in http_names
+    )
+
+
+def _served_help_text(topic, context=None):
+    """Render help from the caller-filtered catalog without leaking misses."""
+    commands = _served_commands(context)
+    needle = str(topic or "").strip().lower()
+    if not needle:
+        categories = sorted({command.category for command in commands})
+        return (
+            "Sonder commands available to this account (use /v1/commands for details):\n"
+            + "  " + ", ".join(categories)
+        )
+    if needle in command_catalog.CATEGORIES:
+        rows = [command for command in commands if command.category == needle]
+        if not rows:
+            return "No commands in that category are available to this account."
+        return "%s --\n%s" % (
+            needle,
+            "\n".join("  %s  %s" % (row.name, row.summary) for row in rows),
+        )
+    for command in commands:
+        if needle == command.name or needle in command.aliases:
+            return "%s\nusage: %s\n%s" % (
+                command.name, command.usage(), command.summary,
+            )
+    # Do not distinguish an unknown command from one intentionally hidden.
+    return "No command with that name is available to this account."
+
+
+def _served_tool_manifest(context):
+    """Human-readable HTTP manifest that excludes unreachable tool schemas."""
+    rows = _served_commands(context)
+    return "\n".join(
+        "  %s: %s" % (command.name, command.summary) for command in rows
+    )
+
+
+def _served_tool_capability_manifest(context):
+    """Fingerprint the served, caller-visible command schema surface only."""
+    rows = [command.to_dict() for command in _served_commands(context)]
+    canonical = json.dumps(
+        rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return json.dumps({
+        "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "tool_count": len(rows),
+        "manifest": _served_tool_manifest(context),
+        "authority": "informational only; host policy remains authoritative",
+    }, indent=2, sort_keys=True)
+
+
+def _commands_index_payload(context=None):
     # A catalog that cannot read the tool registry now raises rather than
     # quietly returning nothing (command_catalog.CatalogUnavailable). This is
     # a listing endpoint, not an enforcing one, so it degrades -- but it says
     # so in the payload instead of shipping an empty list the client would
     # render as "this build has no commands".
     try:
-        commands = [command.to_dict() for command in command_catalog.catalog()]
+        commands = [command.to_dict() for command in _served_http_commands(context)]
         error = ""
     except command_catalog.CatalogUnavailable as exc:
         commands, error = [], str(exc)
@@ -2211,28 +2665,53 @@ def _commands_index_payload():
         # The blurb per category, not the commands in it: the client renders
         # these as section headings beside the counts it derives itself.
         "categories": dict(command_catalog.CATEGORIES),
-        "popular": list(command_catalog.POPULAR),
+        "popular": [
+            name for name in command_catalog.POPULAR
+            if any(command.name == name for command in _served_commands(context))
+        ],
     }
     if error:
         payload["error"] = error
     return payload
 
 
-def _commands_complete_payload(query, limit=""):
+def _commands_complete_payload(query, limit="", context=None):
     try:
+        # Search the complete catalog first so filtering cannot make a valid
+        # lower-ranked HTTP command disappear behind console-only matches.
+        visible = {command.name for command in _served_http_commands(context)}
         matches = [
             command.to_dict()
             for command in command_catalog.complete(
-                query, limit=_completion_limit(limit),
+                query, limit=COMPLETE_MAX_LIMIT,
             )
+            if command.name in visible
         ]
     except command_catalog.CatalogUnavailable as exc:
         return {"matches": [], "error": str(exc)}
-    return {"matches": matches}
+    return {"matches": matches[:_completion_limit(limit)]}
 
 
-def _commands_help_payload(topic=""):
-    return {"text": command_catalog.help_text(topic)}
+def _commands_help_payload(topic="", context=None):
+    if context is None or context.get("mode") == "local-open":
+        requested = str(topic or "").strip()
+        catalogued = command_catalog.by_name(requested) if requested else None
+        if catalogued is not None and catalogued.native:
+            wanted = requested.lower()
+            if not wanted.startswith("/"):
+                wanted = "/" + wanted
+            http_spellings = {
+                spelling.lower()
+                for command in command_catalog.http_catalog()
+                for spelling in command.all_names
+            }
+            if wanted not in http_spellings:
+                return {"text": "no HTTP command '%s'." % requested}
+        return {"text": command_catalog.help_text(topic)}
+    try:
+        return {"text": _served_help_text(topic, context)}
+    except command_catalog.CatalogUnavailable as exc:
+        return {"text": "Command catalog unavailable: %s" % exc}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2250,7 +2729,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
-                "X-Sonder-Bootstrap-Secret",
+                "X-Sonder-Bootstrap-Secret, Idempotency-Key",
             )
             self.send_header(
                 "Access-Control-Expose-Headers",
@@ -2412,7 +2891,10 @@ class Handler(BaseHTTPRequestHandler):
             }
 
         payload = lifecycle.idempotent(
-            self.headers.get("Idempotency-Key", ""), start_drain
+            _request_idempotency_key(
+                context, "/v1/admin/drain", self.headers.get("Idempotency-Key", ""),
+            ),
+            start_drain,
         )
         self._send_json_payload(payload, status=202)
 
@@ -2493,8 +2975,14 @@ class Handler(BaseHTTPRequestHandler):
         if len(raw) != length:
             raise HTTPRequestError(400, "request body is incomplete")
         try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_object_key,
+                parse_constant=_reject_nonfinite_json_number,
+            )
+        except _DuplicateJsonObjectKey:
+            raise HTTPRequestError(400, "request JSON must not contain duplicate object keys")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             raise HTTPRequestError(400, "request body must contain valid JSON")
         if not isinstance(payload, dict):
             raise HTTPRequestError(400, "request JSON must be an object")
@@ -2602,6 +3090,37 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_auth_error()
                 return
             account = context["account"]
+            # This endpoint is a host-wide operations dashboard, not a
+            # per-account session view.  Its agent, activity, learning and
+            # durable-store sections have no principal boundary to apply at
+            # this adapter.  Returning a redacted *global* snapshot would
+            # still disclose another account's workload and timing, so keep
+            # it available to the local owner / administrator only.
+            if not _admin_authorized(context):
+                self._send_json_payload({
+                    "status": "restricted",
+                    "account": account or {},
+                    "models": [
+                        {"id": "sonder", "owned_by": "local"},
+                        *[
+                            {
+                                "id": tier_name,
+                                "owned_by": "cloud"
+                                if server._is_cloud_tier(tier_name, model)
+                                else "local",
+                            }
+                            for tier_name, model in server.available_tiers().items()
+                        ],
+                    ],
+                    "operational": {
+                        "available": False,
+                        "reason": (
+                            "host-wide diagnostics require administrator "
+                            "authorization"
+                        ),
+                    },
+                })
+                return
             agents = server.master_orchestrator.snapshot()
             activity_source = server.activity_tracker.snapshot()
             detail_allowed = _execution_feed_detail_allowed(context)
@@ -2683,12 +3202,15 @@ class Handler(BaseHTTPRequestHandler):
             values = query.get(name) or [""]
             return values[0]
 
+        context = self._request_auth_context()
         if route == "/v1/commands/complete":
-            payload = _commands_complete_payload(first("q"), first("limit"))
+            payload = _commands_complete_payload(
+                first("q"), first("limit"), context=context,
+            )
         elif route == "/v1/commands/help":
-            payload = _commands_help_payload(first("topic"))
+            payload = _commands_help_payload(first("topic"), context=context)
         else:
-            payload = _commands_index_payload()
+            payload = _commands_index_payload(context=context)
         self._send_json_payload(payload)
         return True
 
@@ -2807,6 +3329,20 @@ class Handler(BaseHTTPRequestHandler):
             status, message = error
             self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
             return True
+        supplied_key = self.headers.get("Idempotency-Key", "")
+
+        def replay(action_name, factory):
+            # The run is already owner-authorized above.  Bind each replay to
+            # both that durable run and the complete small action payload, so
+            # a client key cannot turn a cancel into a resume or select a
+            # different synthesis model.  _http_action_idempotency_key hashes
+            # this text; neither it nor the raw header is retained.
+            return _idempotent_http_action(
+                context,
+                supplied_key,
+                "fanout\0%s\0%s" % (run_id, action_name),
+                factory,
+            )
         if action == "synthesize":
             if set(req) - {"synth_model"}:
                 self._send_json_payload({"error": {"message": "synthesis accepts only synth_model", "type": "invalid_request"}}, status=400)
@@ -2831,7 +3367,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return True
             try:
-                self._send_json_payload(server._fanout_synthesize_run(_run, synth_model))
+                payload = replay(
+                    "synthesize\0%s" % synth_model,
+                    lambda: server._fanout_synthesize_run(_run, synth_model),
+                )
+                self._send_json_payload(payload)
             except server.ModelCallError as exc:
                 status = exc.status or (
                     400 if exc.kind == "configuration" else
@@ -2853,28 +3393,46 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return True
         if action == "cancel":
-            server.fanout_store.request_cancel(run_id)
+            replay("cancel", lambda: server.fanout_store.request_cancel(run_id))
         else:
             for name in ("include_failed", "retry_unknown"):
                 if name in req and not isinstance(req[name], bool):
                     self._send_json_payload({"error": {"message": "%s must be a boolean" % name, "type": "invalid_request"}}, status=400)
                     return True
-            resumed = server.fanout_store.resume_run(
-                run_id, include_failed=req.get("include_failed") is True,
-                retry_unknown=req.get("retry_unknown") is True,
+            include_failed = req.get("include_failed") is True
+            retry_unknown = req.get("retry_unknown") is True
+
+            def resume():
+                resumed = server.fanout_store.resume_run(
+                    run_id,
+                    include_failed=include_failed,
+                    retry_unknown=retry_unknown,
+                )
+                if resumed is None:
+                    return False
+                # A resume is an explicit replay instruction. _execute
+                # preserves the stored snapshot and never retries unknown rows
+                # unless this request included retry_unknown=true.
+                server._execute_fanout_run(run_id)
+                return True
+
+            resumed = replay(
+                "resume\0include_failed=%d\0retry_unknown=%d" % (
+                    include_failed, retry_unknown,
+                ),
+                resume,
             )
             if resumed is None:
                 self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
                 return True
-            # A resume is an explicit replay instruction. _execute preserves
-            # the stored snapshot and never retries unknown rows unless this
-            # request included retry_unknown=true.
-            server._execute_fanout_run(run_id)
+            if not resumed:
+                self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
+                return True
         receipt = server._fanout_receipt(run_id)
         self._send_json_payload(receipt or {"error": {"message": "fanout receipt was unavailable", "type": "not_found"}}, status=200 if receipt else 404)
         return True
 
-    def _handle_permission_mode_post(self, req):
+    def _handle_permission_mode_post(self, req, context=None):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
         wanted = ""
         if isinstance(req, dict):
@@ -2886,7 +3444,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         try:
-            permission_modes.set_mode(wanted)
+            _idempotent_http_action(
+                context,
+                self.headers.get("Idempotency-Key", ""),
+                "permission-mode\0%s" % wanted,
+                lambda: permission_modes.set_mode(wanted),
+            )
         except ValueError as exc:
             self._send_json_payload(
                 {"error": str(exc), "modes": list(permission_modes.MODES)},
@@ -2963,7 +3526,7 @@ class Handler(BaseHTTPRequestHandler):
                     status=403,
                 )
                 return
-            self._handle_permission_mode_post(req)
+            self._handle_permission_mode_post(req, context=context)
             return
         if path == "/v1/sonder/register":
             conn = server._open_db()
@@ -3030,7 +3593,22 @@ class Handler(BaseHTTPRequestHandler):
                 dev_flags=req.get("dev_flags", ""),
                 banned=str(req.get("banned", "")),
             )
-            self._send_json_payload({"ok": not out.startswith("ERROR:"), "message": out})
+            # ``admin_set_account`` is also the REPL/MCP-facing legacy
+            # wrapper, where a readable ``ERROR:`` string is the established
+            # contract.  Do not carry that stringly failure over the direct
+            # HTTP boundary as a successful 200 response: API clients need a
+            # non-2xx status and the standard machine-readable error shape to
+            # distinguish a rejected mutation from a completed one.
+            if out.startswith("ERROR:"):
+                self._send_json_payload(
+                    {"error": {
+                        "message": out.removeprefix("ERROR:").strip() or "account update failed",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            self._send_json_payload({"ok": True, "message": out})
             return
         if path != "/v1/chat/completions":
             self._send_json_payload(
@@ -3132,6 +3710,31 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
+        include_stream_usage = False
+        if "stream_options" in req:
+            stream_options = req["stream_options"]
+            if not isinstance(stream_options, dict):
+                record_early_chat_metric("invalid_stream_options")
+                self._send_json_payload(
+                    {"error": {
+                        "message": "stream_options must be an object",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            include_usage = stream_options.get("include_usage", False)
+            if not isinstance(include_usage, bool):
+                record_early_chat_metric("invalid_stream_options")
+                self._send_json_payload(
+                    {"error": {
+                        "message": "stream_options.include_usage must be a boolean",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            include_stream_usage = include_usage
         model = req.get("model", "sonder")
         if not isinstance(model, str):
             record_early_chat_metric("invalid_model")
@@ -3238,11 +3841,12 @@ class Handler(BaseHTTPRequestHandler):
                     model=model,
                     session=storage_session,
                     project=storage_project,
+                    reasoning_owner=_reasoning_request_owner(context),
                 ) as activity_response:
                     if structured_schema is not None:
                         turn = _run_structured_prompt(
                             prompt, history, model_selector, structured_schema,
-                            context_size=context_size,
+                            context_size=context_size, metrics=_lifecycle.metrics,
                         )
                         content = turn.content
                         response_model = turn.resolved_model
@@ -3251,8 +3855,10 @@ class Handler(BaseHTTPRequestHandler):
                         reply = _handle_slash(
                             prompt, messages=messages, state=state,
                             project=storage_project, context=context,
+                            idempotency_key=self.headers.get("Idempotency-Key", ""),
                         )
                     if (structured_schema is None and reply is None
+                            and not context.get("account")
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_feedback(prompt, state=state)
                     if (structured_schema is None and reply is None
@@ -3289,6 +3895,7 @@ class Handler(BaseHTTPRequestHandler):
                                 location_consent
                                 and bool(self.client_address)
                                 and _is_loopback_host(self.client_address[0])
+                                and _http_server_location_lookup_allowed(context)
                             ),
                         )
                         web_routed = reply is not None
@@ -3297,6 +3904,8 @@ class Handler(BaseHTTPRequestHandler):
                             prompt,
                             project=storage_project,
                             authorized=_developer_authorized(context),
+                            context=context,
+                            idempotency_key=self.headers.get("Idempotency-Key", ""),
                         )
                         execution_routed = reply is not None
                     if structured_schema is None and reply is not None:
@@ -3311,16 +3920,22 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project,
                             state=state,
                             return_result=True,
+                            # Account-backed deployments intentionally do not
+                            # inject or train the legacy global lesson store.
+                            # Their durable chat/session project IDs remain
+                            # principal-namespaced above.
+                            augment=not bool(context.get("account")),
+                            metrics=_lifecycle.metrics,
                         )
                         content = turn.content
                         response_iid = turn.iid
                         response_reasoning = turn.thinking
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                if structured_schema is None:
-                    content = server._append_activity(
-                        content, response=activity_response, replace=True,
-                    )
+                # OpenAI-compatible content is the answer only.  Observable
+                # execution data is returned separately in the bounded
+                # ``sonder_activity`` vendor extension, never appended where
+                # clients would replay it as assistant text.
                 _record_chat(
                     "assistant",
                     content,
@@ -3421,9 +4036,15 @@ class Handler(BaseHTTPRequestHandler):
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,
                 receipt=receipt,
+                usage=_chat_usage(activity_response) if include_stream_usage else None,
+                activity_response=activity_response,
             )
             self._record_chat_completion_metric(
-                _lifecycle, "ok" if streamed else "cancelled", request_started,
+                _lifecycle,
+                "ok" if streamed is True else
+                "cancelled" if streamed is False else
+                "stream_error",
+                request_started,
             )
         else:
             try:
@@ -3431,7 +4052,7 @@ class Handler(BaseHTTPRequestHandler):
                     _chat_completion_object(
                         content, model, iid=response_iid,
                         reasoning=response_reasoning, elapsed_ms=elapsed_ms,
-                        receipt=receipt,
+                        receipt=receipt, activity_response=activity_response,
                     ), elapsed_ms=elapsed_ms,
                 )
             finally:
@@ -3449,8 +4070,25 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, elapsed_ms=None):
         self._send_json_payload(obj, elapsed_ms=elapsed_ms)
 
-    def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None):
+    def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None,
+                     usage=None, activity_response=None):
+        """Send one complete SSE response.
+
+        ``True`` is a normal completed stream and ``False`` means the client
+        left.  ``None`` is a server-side streaming failure after the response
+        became SSE; callers must record it as a non-success result.  Model
+        calls themselves complete before this method begins, so their errors
+        retain the ordinary pre-header JSON error contract.
+        """
         iid = iid or uuid.uuid4().hex[:12]
+        activity = (
+            server.activity_tracker.public_response(
+                activity_response, include_detail=False,
+            )
+            if isinstance(activity_response, dict)
+            else (server.activity_tracker.public_snapshot(include_detail=False) or {}).get("latest")
+        )
+        headers_sent = False
         try:
             self.send_response(200)
             self._cors()
@@ -3467,11 +4105,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.close_connection = True
             self.end_headers()
+            headers_sent = True
             self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
             self.wfile.write(_chunk(
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
-                receipt=receipt,
+                receipt=receipt, activity=activity,
             ).encode("utf-8"))
+            if usage is not None:
+                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
             return True
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
@@ -3479,6 +4120,38 @@ class Handler(BaseHTTPRequestHandler):
             # can.  Return the same cancellation signal so the caller records
             # one truthful terminal metric instead of leaking a socket error.
             self.close_connection = True
+            return False
+        except Exception as error:
+            # HTTP status and headers are immutable now.  Do not try to append
+            # a JSON error body to an SSE response: a parser would see a bare
+            # close or malformed event stream.  A functioning connection gets
+            # a terminal, non-sensitive SSE error and [DONE] instead.
+            self.log_error("stream response failed: %s", type(error).__name__)
+            if headers_sent:
+                Handler._send_stream_terminal_error(self, iid, model)
+            self.close_connection = True
+            return None
+
+    def _send_stream_terminal_error(self, iid, model):
+        """Best-effort terminal SSE error after an already-started stream."""
+        payload = {
+            "id": "chatcmpl-%s" % iid,
+            "object": "error",
+            "model": model,
+            "error": {
+                "message": "stream interrupted before completion",
+                "type": "server_error",
+                "code": "STREAM_INTERRUPTED",
+            },
+        }
+        try:
+            self.wfile.write(("data: %s\n\n" % json.dumps(payload)).encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+            return True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return False
+        except Exception as error:
+            self.log_error("stream terminal error write failed: %s", type(error).__name__)
             return False
 
 

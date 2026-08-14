@@ -87,6 +87,31 @@ displaced coverage produces `task_drift`, suppresses the drifted output, and doe
 not enter the learning path. Inline protected runs use the same checks. Runs
 without objective markers retain the ordinary fleet behavior.
 
+### Model fanout
+
+Model fanout asks each eligible chat model the same bounded question and records
+a durable receipt. In the REPL, use an imperative whole turn such as:
+
+```
+ask all available local models: summarize this design
+ask all local and cloud models: compare these alternatives
+ask all loaded local chat models: review this patch plan
+```
+
+`local`, `cloud`, and combined requests select only discovered chat-capable
+models. The `loaded local chat` form is deliberately no-load: it fails closed
+unless Ollama reports every selected local target as already resident. Cloud
+fanout additionally requires the operator's cloud opt-in; on a shared deployment
+it requires developer authorization. Local models run serially to avoid VRAM
+contention. Cloud work is bounded to two concurrent calls by default and failed
+cloud calls are not automatically retried.
+
+The result reports selected, answered, failed, unknown, skipped, and elapsed
+counts. Use `/fanouts` to recover safe recent summaries after restarting the
+REPL. Full receipts can include model answers, so `model_fanout_status` is
+owner-scoped and developer-gated on shared deployments; local-open use keeps the
+full local toolset.
+
 ## Idempotency & recovery
 
 Autopilot/fleet control requests carry durable operation IDs; retrying a

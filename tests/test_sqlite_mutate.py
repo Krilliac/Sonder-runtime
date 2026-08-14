@@ -46,6 +46,55 @@ def test_preview_executes_then_rolls_back_with_exact_row_count(database):
     assert not Path(str(database) + "-journal").exists()
 
 
+def test_preview_token_fences_an_external_commit_before_apply(database):
+    preview = mutate.mutate_sqlite(
+        database, "UPDATE records SET active = ? WHERE id = ?", [0, 1],
+    )
+    assert preview["preview_token"]
+    assert preview["preview_token_expires_in_seconds"] == 60
+
+    external = sqlite3.connect(database)
+    try:
+        external.execute("UPDATE records SET name = 'external' WHERE id = 2")
+        external.commit()
+    finally:
+        external.close()
+
+    with pytest.raises(mutate.SqliteMutateError, match="preview is stale"):
+        mutate.mutate_sqlite(
+            database, "UPDATE records SET active = ? WHERE id = ?", [0, 1],
+            mode="apply", preview_token=preview["preview_token"],
+        )
+    assert _rows(database) == [
+        (1, "alpha", 1), (2, "external", 1), (3, "gamma", 0),
+    ]
+
+
+def test_preview_token_is_exact_request_bound_and_single_use(database):
+    preview = mutate.mutate_sqlite(
+        database, "UPDATE records SET active = ? WHERE id = ?", [0, 1],
+    )
+    with pytest.raises(mutate.SqliteMutateError, match="does not match"):
+        mutate.mutate_sqlite(
+            database, "UPDATE records SET active = ? WHERE id = ?", [0, 2],
+            mode="apply", preview_token=preview["preview_token"],
+        )
+
+    preview = mutate.mutate_sqlite(
+        database, "UPDATE records SET active = ? WHERE id = ?", [0, 1],
+    )
+    result = mutate.mutate_sqlite(
+        database, "UPDATE records SET active = ? WHERE id = ?", [0, 1],
+        mode="apply", preview_token=preview["preview_token"],
+    )
+    assert result["applied"] is True
+    with pytest.raises(mutate.SqliteMutateError, match="invalid, expired, or already used"):
+        mutate.mutate_sqlite(
+            database, "UPDATE records SET active = ? WHERE id = ?", [0, 1],
+            mode="apply", preview_token=preview["preview_token"],
+        )
+
+
 @pytest.mark.parametrize(
     "sql,params,expected",
     [

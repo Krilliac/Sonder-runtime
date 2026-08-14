@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import engine_bundle
 import ollama_endpoint
+import unsafe_lab
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 import sonder_health
 import sonder_paths
@@ -197,20 +199,74 @@ def _is_sonder_server_pid(pid: int) -> bool:
     return bool(command and script in command)
 
 
+def _is_sonder_server_for_port(pid: int, port: int) -> bool:
+    """Return whether a managed server PID belongs to ``port``.
+
+    ``sonder_serve.pid`` is deliberately a simple, backwards-compatible PID
+    file.  A user can nevertheless run another managed instance with a
+    different port, at which point a stale PID file must never make ``stop
+    --port`` terminate that other instance.  The supervisor always supplies
+    the port as the script's first argument.  Preserve legacy default-port
+    recognition for an older direct launch which omitted it.
+    """
+    command = _pid_command_line(pid)
+    normalized = command.lower().replace("/", os.sep).replace("\\", os.sep)
+    script = str((repo_root() / "sonder_serve.py").resolve()).lower()
+    if not command or script not in normalized:
+        return False
+    match = re.search(r"sonder_serve\.py[\"']?\s+(\d+)(?:\s|$)", command, re.IGNORECASE)
+    if match:
+        return int(match.group(1)) == int(port)
+    return int(port) == DEFAULT_PORT
+
+
 def _managed_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
     """Resolve a service PID, repairing stale Windows venv-launcher pidfiles."""
     recorded = _read_pid(name)
     if recorded and pid_alive(recorded) and (
-        name != "sonder_serve" or _is_sonder_server_pid(recorded)
+        name != "sonder_serve" or _is_sonder_server_for_port(recorded, port)
     ):
         return recorded
     if name != "sonder_serve" or not port_open(host, port):
         return None
     listener = _listener_pid(host, port)
-    if listener and pid_alive(listener) and _is_sonder_server_pid(listener):
+    if listener and pid_alive(listener) and _is_sonder_server_for_port(listener, port):
         pid_file(name).write_text(str(listener), encoding="ascii")
         return listener
     return None
+
+
+def _managed_listener_pid(host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
+    """Return the managed Sonder PID only when it owns the listener.
+
+    A TCP connect only proves that *something* accepted the connection.  In
+    particular, a stale or unrelated local process can bind the port while a
+    newly launched ``sonder_serve`` child is still starting (or has failed
+    before bind).  Windows gives us the listening PID, so use that stronger
+    identity evidence for readiness and status instead of combining a live
+    child PID with an unrelated open port.
+
+    The non-Windows fallback retains the existing managed-PID behaviour: this
+    lightweight launcher deliberately has no platform-specific listener table
+    implementation outside Windows.
+    """
+    if not port_open(host, port):
+        return None
+    listener = _listener_pid(host, port)
+    if listener is not None:
+        # A PID reported as a current TCP listener is already live; do not
+        # perform a second process-table lookup that can race process exit.
+        if _is_sonder_server_pid(listener):
+            # Repair a stale launcher pidfile only after proving that this PID
+            # owns the endpoint we are about to call ready.
+            pid_file("sonder_serve").write_text(str(listener), encoding="ascii")
+            return listener
+        return None
+    if os.name == "nt":
+        # A listener exists but its owner could not be identified.  Do not
+        # convert that weaker evidence into a successful Sonder launch.
+        return None
+    return _managed_pid("sonder_serve", host, port)
 
 
 def ollama_exe() -> str:
@@ -350,7 +406,23 @@ def ensure_sonder_alias() -> tuple[bool, str]:
     )
 
 
+def _require_safe_unsafe_lab_start(host, overrides=None) -> bool:
+    """Validate the exact environment a managed API child will receive.
+
+    ``sonder_serve`` repeats this gate at bind time, but the headless command
+    used to start/probe Ollama and bootstrap its alias first.  An invalid lab
+    request must not get any sidecar work merely because rejection happens in
+    the later API child.  Explicit launcher arguments win over stale parent
+    variables, matching the child environment below.
+    """
+    effective = dict(os.environ)
+    effective.update(dict(overrides or {}))
+    effective["SONDER_HOST"] = str(host)
+    return unsafe_lab.require_startup(env=effective, host=host)
+
+
 def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
+    _require_safe_unsafe_lab_start(host, env)
     if port_open(host, port):
         pid = _managed_pid("sonder_serve", host, port)
         suffix = " pid=%s" % pid if pid else " (unmanaged listener)"
@@ -384,11 +456,10 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
     # caller prints ``status`` immediately afterward, and without this probe a
     # healthy server can be labelled "did not start cleanly" one line before
     # that status says it is listening.
-    if wait_until(lambda: port_open(host, port), 12) or port_open(host, port):
-        listener = _listener_pid(host, port)
-        if listener and _is_sonder_server_pid(listener):
-            pid = listener
-            pid_file("sonder_serve").write_text(str(pid), encoding="ascii")
+    if (wait_until(lambda: _managed_listener_pid(host, port) is not None, 12)
+            or _managed_listener_pid(host, port) is not None):
+        pid = _managed_listener_pid(host, port) or pid
+        pid_file("sonder_serve").write_text(str(pid), encoding="ascii")
         return "sonder: started pid=%s at http://%s:%s" % (pid, host, port)
     return "sonder: start requested pid=%s, not reachable yet (see %s)" % (
         pid, log_file("sonder_serve"))
@@ -397,11 +468,15 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
 def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
     recorded = _read_pid(name)
     if name == "sonder_serve":
-        candidates = ([recorded] if recorded else []) + _listener_pids(host, port)
+        recorded_for_other_port = bool(
+            recorded and pid_alive(recorded)
+            and not _is_sonder_server_for_port(recorded, port)
+        )
+        candidates = ([] if recorded_for_other_port else [recorded]) + _listener_pids(host, port)
         pids = [
             pid for index, pid in enumerate(candidates)
             if pid and pid not in candidates[:index] and pid_alive(pid)
-            and _is_sonder_server_pid(pid)
+            and _is_sonder_server_for_port(pid, port)
         ]
     else:
         pids = [recorded] if recorded and pid_alive(recorded) else []
@@ -411,6 +486,11 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
         except OSError:
             pass
         if recorded:
+            if name == "sonder_serve" and recorded_for_other_port:
+                return (
+                    "%s: recorded pid %s is not for port %s; not stopped"
+                    % (name, recorded, port)
+                )
             return "%s: pid %s is not running" % (name, recorded)
         return "%s: no pid file" % name
     try:
@@ -453,17 +533,23 @@ def _start_succeeded(message: str) -> bool:
 
 
 def status(host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
-    sonder_pid = _managed_pid("sonder_serve", host, port)
+    listener_open = port_open(host, port)
+    sonder_pid = _managed_listener_pid(host, port)
+    if sonder_pid:
+        api_status = "listening on http://%s:%s (pid %s)" % (
+            host, port, sonder_pid,
+        )
+    elif listener_open:
+        api_status = "unmanaged listener on http://%s:%s (not Sonder)" % (host, port)
+    else:
+        api_status = "not listening"
     lines = [
         "sonder headless status",
         "  ollama: %s%s" % (
             "reachable" if ollama_ok() else "not reachable",
             " (pid %s)" % _read_pid("ollama") if _read_pid("ollama") else "",
         ),
-        "  sonder api: %s%s" % (
-            "listening on http://%s:%s" % (host, port) if port_open(host, port) else "not listening",
-            " (pid %s)" % sonder_pid if sonder_pid else "",
-        ),
+        "  sonder api: %s" % api_status,
         "  run dir: %s" % run_dir(),
         "  logs: %s, %s" % (log_file("ollama"), log_file("sonder_serve")),
     ]
@@ -520,6 +606,14 @@ def main(argv=None) -> int:
         print(stopped)
         if not _stop_succeeded(stopped):
             return 1
+    try:
+        # Validate before touching Ollama or the bootstrap subprocess.  The
+        # API child validates again at bind time; this protects the launcher
+        # sequence itself and includes --allow-hosted in the effective env.
+        _require_safe_unsafe_lab_start(args.host, env)
+    except unsafe_lab.UnsafeLabError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
     print(start_ollama())
     alias_ok, alias_message = ensure_sonder_alias()
     print(alias_message)
@@ -535,12 +629,11 @@ def main(argv=None) -> int:
     # immediately afterward, so preserve a successful exit when that probe
     # can verify the listener belongs to our managed Sonder process.  Do not
     # treat an arbitrary unmanaged listener as success.
-    managed = _managed_pid("sonder_serve", args.host, args.port)
-    # ``_managed_pid`` can identify a child which is alive but has not yet
-    # successfully bound its port.  Ownership alone is not readiness: require
-    # a listener as well so a hung/pre-bind child still returns a failure to
-    # launchers and the desktop shell.
-    return 0 if _start_succeeded(started) or (managed and port_open(args.host, args.port)) else 1
+    managed = _managed_listener_pid(args.host, args.port)
+    # ``_managed_listener_pid`` proves both ownership and the listener, so a
+    # hung/pre-bind child still returns a failure to launchers and the desktop
+    # shell.
+    return 0 if _start_succeeded(started) or managed else 1
 
 
 if __name__ == "__main__":

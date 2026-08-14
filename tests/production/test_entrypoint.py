@@ -76,6 +76,30 @@ def test_invalid_security_config_fails_before_bind(isolated_home, capsys):
     assert "tls_terminated_by_proxy" in err
 
 
+def test_exported_runtime_posture_includes_proxy_declaration(monkeypatch):
+    """The final HTTP bind gate must see the typed config's TLS declaration."""
+    import sonder_config
+    from sonder_runtime.__main__ import _export_runtime_environment
+
+    config = sonder_config.SonderConfig(
+        server=sonder_config.ServerConfig(
+            host="0.0.0.0", tls_terminated_by_proxy=True
+        )
+    )
+    # _export_runtime_environment is deliberately process-wide.  Register each
+    # output with monkeypatch first so this regression fixture cannot leak its
+    # non-loopback posture into the unrelated CLI tests below.
+    for name in (
+        "SONDER_HOST", "SONDER_PORT", "SONDER_AUTH_MODE",
+        "SONDER_MAX_REQUEST_BYTES", "SONDER_TLS_TERMINATED_BY_PROXY",
+        "OLLAMA_HOST", "SONDER_ALLOW_REMOTE_OLLAMA", "SONDER_WEB_TOOLS",
+        "SONDER_LIVE_RELOAD",
+    ):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+    _export_runtime_environment(config)
+    assert os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] == "1"
+
+
 def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(monkeypatch):
     import server
     from sonder_runtime.__main__ import cmd_mcp

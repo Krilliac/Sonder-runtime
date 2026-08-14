@@ -36,6 +36,23 @@ def test_banned_account_cannot_login_or_authenticate():
         admin_auth.login(conn, "user1", "password123")
 
 
+def test_ban_revokes_existing_sessions_even_after_unban():
+    conn = memory_store.connect(":memory:")
+    admin_auth.register(conn, "user1", "password123")
+    token, _ = admin_auth.login(conn, "user1", "password123")
+
+    admin_auth.set_account(conn, "user1", banned=True)
+    admin_auth.set_account(conn, "user1", banned=False)
+
+    # Unbanning permits a new login, but it must never revive a bearer token
+    # issued before the administrative ban.
+    assert admin_auth.authenticate(conn, token) is None
+    fresh_token, account = admin_auth.login(conn, "user1", "password123")
+    assert fresh_token != token
+    assert account["username"] == "user1"
+    assert admin_auth.authenticate(conn, fresh_token)["username"] == "user1"
+
+
 def test_rate_limit_blocks_free_tier_after_limit():
     conn = memory_store.connect(":memory:")
     account = admin_auth.register(conn, "user1", "password123")
@@ -44,6 +61,48 @@ def test_rate_limit_blocks_free_tier_after_limit():
 
     assert ok is False
     assert "rate limit" in msg
+
+
+def test_rate_limit_is_atomic_across_concurrent_connections(monkeypatch, tmp_path):
+    """Concurrent HTTP connections cannot each admit the same final slot."""
+    path = str(tmp_path / "accounts.db")
+    initial = memory_store.connect(path)
+    account = admin_auth.register(initial, "user1", "password123")
+    initial.close()
+    monkeypatch.setattr(admin_auth, "_now", lambda: 1_700_000_000)
+
+    attempts = admin_auth.DEFAULT_RATE_LIMIT + 12
+    barrier = threading.Barrier(attempts)
+    outcomes = []
+    outcome_lock = threading.Lock()
+
+    def attempt():
+        conn = memory_store.connect(path)
+        try:
+            barrier.wait()
+            outcome = admin_auth.rate_limit(conn, account)
+            with outcome_lock:
+                outcomes.append(outcome)
+        finally:
+            conn.close()
+
+    workers = [threading.Thread(target=attempt) for _ in range(attempts)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=30)
+
+    assert len(outcomes) == attempts
+    assert sum(ok for ok, _message in outcomes) == admin_auth.DEFAULT_RATE_LIMIT
+    check = memory_store.connect(path)
+    try:
+        row = check.execute(
+            "SELECT count FROM account_rate WHERE username=?",
+            (account["username"],),
+        ).fetchone()
+        assert row["count"] == attempts
+    finally:
+        check.close()
 
 
 def test_public_bootstrap_requires_secret_and_is_one_use(monkeypatch):

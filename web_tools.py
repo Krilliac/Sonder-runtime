@@ -28,6 +28,10 @@ BING_SEARCH_URL = "https://www.bing.com/search?q={query}"
 BING_SEARCH_RSS_URL = "https://www.bing.com/search?q={query}&format=rss"
 USER_AGENT = "sonder-local-agent/1.0"
 MAX_REDIRECTS = 5
+# Fetching more than this is neither necessary for the bounded text surface nor
+# safe to present as a complete document.  Read one byte beyond this limit in
+# _request so an over-limit response is rejected rather than silently truncated.
+MAX_RESPONSE_BYTES = 512_000
 MAX_DECOMPRESSED_BYTES = 2_000_000
 # A DNS response is attacker-controlled for arbitrary fetched URLs.  Trying an
 # unbounded number of individually pinned addresses turns one fetch into many
@@ -116,6 +120,15 @@ _UPCOMING_RECENCY_SIGNAL = re.compile(
     r"algorithm|button|branch|selector|sender))[^\n]{0,60}"
     r"\b(?:race|grand\s+prix|game|match|"
     r"election|release|launch|episode|concert)\b\s*[?!.]*$",
+    re.IGNORECASE,
+)
+
+# Exact conversational wrappers that carry no provider-search meaning.  Keep
+# this narrow and only strip the opening form: a literal phrase mentioned in a
+# question or quoted content must remain untouched.
+_EXPLICIT_SEARCH_PREFIX = re.compile(
+    r"^\s*(?:please\s+)?(?:web\s+search|search\s+(?:the\s+)?web)"
+    r"\s+(?:to\s+)?(?:find|for)\s+",
     re.IGNORECASE,
 )
 
@@ -630,6 +643,13 @@ def _search_query_variants(query):
     return variants[:4]
 
 
+def _provider_search_query(query):
+    """Remove one exact imperative wrapper before sending a provider query."""
+    original = str(query or "").strip()
+    cleaned = _EXPLICIT_SEARCH_PREFIX.sub("", original, count=1).strip()
+    return cleaned or original
+
+
 def _search_relevance(query, results):
     def normalized_terms(value):
         normalized = set()
@@ -719,7 +739,12 @@ def _request(url, timeout=10):
                 current_url = urllib.parse.urljoin(current_url, location)
                 redirects += 1
                 continue
-            raw = resp.read(512000)
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    "HTTP response exceeds the raw body safety limit "
+                    "(max %d bytes)" % MAX_RESPONSE_BYTES
+                )
             raw = _decode_content_encoding(
                 raw, resp.headers.get("Content-Encoding", "")
             )
@@ -733,6 +758,7 @@ def web_search(query, limit=5, timeout=10):
     if not query:
         raise ValueError("empty search query")
     limit = max(1, min(int(limit or 5), 10))
+    provider_query_root = _provider_search_query(query)
     configured_endpoint = os.environ.get("SONDER_SEARCH_URL", "").strip()
     endpoints = (
         [configured_endpoint] if configured_endpoint
@@ -743,7 +769,7 @@ def web_search(query, limit=5, timeout=10):
     best_relevance = -1
     for endpoint in endpoints:
         provider_queries = (
-            [query] if configured_endpoint else _search_query_variants(query)
+            [provider_query_root] if configured_endpoint else _search_query_variants(provider_query_root)
         )
         for provider_query in provider_queries:
             url = endpoint.format(query=urllib.parse.quote_plus(provider_query))
@@ -773,7 +799,7 @@ def web_search(query, limit=5, timeout=10):
                 else:
                     results = _search_rows(text, url, limit)
                 if results:
-                    relevance, required = _search_relevance(query, results)
+                    relevance, required = _search_relevance(provider_query_root, results)
                     if relevance > best_relevance:
                         best_results = results
                         best_relevance = relevance

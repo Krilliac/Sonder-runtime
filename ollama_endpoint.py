@@ -94,12 +94,19 @@ def policy_error(value=None, *, allow_remote=None) -> str:
     if is_loopback(origin):
         return ""
     consent = remote_allowed() if allow_remote is None else allow_remote is True
-    if consent:
-        return ""
-    return (
-        "non-loopback OLLAMA_HOST is blocked because prompts and embeddings "
-        "would leave this machine; set %s=1 to opt in explicitly" % REMOTE_OPT_IN
-    )
+    if not consent:
+        return (
+            "non-loopback OLLAMA_HOST is blocked because prompts and embeddings "
+            "would leave this machine; set %s=1 to opt in explicitly" % REMOTE_OPT_IN
+        )
+    # A remote inference endpoint receives prompts and embeddings.  Explicit
+    # consent is necessary, but is not a reason to permit an accidental
+    # clear-text transport on a LAN, VPN, or public network.  Keep HTTP for
+    # the local Ollama default only; a remote endpoint must authenticate its
+    # TLS certificate through urllib's normal HTTPS handling.
+    if parsed.scheme.lower() != "https":
+        return "non-loopback OLLAMA_HOST must use https to protect prompts and embeddings in transit"
+    return ""
 
 
 def configured_origin(value=None, *, allow_remote=None) -> str:
@@ -125,10 +132,30 @@ def client_environment(environment=None, *, allow_remote=None) -> dict:
 
 def locality(value=None) -> str:
     origin = normalize(value)
-    if policy_error(origin, allow_remote=True):
+    try:
+        parsed = urllib.parse.urlparse(origin)
+    except ValueError:
+        return "invalid"
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return "invalid"
+    try:
+        if parsed.port is None:
+            return "invalid"
+    except ValueError:
         return "invalid"
     if is_loopback(origin):
         return "loopback"
+    if parsed.scheme.lower() != "https":
+        return "remote-insecure"
     return "remote-opt-in" if remote_allowed() else "remote-blocked"
 
 

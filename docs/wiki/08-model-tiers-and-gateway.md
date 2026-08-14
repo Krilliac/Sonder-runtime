@@ -163,7 +163,9 @@ note: [use-facts-model](../runbooks/use-facts-model.md).
 ## Remote & cloud (opt-in)
 
 - **Remote Ollama** — set `[ollama].allow_remote = true` /
-  `SONDER_ALLOW_REMOTE_OLLAMA=1` to point at a non-loopback Ollama origin.
+  `SONDER_ALLOW_REMOTE_OLLAMA=1` to point at a non-loopback **HTTPS** Ollama
+  origin. HTTP remains available only for loopback Ollama because remote
+  prompts and embeddings must be protected in transit.
 - **Hosted/cloud tiers** — set `[features].cloud = true` /
   `SONDER_ALLOW_CLOUD=1`. Both are explicit consent gates; default is fully
   local. A non-Ollama frontier API would slot in as a new gateway adapter.

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+import command_router
 import git_tools
 import server
 import sonder_serve
@@ -321,6 +322,31 @@ def test_runtime_update_status_reports_ahead_behind_and_commit_times(tmp_path):
     assert datetime.fromisoformat(result["installed_commit_time"]).tzinfo is not None
     assert datetime.fromisoformat(result["newest_commit_time"]).tzinfo is not None
     assert result["trusted_remote"] is False
+    assert result["remote_ref_refreshed"] is False
+
+
+def test_runtime_update_status_marks_only_explicit_fetches_as_refreshed(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/Krilliac/Sonder-runtime.git")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    calls = []
+    real_checked = git_tools._checked_git
+
+    def observed(root, arguments, **kwargs):
+        calls.append(list(arguments))
+        if "fetch" in arguments:
+            return {"stdout": "", "stderr": "", "returncode": 0, "timed_out": False,
+                    "elapsed_ms": 1, "truncated": False, "output_bytes": 0, "output_limit": 16384}
+        return real_checked(root, arguments, **kwargs)
+
+    monkeypatch.setattr(git_tools, "_checked_git", observed)
+
+    cached = git_tools.runtime_update_status(repo, refresh=False)
+    refreshed = git_tools.runtime_update_status(repo, refresh=True)
+
+    assert cached["remote_ref_refreshed"] is False
+    assert refreshed["remote_ref_refreshed"] is True
+    assert any("fetch" in call for call in calls)
 
 
 def test_runtime_checkout_commit_reads_only_the_current_head(tmp_path):
@@ -354,6 +380,45 @@ def test_runtime_update_status_refuses_untrusted_origin_before_fetch(monkeypatch
     with pytest.raises(PermissionError, match="canonical Sonder origin"):
         git_tools.runtime_update_status(repo, refresh=True)
     assert not any("fetch" in call for call in calls)
+
+
+def test_runtime_update_fetch_neutralizes_credential_and_refspec_configuration(
+    monkeypatch, tmp_path,
+):
+    repo = _repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/Krilliac/Sonder-runtime.git")
+    calls = []
+
+    def fake_checked(_root, arguments, **_kwargs):
+        calls.append(list(arguments))
+        if "rev-parse" in arguments:
+            return {"stdout": "a" * 40 + "\n", "elapsed_ms": 1}
+        if "rev-list" in arguments:
+            return {"stdout": "0 0\n", "elapsed_ms": 1}
+        if "show" in arguments:
+            return {"stdout": "2026-08-13T00:00:00Z\n", "elapsed_ms": 1}
+        if "status" in arguments:
+            return {
+                "stdout": "# branch.oid " + "a" * 40 + "\n# branch.head main\n",
+                "elapsed_ms": 1, "truncated": False, "output_bytes": 0,
+                "output_limit": 16_384,
+            }
+        return {"stdout": "", "elapsed_ms": 1}
+
+    monkeypatch.setattr(git_tools, "_checked_git", fake_checked)
+    monkeypatch.setattr(git_tools, "_require_repository_root", lambda *_args, **_kwargs: repo)
+    monkeypatch.setattr(
+        git_tools, "_runtime_remote_url",
+        lambda _root: "https://github.com/Krilliac/Sonder-runtime.git",
+    )
+    result = git_tools.runtime_update_status(repo, refresh=True)
+
+    fetch = next(call for call in calls if "fetch" in call)
+    assert "credential.helper=" in fetch
+    assert "core.askPass=" in fetch
+    assert "--refmap=" in fetch
+    assert fetch[-1] == "+refs/heads/main:refs/remotes/origin/main"
+    assert result["state"] == "current"
 
 
 def test_runtime_update_neutralizes_checkout_filter_processes(monkeypatch, tmp_path):
@@ -411,6 +476,7 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert "behind=3" in text
     assert "checkout: main" in text
     assert "source root: C:/Sonder-runtime" in text
+    assert "eligible; /update can fast-forward canonical main" in text
 
     monkeypatch.setattr(
         server.git_tools, "runtime_update", lambda _root: {"updated": False, "after": data},
@@ -420,6 +486,43 @@ def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch)
     assert "usage:" in server.control_command("/update check")
     assert not sonder_serve._dangerous_http_slash("/updatecheck")
     assert sonder_serve._dangerous_http_slash("/update")
+
+
+def test_natural_update_check_reuses_guarded_refresh_dispatch(monkeypatch):
+    seen = {}
+
+    def status(refresh=True):
+        seen["refresh"] = refresh
+        return "Sonder source update status: current"
+
+    monkeypatch.setattr(server, "runtime_source_update_status", status)
+    line = command_router.resolve("check whether Sonder is up to date")
+
+    assert line == "/updatecheck"
+    assert server.control_command(line) == "Sonder source update status: current"
+    assert seen == {"refresh": True}
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({"trusted_remote": False}, "remote is not the canonical Sonder origin"),
+        ({"branch": "feature/demo"}, "checkout must be 'main' (current: 'feature/demo')"),
+        ({"clean": False}, "source checkout is dirty"),
+        ({"ahead": 1}, "local commits require manual reconciliation"),
+    ],
+)
+def test_runtime_update_status_explains_safe_refusal_before_approval(changes, expected):
+    data = {
+        "branch": "main", "trusted_remote": True, "clean": True,
+        "ahead": 0, "state": "behind",
+    }
+    data.update(changes)
+
+    text = server._runtime_update_format(data)
+
+    assert "update: refused;" in text
+    assert expected in text
 
 
 def test_runtime_update_refusal_names_current_branch_and_safe_recovery(monkeypatch, tmp_path):
@@ -475,5 +578,16 @@ def test_repl_startup_banner_reads_cached_update_status(monkeypatch):
     assert seen == [False]
     assert "installed source" in banner
     assert "running source" in banner
+    assert "newest known source" in banner
     assert "restart required" in banner
     assert "/updatecheck | /update" in banner
+
+
+def test_runtime_update_format_marks_cached_remote_ref_as_known():
+    text = server._runtime_update_format({
+        "installed_commit": "a" * 40,
+        "newest_commit": "b" * 40,
+        "remote_ref_refreshed": False,
+    })
+
+    assert "newest known origin/main" in text

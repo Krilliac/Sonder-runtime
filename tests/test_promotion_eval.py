@@ -474,7 +474,7 @@ def test_promotion_origin_rewrites_ipv6_bind_all_and_ignores_remote_opt_in(
     monkeypatch.setenv("OLLAMA_HOST", "[::]:11434")
     assert pe._local_ollama_origin() == "http://[::1]:11434"
 
-    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     with pytest.raises(ValueError, match="loopback"):
         pe._local_ollama_origin()

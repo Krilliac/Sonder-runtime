@@ -8,7 +8,6 @@ recoverable without replaying an unknown cloud request.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import os
 import re
 import socket
@@ -30,6 +29,12 @@ MAX_EVENT_CHARS = 1_000
 MAX_MODELS = 128
 MAX_PROVIDER_RETRY_SECONDS = 3600
 DEFAULT_LEASE_SECONDS = 300
+# A durable fanout may need its original prompt to resume, but that payload is
+# held exclusively in ``execution_prompt_ciphertext``.  The legacy columns are
+# kept for schema compatibility only; retaining even a redacted free-text copy
+# or a stable digest there leaks private prose / enables offline guessing when
+# the SQLite receipt is copied.
+_PROMPT_REDACTED = "sealed-fanout-prompt:redacted"
 # A queued receipt should normally be claimed immediately by its caller.  If a
 # process dies in that narrow handoff window, leave enough time for ordinary
 # scheduling then make the never-started run explicitly recoverable.
@@ -74,6 +79,7 @@ CREATE TABLE IF NOT EXISTS fanout_results (
  run_id TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
  owner_id TEXT NOT NULL DEFAULT '', owner_pid INTEGER NOT NULL DEFAULT 0, owner_host TEXT NOT NULL DEFAULT '',
  lease_until REAL, answer TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', elapsed_ms INTEGER,
+ dispatch_started INTEGER NOT NULL DEFAULT 0, dispatch_state_known INTEGER NOT NULL DEFAULT 1,
  answer_chars INTEGER NOT NULL DEFAULT 0, answer_truncated INTEGER NOT NULL DEFAULT 0,
  answer_truncation_known INTEGER NOT NULL DEFAULT 0, thinking_chars INTEGER NOT NULL DEFAULT 0,
  done_reason TEXT NOT NULL DEFAULT '',
@@ -163,6 +169,12 @@ def _ensure_schema(path: str) -> None:
                     )
                 result_columns = {row[1] for row in conn.execute("PRAGMA table_info(fanout_results)")}
                 for column, declaration in (
+                    # Older receipts predate the pre-transport dispatch fence.
+                    # Keep their state explicitly unknown: interpreting an old
+                    # in-flight row as "not dispatched" could make a cancelled
+                    # metered request look safely replayable.
+                    ("dispatch_started", "INTEGER NOT NULL DEFAULT 0"),
+                    ("dispatch_state_known", "INTEGER NOT NULL DEFAULT 0"),
                     ("answer_chars", "INTEGER NOT NULL DEFAULT 0"),
                     ("answer_truncated", "INTEGER NOT NULL DEFAULT 0"),
                     # Existing rows have no exact source length or historical
@@ -190,13 +202,13 @@ def _ensure_schema(path: str) -> None:
                 # Before sealed prompts existed this database retained a best-effort
                 # redacted copy plus a stable digest.  That is not an acceptable
                 # durable prompt store: a redactor cannot safely classify arbitrary
-                # private prose, and a digest enables offline guessing.  Old runs
-                # cannot be resumed without their sealed payload, so scrub them in
-                # the same migration that introduces the vault column.
+                # private prose, and a digest enables offline guessing.  Sealed
+                # rows do not need either legacy field to resume, so scrub *all*
+                # existing rows rather than leaving newer vault-backed rows behind.
                 conn.execute(
-                    "UPDATE fanout_runs SET prompt='legacy-fanout-prompt:redacted', "
-                    "prompt_sha256='' WHERE COALESCE(execution_prompt_ciphertext, '')='' "
-                    "AND prompt NOT LIKE 'legacy-fanout-prompt:%'"
+                    "UPDATE fanout_runs SET prompt=?, prompt_sha256='' "
+                    "WHERE prompt<>? OR prompt_sha256<>''",
+                    (_PROMPT_REDACTED, _PROMPT_REDACTED),
                 )
                 conn.commit()
             except sqlite3.OperationalError as exc:
@@ -279,15 +291,14 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
     if len(ciphertext) > 64_000:
         raise ValueError("fanout sealed prompt exceeds 64000 characters")
     now = time.time(); run_id = "fan-%s" % uuid.uuid4().hex[:16]
-    stored_prompt = _safe_text(raw_prompt, MAX_PROMPT_CHARS)
     with _write_transaction() as conn:
         conn.execute("""INSERT INTO fanout_runs(id,request_owner,request_role,prompt,prompt_sha256,models_json,execution_prompt_ciphertext,scope,cloud_opt_in,limits_json,status,created_ts,updated_ts)
                         VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
-                     (run_id, _safe_text(request_owner, 200), _safe_text(request_role, 80), stored_prompt,
-                      hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest(), _json(clean_models),
+                     (run_id, _safe_text(request_owner, 200), _safe_text(request_role, 80), _PROMPT_REDACTED,
+                      "", _json(clean_models),
                       ciphertext, _safe_text(scope, 40),
                       int(bool(cloud_opt_in)), _json(limits or {}), now, now))
-        conn.executemany("INSERT INTO fanout_results(run_id,model,status,updated_ts) VALUES(?,?,'pending',?)",
+        conn.executemany("INSERT INTO fanout_results(run_id,model,status,dispatch_state_known,updated_ts) VALUES(?,?,'pending',1,?)",
                          [(run_id, model, now) for model in clean_models])
         _event(conn, run_id, "created", "fanout receipt created for %d models" % len(clean_models), now)
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (run_id,)).fetchone()
@@ -493,6 +504,33 @@ def worker_can_dispatch(run_id: str, owner_id: str) -> bool:
         conn.close()
 
 
+def mark_result_dispatched(run_id: str, model: str, owner_id: str) -> bool:
+    """Atomically fence one provider handoff before calling its transport.
+
+    A cancellation that wins before this transition can safely retain the row
+    as ``skipped``.  Once the transition succeeds the host cannot prove a
+    provider request was not sent, so cancellation records ``unknown`` rather
+    than falsely promising that a metered request did not happen.
+    """
+    now = time.time()
+    with _write_transaction() as conn:
+        run = conn.execute(
+            "SELECT cancel_requested,owner_id,status,lease_until FROM fanout_runs WHERE id=?",
+            (str(run_id),),
+        ).fetchone()
+        if (
+            run is None or run["cancel_requested"] or run["owner_id"] != str(owner_id)
+            or run["status"] != "running" or run["lease_until"] is None
+            or run["lease_until"] < now
+        ):
+            return False
+        return conn.execute(
+            "UPDATE fanout_results SET dispatch_started=1,dispatch_state_known=1,updated_ts=? "
+            "WHERE run_id=? AND model=? AND owner_id=? AND status='running' AND lease_until>=?",
+            (now, str(run_id), str(model), str(owner_id), now),
+        ).rowcount > 0
+
+
 def _metric_count(value, maximum: int) -> int:
     """Return one bounded receipt metric without accepting bools or junk."""
     if isinstance(value, bool):
@@ -617,7 +655,20 @@ def request_cancel(run_id: str) -> dict | None:
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None: return None
         if row["status"] in TERMINAL_RUNS: return _row(row)
-        conn.execute("UPDATE fanout_results SET status='skipped',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL WHERE run_id=? AND status IN ('pending','running')", (now, now, str(run_id)))
+        # A claimed row is not necessarily a dispatched provider call.  Keep
+        # the receipt truthful at the billing boundary: only rows with a
+        # confirmed pre-transport fence are safe to call skipped.  Legacy rows
+        # have unknown fence state and are conservatively non-replayable too.
+        conn.execute(
+            "UPDATE fanout_results SET status='skipped',finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL "
+            "WHERE run_id=? AND (status='pending' OR (status='running' AND dispatch_state_known=1 AND dispatch_started=0))",
+            (now, now, str(run_id)),
+        )
+        conn.execute(
+            "UPDATE fanout_results SET status='unknown',error='cancelled while provider request may have been dispatched',failure_class='execution_uncertain',retry_after_ts=NULL,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL "
+            "WHERE run_id=? AND status='running' AND (dispatch_state_known=0 OR dispatch_started=1)",
+            (now, now, str(run_id)),
+        )
         conn.execute("UPDATE fanout_runs SET status='cancelled',cancel_requested=1,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? WHERE id=?", (now, now, str(run_id)))
         message = "fanout cancelled; late model receipts will be discarded"
         _event(conn, str(run_id), "cancel", message, now)
@@ -643,7 +694,7 @@ def resume_run(run_id: str, *, include_failed: bool = False, retry_unknown: bool
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None or row["status"] not in TERMINAL_RUNS:
             return None
-        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',error='',elapsed_ms=NULL,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',failure_class=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
+        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',error='',elapsed_ms=NULL,dispatch_started=0,dispatch_state_known=1,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',failure_class=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
         if not changed:
             return None
         conn.execute("UPDATE fanout_runs SET status='queued',cancel_requested=0,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=NULL,updated_ts=? WHERE id=?", (now, str(run_id)))

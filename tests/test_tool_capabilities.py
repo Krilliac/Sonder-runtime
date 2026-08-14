@@ -14,7 +14,7 @@ def test_initial_shadow_registry_is_immutable_and_has_no_drift():
         "environment_status", "hardware_profile", "file_policy",
         "workspace_inventory", "directory_tree", "file_find", "file_read",
         "file_read_range", "file_digest", "text_search", "repo_status",
-        "repo_diff", "artifact_risk_inspect", "process_list",
+        "repo_diff", "image_inspect", "artifact_risk_inspect", "process_list",
         "process_memory_risk_inspect",
     }
     with pytest.raises(TypeError):
@@ -275,9 +275,9 @@ def test_descriptor_policy_invariants_are_checked():
 def test_diagnostics_exposes_shadow_result_without_startup_enforcement():
     report = server.tool_capability_shadow_report()
     # "ok" is exactly what this validator must never be able to say while it
-    # inspects 15 of ~184 advertised tools.  The verdict names the coverage.
+    # inspects 16 of ~184 advertised tools.  The verdict names the coverage.
     assert report.startswith("partial: ")
-    assert "15 of " in report
+    assert "16 of " in report
     assert "unvalidated" in report
     # Prove diagnostics consumes the shadow report without running its unrelated
     # model, database, NPU, and filesystem checks in this focused unit test.
@@ -401,4 +401,4 @@ def test_diagnostics_reports_shadow_coverage_per_surface():
     assert "tool_capability_coverage_report()" in source
     assert "tool capability coverage" in source
     line = server.tool_capability_coverage_report()
-    assert "direct-mcp 15/" in line
+    assert "direct-mcp 16/" in line

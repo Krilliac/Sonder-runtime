@@ -55,6 +55,30 @@ def _write_private(path: Path, content: str) -> None:
     os.replace(tmp, path)
 
 
+def _create_private_if_missing(path: Path, content: str) -> bool:
+    """Atomically create private state without replacing an existing value.
+
+    This is deliberately separate from ``_write_private``.  Some secrets,
+    notably the generated account-session HMAC key, must have one stable
+    value across simultaneous first starts.  Replacing that file lets two
+    processes each hash sessions with a different key during the race.
+
+    Returns ``True`` only to the process that created the file.  ``O_EXCL``
+    has the required create-once semantics on both POSIX and Windows.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, content.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
 def load_rotation_state(path: Path | None = None) -> dict | None:
     state_path = path or rotation_state_path()
     try:

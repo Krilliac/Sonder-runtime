@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import secrets
+import threading
 import time
 
 import data_query
@@ -24,6 +26,8 @@ DEFAULT_TIMEOUT_SECONDS = 2.0
 MAX_TIMEOUT_SECONDS = 5.0
 DEFAULT_MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_DB_BYTES = 256 * 1024 * 1024
+PREVIEW_LEASE_TTL_SECONDS = 60.0
+MAX_PREVIEW_LEASES = 32
 _MUTATION_ACTIONS = {
     "INSERT": sqlite3.SQLITE_INSERT,
     "UPDATE": sqlite3.SQLITE_UPDATE,
@@ -33,6 +37,80 @@ _MUTATION_ACTIONS = {
 
 class SqliteMutateError(RuntimeError):
     pass
+
+
+# A preview is normally advisory: a later apply opens a new SQLite connection,
+# and SQLite's data_version is deliberately connection-local.  When callers
+# opt into this short-lived lease, keep the preview connection alive so its
+# data_version can detect a commit by any *other* connection before apply.
+# This is deliberately bounded and in-memory only; it is not a durable work
+# queue or an authorization grant.
+_preview_lease_lock = threading.Lock()
+_preview_leases = {}
+
+
+def _close_preview_lease(lease):
+    try:
+        lease["conn"].close()
+    except sqlite3.Error:
+        pass
+
+
+def _purge_preview_leases(now=None):
+    now = time.monotonic() if now is None else now
+    expired = []
+    with _preview_lease_lock:
+        for token, lease in list(_preview_leases.items()):
+            if lease["expires_at"] <= now:
+                expired.append(_preview_leases.pop(token))
+    for lease in expired:
+        _close_preview_lease(lease)
+
+
+def _preview_binding(target, identity, sql, parameters, max_rows, timeout, max_db_bytes):
+    value = {
+        "path": str(target), "identity": list(identity), "sql": sql,
+        "parameters": parameters, "max_rows": max_rows, "timeout": timeout,
+        "max_db_bytes": max_db_bytes,
+    }
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _store_preview_lease(conn, binding, data_version):
+    _purge_preview_leases()
+    token = secrets.token_urlsafe(32)
+    lease = {
+        "conn": conn, "binding": binding, "data_version": data_version,
+        "expires_at": time.monotonic() + PREVIEW_LEASE_TTL_SECONDS,
+    }
+    evicted = None
+    with _preview_lease_lock:
+        # Tokens are random, but do not silently overwrite a live lease if a
+        # provider or test double ever produces a collision.
+        while token in _preview_leases:
+            token = secrets.token_urlsafe(32)
+        if len(_preview_leases) >= MAX_PREVIEW_LEASES:
+            oldest = min(_preview_leases, key=lambda item: _preview_leases[item]["expires_at"])
+            evicted = _preview_leases.pop(oldest)
+        _preview_leases[token] = lease
+    if evicted is not None:
+        _close_preview_lease(evicted)
+    return token
+
+
+def _claim_preview_lease(token, binding):
+    if not isinstance(token, str) or not token or len(token) > 256:
+        raise SqliteMutateError("SQLite preview token is invalid, expired, or already used")
+    _purge_preview_leases()
+    with _preview_lease_lock:
+        lease = _preview_leases.pop(token, None)
+    if lease is None:
+        raise SqliteMutateError("SQLite preview token is invalid, expired, or already used")
+    if not secrets.compare_digest(lease["binding"], binding):
+        _close_preview_lease(lease)
+        raise SqliteMutateError("SQLite preview token does not match this mutation")
+    return lease
 
 
 def _bounded_int(value, default, minimum, maximum):
@@ -254,7 +332,8 @@ def _check_deadline(deadline):
 
 def mutate_sqlite(path, sql, parameters, *, mode="preview",
                   max_rows=DEFAULT_MAX_ROWS, timeout=DEFAULT_TIMEOUT_SECONDS,
-                  max_db_bytes=DEFAULT_MAX_DB_BYTES, extra_roots="", bypass=False):
+                  max_db_bytes=DEFAULT_MAX_DB_BYTES, preview_token="",
+                  extra_roots="", bypass=False):
     mode = str(mode or "preview").strip().lower()
     if mode not in {"preview", "apply"}:
         raise SqliteMutateError("mode must be preview or apply")
@@ -276,13 +355,22 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
         raise SqliteMutateError("SQLite database exceeds the configured size ceiling")
     initial = target.stat()
     identity = (initial.st_dev, initial.st_ino)
+    binding = _preview_binding(
+        target, identity, sql, parameters, max_rows, timeout, max_db_bytes,
+    )
     deadline = time.monotonic() + timeout
     started = time.monotonic()
     uri = target.as_uri() + "?mode=rw"
-    try:
-        conn = sqlite3.connect(uri, uri=True, timeout=0, isolation_level=None)
-    except sqlite3.Error as exc:
-        raise SqliteMutateError("SQLite open failed: %s" % exc) from exc
+    lease = None
+    retained_preview = False
+    if mode == "apply" and preview_token:
+        lease = _claim_preview_lease(preview_token, binding)
+        conn = lease["conn"]
+    else:
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=0, isolation_level=None)
+        except sqlite3.Error as exc:
+            raise SqliteMutateError("SQLite open failed: %s" % exc) from exc
     transaction = False
     try:
         conn.execute("PRAGMA busy_timeout=0")
@@ -311,6 +399,14 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
         conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 100)
         conn.execute("BEGIN IMMEDIATE")
         transaction = True
+        if lease is not None:
+            # Check after acquiring the writer lock: any external writer has
+            # either committed (and advances this retained connection's
+            # data_version) or prevents BEGIN IMMEDIATE.  There is then no
+            # race between this check and the guarded mutation below.
+            current_version = int(conn.execute("PRAGMA data_version").fetchone()[0])
+            if current_version != lease["data_version"]:
+                raise SqliteMutateError("SQLite preview is stale; rerun preview")
         authorize, state = _authorizer(statement, restricted_tables)
         conn.set_authorizer(authorize)
         before_changes = conn.total_changes
@@ -375,6 +471,13 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
         storage_after = _storage_bytes(target)
         if not applied and storage_after > max_db_bytes:
             raise SqliteMutateError("SQLite database exceeds size ceiling after completion")
+        if not applied:
+            # A caller can opt into optimistic preview/apply fencing by
+            # returning this opaque token with the exact same request.  The
+            # connection remains idle (not in a transaction) until then.
+            data_version = int(conn.execute("PRAGMA data_version").fetchone()[0])
+            preview_token = _store_preview_lease(conn, binding, data_version)
+            retained_preview = True
         return {
             "ok": True,
             "path": str(target),
@@ -391,6 +494,9 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
                 "database_bytes": max_db_bytes, "statement_bytes": MAX_SQL_BYTES,
                 "parameters": MAX_PARAMETERS,
             },
+            **({"preview_token": preview_token,
+                "preview_token_expires_in_seconds": int(PREVIEW_LEASE_TTL_SECONDS)}
+               if mode == "preview" else {}),
         }
     except SqliteMutateError:
         if transaction:
@@ -412,4 +518,5 @@ def mutate_sqlite(path, sql, parameters, *, mode="preview",
             conn.set_progress_handler(None, 0)
         except sqlite3.Error:
             pass
-        conn.close()
+        if not retained_preview:
+            conn.close()

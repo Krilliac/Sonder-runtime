@@ -2344,7 +2344,13 @@ def count_interactions(conn):
 
 
 def interaction_token_totals(conn):
-    """Return exact persisted token totals plus estimated fallback for legacy rows."""
+    """Return token totals with measured/estimated provenance counts.
+
+    Numeric columns alone are not proof that a count came from the provider:
+    current callers persist character estimates when Ollama omits usage, and
+    historical callers can have unknown provenance.  Keep the total useful,
+    while reporting those categories honestly.
+    """
     estimated_in_sql = (
         "CASE WHEN (length(COALESCE(task, '')) + length(COALESCE(retrieved_ctx, ''))) = 0 "
         "THEN 0 ELSE ((length(COALESCE(task, '')) + length(COALESCE(retrieved_ctx, '')) + 3) / 4) END"
@@ -2356,8 +2362,21 @@ def interaction_token_totals(conn):
     row = conn.execute(
         "SELECT "
         "COUNT(*) AS interactions, "
-        "SUM(CASE WHEN tokens_in IS NOT NULL OR tokens_out IS NOT NULL THEN 1 ELSE 0 END) AS exact_rows, "
-        "SUM(CASE WHEN tokens_in IS NULL AND tokens_out IS NULL THEN 1 ELSE 0 END) AS estimated_rows, "
+        "SUM(CASE WHEN lower(COALESCE(token_source, '')) = 'ollama' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'ollama+%%' THEN 1 ELSE 0 END) AS exact_rows, "
+        "SUM(CASE WHEN token_source IS NULL AND tokens_in IS NULL AND tokens_out IS NULL "
+        "OR lower(COALESCE(token_source, '')) = 'estimated' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'estimated+%%' THEN 1 ELSE 0 END) AS estimated_rows, "
+        "SUM(CASE WHEN lower(COALESCE(token_source, '')) = 'mixed' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'mixed+%%' THEN 1 ELSE 0 END) AS mixed_rows, "
+        "SUM(CASE WHEN NOT ("
+        "lower(COALESCE(token_source, '')) = 'ollama' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'ollama+%%' "
+        "OR (token_source IS NULL AND tokens_in IS NULL AND tokens_out IS NULL) "
+        "OR lower(COALESCE(token_source, '')) = 'estimated' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'estimated+%%' "
+        "OR lower(COALESCE(token_source, '')) = 'mixed' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'mixed+%%') THEN 1 ELSE 0 END) AS unknown_rows, "
         "SUM(COALESCE(tokens_in, %s)) AS tokens_in, "
         "SUM(COALESCE(tokens_out, %s)) AS tokens_out "
         "FROM interactions"
@@ -2369,6 +2388,8 @@ def interaction_token_totals(conn):
         "interactions": int(row["interactions"] or 0),
         "exact_rows": int(row["exact_rows"] or 0),
         "estimated_rows": int(row["estimated_rows"] or 0),
+        "mixed_rows": int(row["mixed_rows"] or 0),
+        "unknown_rows": int(row["unknown_rows"] or 0),
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "tokens_total": tokens_in + tokens_out,
@@ -2387,8 +2408,21 @@ def interaction_token_totals_by_tier(conn):
     rows = conn.execute(
         "SELECT tier, "
         "COUNT(*) AS interactions, "
-        "SUM(CASE WHEN tokens_in IS NOT NULL OR tokens_out IS NOT NULL THEN 1 ELSE 0 END) AS exact_rows, "
-        "SUM(CASE WHEN tokens_in IS NULL AND tokens_out IS NULL THEN 1 ELSE 0 END) AS estimated_rows, "
+        "SUM(CASE WHEN lower(COALESCE(token_source, '')) = 'ollama' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'ollama+%%' THEN 1 ELSE 0 END) AS exact_rows, "
+        "SUM(CASE WHEN token_source IS NULL AND tokens_in IS NULL AND tokens_out IS NULL "
+        "OR lower(COALESCE(token_source, '')) = 'estimated' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'estimated+%%' THEN 1 ELSE 0 END) AS estimated_rows, "
+        "SUM(CASE WHEN lower(COALESCE(token_source, '')) = 'mixed' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'mixed+%%' THEN 1 ELSE 0 END) AS mixed_rows, "
+        "SUM(CASE WHEN NOT ("
+        "lower(COALESCE(token_source, '')) = 'ollama' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'ollama+%%' "
+        "OR (token_source IS NULL AND tokens_in IS NULL AND tokens_out IS NULL) "
+        "OR lower(COALESCE(token_source, '')) = 'estimated' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'estimated+%%' "
+        "OR lower(COALESCE(token_source, '')) = 'mixed' "
+        "OR lower(COALESCE(token_source, '')) LIKE 'mixed+%%') THEN 1 ELSE 0 END) AS unknown_rows, "
         "SUM(COALESCE(tokens_in, %s)) AS tokens_in, "
         "SUM(COALESCE(tokens_out, %s)) AS tokens_out "
         "FROM interactions GROUP BY tier ORDER BY interactions DESC"
@@ -2403,6 +2437,8 @@ def interaction_token_totals_by_tier(conn):
             "interactions": int(row["interactions"] or 0),
             "exact_rows": int(row["exact_rows"] or 0),
             "estimated_rows": int(row["estimated_rows"] or 0),
+            "mixed_rows": int(row["mixed_rows"] or 0),
+            "unknown_rows": int(row["unknown_rows"] or 0),
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "tokens_total": tokens_in + tokens_out,
@@ -2615,9 +2651,24 @@ def _normalize_task_status(status):
 
 
 def _normalize_task_status_filter(status):
-    """Parse the task-list status filter, including documented ``a|b`` sets."""
+    """Parse task-list statuses from the legacy string or typed list form.
+
+    A string keeps the original pipe-delimited contract (``pending|blocked``).
+    MCP clients may instead send a JSON array such as
+    ``["pending", "blocked"]``.  Do not stringify arbitrary JSON here: a
+    list rendered as Python text used to become an opaque, invalid status and
+    turn a requested multi-status inspection into a failed tool call.
+    """
+    if isinstance(status, str):
+        items = status.split("|")
+    elif isinstance(status, (list, tuple)):
+        items = status
+    else:
+        raise ValueError("task status filter must be a string or a list of strings")
     values = []
-    for item in str(status or "").split("|"):
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError("task status filter entries must be strings")
         item = item.strip()
         if item:
             normalized = _normalize_task_status(item)

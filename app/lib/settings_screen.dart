@@ -164,6 +164,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _accountAction(register: false);
   }
 
+  Future<void> _forgetApiSession() async {
+    setState(() {
+      _testing = true;
+      _status = null;
+    });
+    try {
+      await Settings.clearApiKey();
+      _key.clear();
+      _password.clear();
+      if (!mounted) return;
+      widget.onChanged(_current());
+      setState(() {
+        _statusOk = true;
+        _status = 'Local API/session token removed from this device.';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _statusOk = false;
+        _status = 'Could not remove the local API/session token securely.';
+      });
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
   Future<void> _accountAction({required bool register}) async {
     setState(() {
       _testing = true;
@@ -181,8 +207,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final token = await api.login(_username.text, _password.text);
         setState(() {
           _key.text = token;
+          _password.clear();
           _statusOk = true;
-          _status = 'Logged in. Token saved in the API key/token field.';
+          _status = 'Logged in. Save settings to store the token securely.';
         });
       }
     } on SonderException catch (e) {
@@ -204,7 +231,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       return;
     }
-    await s.save();
+    // A blank field explicitly replaces a credential that was present when
+    // this screen opened. Do not leave an old keychain value usable.
+    try {
+      if (widget.settings.apiKey.trim().isNotEmpty &&
+          s.apiKey.trim().isEmpty) {
+        await Settings.clearApiKey();
+      }
+      if (widget.settings.launcherToken.trim().isNotEmpty &&
+          s.launcherToken.trim().isEmpty) {
+        await Settings.clearLauncherToken();
+      }
+      await s.save();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Settings were not saved because secure credential storage failed.',
+          ),
+        ),
+      );
+      return;
+    }
     if (!mounted) return;
     widget.onChanged(s);
     ScaffoldMessenger.of(context).showSnackBar(
@@ -427,6 +476,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onPressed: _testing ? null : _login,
                 icon: const Icon(Icons.login),
                 label: const Text('Login'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _testing ? null : _forgetApiSession,
+                icon: const Icon(Icons.logout),
+                label: const Text('Forget local session'),
               ),
             ],
           ),

@@ -15,6 +15,20 @@ from sonder_runtime.adapters.strangler_services import LegacyAutomationRepositor
 from sonder_runtime.bootstrap import app as bootstrap_app
 
 
+def _durable_validation_plan():
+    return [{
+        "id": "task-01", "title": "Validate", "kind": "validate",
+        "instruction": "run the host check", "status": "passed", "attempts": 1,
+        "output": "PASS", "error": "", "history": [],
+        "host_receipt": {
+            "tools": ["workspace_run"],
+            "mutation_observed": False,
+            "validation_attempted": True,
+            "validation_passed": True,
+        },
+    }]
+
+
 @pytest.fixture()
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(tmp_path / "autopilot.db"))
@@ -49,7 +63,10 @@ def test_claim_heartbeat_progress_finish_lifecycle(repo):
     assert claimed is not None
     assert claimed["owner_id"] == owner
     assert repo.heartbeat(run["id"], owner) is True
-    updated = repo.save_progress(run["id"], owner, phase="execute", cycles_delta=1)
+    updated = repo.save_progress(
+        run["id"], owner, phase="execute", cycles_delta=1,
+        plan=_durable_validation_plan(), criteria=["host check passes"],
+    )
     assert updated is not None
     finished = repo.finish_run(
         run["id"], owner, "completed", summary="done", final_report="ok"
@@ -62,6 +79,10 @@ def test_claim_refuses_a_finished_run(repo):
     run = repo.create_run("short")
     owner = "owner-1"
     repo.claim_run(run["id"], owner, owner_pid=os.getpid())
+    repo.save_progress(
+        run["id"], owner, plan=_durable_validation_plan(),
+        criteria=["host check passes"],
+    )
     repo.finish_run(run["id"], owner, "completed")
     # A terminal run can no longer be claimed.
     assert repo.claim_run(run["id"], "owner-2", owner_pid=os.getpid()) is None

@@ -411,6 +411,18 @@ def test_http_autopilot_status_is_safe_but_lifecycle_changes_require_developer()
     assert sonder_serve._dangerous_http_slash("/auto cancel auto-1") is True
 
 
+def test_served_autopilot_binds_an_opaque_account_scope(monkeypatch):
+    captured = {}
+    context = {"account": {"username": "alice"}, "api_key": "", "mode": "account"}
+    monkeypatch.setattr(
+        server, "control_command",
+        lambda prompt, **kwargs: captured.update(kwargs) or "ok",
+    )
+    assert sonder_serve._handle_slash("/autopilot status", context=context) == "ok"
+    assert captured["autopilot_request_owner"] == sonder_serve._task_account_scope(context)
+    assert captured["autopilot_request_owner"].startswith("ta-")
+
+
 def test_diagnostics_manifest_and_improvement_expose_autopilot(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "memory.db"))
     monkeypatch.setattr(server, "_get", lambda path: {"models": []})

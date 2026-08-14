@@ -213,6 +213,27 @@ class MetricsRegistry:
         if state in ("cold", "warm"):
             self.model_load_states_total.labels(backend=backend, state=state).inc()
 
+    def observe_model_call(
+        self, *, cloud: bool, result: str, elapsed_seconds: float
+    ) -> None:
+        """Record one routed generation with fixed, non-identifying labels.
+
+        Exact model names and configured tier aliases are deliberately not
+        exported: live discovery and operator configuration would otherwise
+        turn a request-selected value into unbounded Prometheus cardinality.
+        ``local``/``cloud`` and the terminal outcome are closed sets.
+        """
+        route = "cloud" if cloud else "local"
+        outcome = result if result in {"ok", "error"} else "error"
+        try:
+            elapsed = float(elapsed_seconds)
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        if elapsed < 0 or elapsed > 86_400:
+            elapsed = 0.0
+        self.model_calls_total.labels(tier=route, result=outcome).inc()
+        self.model_call_duration_seconds.labels(tier=route).observe(elapsed)
+
     def set_build_info(self, version: str, commit: str) -> None:
         self.build_info.labels(version=version, commit=commit).set(1)
 

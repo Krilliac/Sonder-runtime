@@ -22,6 +22,10 @@ MAX_HEADER_BYTES = 16 * 1024
 MAX_BODY_BYTES = MAX_RESPONSE_BYTES - MAX_HEADER_BYTES
 MAX_PREVIEW_CHARS = 4096
 MAX_REDIRECTS = 3
+# DNS is still an untrusted input even though every accepted answer is
+# loopback.  Without a cap, a deliberately large loopback answer set would
+# turn one diagnostic request into many sequential local connection attempts.
+MAX_DNS_ADDRESSES = 16
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _NUMERIC_HOST_PART = re.compile(r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)$")
 _SENSITIVE_QUERY_WORDS = {
@@ -96,11 +100,17 @@ def _resolve_loopback_addresses(host: str, port: int) -> tuple[str, ...]:
                     raise ValueError(
                         "probe hostname must resolve exclusively to loopback addresses"
                     )
-                addresses.add(ipaddress.ip_address(raw).compressed)
+                canonical = ipaddress.ip_address(raw).compressed
             except ValueError as exc:
                 if "exclusively" in str(exc):
                     raise
                 raise ValueError("probe hostname resolved to an invalid address") from exc
+            addresses.add(canonical)
+            if len(addresses) > MAX_DNS_ADDRESSES:
+                raise ValueError(
+                    "probe hostname resolved to too many addresses "
+                    "(max %d)" % MAX_DNS_ADDRESSES
+                )
         if not addresses:
             raise ValueError("probe hostname did not resolve to an address")
         return tuple(sorted(addresses))

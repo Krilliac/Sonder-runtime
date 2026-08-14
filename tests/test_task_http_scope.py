@@ -157,3 +157,52 @@ def test_account_http_rejects_indirect_global_task_paths(monkeypatch):
     ) == "retry ran"
     assert serve._handle_slash("/agentretry abc") == "control ran"
     assert calls
+
+
+def test_account_http_rejects_global_saved_workflow_library(monkeypatch):
+    """A hosted account must not see or operate the operator's workflow file."""
+    # Use a fully authorized administrator: a normal user/developer is already
+    # stopped by at least one role gate, while this tier could otherwise read
+    # another account's shared workflow payloads and execute its actions.
+    alice = {
+        "account": {"username": "alice", "role": "admin"},
+        "authorized": True,
+        "mode": "account",
+    }
+    calls = []
+    invocations = {
+        "workflow_list": {},
+        "workflow_save": {
+            "name": "alice-private",
+            "actions_json": '[{"type":"run_code","code":"secret"}]',
+            "description": "private action payload",
+        },
+        "workflow_delete": {"name": "operator-flow"},
+        "workflow_run": {"name": "operator-flow"},
+    }
+
+    for tool_name, values in invocations.items():
+        monkeypatch.setattr(
+            serve.command_catalog,
+            "parse_invocation",
+            lambda _line, name=tool_name, kwargs=values: (name, dict(kwargs)),
+        )
+        monkeypatch.setattr(
+            serve.server, tool_name,
+            lambda **kwargs: calls.append((tool_name, kwargs)) or "private payload",
+        )
+        result = serve._dispatch_catalogued_tool(
+            "/%s" % tool_name, serve._LEGACY_STATE, alice,
+        )
+        assert "account-scoped saved workflows" in result
+        assert "private" not in result
+
+    assert calls == []
+
+    # Direct MCP/local-open remains the single-user operator surface.
+    monkeypatch.setattr(
+        serve.command_catalog,
+        "parse_invocation", lambda _line: ("workflow_list", {}),
+    )
+    monkeypatch.setattr(serve.server, "workflow_list", lambda: "operator flow")
+    assert serve._dispatch_catalogued_tool("/workflow_list", serve._LEGACY_STATE) == "operator flow"

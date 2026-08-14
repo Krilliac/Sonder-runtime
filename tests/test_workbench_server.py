@@ -1,4 +1,5 @@
 import json
+import threading
 
 import activity_tracker
 import memory_store
@@ -351,6 +352,41 @@ def test_agent_observation_records_nested_run_code_once():
     assert "ONCE" in result
     assert len(actions) == 1
     assert actions[0]["tool"] == "run_code"
+
+
+def test_agent_activity_status_is_scoped_to_its_own_response():
+    """An agent observation must not disclose another live run's activity."""
+    activity_tracker.reset_for_tests()
+    ready = threading.Event()
+    release = threading.Event()
+
+    def unrelated_response():
+        with activity_tracker.response_span(
+            "parallel-private-label", "unrelated private work",
+        ):
+            activity_tracker.record_event("private_parallel_event")
+            ready.set()
+            assert release.wait(5)
+
+    worker = threading.Thread(target=unrelated_response)
+    worker.start()
+    assert ready.wait(5)
+    try:
+        with activity_tracker.response_span("current-agent-label", "inspect mine"):
+            observation = server._agent_dispatch(
+                "activity_status", {"include_events": True},
+            )
+            # The operator endpoint intentionally retains global visibility.
+            operator_view = server.activity_status(include_events=True)
+    finally:
+        release.set()
+        worker.join(5)
+
+    assert "current agent response only" in observation
+    assert "current-agent-label" in observation
+    assert "parallel-private-label" not in observation
+    assert "private_parallel_event" not in observation
+    assert "parallel-private-label" in operator_view
 
 
 def test_recreating_a_run_created_file_is_promoted_to_overwrite(monkeypatch, tmp_path, without_standing):

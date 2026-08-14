@@ -7,7 +7,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_mcp_runtime_dependency_excludes_breaking_v2():
     runtime = (ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
-    assert "mcp>=1.28.1,<2" in runtime.splitlines()
+    assert "mcp==1.29.0" in runtime.splitlines()
+    assert "cryptography==45.0.7" in runtime.splitlines()
+    assert not any(
+        line.startswith(("mcp>=", "mcp<=", "cryptography>=", "cryptography<="))
+        for line in runtime.splitlines()
+    )
+
+
+def test_update_trust_dependencies_are_exactly_pinned():
+    update = (ROOT / "requirements-update.txt").read_text(encoding="utf-8")
+    assert {
+        "tuf==6.0.0",
+        "cryptography==45.0.7",
+        "securesystemslib==1.4.0",
+    }.issubset(update.splitlines())
 
 
 def test_installers_use_the_shared_runtime_dependency_contract():

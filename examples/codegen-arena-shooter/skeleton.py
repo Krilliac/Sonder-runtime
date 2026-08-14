@@ -248,6 +248,33 @@ public sealed class Combatant
         // BODY:TakeDamage
         throw new NotImplementedException();
     }
+
+    // Weapon state is host-owned rather than generated: ammo, fire cadence,
+    // and reload eligibility are gameplay invariants shared by every input
+    // path. A generated screen loop therefore cannot spend ammo while
+    // bypassing the cooldown, or reload a dead player.
+    public bool TryFire()
+    {
+        if (!Alive || RespawnTimer > 0f || FireCooldown > 0f || Ammo <= 0)
+            return false;
+
+        Ammo--;
+        FireCooldown = MathF.Max(0f, ClassKit.Get(Kit).FireDelay);
+        return true;
+    }
+
+    public bool TryReload()
+    {
+        if (!Alive || RespawnTimer > 0f)
+            return false;
+
+        int capacity = ClassKit.Get(Kit).MaxAmmo;
+        if (Ammo >= capacity)
+            return false;
+
+        Ammo = capacity;
+        return true;
+    }
 }
 """
 

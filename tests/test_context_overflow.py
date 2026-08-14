@@ -633,7 +633,7 @@ def test_generate_wrapper_declares_remote_inference_idempotent(monkeypatch):
 
 
 def test_remote_ollama_overflow_is_not_retried_by_default(monkeypatch):
-    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     seen = _recording_post(
         monkeypatch,

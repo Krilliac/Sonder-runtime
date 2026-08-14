@@ -80,6 +80,49 @@ def test_guarded_update_requires_installed_local_model(
     assert runtime_policy.load()["local_models"]["reasoning"] == ""
 
 
+def test_guarded_update_rejects_installed_embedding_model_for_chat_tier(
+    isolated_runtime_policy, monkeypatch,
+):
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda _path: {"models": [
+            {
+                "name": "nomic-embed-text:latest",
+                "capabilities": ["embedding"],
+            },
+        ]},
+    )
+
+    result = server.runtime_policy_update(
+        local_models_json='{"code":"nomic-embed-text:latest"}',
+    )
+
+    assert result == (
+        "ERROR: local model(s) are not chat-capable for their tier: "
+        "code=nomic-embed-text:latest (embedding-only capability)"
+    )
+    assert runtime_policy.load()["local_models"]["code"] != "nomic-embed-text:latest"
+
+
+def test_guarded_update_allows_vision_only_model_for_vision_tier(
+    isolated_runtime_policy, monkeypatch,
+):
+    monkeypatch.setattr(
+        server,
+        "_get",
+        lambda _path: {"models": [
+            {"name": "llava:latest", "capabilities": ["vision"]},
+        ]},
+    )
+
+    result = server.runtime_policy_update(
+        local_models_json='{"vision":"llava:latest"}',
+    )
+
+    assert "vision: llava:latest" in result
+
+
 def test_runtime_slash_parses_models_and_routes(isolated_runtime_policy, monkeypatch):
     calls = []
     monkeypatch.setattr(

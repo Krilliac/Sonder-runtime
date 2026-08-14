@@ -627,6 +627,34 @@ def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> P
     )
 
 
+def resolve_mutation_path(
+    path: str,
+    *,
+    extra_roots: str = "",
+    bypass: bool = False,
+) -> Path:
+    """Resolve a mutation target without accepting a reparse-point spelling.
+
+    ``resolve_path`` deliberately follows links so read-only callers get the
+    canonical path for containment checks.  That is not an acceptable default
+    for a mutation: ``file_delete('alias')`` used to resolve a workspace link
+    and remove its target, while a write/edit could silently modify the link
+    target.  Reject the lexical path whenever it contains a symlink or Windows
+    junction, then resolve and recheck the canonical result.  Transfer and
+    batch paths already do this; this shared entry point gives single-file
+    mutations the same rule.
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("empty path")
+    if _foreign_absolute(path.strip()):
+        raise PermissionError("path uses a foreign absolute path form")
+    requested = _requested_path(path)
+    _require_no_reparse_components(requested)
+    resolved = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    _require_no_reparse_components(resolved)
+    return resolved
+
+
 def policy_text(*, bypass: bool = False, extra_roots: str = "") -> str:
     lines = [
         "filesystem policy",
@@ -744,7 +772,7 @@ def make_directory(
     bypass: bool = False,
     developer_authorized: bool = False,
 ) -> dict:
-    p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    p = resolve_mutation_path(path, extra_roots=extra_roots, bypass=bypass)
     _require_mutation_access(p, developer_authorized)
     existed = p.exists()
     if existed and not p.is_dir():
@@ -1421,7 +1449,7 @@ def write_file(
     bypass: bool = False,
     developer_authorized: bool = False,
 ) -> dict:
-    p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    p = resolve_mutation_path(path, extra_roots=extra_roots, bypass=bypass)
     _require_mutation_access(p, developer_authorized)
     before = _read_text_if_file(p)
     before_lines = _line_count(before) if before is not None else _line_count_on_disk(p)
@@ -1800,7 +1828,7 @@ def edit_file(
     bypass: bool = False,
     developer_authorized: bool = False,
 ) -> dict:
-    p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    p = resolve_mutation_path(path, extra_roots=extra_roots, bypass=bypass)
     _require_mutation_access(p, developer_authorized)
     if old == "":
         raise ValueError("old text must not be empty")
@@ -1846,7 +1874,7 @@ def delete_path(
     developer_authorized: bool = False,
 ) -> dict:
     requested = _requested_path(path)
-    p = resolve_path(path, extra_roots=extra_roots, bypass=bypass)
+    p = resolve_mutation_path(path, extra_roots=extra_roots, bypass=bypass)
     _require_mutation_access(p, developer_authorized)
     if recursive:
         _require_safe_recursive_delete(

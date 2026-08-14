@@ -26,6 +26,37 @@ def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
 
+def test_admin_account_rejection_is_structured_http_error(monkeypatch):
+    """A rejected admin mutation must not be represented as a successful POST.
+
+    The REPL/MCP wrapper deliberately returns legacy ``ERROR:`` text, but the
+    direct HTTP route is consumed by programmatic clients and must preserve a
+    non-2xx status plus the standard error object.
+    """
+    admin = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "admin", "role": "admin"},
+    }
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda _self: admin)
+    monkeypatch.setattr(
+        ts.server, "admin_set_account",
+        lambda **_kwargs: "ERROR: unknown account",
+    )
+    request = json.dumps({"username": "missing"}).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/sonder/admin/account", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body) == {
+        "error": {"message": "unknown account", "type": "invalid_request"},
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
 def test_query_string_does_not_change_openai_route_or_terminal_metric(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
@@ -49,6 +80,144 @@ def test_query_string_does_not_change_openai_route_or_terminal_metric(monkeypatc
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
     assert models_status == 200
     assert json.loads(models_body)["object"] == "list"
+
+
+def test_chat_content_excludes_terminal_activity_block(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    answer = (
+        "pin-ok\n\n=== ACTIVITY (observable work) ===\n"
+        "response: complete\n=== END ACTIVITY ===\n\n"
+        + ts.server.FOOTER_PREFIX + "r000001]"
+    )
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: answer)
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    content = json.loads(body)["choices"][0]["message"]["content"]
+    assert content == "pin-ok"
+    assert "=== ACTIVITY" not in content
+
+
+def test_chat_usage_comes_from_the_current_request_span(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def answer(*_args, **_kwargs):
+        ts.server.activity_tracker.record_model_call(
+            "model:latest", tokens_in=23, tokens_out=5,
+        )
+        return "answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["usage"] == {
+        "prompt_tokens": 23, "completion_tokens": 5, "total_tokens": 28,
+    }
+
+
+def test_chat_completion_activity_comes_from_its_own_span(monkeypatch):
+    monkeypatch.setattr(
+        ts.server.activity_tracker, "public_snapshot",
+        lambda **_kwargs: {"latest": {"id": "r_other"}},
+    )
+    activity = {
+        "id": "r_current", "label": "chat:sonder", "surface": "http",
+        "model": "sonder", "status": "complete", "started_ts": "now",
+        "events": [], "files": [],
+    }
+
+    payload = ts._chat_completion_object("answer", activity_response=activity)
+
+    assert payload["sonder_activity"]["id"] == "r_current"
+
+
+def test_stream_options_include_current_request_usage_in_terminal_chunk(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def answer(*_args, **_kwargs):
+        ts.server.activity_tracker.record_model_call(
+            "model:latest", tokens_in=23, tokens_out=5,
+        )
+        return "answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "sonder", "stream": True,
+        "stream_options": {"include_usage": True},
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    chunks = [
+        json.loads(line[6:]) for line in body.decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert chunks[-1]["choices"] == []
+    assert chunks[-1]["usage"] == {
+        "prompt_tokens": 23, "completion_tokens": 5, "total_tokens": 28,
+    }
+
+
+def test_stream_includes_the_current_request_activity_in_terminal_chunk(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def answer(*_args, **_kwargs):
+        ts.server.activity_tracker.record_model_call("model:latest")
+        return "answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "sonder", "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    chunks = [
+        json.loads(line[6:]) for line in body.decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert chunks[-1]["sonder_activity"]["model_calls"] == 1
 
 
 @pytest.mark.parametrize("model", [None, 7, True, {}, []])
@@ -96,6 +265,79 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
         "message": "stream must be a boolean", "type": "invalid_request",
     }
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
+@pytest.mark.parametrize(
+    ("stream_options", "message"),
+    [
+        (None, "stream_options must be an object"),
+        ([], "stream_options must be an object"),
+        ({"include_usage": "yes"}, "stream_options.include_usage must be a boolean"),
+    ],
+)
+def test_chat_rejects_invalid_stream_options_before_response_routing(
+        monkeypatch, stream_options, message):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = json.dumps({
+        "model": "sonder", "stream": True, "stream_options": stream_options,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": message, "type": "invalid_request",
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
+@pytest.mark.parametrize("raw_request", [
+    b'{"model":"sonder","stream":true,"stream":false,"messages":[]}',
+    b'{"model":"sonder","messages":[{"role":"user","role":"system","content":"hello"}]}',
+])
+def test_http_rejects_duplicate_json_object_keys_before_chat_routing(monkeypatch, raw_request):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(
+        ts.server, "answer_with_history",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not route malformed JSON")),
+    )
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=raw_request,
+            headers={"Content-Type": "application/json"},
+        )
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": "request JSON must not contain duplicate object keys",
+        "type": "invalid_request",
+    }
+
+
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+def test_http_rejects_nonfinite_json_numbers_before_chat_routing(monkeypatch, constant):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = b'{"model":"sonder","temperature":' + constant + b',"messages":[]}'
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": "request body must contain valid JSON",
+        "type": "invalid_request",
+    }
 
 
 @pytest.mark.parametrize("response_format", [
@@ -463,6 +705,35 @@ def test_catalogued_global_controls_require_admin_on_shared_http(
     ) == ""
 
 
+def test_shared_workflow_inventory_requires_lifecycle_authority(monkeypatch):
+    """A saved workflow is shared operator data, not a user's status view."""
+    monkeypatch.setattr(
+        ts.permission_modes, "decide_for_caller", lambda *_args, **_kwargs: None,
+    )
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "ordinary", "role": "user"},
+    }
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "developer", "role": "developer"},
+    }
+    calls = []
+    monkeypatch.setattr(ts.server, "workflow_list", lambda: calls.append(True) or "workflows")
+
+    refused = ts._dispatch_catalogued_tool(
+        "/workflow_list", ts.ConversationState(), context=ordinary,
+    )
+    assert "developer or administrator authorization is required" in refused
+    assert calls == []
+
+    denied_developer = ts._dispatch_catalogued_tool(
+        "/workflow_list", ts.ConversationState(), context=developer,
+    )
+    assert "account-scoped saved workflows are not available" in denied_developer
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "command, mutation",
     (
@@ -566,6 +837,41 @@ def test_chat_keepalive_requests_receive_distinct_correlation_ids(monkeypatch):
             conn.close()
 
     assert received[0] != received[1]
+
+
+def test_admin_drain_idempotency_key_is_scoped_to_authenticated_principal(monkeypatch):
+    """A shared hosted deployment must not replay an admin's cached receipt."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda _self: False)
+
+    def account_for(header):
+        token = ts._bearer_token(header)
+        return {"username": token, "role": "admin"}
+
+    monkeypatch.setattr(ts, "_auth_account", account_for)
+    keys = []
+
+    class FakeLifecycle:
+        def idempotent(self, key, _factory):
+            keys.append(key)
+            return {"draining": True, "correlation_id": "stable"}
+
+    monkeypatch.setattr(ts.sonder_lifecycle, "get", lambda: FakeLifecycle())
+    headers = {"Content-Type": "application/json", "Idempotency-Key": "same-key"}
+    with _http_server(monkeypatch) as port:
+        for token in ("admin-a", "admin-b", "admin-a"):
+            status, _, body = _request(
+                port, "POST", "/v1/admin/drain", body=b"{}",
+                headers={**headers, "Authorization": "Bearer " + token},
+            )
+            assert status == 202
+            assert json.loads(body)["draining"] is True
+
+    assert keys[0] != keys[1]
+    assert keys[0] == keys[2]
+    assert all(key.startswith("hi-") and "same-key" not in key for key in keys)
 
 
 def test_served_source_update_requires_admin_but_check_remains_read_only(monkeypatch):
@@ -687,6 +993,55 @@ def test_system_status_uses_projected_activity_and_shared_feed(
         "npu-secret", str(tmp_path / "private"),
     ):
         assert secret not in text
+
+
+def test_ordinary_hosted_account_cannot_read_global_operations_dashboard(monkeypatch):
+    """A normal served account must not learn another account's work/state."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(
+        ts, "_auth_account",
+        lambda _header: {"username": "ordinary", "role": "user"},
+    )
+    forbidden = []
+
+    def global_only(name):
+        def reject(*_args, **_kwargs):
+            forbidden.append(name)
+            raise AssertionError("ordinary account read global " + name)
+        return reject
+
+    monkeypatch.setattr(ts.server, "status", global_only("status"))
+    monkeypatch.setattr(ts.server, "sonder_stats", global_only("stats"))
+    monkeypatch.setattr(ts.server.master_orchestrator, "snapshot", global_only("agents"))
+    monkeypatch.setattr(ts.server.autopilot_controller, "snapshot", global_only("autopilot"))
+    monkeypatch.setattr(ts.server.activity_tracker, "snapshot", global_only("activity"))
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {"code": "local-code"})
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "GET",
+            "/v1/sonder/status",
+            headers={"Authorization": "Bearer ordinary-token"},
+        )
+
+    payload = json.loads(body)
+    assert status == 200
+    assert forbidden == []
+    assert payload["status"] == "restricted"
+    assert payload["account"] == {"username": "ordinary", "role": "user"}
+    assert payload["models"] == [
+        {"id": "sonder", "owned_by": "local"},
+        {"id": "code", "owned_by": "local"},
+    ]
+    assert payload["operational"]["available"] is False
+    for key in (
+        "stats", "agents", "activity", "execution", "autopilot", "db_path",
+        "state_home", "learning_health", "runtime_policy",
+    ):
+        assert key not in payload
 
 
 @pytest.mark.parametrize(("messages", "message"), [
@@ -875,6 +1230,24 @@ def test_models_response_hides_discovered_cloud_models_without_opt_in(monkeypatc
 
     assert status == 200
     assert [row["id"] for row in json.loads(body)["data"]] == ["sonder", "local:latest"]
+
+
+def test_models_response_hides_tier_bound_to_declared_embedding_model(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {
+        "code": "nomic-embed-text:latest",
+    })
+    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+        ("nomic-embed-text:latest", {"capabilities": ["embedding"]}),
+    ])
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/models")
+
+    assert status == 200
+    assert [row["id"] for row in json.loads(body)["data"]] == ["sonder"]
 
 
 @pytest.mark.parametrize(
@@ -1580,6 +1953,99 @@ def test_stream_swallows_a_client_disconnect_during_headers():
     assert probe.wfile.getvalue() == b""
 
 
+def test_stream_terminalizes_internal_failure_after_content_event(monkeypatch):
+    class StreamProbe:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = io.BytesIO()
+            self.close_connection = False
+
+        def send_response(self, status):
+            assert status == 200
+
+        def _cors(self):
+            pass
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            pass
+
+        def log_error(self, _fmt, *_args):
+            pass
+
+    real_chunk = ts._chunk
+    calls = []
+
+    def fail_after_content(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            raise RuntimeError("finish chunk failed")
+        return real_chunk(*args, **kwargs)
+
+    monkeypatch.setattr(ts, "_chunk", fail_after_content)
+    probe = StreamProbe()
+    assert ts.Handler._send_stream(probe, "partial", "sonder", iid="broken") is None
+
+    payloads = [
+        json.loads(line[6:])
+        for line in probe.wfile.getvalue().decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert payloads[0]["choices"][0]["delta"]["content"] == "partial"
+    assert payloads[-1] == {
+        "id": "chatcmpl-broken",
+        "object": "error",
+        "model": "sonder",
+        "error": {
+            "message": "stream interrupted before completion",
+            "type": "server_error",
+            "code": "STREAM_INTERRUPTED",
+        },
+    }
+    assert probe.wfile.getvalue().endswith(b"data: [DONE]\n\n")
+    assert probe.close_connection is True
+
+
+def test_chat_records_terminal_stream_failure_as_non_success(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *_args, **_kwargs: "answer")
+    recorded = []
+    monkeypatch.setattr(
+        ts.Handler, "_record_chat_completion_metric",
+        lambda _self, _lifecycle, result, _started: recorded.append(result),
+    )
+
+    def terminal_failure(self, _content, _model, **_kwargs):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        self.wfile.write(b'data: {"error":{"type":"server_error"}}\n\ndata: [DONE]\n\n')
+        return None
+
+    monkeypatch.setattr(ts.Handler, "_send_stream", terminal_failure)
+    request = json.dumps({
+        "model": "sonder", "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+    with _http_server(monkeypatch) as port:
+        status, _headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert body.endswith(b"data: [DONE]\n\n")
+    assert recorded == ["stream_error"]
+
+
 def test_json_payload_swallows_a_client_disconnect_during_headers():
     class JsonProbe:
         def __init__(self):
@@ -1686,10 +2152,17 @@ def test_api_key_mode_cannot_be_bypassed_by_account_token(monkeypatch):
 def test_non_loopback_bind_fails_without_strong_auth():
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(
-            "0.0.0.0", api_key="", auth_mode="local-open", auth_secret=""
+            "0.0.0.0", api_key="", auth_mode="local-open", auth_secret="",
+            tls_terminated_by_proxy=True,
+        )
+    with pytest.raises(RuntimeError, match="TLS-terminating"):
+        ts._validate_bind_security(
+            "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret="",
+            tls_terminated_by_proxy=False,
         )
     ts._validate_bind_security(
-        "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret=""
+        "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret="",
+        tls_terminated_by_proxy=True,
     )
     ts._validate_bind_security(
         "127.0.0.1", api_key="", auth_mode="local-open", auth_secret=""
@@ -1855,6 +2328,7 @@ def test_cors_denies_hostile_origin_and_echoes_only_allowlisted(monkeypatch):
         assert headers["Access-Control-Expose-Headers"] == (
             "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id"
         )
+        assert "Idempotency-Key" in headers["Access-Control-Allow-Headers"]
         status, _, _ = _request(
             port,
             "POST",
@@ -1972,6 +2446,50 @@ def test_chat_forwards_consent_and_client_location_to_web_router(monkeypatch):
     assert calls[0][1]["location_consent"] is True
     assert calls[0][1]["location_hint"] == hint
     assert calls[0][1]["allow_server_location_lookup"] is True
+
+
+def test_chat_hosted_proxy_request_never_uses_server_ip_for_location(monkeypatch):
+    """A loopback TLS proxy is not evidence that its caller is local."""
+    monkeypatch.setattr(ts, "API_KEY", "x" * 32)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    calls = []
+
+    def fake_web(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        return "LOCATION REQUIRED"
+
+    monkeypatch.setattr(ts.server, "chat_web_response", fake_web)
+    request = json.dumps({
+        "model": "sonder",
+        "messages": [{"role": "user", "content": "weather in my area"}],
+        "location_consent": True,
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            body=request,
+            headers={
+                "Authorization": "Bearer " + "x" * 32,
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert status == 200
+    assert "LOCATION REQUIRED" in json.loads(body)["choices"][0]["message"]["content"]
+    assert calls[0][1]["location_consent"] is True
+    assert calls[0][1]["location_hint"] is None
+    assert calls[0][1]["allow_server_location_lookup"] is False
 
 
 def test_dangerous_slash_denied_before_handler(monkeypatch):
@@ -2128,7 +2646,7 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
     forwarded = []
 
     def fake_answer(prompt, history, **kwargs):
-        forwarded.append((kwargs["session"], kwargs["project"]))
+        forwarded.append((kwargs["session"], kwargs["project"], kwargs["augment"]))
         return "answer\n\n[interaction_id: abc123]"
 
     monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
@@ -2154,9 +2672,29 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
             assert status == 200
 
     assert forwarded[0] == forwarded[2]
-    assert forwarded[0] != forwarded[1]
-    assert all(session != "common-session" for session, _ in forwarded)
-    assert all(project != "common-project" for _, project in forwarded)
+    assert forwarded[0][:2] != forwarded[1][:2]
+    assert all(session != "common-session" for session, _, _ in forwarded)
+    assert all(project != "common-project" for _, project, _ in forwarded)
+    assert all(augment is False for _, _, augment in forwarded)
+
+
+def test_account_catalogued_global_memory_tools_are_refused(monkeypatch):
+    """Hosted accounts must not query or influence the shared legacy corpus."""
+    context = {
+        "mode": "account",
+        "authorized": True,
+        "account": {"username": "alice", "role": "user"},
+    }
+    local = {"mode": "local-open", "authorized": True, "account": None}
+    tools = (
+        "memory_search", "apply_learned", "sonder_sessions", "session_export",
+        "memory_export", "learning_health_status", "evaluation_history_status",
+        "sonder_remember_fact", "record_outcome", "learn_from_example",
+    )
+    for tool in tools:
+        refused = ts._http_tool_refusal((tool,), "/" + tool, context)
+        assert "global memory tool is local-operator only" in refused
+        assert ts._account_global_memory_refusal(tool, local) == ""
 
 
 def test_deployment_gating_summary_covers_every_auth_mode(monkeypatch):
@@ -2213,10 +2751,12 @@ def test_bind_gate_tracks_the_named_minimum_key_length(monkeypatch):
 
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(
-            "0.0.0.0", api_key="k" * 30, auth_mode="api-key", auth_secret=""
+            "0.0.0.0", api_key="k" * 30, auth_mode="api-key", auth_secret="",
+            tls_terminated_by_proxy=True,
         )
     ts._validate_bind_security(
-        "0.0.0.0", api_key="k" * 40, auth_mode="api-key", auth_secret=""
+        "0.0.0.0", api_key="k" * 40, auth_mode="api-key", auth_secret="",
+        tls_terminated_by_proxy=True,
     )
 
 

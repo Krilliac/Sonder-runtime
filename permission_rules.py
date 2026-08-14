@@ -9,15 +9,11 @@ and glob evaluation live in ``sonder_runtime.domain.execution.policy``;
 this module keeps the filesystem load/save and delegates the logic, with
 identical behavior.
 
-Load failures are *reported*, not *changed*. ``load`` stays total -- it never
-raises into a caller and always returns a usable rule list, falling back to the
-built-in defaults exactly as before. What is new is that the fallback is no
-longer silent: every load also produces a :class:`LoadReport` saying whether the
-policy file parsed and how many individual rules were discarded. The partial
-case is the dangerous one -- ten of eleven rules load, nothing looks wrong, and
-the discarded rule is the one that said ``deny``. A tool whose only rule was
-dropped stops matching anything and falls through to the permissive
-``NO_MATCH_RULE`` ("ask"), silently downgrading a denial.
+Load failures stay observable and total: callers can always render a useful
+diagnostic instead of crashing. Enforcement callers also receive the
+:class:`LoadReport`, so they can fail closed for non-read operations when a
+policy artifact is malformed. A truly missing file remains the normal
+first-run case and uses the built-in local defaults.
 """
 
 import json
@@ -257,7 +253,21 @@ def add_rule(home, pattern, action, note=""):
 
 
 def check(home, tool_name):
-    return _policy.evaluate(load(home), tool_name)
+    rule, _report = check_report(home, tool_name)
+    return rule
+
+
+def check_report(home, tool_name):
+    """Return one evaluated rule and its load report from the same snapshot.
+
+    Permission gates need to distinguish a normal first-run default from an
+    unreadable, malformed, or partial policy artifact.  Keeping the rule and
+    report together avoids a second filesystem read that could observe a
+    different revision while a policy is being repaired.
+    """
+    rules, report = load_report(home)
+    _warn_once(report)
+    return _policy.evaluate(rules, tool_name), report
 
 
 # fnmatch's metacharacters. A pattern carrying any of them can match more than

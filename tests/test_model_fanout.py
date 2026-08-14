@@ -1231,9 +1231,9 @@ def test_fanout_synthesis_rejects_cloud_before_vault_or_source_construction(monk
 
 
 def test_fanout_synthesis_rejects_remote_ollama_before_vault_or_generation(monkeypatch):
-    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
-    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
     monkeypatch.setattr(server, "_direct_fanout_access", lambda *_args: ({"id": "fan-test", "status": "completed"}, None))
     monkeypatch.setattr(
         server, "_fanout_synthesis_sources",
@@ -1293,6 +1293,10 @@ def test_fanout_synthesis_uses_nested_tag_capability_without_show(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("positively declared nested capability must avoid /api/show"),
     )
 
+    plan, error = server._fanout_plan("local")
+
+    assert error is None
+    assert plan == {"scope": "local", "selected": ["nested-chat"], "skipped": []}
     assert server._fanout_nonchat_reason({
         "name": "nested-chat", "capabilities": [],
         "details": {"capabilities": ["completion"]},
@@ -1455,6 +1459,39 @@ def test_direct_mcp_fanout_receipts_are_owner_scoped_on_shared_deployments(
         "run_id": "fan-private"
     }
     assert json.loads(server.model_fanout_status("fan-private", token="admin")) == {
+        "run_id": "fan-private"
+    }
+
+
+def test_direct_mcp_id_only_accounts_do_not_share_the_legacy_fanout_owner(monkeypatch):
+    """Id-only account records retain the same owner boundary as HTTP."""
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    accounts = {
+        "developer-a": {"id": "account-a", "role": "developer"},
+        "developer-b": {"id": "account-b", "role": "developer"},
+    }
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda token: accounts.get(token))
+    captured = {}
+    monkeypatch.setattr(
+        server, "_model_fanout_authorized",
+        lambda *_args, **kwargs: captured.update(kwargs) or "created",
+    )
+
+    assert server.model_fanout("private question", token="developer-a") == "created"
+    owner = captured["request_owner"]
+    assert owner.startswith("fo-")
+    assert owner != ""
+    assert owner == sonder_serve._fanout_request_owner({
+        "account": accounts["developer-a"], "api_key": False,
+    })
+    monkeypatch.setattr(
+        server.fanout_store, "get_run",
+        lambda _run_id: {"id": "fan-private", "request_owner": owner},
+    )
+    monkeypatch.setattr(server, "_fanout_receipt", lambda run_id: {"run_id": run_id})
+
+    assert "not found" in server.model_fanout_status("fan-private", token="developer-b")
+    assert json.loads(server.model_fanout_status("fan-private", token="developer-a")) == {
         "run_id": "fan-private"
     }
 
@@ -1960,6 +1997,97 @@ def test_fanout_cancel_between_claim_and_send_does_not_start_provider_call(monke
     assert receipt["status"] == "cancelled"
     assert receipt["models_skipped"] == 1
     assert receipt["skipped"][0]["model"] == "remote:cloud"
+
+
+def test_fanout_cancellation_after_dispatch_fence_marks_result_unknown(monkeypatch, tmp_path):
+    """Cancellation must not claim a possibly billed cloud call was skipped."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    run = server.fanout_store.create_run("private prompt", ["remote:cloud"], scope="cloud")
+    owner = "worker"
+    assert server.fanout_store.claim_run(run["id"], owner, owner_pid=server.os.getpid())
+    assert server.fanout_store.claim_next_result(run["id"], owner, owner_pid=server.os.getpid())
+    assert server.fanout_store.mark_result_dispatched(run["id"], "remote:cloud", owner)
+
+    cancelled = server.fanout_store.request_cancel(run["id"])
+    result = server.fanout_store.list_results(run["id"])[0]
+
+    assert cancelled["status"] == "cancelled"
+    assert result["status"] == "unknown"
+    assert result["failure_class"] == "execution_uncertain"
+    assert "may have been dispatched" in result["error"]
+    # Unknown calls remain non-replayable unless the caller makes that spend
+    # decision explicitly.
+    assert server.fanout_store.resume_run(run["id"]) is None
+    assert server.fanout_store.resume_run(run["id"], retry_unknown=True) is not None
+
+
+def test_fanout_cancel_after_dispatch_fence_stops_transport_and_keeps_truthful_receipt(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+    ))
+    run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
+    original_mark = server.fanout_store.mark_result_dispatched
+    cancelled = False
+
+    def mark_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        marked = original_mark(*args, **kwargs)
+        if marked and not cancelled:
+            cancelled = True
+            server.fanout_store.request_cancel(run["id"])
+        return marked
+
+    provider_calls = []
+    monkeypatch.setattr(server.fanout_store, "mark_result_dispatched", mark_then_cancel)
+    monkeypatch.setattr(server, "_post", lambda *args, **kwargs: provider_calls.append(args) or {})
+
+    receipt = server._execute_fanout_run(run["id"])
+
+    assert cancelled is True
+    assert provider_calls == []
+    assert receipt["status"] == "cancelled"
+    assert receipt["models_unknown"] == 1
+    assert receipt["models_skipped"] == 0
+    assert receipt["failures"][0]["failure_class"] == "execution_uncertain"
+
+
+def test_fanout_revoked_cloud_opt_in_cancels_before_provider_send(monkeypatch, tmp_path):
+    """A policy revocation after claim must fence the cloud retry/send path."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+    ))
+    run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
+    provider_calls = []
+
+    def fake_make(_model, *_args, **kwargs):
+        # Simulate the operator revoking consent after invoke's initial
+        # admission check but before the provider path's final fence.
+        monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
+
+        def generate(_prompt):
+            if kwargs["cancel_check"]():
+                raise server.ModelCallError("cancelled", "model call cancelled before another request was sent")
+            provider_calls.append(True)
+            return "answer"
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+
+    with server.activity_tracker.response_span("chat", "fanout") as activity:
+        receipt = server._execute_fanout_run(run["id"])
+
+    assert provider_calls == []
+    assert receipt["models_answered"] == 0
+    assert receipt["models_failed"] == 0
+    assert receipt["models_skipped"] == 1
+    assert receipt["skipped"][0]["model"] == "remote:cloud"
+    assert server.fanout_store.resume_run(run["id"]) is not None
+    event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
+    assert event["cloud_model_calls"] == 0
 
 
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():

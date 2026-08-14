@@ -191,7 +191,15 @@ def ensure_python_deps(
     print(f"Installing Python runtime dependencies from {requirements.name}")
     try:
         result = subprocess.run(
-            [executable, "-m", "pip", "install", "-r", str(requirements)],
+            [
+                executable,
+                "-m",
+                "pip",
+                "install",
+                "--only-binary=:all:",
+                "-r",
+                str(requirements),
+            ],
             env=process_env,
         )
     except (OSError, subprocess.SubprocessError) as exc:

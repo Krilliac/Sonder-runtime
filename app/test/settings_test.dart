@@ -2,6 +2,35 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/settings.dart';
 
+class _MemoryCredentialStore implements CredentialStore {
+  final Map<String, String> values = <String, String>{};
+
+  @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
+}
+
+class _FailingCredentialStore implements CredentialStore {
+  @override
+  Future<void> delete(String key) async => throw StateError('keychain down');
+
+  @override
+  Future<String?> read(String key) async => throw StateError('keychain down');
+
+  @override
+  Future<void> write(String key, String value) async =>
+      throw StateError('keychain down');
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -31,28 +60,97 @@ void main() {
     expect(weak.usesHostLauncher, isFalse);
     expect(weak.launcherConfigurationError, contains('at least 24'));
 
+    final plaintextRemote = Settings(
+      launcherUrl: 'http://host.test:11436',
+      launcherToken: 'xxxxxxxxxxxxxxxxxxxxxxxx',
+    );
+    expect(plaintextRemote.usesHostLauncher, isFalse);
+    expect(
+      plaintextRemote.launcherConfigurationError,
+      contains('requires an HTTPS endpoint'),
+    );
+
     final loopback = Settings(launcherUrl: 'http://127.0.0.1:11436');
     expect(loopback.usesHostLauncher, isTrue);
   });
 
-  test('launcher credentials persist independently from the API key', () async {
+  test('credentials use the secure store, not plaintext preferences', () async {
     SharedPreferences.setMockInitialValues({});
+    final credentials = _MemoryCredentialStore();
     final settings = Settings(
       apiKey: 'main-api-key',
       launcherUrl: 'https://host.test:11436',
       launcherToken: 'launcher-token',
     );
-    await settings.save();
-    final restored = await Settings.load();
+    await settings.save(credentialStore: credentials);
+    final restored = await Settings.load(credentialStore: credentials);
 
     expect(restored.apiKey, 'main-api-key');
     expect(restored.launcherUrl, 'https://host.test:11436');
     expect(restored.launcherToken, 'launcher-token');
     final preferences = await SharedPreferences.getInstance();
-    expect(preferences.getString('sonder_api_key'), 'main-api-key');
+    expect(preferences.containsKey('sonder_api_key'), isFalse);
+    expect(preferences.containsKey('sonder_launcher_token'), isFalse);
+    expect(credentials.values, {
+      'sonder_api_key': 'main-api-key',
+      'sonder_launcher_token': 'launcher-token',
+    });
+  });
+
+  test('legacy plaintext credentials migrate only after secure persistence',
+      () async {
+    SharedPreferences.setMockInitialValues({
+      'sonder_api_key': 'legacy-api-key',
+      'sonder_launcher_token': 'legacy-launcher-token',
+    });
+    final credentials = _MemoryCredentialStore();
+
+    final restored = await Settings.load(credentialStore: credentials);
+    final preferences = await SharedPreferences.getInstance();
+
+    expect(restored.apiKey, 'legacy-api-key');
+    expect(restored.launcherToken, 'legacy-launcher-token');
+    expect(preferences.containsKey('sonder_api_key'), isFalse);
+    expect(preferences.containsKey('sonder_launcher_token'), isFalse);
+    expect(credentials.values.length, 2);
+  });
+
+  test('clearing credentials deletes secure and legacy copies', () async {
+    SharedPreferences.setMockInitialValues({
+      'sonder_api_key': 'legacy-api-key',
+      'sonder_launcher_token': 'legacy-launcher-token',
+    });
+    final credentials = _MemoryCredentialStore()
+      ..values['sonder_api_key'] = 'active-api-key'
+      ..values['sonder_launcher_token'] = 'active-launcher-token';
+
+    await Settings.clearApiKey(credentialStore: credentials);
+    await Settings.clearLauncherToken(credentialStore: credentials);
+    final preferences = await SharedPreferences.getInstance();
+
+    expect(credentials.values, isEmpty);
+    expect(preferences.containsKey('sonder_api_key'), isFalse);
+    expect(preferences.containsKey('sonder_launcher_token'), isFalse);
+  });
+
+  test('unavailable secure storage never reloads a plaintext token', () async {
+    SharedPreferences.setMockInitialValues({
+      'sonder_api_key': 'legacy-api-key',
+      'sonder_launcher_token': 'legacy-launcher-token',
+    });
+
+    final restored = await Settings.load(
+      credentialStore: _FailingCredentialStore(),
+    );
+    final preferences = await SharedPreferences.getInstance();
+
+    expect(restored.apiKey, isEmpty);
+    expect(restored.launcherToken, isEmpty);
+    // Do not destroy an old value when the attempted migration did not finish.
+    expect(preferences.getString('sonder_api_key'), 'legacy-api-key');
     expect(
       preferences.getString('sonder_launcher_token'),
-      'launcher-token',
+      'legacy-launcher-token',
     );
   });
 

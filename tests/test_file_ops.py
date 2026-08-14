@@ -22,6 +22,43 @@ def test_write_read_edit_delete_inside_workspace(monkeypatch, tmp_path):
     assert deleted["deleted"] is True
 
 
+def test_single_file_mutations_reject_symlink_spelling(monkeypatch, tmp_path):
+    """A guarded mutation must never follow an in-root symlink to its target."""
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    target = tmp_path / "target.txt"
+    target.write_text("original", encoding="utf-8")
+    link = tmp_path / "alias.txt"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip("symlink creation unavailable: %s" % exc)
+
+    for mutate in (
+        lambda: file_ops.write_file("alias.txt", "changed", mode="overwrite"),
+        lambda: file_ops.edit_file("alias.txt", "original", "changed"),
+        lambda: file_ops.delete_path("alias.txt"),
+    ):
+        with pytest.raises(PermissionError, match="symlink or junction"):
+            mutate()
+        assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_directory_create_rejects_symlink_parent(monkeypatch, tmp_path):
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "alias"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip("symlink creation unavailable: %s" % exc)
+
+    with pytest.raises(PermissionError, match="symlink or junction"):
+        file_ops.make_directory("alias/new")
+
+    assert not (target / "new").exists()
+
+
 def test_outside_workspace_rejected_without_bypass(monkeypatch, tmp_path):
     root = tmp_path / "root"
     outside = tmp_path / "outside.txt"

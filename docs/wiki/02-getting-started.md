@@ -43,6 +43,29 @@ On Windows PowerShell, use the same commands with
 `%LOCALAPPDATA%\sonder`; minimal service environments fall back through
 `%USERPROFILE%`, then `%SystemDrive%\Sonder`.
 
+### Extracted local-system bundle
+
+The local-system archive is self-contained and does not change `PATH`. Run
+the launcher from its extracted directory:
+
+```powershell
+# Windows PowerShell
+.\bootstrap-engine.cmd
+.\sonder.cmd
+```
+
+```bash
+# Linux/macOS
+./bootstrap-engine.sh
+. ./sonder-runtime.sh
+"$SONDER_PYTHON" ./sonder_repl.py
+```
+
+If a launcher has been installed on `PATH`, invoking `sonder` is equivalent on
+Windows (`sonder.cmd`). An extracted POSIX bundle does not ship a bare
+`sonder` executable, so retain the explicit command above unless you create a
+local wrapper yourself.
+
 ## Server-private (production)
 
 Use the installer, which creates a dedicated OS user, installs an
@@ -80,7 +103,21 @@ runtime recovers on its own (it probes every 15s), no restart needed.
 - **MCP** — `python -m sonder_runtime mcp` exposes the tool surface to MCP
   clients.
 - **Flutter app** — in `app/`; its System page shows version, update
-  status, and rollback ([Update Manager](13-update-manager.md)).
+  status, and rollback ([Update Manager](13-update-manager.md)). API and host
+  launcher bearer tokens use the platform credential store rather than app
+  preferences. Use **Forget local session** to remove the account token from
+  this device; copied tokens remain valid until server expiry or revocation.
+
+## Source checkout updates from the REPL
+
+The REPL banner reports the loaded checkout and the newest cached
+`origin/main` revision without contacting the network. Type `/updatecheck` to
+refresh that ref and see the installed/newest commits and timestamps.
+`/update` is a guarded source fast-forward, not a release-manager install: it
+only runs for a clean checkout on `main` using the canonical Sonder remote and
+refuses local commits, feature branches, or local edits. Restart the REPL
+after it succeeds. See [Update Manager](13-update-manager.md) for signed
+release bundles and rollback.
 
 ## Where to go next
 

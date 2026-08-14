@@ -73,10 +73,21 @@ def test_remote_requires_strict_explicit_opt_in(monkeypatch):
     assert endpoint.locality(remote) == "remote-opt-in"
 
 
+def test_remote_http_is_refused_even_with_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv(endpoint.REMOTE_OPT_IN, "1")
+
+    error = endpoint.policy_error("http://models.example.test:11434")
+
+    assert "must use https" in error
+    with pytest.raises(ValueError, match="must use https"):
+        endpoint.configured_origin("http://models.example.test:11434")
+
+
 def test_locality_distinguishes_invalid_from_blocked_remote(monkeypatch):
     monkeypatch.delenv(endpoint.REMOTE_OPT_IN, raising=False)
 
-    assert endpoint.locality("http://models.example.test:11434") == "remote-blocked"
+    assert endpoint.locality("http://models.example.test:11434") == "remote-insecure"
+    assert endpoint.locality("https://models.example.test:11434") == "remote-blocked"
     assert endpoint.locality("http://127.0.0.1:not-a-port") == "invalid"
 
 

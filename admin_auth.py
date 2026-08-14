@@ -48,14 +48,19 @@ def _secret() -> str:
     if existing:
         return existing
     generated = sonder_secrets.generate_key()
-    sonder_secrets._write_private(path, generated)
-    # Re-read so a concurrent first-run writer's value wins for everyone,
-    # keeping the token->hash mapping stable across processes.
+    if sonder_secrets._create_private_if_missing(path, generated):
+        return generated
+    # Another first-run process won the atomic create.  Re-read its value so
+    # every process uses exactly the same HMAC key for account sessions.
     try:
         persisted = path.read_text(encoding="utf-8").strip()
     except OSError:
         persisted = ""
-    return persisted or generated
+    if persisted:
+        return persisted
+    # Never fall back to a generated-but-unpersisted key: doing so would mint
+    # session hashes no later process can validate after a crash/race.
+    raise RuntimeError("persisted account-session secret is unavailable")
 
 
 def _bootstrap_secret() -> str:
@@ -287,6 +292,16 @@ def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
     if assignments:
         values.append(username)
         conn.execute("UPDATE accounts SET %s WHERE username=?" % ", ".join(assignments), values)
+        # A ban must terminate already-issued credentials, not merely make
+        # them temporarily unusable.  Otherwise unbanning an account silently
+        # resurrects every bearer token that existed before the ban.  Keep the
+        # account change and revocation in the same transaction so another
+        # connection cannot observe an unbanned account with a live old token.
+        if changes.get("banned"):
+            conn.execute(
+                "UPDATE account_sessions SET revoked=1 WHERE username=? AND revoked=0",
+                (username,),
+            )
         conn.commit()
     return public_account(conn, username)
 
@@ -313,22 +328,33 @@ def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1) ->
         return True, ""
     username = account["username"]
     window = (_now() // RATE_WINDOW_SECONDS) * RATE_WINDOW_SECONDS
-    row = conn.execute(
-        "SELECT count FROM account_rate WHERE username=? AND window_start=?",
-        (username, window),
-    ).fetchone()
-    count = int(row["count"] if row else 0) + max(1, int(cost or 1))
-    if row:
-        conn.execute(
-            "UPDATE account_rate SET count=? WHERE username=? AND window_start=?",
-            (count, username, window),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO account_rate(username, window_start, count) VALUES(?, ?, ?)",
-            (username, window, count),
-        )
-    conn.commit()
+    units = max(1, int(cost or 1))
+    # Each HTTP request owns a separate SQLite connection.  A plain SELECT
+    # followed by UPDATE lets simultaneous requests read the same old count,
+    # then each write the same incremented value.  Begin the short
+    # read-modify-write transaction with a reserved write lock so a limit is
+    # a real per-account budget under concurrent requests, not a best effort.
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT count FROM account_rate WHERE username=? AND window_start=?",
+            (username, window),
+        ).fetchone()
+        count = int(row["count"] if row else 0) + units
+        if row:
+            conn.execute(
+                "UPDATE account_rate SET count=? WHERE username=? AND window_start=?",
+                (count, username, window),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO account_rate(username, window_start, count) VALUES(?, ?, ?)",
+                (username, window, count),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     if count > limit:
         return False, "rate limit exceeded for tier %s (%d/min)" % (account.get("tier"), limit)
     return True, ""

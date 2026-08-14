@@ -177,3 +177,42 @@ def test_pointer_file_fallback_when_symlink_unavailable(tmp_path, monkeypatch):
     # A pointer file carries the target; _read_pointer resolves it.
     assert (tmp_path / "current.pointer").is_file()
     assert _read_pointer(link) == str(target)
+
+
+def test_pointer_fallback_refuses_a_stale_symlink_it_cannot_retire(
+    tmp_path, monkeypatch
+):
+    """Never report activation when `_read_pointer` still selects old link."""
+    old_target = tmp_path / "releases" / "1.0.0"
+    new_target = tmp_path / "releases" / "1.1.0"
+    old_target.mkdir(parents=True)
+    new_target.mkdir(parents=True)
+    link = tmp_path / "current"
+    os.symlink(old_target, link, target_is_directory=True)
+    hidden_pointer = tmp_path / "releases" / "stale-fallback"
+    (tmp_path / "current.pointer").write_text(
+        str(hidden_pointer), encoding="utf-8"
+    )
+
+    def no_symlink(*_args, **_kwargs):
+        raise OSError("symlink privilege not held")
+
+    original_unlink = Path.unlink
+
+    def deny_current_unlink(path, *args, **kwargs):
+        if path == link:
+            raise PermissionError("current symlink is in use")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(sonder_updates.os, "symlink", no_symlink)
+    monkeypatch.setattr(Path, "unlink", deny_current_unlink)
+
+    with pytest.raises(sonder_updates.UpdateError, match="cannot be removed"):
+        switch_active_pointer(link, new_target)
+
+    # The attempted fallback pointer is restored, so the new target cannot
+    # spring into effect later merely because somebody deletes the old link.
+    assert (tmp_path / "current.pointer").read_text(encoding="utf-8") == str(
+        hidden_pointer
+    )
+    assert _read_pointer(link) == str(old_target)

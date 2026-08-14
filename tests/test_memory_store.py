@@ -529,6 +529,31 @@ def test_interaction_token_totals_mix_exact_and_estimated_rows():
     assert by_tier["fast"]["tokens_total"] == 4
 
 
+def test_interaction_token_totals_do_not_call_persisted_estimates_exact():
+    c = _conn()
+    ms.log_interaction(c, "measured", "task", "", "answer", "code",
+                       tokens_in=10, tokens_out=5, token_source="ollama")
+    ms.log_interaction(c, "estimated", "task", "", "answer", "code",
+                       tokens_in=7, tokens_out=2, token_source="estimated")
+    ms.log_interaction(c, "partial", "task", "", "answer", "code",
+                       tokens_in=8, tokens_out=3, token_source="mixed")
+    ms.log_interaction(c, "unknown", "task", "", "answer", "code",
+                       tokens_in=9, tokens_out=4, token_source="provided")
+
+    totals = ms.interaction_token_totals(c)
+
+    assert totals["exact_rows"] == 1
+    assert totals["estimated_rows"] == 1
+    assert totals["mixed_rows"] == 1
+    assert totals["unknown_rows"] == 1
+
+    by_tier = ms.interaction_token_totals_by_tier(c)[0]
+    assert by_tier["exact_rows"] == 1
+    assert by_tier["estimated_rows"] == 1
+    assert by_tier["mixed_rows"] == 1
+    assert by_tier["unknown_rows"] == 1
+
+
 def test_get_missing_interaction_returns_none():
     assert ms.get_interaction(_conn(), "nope") is None
 

@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 
 import server
@@ -35,6 +36,34 @@ def test_task_tools_round_trip(monkeypatch, tmp_path):
     assert "done" in updated
     shown = server.task_show(task_id)
     assert "events:" in shown
+
+
+def test_task_list_mcp_schema_and_dispatch_accept_typed_multi_status(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "memory.db"))
+    server.task_create("pending task")
+    blocked = server.task_create("blocked task")
+    done = server.task_create("done task")
+    server.task_update(blocked.split()[2], status="blocked")
+    server.task_update(done.split()[2], status="done")
+
+    registered = server.mcp._tool_manager._tools["task_list"]
+    status_schema = registered.parameters["properties"]["status"]
+    assert {item.get("type") for item in status_schema["anyOf"]} == {"string", "array"}
+
+    blocks, _ = asyncio.run(server.mcp.call_tool(
+        "task_list", {"status": ["pending", "blocked"]},
+    ))
+    output = "\n".join(str(block.text) for block in blocks)
+    assert "pending task" in output
+    assert "blocked task" in output
+    assert "done task" not in output
+
+    agent_output = server._agent_dispatch(
+        "task_list", {"status": ["pending", "blocked"]}, read_only=False,
+    )
+    assert "pending task" in agent_output
+    assert "blocked task" in agent_output
+    assert "done task" not in agent_output
 
 
 def test_command_and_compaction_tools(monkeypatch, tmp_path):

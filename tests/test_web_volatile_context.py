@@ -535,6 +535,7 @@ def test_followup_dispatch_uses_resolved_dated_query_not_ellipsis(monkeypatch):
     assert "And Node.js" not in task
     assert time.strftime("%B %Y") in task
     assert kwargs["required_tool_names"] == ("web_fetch",)
+    assert kwargs["abort_on_tool_failure_names"] == ("web_search",)
 
 
 def test_disabled_web_reports_only_for_positive_direct_and_followup(monkeypatch):

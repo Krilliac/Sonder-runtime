@@ -124,6 +124,34 @@ def test_failing_pytest_is_not_reported_as_a_completed_phase(tmp_path):
     assert transcript.splitlines()[0].startswith("×")
 
 
+def test_failed_test_discovery_is_not_recorded_as_success(monkeypatch, tmp_path):
+    """Collection failures are not usable workspace-inspection evidence."""
+    activity_tracker.reset_for_tests()
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server.harness_tools, "test_discover",
+        lambda **kwargs: {
+            "framework": "pytest", "test_count": 0, "test_files": [],
+            "error": "collection failed: invalid configuration",
+        },
+    )
+
+    with activity_tracker.response_span("test", prompt="t", project=str(tmp_path)):
+        direct = server.test_discover(root=str(tmp_path), framework="pytest")
+        direct_event = _tool_call_events(activity_tracker.current() or {})[-1]
+        observation = server._agent_dispatch_observed(
+            "test_discover", {"root": ".", "framework": "pytest"},
+            project=str(tmp_path),
+        )
+        dispatched_event = _tool_call_events(activity_tracker.current() or {})[-1]
+
+    assert direct.startswith("ERROR: test discovery failed")
+    assert "collection failed" in direct
+    assert direct_event["ok"] is False
+    assert observation.startswith("ERROR: test discovery failed")
+    assert dispatched_event["ok"] is False
+
+
 def _rendered_failure(title, data):
     """Real rendered text, from the server's own renderer."""
     return server._format_run_result(title, data)

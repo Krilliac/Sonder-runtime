@@ -66,6 +66,22 @@ def configure_android(app_root: Path, allow_cleartext: bool = False) -> list[Pat
             '<application\n        android:usesCleartextTraffic="%s"' % value,
             1,
         )
+    # Bearer credentials are held by flutter_secure_storage. Backing up its
+    # encrypted blobs without the Android Keystore key is both unusable and a
+    # source of recovery errors, so never include this app in Android backup.
+    if "android:allowBackup=" in text:
+        text = re.sub(
+            r'android:allowBackup="(?:true|false)"',
+            'android:allowBackup="false"',
+            text,
+            count=1,
+        )
+    else:
+        text = text.replace(
+            "<application",
+            '<application\n        android:allowBackup="false"',
+            1,
+        )
     if _write_text(manifest, text):
         changed.append(manifest)
 
@@ -81,6 +97,10 @@ def configure_android(app_root: Path, allow_cleartext: bool = False) -> list[Pat
             'namespace = "%s"' % APPLICATION_ID,
             text,
         )
+        # flutter_secure_storage v10 uses Android Keystore APIs available from
+        # API 23 onward. Pin this instead of inheriting a template default.
+        text = re.sub(r"minSdk\s*=\s*[^\n]+", "minSdk = 23", text)
+        text = re.sub(r"minSdkVersion\s+[^\n]+", "minSdkVersion 23", text)
         text = re.sub(
             r'applicationId\s*=\s*"[^"]+"',
             'applicationId = "%s"' % APPLICATION_ID,
@@ -160,6 +180,30 @@ def configure_apple(app_root: Path) -> list[Path]:
         )
         if _write_text(project, text):
             changed.append(project)
+
+    # flutter_secure_storage requires Keychain Sharing for generated Apple
+    # runners. Keep an empty group array so the platform derives the app's
+    # normal keychain access group instead of sharing credentials broadly.
+    entitlement_files = (
+        "ios/Runner/DebugProfile.entitlements",
+        "ios/Runner/Release.entitlements",
+        "macos/Runner/DebugProfile.entitlements",
+        "macos/Runner/Release.entitlements",
+    )
+    for relative in entitlement_files:
+        entitlements = app_root / relative
+        if not entitlements.exists():
+            continue
+        try:
+            payload = plistlib.loads(entitlements.read_bytes())
+        except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+            raise ValueError("generated Apple entitlements are invalid: %s" % exc) from exc
+        if not isinstance(payload, dict):
+            raise ValueError("generated Apple entitlements have no root dictionary")
+        if "keychain-access-groups" not in payload:
+            payload["keychain-access-groups"] = []
+            entitlements.write_bytes(plistlib.dumps(payload, sort_keys=False))
+            changed.append(entitlements)
 
     app_info = app_root / "macos" / "Runner" / "Configs" / "AppInfo.xcconfig"
     if app_info.exists():

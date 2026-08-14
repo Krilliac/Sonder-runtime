@@ -168,7 +168,21 @@ class UpdateManager:
 
     def _locate_archive(self, bundle: Path, archive_info: dict) -> Path:
         name = archive_info.get("name", "")
-        if not name or "/" in name or name.startswith("."):
+        # Archive names are manifest data and must never alter the directory
+        # selected by the update operator.  Checking only POSIX separators is
+        # insufficient on Windows: ``C:\\...`` and ``\\\\server\\share`` are
+        # absolute there, while ``foo\\bar`` changes the bundle-relative
+        # location.  Reject both platform separator spellings (and NTFS ADS
+        # syntax) on every host so a bundle has one portable interpretation.
+        if (
+            not isinstance(name, str)
+            or not name
+            or "/" in name
+            or "\\" in name
+            or ":" in name
+            or "\x00" in name
+            or name.startswith(".")
+        ):
             raise UpdateError("manifest lacks a valid archive name")
         for candidate in (bundle / "targets" / name, bundle / name):
             if candidate.is_file():

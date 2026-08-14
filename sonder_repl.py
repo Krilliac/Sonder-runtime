@@ -43,6 +43,20 @@ except ImportError:  # pragma: no cover - the REPL must never hard-depend on it
 CURRENT_TOKEN = ""
 REPL_HISTORY_LIMIT = 200
 
+# The raw composer history is deliberately process-local, but that is not a
+# reason to retain credentials for the lifetime of the terminal.  Ctrl+R
+# redraws entries in clear text, which makes a successfully typed `/login`
+# password visible again to anyone at the console.  These names cover the two
+# native commands whose positional arguments are credentials; the assignment
+# pattern covers the catalogue commands that accept an explicitly supplied
+# bearer token.
+_HISTORY_SECRET_COMMANDS = frozenset(("/login", "/register"))
+_HISTORY_SECRET_ASSIGNMENT = re.compile(
+    r"(?:^|[\s,;])(?:api[_-]?key|authorization|credential|password|passwd|"
+    r"secret|token)\s*(?:=|:)\s*\S+",
+    re.IGNORECASE,
+)
+
 
 class _Ansi:
     """Small dependency-free palette; automatically disappears when piped."""
@@ -359,6 +373,21 @@ def _normalize_input_line(line):
     return value.strip()
 
 
+def _history_safe(line):
+    """Whether a submitted REPL line may be retained for Ctrl+R recall.
+
+    This is intentionally a deny-only privacy boundary: it never rewrites a
+    command into something that could be recalled and rerun with changed
+    semantics.  Sensitive turns are simply absent from the in-memory history;
+    normal command and chat recall remain unchanged.
+    """
+    value = str(line or "").strip()
+    command = value.split(None, 1)[0].lower() if value else ""
+    return bool(value) and command not in _HISTORY_SECRET_COMMANDS and not (
+        _HISTORY_SECRET_ASSIGNMENT.search(value)
+    )
+
+
 def _rule(char="─", width=56):
     return _paint(char * width, _Ansi.muted)
 
@@ -519,6 +548,30 @@ class _ModelArgumentCompleter:
         ]
 
 
+def _model_selection_ineligibility(model):
+    """Return a known reason a discovered model cannot serve REPL chat.
+
+    ``/model`` used to verify only that a tag was installed.  That made an
+    embedding-only model look successfully selected, then deferred the useful
+    rejection until the next ordinary chat turn.  The HTTP chat endpoint
+    already consults the richer catalog record before prewarming, so reuse the
+    same positive capability evidence here.  Discovery remains best-effort:
+    a catalog that omits capability metadata must not turn a valid local model
+    into a false negative.
+    """
+    try:
+        found = server.resolve_discovered_model_record(model)
+        if found is None:
+            return ""
+        _name, record = found
+        return server._fanout_nonchat_reason(record)
+    except Exception:
+        # `/model` has already established that Ollama was reachable enough to
+        # list this tag.  A second metadata lookup is advisory only; preserve
+        # the pre-existing selection behavior if it races a catalog reload.
+        return ""
+
+
 def _home_relative(path):
     """Show ~ instead of the home prefix, the way a shell prompt does."""
     try:
@@ -567,6 +620,10 @@ def _startup_banner(strict, persona, project, tier=None):
             str(source.get("newest_commit") or "unknown")[:12],
             source.get("newest_commit_time") or "unknown time",
         )
+        newest_label = (
+            "newest source" if source.get("remote_ref_refreshed")
+            else "newest known source"
+        )
         update = "%s (behind %s)" % (
             source.get("state") or "unknown", source.get("behind", "?"),
         )
@@ -576,6 +633,7 @@ def _startup_banner(strict, persona, project, tier=None):
             update += "; restart required"
     except Exception as exc:
         revision = newest = "unavailable (%s)" % type(exc).__name__
+        newest_label = "newest source"
         running = "unavailable"
         update = "check unavailable"
 
@@ -590,7 +648,7 @@ def _startup_banner(strict, persona, project, tier=None):
         ("project", str(project or "(none)"), ()),
         ("installed source", revision, ()),
         ("running source", running, (_Ansi.amber,) if source.get("restart_required") else ()),
-        ("newest source", newest, ()),
+        (newest_label, newest, ()),
         ("update", "%s  /updatecheck | /update" % update, (_Ansi.amber,)),
     ]
     if strict:
@@ -691,11 +749,25 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
     # /model changes should be visible before the very next submitted turn.
     compact = width is not None and int(width) <= 88
     if compact:
-        try:
-            lanes = int((status or {}).get("running_lanes") or 0)
-            agents = int((status or {}).get("running_agents") or 0)
-        except (AttributeError, TypeError, ValueError):
+        # The wide composer delegates to _execution_prompt(), which refreshes
+        # a missing status snapshot and explicitly renders an unavailable
+        # lookup as unknown.  Do the same here: treating ``None`` as an empty
+        # mapping made narrow terminals claim L0/A0 when the status service
+        # was unavailable -- an especially misleading place to hide a live
+        # fanout or failed status read.
+        if status is None:
+            try:
+                status = server.execution_status_data()
+            except Exception:
+                status = None
+        if not isinstance(status, dict) or not status.get("known"):
             lanes, agents = "?", "?"
+        else:
+            try:
+                lanes = int(status.get("running_lanes") or 0)
+                agents = int(status.get("running_agents") or 0)
+            except (TypeError, ValueError):
+                lanes, agents = "?", "?"
         parts = ["S %s" % resolved_tier, "L%s A%s" % (lanes, agents)]
     else:
         parts = ["Sonder %s (%s)  %s" % (
@@ -1338,6 +1410,18 @@ def main():
                 print("run /model with no argument to list what is installed")
             return
 
+        if selected_model is not None:
+            ineligible = _model_selection_ineligibility(selected_model)
+            if ineligible:
+                print(_paint(
+                    "model %r cannot serve chat (%s)" % (
+                        selected_model, ineligible,
+                    ),
+                    _Ansi.red,
+                ))
+                print("choose a chat-capable model shown by /model")
+                return
+
         active_tier = tier
         # Preserve the catalog's spelling for the actual request.  Ollama's
         # model tags are conventionally lowercase, but accepting a pasted or
@@ -1512,7 +1596,7 @@ def main():
         line = _normalize_input_line(line)
         if not line:
             continue
-        if not input_history or input_history[-1] != line:
+        if _history_safe(line) and (not input_history or input_history[-1] != line):
             input_history.append(line)
             if len(input_history) > REPL_HISTORY_LIMIT:
                 del input_history[:-REPL_HISTORY_LIMIT]

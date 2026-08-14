@@ -95,6 +95,28 @@ def test_import_rejects_tampered_archive(env):
         manager.import_offline(bundle, allow_unverified=True)
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        r"C:\\outside.tar",
+        r"\\\\server\\share\\outside.tar",
+        r"nested\\archive.tar",
+        r"..\\outside.tar",
+        "nested/archive.tar",
+        "../outside.tar",
+        "archive.tar:alternate-stream",
+    ),
+)
+def test_archive_name_cannot_escape_bundle_on_any_host(env, name):
+    """Windows archive spellings must not bypass the local-bundle boundary."""
+    manager = _manager(env)
+    bundle = env / "bundle"
+    (bundle / "targets").mkdir(parents=True)
+
+    with pytest.raises(sonder_updates.UpdateError, match="valid archive name"):
+        manager._locate_archive(bundle, {"name": name})
+
+
 def test_import_blocks_wrong_platform(env):
     manager = _manager(env)
     source = _mini_source(env, "wrongplat-src")

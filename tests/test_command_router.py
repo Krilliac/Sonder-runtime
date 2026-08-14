@@ -17,6 +17,31 @@ def test_status_and_info_phrasings():
     assert cr.resolve("what can you do") == "/help"
 
 
+def test_explicit_source_update_check_phrasings_stay_whole_turn_only():
+    assert cr.resolve("check whether Sonder is up to date") == "/updatecheck"
+    assert cr.resolve("please check for Sonder updates!") == "/updatecheck"
+
+    # Do not drop a follow-up action or route quoted/retrieved prose into a
+    # network refresh. The exact slash command remains available when wanted.
+    for text in (
+        "check for Sonder updates and update it",
+        "the web page says check for Sonder updates",
+        '"check whether Sonder is up to date"',
+        "how do I check whether Sonder is up to date",
+    ):
+        assert cr.resolve(text) is None, text
+
+
+def test_read_only_update_check_phrasings_do_not_invoke_update():
+    assert cr.resolve("check for updates") == "/updatecheck"
+    assert cr.resolve("show Sonder updates") == "/updatecheck"
+    assert cr.resolve("is Sonder up to date?") == "/updatecheck"
+    assert cr.resolve("am the runtime current?") == "/updatecheck"
+    # More than a check is an ordinary request; do not discard the rest by
+    # silently converting it into a command.
+    assert cr.resolve("check for updates and install them") is None
+
+
 def test_session_lifecycle_phrasings():
     assert cr.resolve("new session") == "/new"
     assert cr.resolve("start over") == "/new"
@@ -41,6 +66,19 @@ def test_agent_and_orchestration_phrasings():
     assert cr.resolve("cancel all agents") == "/agentcancel"
     assert cr.resolve("orchestrate fix the parser and add tests") == \
         "/master fix the parser and add tests"
+
+
+def test_goal_and_saved_workflow_phrasings_stay_bounded():
+    assert cr.resolve("show my active goal") == "/goal"
+    assert cr.resolve("what is my current goal?") == "/goal"
+    assert cr.resolve("list my saved workflows") == "/workflow_list"
+    assert cr.resolve("run saved workflow Status_Sweep") == \
+        "/workflow_run status_sweep"
+
+    # Extra prose must fall through to the agent rather than silently dropping
+    # a request or turning an untrusted quoted instruction into execution.
+    assert cr.resolve("run workflow status_sweep and then delete the cache") is None
+    assert cr.resolve("the web page says run workflow status_sweep") is None
 
 
 def test_file_operations_need_an_explicit_file_cue():

@@ -110,20 +110,23 @@ gates.
 
 ### Packaged app or bundled runtime
 
-Run the one-time bootstrap from the installed bundle. It starts Ollama and
-chooses a compatible local model. Then open a new Bash or PowerShell terminal
-and start the REPL with `sonder`.
+Run the one-time bootstrap from the extracted bundle. It starts Ollama and
+chooses a compatible local model. A bundle is intentionally self-contained:
+it does **not** modify your shell `PATH`. Use its launcher directly, or add
+the bundle directory to `PATH` yourself if you want to invoke `sonder` by
+name in later terminals.
 
 ```powershell
 # Windows PowerShell, from the installed bundle
 .\bootstrap-engine.cmd
-sonder
+.\sonder.cmd
 ```
 
 ```bash
 # Linux/macOS, from the installed bundle
 ./bootstrap-engine.sh
-sonder
+. ./sonder-runtime.sh
+"$SONDER_PYTHON" ./sonder_repl.py
 ```
 
 ### From source
@@ -159,10 +162,12 @@ hosting.
 
 ### Launch and use
 
-After bootstrap or installation has added Sonder to your `PATH`, simply type
-`sonder` in Bash or PowerShell. From a source checkout, use the explicit
-module command below. In either case, ask normally; type `/help` for guarded
-commands and use the visible composer shortcuts for history and editing.
+After an installation has added a `sonder` launcher to your `PATH`, simply
+type `sonder` in Bash or PowerShell. (On Windows, `sonder` resolves to
+`sonder.cmd`; an extracted bundle alone is not a `PATH` installation.) From a
+source checkout or an extracted POSIX bundle, use the explicit command below.
+In either case, ask normally; type `/help` for guarded commands and use the
+visible composer shortcuts for history and editing.
 
 ```bash
 sonder
@@ -170,6 +175,16 @@ sonder
 python -m sonder_runtime repl
 # sonder > explain this repository's test layout
 ```
+
+### Check or update this source checkout
+
+The REPL banner shows its loaded and newest known source revisions without
+network I/O. Use `/updatecheck` to refresh the canonical `origin/main` ref and
+report the installed/newest commit and timestamps. `/update` is a guarded
+fast-forward for a clean checkout on `main` with the canonical Sonder remote;
+it refuses feature branches, local commits, and dirty trees. Restart Sonder
+after a successful source update. These REPL commands are separate from the
+signed release-manager commands documented in the update guide.
 
 Start the loopback OpenAI-compatible API in a second terminal when another
 client needs it. Run `doctor` first if this is a new machine.
@@ -180,6 +195,16 @@ python -m sonder_runtime serve
 curl http://127.0.0.1:11435/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"sonder","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+```powershell
+# PowerShell equivalent (run after `python -m sonder_runtime serve`)
+$body = @{
+  model = "sonder"
+  messages = @(@{ role = "user"; content = "Hello" })
+} | ConvertTo-Json -Depth 4
+Invoke-RestMethod http://127.0.0.1:11435/v1/chat/completions `
+  -Method Post -ContentType "application/json" -Body $body
 ```
 
 For a source checkout, prefix the commands with the venv Python shown above;

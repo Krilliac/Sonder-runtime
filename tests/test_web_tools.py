@@ -301,6 +301,19 @@ def test_http_content_encoding_rejects_expansion_bomb():
         web_tools._decode_content_encoding(compressed, "gzip")
 
 
+def test_web_fetch_rejects_oversized_raw_body_instead_of_truncating(monkeypatch):
+    monkeypatch.setattr(
+        web_tools,
+        "_urlopen",
+        lambda req, timeout=10: FakeResponse(
+            b"x" * (web_tools.MAX_RESPONSE_BYTES + 1), "text/plain",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="raw body safety limit"):
+        web_tools.web_fetch("https://example.com/too-large")
+
+
 def test_web_fetch_rejects_localhost():
     with pytest.raises(ValueError):
         web_tools.web_fetch("http://127.0.0.1/private")
@@ -319,6 +332,22 @@ def test_web_search_rejects_weak_generic_fallback_for_local_intent(monkeypatch):
 
     with pytest.raises(RuntimeError, match="sufficiently relevant"):
         web_tools.web_search("computer repair shops near 67215")
+
+
+def test_web_search_strips_exact_imperative_wrapper_for_provider(monkeypatch):
+    requested = []
+    page = b'''<html><a class="result__a" href="https://repair.example/">Computer repair shops</a></html>'''
+
+    def fake_request(url, timeout=10):
+        requested.append(url)
+        return page, "text/html"
+
+    monkeypatch.setattr(web_tools, "_request", fake_request)
+    results = web_tools.web_search("web search to find computer repair shops near 67215")
+
+    assert results
+    assert "computer+repair+shops+near+67215" in requested[0]
+    assert "web+search+to+find" not in requested[0]
 
 
 def test_format_search_results_empty():

@@ -577,6 +577,13 @@ def switch_active_pointer(
     except FileNotFoundError:
         pass
     pointer = link.with_name(link.name + ".pointer")
+    # A pointer file can be left behind by an earlier unprivileged run while
+    # a privileged symlink is still active.  Preserve it before attempting a
+    # fallback switch so a failure to retire the symlink cannot leave a hidden
+    # new target that becomes active later if the symlink is removed.
+    previous_pointer = (
+        pointer.read_bytes() if pointer.is_file() else None
+    )
     try:
         os.symlink(target, temp, target_is_directory=True)
         try:
@@ -611,8 +618,33 @@ def switch_active_pointer(
         if link.is_symlink():
             try:
                 link.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                # `_read_pointer` prefers a symlink, so accepting this state
+                # would journal the new release as active while launchers
+                # still select the old one.  Restore the fallback file as
+                # well: otherwise it could activate unexpectedly once the
+                # stale symlink disappears.
+                try:
+                    if previous_pointer is None:
+                        pointer.unlink()
+                    else:
+                        restore = pointer.with_name(
+                            pointer.name + ".restore-%d" % os.getpid()
+                        )
+                        restore.write_bytes(previous_pointer)
+                        os.replace(restore, pointer)
+                except OSError:
+                    # The activation has already failed closed.  Keep the
+                    # original unlink failure as the useful operator error.
+                    pass
+                raise UpdateError(
+                    "cannot activate pointer fallback while the existing "
+                    "current symlink cannot be removed"
+                ) from exc
+        if link.is_symlink():
+            raise UpdateError(
+                "pointer fallback is shadowed by an existing current symlink"
+            )
         return previous
 
 

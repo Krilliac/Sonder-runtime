@@ -1,8 +1,11 @@
 import io
 import subprocess
 
+import pytest
+
 import sonder_headless as H
 import sonder_serve
+import unsafe_lab
 
 
 class GateInput:
@@ -31,6 +34,41 @@ def test_start_ollama_skips_when_already_reachable(monkeypatch):
     assert H.start_ollama() == "ollama: already reachable"
 
 
+def test_unsafe_headless_hosted_request_fails_before_sidecars(monkeypatch, capsys):
+    monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, unsafe_lab.ACKNOWLEDGEMENT)
+    monkeypatch.setenv("SONDER_HOST", "127.0.0.1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    monkeypatch.setattr(
+        H,
+        "start_ollama",
+        lambda: (_ for _ in ()).throw(AssertionError("Ollama must not start")),
+    )
+    monkeypatch.setattr(
+        H,
+        "ensure_sonder_alias",
+        lambda: (_ for _ in ()).throw(AssertionError("alias must not bootstrap")),
+    )
+
+    assert H.main(["start", "--allow-hosted"]) == 2
+    assert "unsafe lab mode refuses hosted/cloud" in capsys.readouterr().err
+
+
+def test_start_sonder_checks_effective_hosted_override_before_spawn(monkeypatch):
+    monkeypatch.setenv(unsafe_lab.ACK_ENV, unsafe_lab.ACKNOWLEDGEMENT)
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: False)
+    monkeypatch.setattr(
+        H,
+        "port_open",
+        lambda *args: (_ for _ in ()).throw(AssertionError("must not probe")),
+    )
+
+    with pytest.raises(unsafe_lab.UnsafeLabError, match="hosted/cloud"):
+        H.start_sonder("127.0.0.1", 11435, env={"SONDER_ALLOW_CLOUD": "1"})
+
+
 def test_start_ollama_reports_missing_binary(monkeypatch):
     monkeypatch.setattr(H, "ollama_ok", lambda: False)
     monkeypatch.setattr(H.shutil, "which", lambda exe: None)
@@ -54,7 +92,7 @@ def test_ollama_probe_uses_canonical_client_environment(monkeypatch):
 
 def test_unavailable_remote_ollama_never_starts_local_daemon(monkeypatch):
     started = []
-    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     monkeypatch.setattr(H, "ollama_ok", lambda: False)
     monkeypatch.setattr(H, "ollama_exe", lambda: "ollama-test")
@@ -208,13 +246,43 @@ def test_listener_pid_parses_windows_netstat(monkeypatch):
     assert H._listener_pid("127.0.0.1", 11435) == 4567
 
 
+def test_server_pid_port_match_rejects_another_managed_endpoint(monkeypatch):
+    script = H.repo_root() / "sonder_serve.py"
+    monkeypatch.setattr(
+        H, "_pid_command_line", lambda pid: 'python "%s" 11436' % script,
+    )
+
+    assert H._is_sonder_server_for_port(4567, 11435) is False
+    assert H._is_sonder_server_for_port(4567, 11436) is True
+
+
+def test_stop_does_not_kill_recorded_server_on_another_port(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    H.pid_file("sonder_serve").write_text("4567", encoding="ascii")
+    monkeypatch.setattr(H, "pid_alive", lambda pid: pid == 4567)
+    monkeypatch.setattr(H, "_listener_pids", lambda host, port: [])
+    monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: False)
+    monkeypatch.setattr(
+        H.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("another port must not be terminated")
+        ),
+    )
+
+    assert H.stop_pid("sonder_serve", port=11435) == (
+        "sonder_serve: recorded pid 4567 is not for port 11435; not stopped"
+    )
+    assert not H.pid_file("sonder_serve").exists()
+
+
 def test_managed_pid_repairs_stale_venv_launcher_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
     H.pid_file("sonder_serve").write_text("111", encoding="ascii")
     monkeypatch.setattr(H, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(H, "port_open", lambda host, port: True)
     monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
-    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: pid == 222)
+    monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: pid == 222)
 
     assert H._managed_pid("sonder_serve") == 222
     assert H.pid_file("sonder_serve").read_text(encoding="ascii") == "222"
@@ -222,12 +290,12 @@ def test_managed_pid_repairs_stale_venv_launcher_pid(monkeypatch, tmp_path):
 
 def test_start_sonder_records_real_listener_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
-    monkeypatch.setattr(H, "port_open", lambda host, port: False)
-    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: True)
+    probes = iter((False, True, True))
+    monkeypatch.setattr(H, "port_open", lambda host, port: next(probes))
+    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: fn())
     monkeypatch.setattr(H, "python_exe", lambda: "python")
     monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
-    monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
-    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: True)
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda host, port: 222)
 
     out = H.start_sonder("127.0.0.1", 11435)
 
@@ -237,7 +305,7 @@ def test_start_sonder_records_real_listener_pid(monkeypatch, tmp_path):
 
 def test_start_sonder_accepts_a_listener_that_binds_at_wait_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
-    probes = iter((False, True))
+    probes = iter((False, True, True))
     monkeypatch.setattr(H, "port_open", lambda host, port: next(probes))
     monkeypatch.setattr(H, "wait_until", lambda fn, seconds: False)
     monkeypatch.setattr(H, "python_exe", lambda: "python")
@@ -403,10 +471,31 @@ def test_main_start_accepts_a_managed_listener_that_binds_after_readiness_window
         lambda *args, **kwargs: "sonder: start requested pid=7, not reachable yet",
     )
     monkeypatch.setattr(H, "status", lambda *args: "sonder api: listening on http://127.0.0.1:11435")
-    monkeypatch.setattr(H, "_managed_pid", lambda *args: 7)
-    monkeypatch.setattr(H, "port_open", lambda *args: True)
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: 7)
 
     assert H.main(["start"]) == 0
+
+
+def test_start_sonder_rejects_unmanaged_listener_that_appears_after_spawn(monkeypatch, tmp_path):
+    """A live port is not readiness when another process owns it."""
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    probes = iter((False, True, True))
+    monkeypatch.setattr(H, "port_open", lambda *args: next(probes))
+    monkeypatch.setattr(H, "python_exe", lambda: "python")
+    monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
+    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: fn())
+    monkeypatch.setattr(H, "_listener_pid", lambda *args: 222)
+    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: False)
+
+    assert "not reachable yet" in H.start_sonder("127.0.0.1", 11435)
+
+
+def test_status_names_unmanaged_listener_instead_of_calling_it_sonder(monkeypatch):
+    monkeypatch.setattr(H, "ollama_ok", lambda: True)
+    monkeypatch.setattr(H, "port_open", lambda *args: True)
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: None)
+
+    assert "unmanaged listener" in H.status("127.0.0.1", 11435)
 
 
 def test_main_start_rejects_a_managed_child_that_never_binds(monkeypatch):

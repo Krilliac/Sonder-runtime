@@ -33,6 +33,32 @@ def test_parse_none_when_absent():
     assert server.parse_interaction_id("just some text") is None
 
 
+def test_answer_with_history_augment_opt_out_cannot_be_reenabled_by_tier(monkeypatch):
+    """A hosted boundary opt-out wins over a local learning route's default."""
+    captured = {}
+
+    class _Connection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "_open_db", lambda: _Connection())
+    monkeypatch.setattr(
+        server, "_serve_target", lambda *_args: ("model", False, True, "sonder")
+    )
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(server, "_should_learn", lambda *_args: True)
+
+    def fake_answer(*_args, **kwargs):
+        captured["augment"] = kwargs["augment"]
+        return "answer", None, {}
+
+    monkeypatch.setattr(server, "_answer", fake_answer)
+    out = server._answer_with_history_impl("hello", [], augment=False)
+
+    assert "answer" in out
+    assert captured["augment"] is False
+
+
 def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch, tmp_path):
     # Regression for a 2026-07-13 bug: master_orchestrate() called
     # creative_router.classify(task) BEFORE checking
@@ -276,6 +302,20 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
         "num_gpu": 99,
         "num_batch": 256,
     }
+
+
+def test_make_generate_marks_partial_provider_usage_as_mixed(monkeypatch):
+    def fake_post(_path, _payload):
+        return {"message": {"content": "ok"}, "eval_count": 2}
+
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    gen = server._make_generate("local-model", "system", 0.2, 20, 4096)
+
+    assert gen("hello") == "ok"
+    assert gen.last_usage["tokens_in"] > 0
+    assert gen.last_usage["tokens_out"] == 2
+    assert gen.last_usage["token_source"] == "mixed"
 
 
 def test_local_model_options_clamps_native_context(monkeypatch):
@@ -1105,6 +1145,19 @@ def test_exact_model_pin_keeps_the_selected_code_route_augmentation(monkeypatch)
     assert captured == {"model": "gemma3:12b", "augment": True}
 
 
+@pytest.mark.parametrize(
+    ("tier_label", "expected"),
+    [
+        ("cloud-code", True),
+        ("model:kimi-k3:cloud", False),
+        ("model:KIMI-K3:CLOUD", False),
+        ("MODEL:kimi-k3:cloud", False),
+    ],
+)
+def test_only_configured_cloud_tiers_may_substitute_their_model(tier_label, expected):
+    assert server._allow_cloud_fallback_for_target(tier_label) is expected
+
+
 def test_serve_target_unknown_model_is_rejected():
     model, cloud, augment, label = server._serve_target("gpt-4o", None)
     assert label is None
@@ -1148,11 +1201,13 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
 
     def fake_make_generate(*_args, **kwargs):
         seen["schema"] = kwargs["schema"]
+        seen["allow_cloud_fallback"] = kwargs["allow_cloud_fallback"]
         return lambda *_call_args: '{"ok":true}'
 
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
     assert server.structured_answer_with_history("return json", [], schema, tier="fast") == '{"ok":true}'
     assert seen["schema"] == schema
+    assert seen["allow_cloud_fallback"] is True
 
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda *_call_args: '{"ok":"no"}')
     with pytest.raises(server.ModelCallError, match="response_format validation failed"):
@@ -1161,6 +1216,27 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda *_call_args: '{"ok":NaN}')
     with pytest.raises(server.ModelCallError, match="not valid JSON"):
         server.structured_answer_with_history("return json", [], schema, tier="fast")
+
+
+def test_structured_exact_cloud_model_does_not_substitute_on_billing_error(monkeypatch):
+    """A direct model selector is not a tier alias and must stay exact."""
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    seen = {}
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *_args, **_kwargs: ("kimi-k3:cloud", True, False, "model:kimi-k3:cloud"),
+    )
+    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+
+    def fake_make_generate(*_args, **kwargs):
+        seen["allow_cloud_fallback"] = kwargs["allow_cloud_fallback"]
+        return lambda *_call_args: '{"ok":true}'
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    assert server.structured_answer_with_history("return json", [], schema, tier="kimi-k3:cloud") == '{"ok":true}'
+    assert seen["allow_cloud_fallback"] is False
 
 
 def test_structured_answer_maps_deep_model_json_to_protocol_error(monkeypatch):
@@ -3264,6 +3340,38 @@ def test_build_system_puts_the_identity_facts_first():
         "", False, "").startswith("Facts about what is serving")
 
 
+def test_build_system_does_not_export_mutable_local_context_to_cloud(monkeypatch):
+    """Cloud consent covers the request, never hidden local control-plane text."""
+    monkeypatch.setattr(
+        server,
+        "_read_system_context",
+        lambda: (
+            "LOCAL PROFILE SECRET",
+            "LOCAL EMOTION SECRET",
+            "LOCAL GOAL SECRET",
+        ),
+    )
+    monkeypatch.setattr(server.personas, "get", lambda _name: "LOCAL PERSONA SECRET")
+
+    local = server._build_system(
+        "request instruction", False, "custom", model="local:latest", cloud=False,
+    )
+    hosted = server._build_system(
+        "request instruction", False, "custom", model="cloud:latest", cloud=True,
+    )
+
+    assert "LOCAL PERSONA SECRET" in local
+    assert "LOCAL PROFILE SECRET" in local
+    assert "LOCAL EMOTION SECRET" in local
+    assert "LOCAL GOAL SECRET" in local
+    assert "LOCAL PROFILE SECRET" not in hosted
+    assert "LOCAL EMOTION SECRET" not in hosted
+    assert "LOCAL GOAL SECRET" not in hosted
+    assert "LOCAL PERSONA SECRET" not in hosted
+    assert "request instruction" in hosted
+    assert "cloud:latest" in hosted
+
+
 # --- #49: the identity block must name the model the call site resolved ----
 #
 # `_ACTIVE_MODEL_HINT` was only ever written by `_resolve_model_and_system`,
@@ -3325,3 +3433,24 @@ def test_identity_block_does_not_place_a_cloud_model_on_this_machine():
     assert "not on this machine" in block
     local = server._runtime_identity_block("sonder:latest", cloud=False)
     assert _LOCAL_CLAIM in local
+def test_agent_report_stays_bound_to_its_span_when_latest_changes(monkeypatch):
+    """MCP agent results must not format a concurrently completed response."""
+    server.activity_tracker.reset_for_tests()
+    monkeypatch.setattr(server, "_agent_impl", lambda *args, **kwargs: "own result")
+    monkeypatch.setattr(
+        server.activity_tracker,
+        "latest",
+        lambda: {
+            "id": "r_other", "status": "complete", "label": "other request",
+            "elapsed_ms": 1, "model_calls": 9, "tool_calls": 8,
+            "tokens_in": 7, "tokens_out": 6, "file_creates": 0,
+            "file_edits": 0, "file_deletes": 0, "lines_added": 0,
+            "lines_edited": 0, "lines_deleted": 0, "events": [], "files": [],
+        },
+    )
+
+    output = server.agent("inspect this")
+
+    assert "own result" in output
+    assert "agent:code" in output
+    assert "r_other" not in output

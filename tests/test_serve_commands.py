@@ -33,9 +33,9 @@ def _http_server(monkeypatch):
         thread.join(timeout=5)
 
 
-def _get(port, path):
+def _get(port, path, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", path)
+    conn.request("GET", path, headers=headers or {})
     response = conn.getresponse()
     raw = response.read()
     status = response.status
@@ -71,7 +71,7 @@ def test_commands_index_returns_catalog_categories_and_popular(monkeypatch):
 
     assert status == 200
     assert set(payload) == {"commands", "categories", "popular"}
-    assert len(payload["commands"]) == len(command_catalog.catalog())
+    assert len(payload["commands"]) == len(command_catalog.http_catalog())
     # The whole point of the catalog: far more than the legacy registry's 59.
     assert len(payload["commands"]) > 150
     for entry in payload["commands"]:
@@ -86,8 +86,89 @@ def test_commands_index_entries_match_to_dict_exactly(monkeypatch):
         _, payload = _get(port, "/v1/commands")
 
     by_name = {entry["name"]: entry for entry in payload["commands"]}
-    for command in command_catalog.catalog():
+    for command in command_catalog.http_catalog():
         assert by_name[command.name] == command.to_dict()
+
+
+def test_commands_index_omits_console_only_native_controls(monkeypatch):
+    """The app sends slash choices to the HTTP dispatcher, not the REPL."""
+    assert command_catalog.by_name("/mode") is not None
+    assert "/mode" not in command_catalog.http_native_names()
+    assert ts._handle_slash("/mode plan") is None
+
+    with _http_server(monkeypatch) as port:
+        _, payload = _get(port, "/v1/commands")
+        _, completion = _get(port, "/v1/commands/complete?q=mode&limit=50")
+        _, help_payload = _get(port, "/v1/commands/help?topic=/mode")
+
+    names = {entry["name"] for entry in payload["commands"]}
+    assert "/mode" not in names
+    assert "/model" not in names
+    assert "/project" not in names
+    assert "/mode" not in {entry["name"] for entry in completion["matches"]}
+    assert "no HTTP command" in help_payload["text"]
+
+
+def test_every_advertised_native_spelling_is_handled_by_http_dispatcher(monkeypatch):
+    with _http_server(monkeypatch) as port:
+        _, payload = _get(port, "/v1/commands")
+
+    handled = command_catalog.http_native_names()
+    for entry in payload["commands"]:
+        if entry["native"]:
+            assert entry["name"] in handled
+            assert set(entry["aliases"]) <= handled
+
+
+def test_hosted_ordinary_account_cannot_enumerate_privileged_tool_schemas(monkeypatch):
+    """HTTP catalog, help, and manifest all apply the same role boundary."""
+    ordinary = {"username": "ordinary", "role": "user"}
+    context = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": ordinary,
+    }
+    with _http_server(monkeypatch) as port:
+        monkeypatch.setattr(ts, "API_KEY", "")
+        monkeypatch.setattr(ts, "AUTH_MODE", "account")
+        monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+        monkeypatch.setattr(ts, "_auth_account", lambda _header: ordinary)
+        headers = {"Authorization": "Bearer ordinary-token"}
+        status, payload = _get(port, "/v1/commands", headers)
+        complete_status, completion = _get(
+            port, "/v1/commands/complete?q=runtime_policy_update", headers,
+        )
+        help_status, help_payload = _get(
+            port, "/v1/commands/help?topic=/runtime_policy_update", headers,
+        )
+
+    names = {entry["name"] for entry in payload["commands"]}
+    assert status == complete_status == help_status == 200
+    assert "/runtime_policy_update" not in names
+    assert "/permission_mode" not in names
+    assert "/admin_accounts" not in names
+    assert "/autopilot_start" not in names
+    assert "/task_list" in names
+    assert completion["matches"] == []
+    assert "available to this account" in help_payload["text"]
+
+    manifest = ts._handle_slash("/tool_manifest", context=context)
+    capability = json.loads(ts._handle_slash("/tool_capability_manifest", context=context))
+    assert "runtime_policy_update" not in manifest
+    assert "admin_accounts" not in manifest
+    assert "runtime_policy_update" not in capability["manifest"]
+    assert "admin_accounts" not in capability["manifest"]
+
+
+def test_hosted_admin_retains_complete_command_catalog(monkeypatch):
+    admin = {"username": "admin", "role": "admin"}
+    context = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": admin,
+    }
+    names = {command.name for command in ts._served_commands(context)}
+    assert "/runtime_policy_update" in names
+    assert "/admin_accounts" in names
+    assert "/permission_mode" in names
 
 
 # --- GET /v1/commands/complete -------------------------------------------

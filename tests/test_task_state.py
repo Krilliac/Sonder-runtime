@@ -52,9 +52,29 @@ def test_task_list_accepts_pipe_delimited_status_filter():
     assert {row["id"] for row in rows} == {pending["id"], blocked["id"]}
 
 
+def test_task_list_accepts_typed_multi_status_filter_without_stringifying_it():
+    conn = memory_store.connect(":memory:")
+    pending = memory_store.create_task(conn, "pending", status="pending")
+    blocked = memory_store.create_task(conn, "blocked", status="blocked")
+    memory_store.create_task(conn, "done", status="done")
+
+    rows = memory_store.list_tasks(conn, status=["pending", "blocked", "pending"])
+
+    assert {row["id"] for row in rows} == {pending["id"], blocked["id"]}
+
+
+@pytest.mark.parametrize("value", [{"status": "pending"}, ["pending", 1]])
+def test_task_list_rejects_non_string_status_filter_entries(value):
+    conn = memory_store.connect(":memory:")
+
+    with pytest.raises(ValueError, match="task status filter"):
+        memory_store.list_tasks(conn, status=value)
+
+
 def test_task_list_contract_documents_multi_status_filtering():
     assert "pipe-delimited set" in server.task_list.__doc__
     assert "pending|blocked" in server.task_list.__doc__
+    assert "typed JSON array" in server.task_list.__doc__
 
 
 def test_account_scoped_task_operations_are_isolated_but_local_default_is_global():

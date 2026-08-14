@@ -46,6 +46,82 @@ import specs  # noqa: E402
 import apiextract  # noqa: E402
 
 
+# The game driver asks an ensemble to generate whole source files.  Unlike an
+# ordinary one-off prompt, this can load several large local weights before the
+# first compiler invocation.  Keep a little capacity for the desktop, Ollama's
+# KV cache, and the compiler rather than treating every currently free byte as
+# model memory.
+_RAM_RESERVE_GB = 2.0
+_VRAM_RESERVE_GB = 1.0
+
+
+def _local_model_sizes_gb(server, targets: list[tuple[str, str]]) -> tuple[dict[str, float], list[str]]:
+    """Return catalogued local model weight sizes and names with no size data."""
+    records = {
+        name.casefold(): record
+        for name, record in server.discovered_model_records()
+        if isinstance(record, dict)
+    }
+    sizes, unknown = {}, []
+    for _tier, model in targets:
+        if server._is_cloud_model_name(model):
+            continue
+        record = records.get(str(model).casefold(), {})
+        try:
+            size = float(record.get("size") or 0) / 1024 ** 3
+        except (TypeError, ValueError):
+            size = 0.0
+        if size > 0:
+            sizes[str(model)] = size
+        else:
+            unknown.append(str(model))
+    return sizes, unknown
+
+
+def _model_headroom_report(sizes_gb: dict[str, float], profile) -> tuple[bool, str]:
+    """Conservatively decide whether the selected local weights can be loaded.
+
+    Ollama may split a model across VRAM and RAM.  The guard consequently uses
+    the sum of *currently free* memory after fixed host reserves, never total
+    installed capacity.  It is intentionally a preflight, not an allocator:
+    exact offload and KV-cache use vary by model and context size.
+    """
+    required = sum(sizes_gb.values())
+    ram = max(0.0, float(profile.system_ram_available_gb) - _RAM_RESERVE_GB)
+    vram = max(0.0, float(profile.vram_free_gb) - _VRAM_RESERVE_GB)
+    usable = ram + vram
+    detail = (
+        f"selected local weights need about {required:.1f} GiB; "
+        f"safe live headroom is {usable:.1f} GiB "
+        f"({ram:.1f} GiB RAM + {vram:.1f} GiB VRAM after reserves)"
+    )
+    return required <= usable, detail
+
+
+def ensure_model_headroom(server, targets: list[tuple[str, str]], *, allow_low_headroom: bool) -> bool:
+    """Print a clear admission decision before an ensemble can load weights."""
+    sizes, unknown = _local_model_sizes_gb(server, targets)
+    if unknown:
+        print("model-size preflight: catalog has no size for " + ", ".join(unknown))
+    if not sizes:
+        return True
+    import system_profile
+
+    profile = system_profile.detect_hardware()
+    ok, detail = _model_headroom_report(sizes, profile)
+    print("model-size preflight: " + detail)
+    if ok or allow_low_headroom:
+        if not ok:
+            print("WARNING: continuing with low headroom because --allow-low-headroom was supplied")
+        return True
+    print(
+        "refusing to start before loading models: insufficient live headroom. "
+        "Close other workloads or use smaller --tiers; pass --allow-low-headroom "
+        "only to deliberately stress-test this machine."
+    )
+    return False
+
+
 def dependency_brief(name: str) -> str:
     """The ACTUAL public API of this file's already-generated dependencies.
 
@@ -584,6 +660,10 @@ def main() -> int:
         help="output project directory (default: SONDER_GAME_PROJECT or a sibling directory)",
     )
     ap.add_argument("--tiers", default="code,reasoning")
+    ap.add_argument(
+        "--allow-low-headroom", action="store_true",
+        help="allow a local ensemble whose catalogued weights exceed safe live RAM/VRAM headroom",
+    )
     ap.add_argument("--repair-rounds", type=int, default=6)
     ap.add_argument("--num-predict", type=int, default=3000)
     ap.add_argument("--only", default="")
@@ -616,6 +696,15 @@ def main() -> int:
 
     import server  # late import so the sys.path insert applies
 
+    # Resolve and admit the exact ensemble once, before either generation mode
+    # can cause Ollama to load a model.  In particular, sequential mode used to
+    # bypass this visibility entirely despite issuing the same ensemble calls.
+    targets, unknown = server._ensemble_targets(args.tiers)
+    if not ensure_model_headroom(
+        server, targets, allow_low_headroom=args.allow_low_headroom,
+    ):
+        return 2
+
     if args.sequential:
         return run_sequential(server, args)
 
@@ -623,7 +712,6 @@ def main() -> int:
     if args.only:
         file_list = [(n, c) for n, c in file_list if n == args.only]
 
-    targets, unknown = server._ensemble_targets(args.tiers)
     print("ensemble models: " + ", ".join(f"{t}={m}" for t, m in targets))
     if unknown:
         print(f"unknown tiers ignored: {unknown}")
