@@ -1135,12 +1135,19 @@ def _direct_fanout_identity(token: str):
     if not _deployment_authenticates_callers():
         return "", None
     account = _admin_account_from_token(token) if token else None
-    username = str((account or {}).get("username") or "").strip()
-    if not username:
+    # Account records normally carry a username, but the served HTTP boundary
+    # deliberately supports an opaque account id as well.  Direct MCP must
+    # derive the same owner identity: treating every id-only developer as the
+    # empty legacy owner would let those callers read or control each other's
+    # durable fanout receipts on a shared deployment.
+    identity = str(
+        (account or {}).get("username") or (account or {}).get("id") or ""
+    ).strip()
+    if not identity:
         return "", account
     # Match sonder_serve._fanout_request_owner exactly so an account can use
     # either supported interface to manage the same durable receipt.
-    material = "fanout-owner\0account:" + username
+    material = "fanout-owner\0account:" + identity
     return "fo-" + hashlib.sha256(material.encode("utf-8")).hexdigest(), account
 
 
