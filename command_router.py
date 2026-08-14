@@ -150,6 +150,9 @@ _RULES = [
     _rule(r"^(?:(?:please\s+)?(?:can|could)\s+you\s+|please\s+)?"
           r"(?:give|show|tell)\s+me\s+(?:the\s+)?(?:next\s+)?"
           r"grounded\s+improvements?\s*[?!.]*$", _fixed("/improve")),
+    _rule(r"^what\s+do\s+you\s+think\s+about\s+(?:the\s+)?system\s+"
+          r"you(?:'re|\s+are)\s+(?:currently\s+)?in\s*[?!.]*$",
+          _fixed("/improve")),
     _rule(r"^(?:can|could)\s+you\s+find\s+something\s+to\s+do\s*[?!.]*$",
           _fixed("/improve")),
     _rule(r"^(?:show\s+)?(?:system\s+)?improvements?(?:\s+report)?\b|"
