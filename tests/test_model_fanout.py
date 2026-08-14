@@ -1463,6 +1463,39 @@ def test_direct_mcp_fanout_receipts_are_owner_scoped_on_shared_deployments(
     }
 
 
+def test_direct_mcp_id_only_accounts_do_not_share_the_legacy_fanout_owner(monkeypatch):
+    """Id-only account records retain the same owner boundary as HTTP."""
+    monkeypatch.setenv("SONDER_AUTH_MODE", "accounts")
+    accounts = {
+        "developer-a": {"id": "account-a", "role": "developer"},
+        "developer-b": {"id": "account-b", "role": "developer"},
+    }
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda token: accounts.get(token))
+    captured = {}
+    monkeypatch.setattr(
+        server, "_model_fanout_authorized",
+        lambda *_args, **kwargs: captured.update(kwargs) or "created",
+    )
+
+    assert server.model_fanout("private question", token="developer-a") == "created"
+    owner = captured["request_owner"]
+    assert owner.startswith("fo-")
+    assert owner != ""
+    assert owner == sonder_serve._fanout_request_owner({
+        "account": accounts["developer-a"], "api_key": False,
+    })
+    monkeypatch.setattr(
+        server.fanout_store, "get_run",
+        lambda _run_id: {"id": "fan-private", "request_owner": owner},
+    )
+    monkeypatch.setattr(server, "_fanout_receipt", lambda run_id: {"run_id": run_id})
+
+    assert "not found" in server.model_fanout_status("fan-private", token="developer-b")
+    assert json.loads(server.model_fanout_status("fan-private", token="developer-a")) == {
+        "run_id": "fan-private"
+    }
+
+
 def test_model_fanout_preserves_legacy_positional_parameter_order(monkeypatch):
     captured = {}
     monkeypatch.setattr(server, "_developer_gate", lambda *_args: "")
