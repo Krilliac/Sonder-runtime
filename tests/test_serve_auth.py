@@ -1202,6 +1202,24 @@ def test_models_response_hides_discovered_cloud_models_without_opt_in(monkeypatc
     assert [row["id"] for row in json.loads(body)["data"]] == ["sonder", "local:latest"]
 
 
+def test_models_response_hides_tier_bound_to_declared_embedding_model(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "available_tiers", lambda: {
+        "code": "nomic-embed-text:latest",
+    })
+    monkeypatch.setattr(ts.server, "discovered_model_records", lambda: [
+        ("nomic-embed-text:latest", {"capabilities": ["embedding"]}),
+    ])
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(port, "GET", "/v1/models")
+
+    assert status == 200
+    assert [row["id"] for row in json.loads(body)["data"]] == ["sonder"]
+
+
 @pytest.mark.parametrize(
     ("selector", "record", "expected"),
     [
