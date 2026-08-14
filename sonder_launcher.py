@@ -1380,11 +1380,18 @@ class LauncherController:
 
     def _server_state(self):
         """Return healthy, stopped, or foreign_listener for the managed port."""
-        if not _reachable("127.0.0.1", self.server_port):
+        # The managed runtime may deliberately bind IPv6 loopback.  Probe the
+        # controller's configured loopback host rather than silently checking
+        # the IPv4 default, otherwise a healthy ``::1`` runtime is treated as
+        # stopped and start/restart can make incorrect lifecycle decisions.
+        if not _reachable(self.server_host, self.server_port):
             return "stopped"
         nonce = sonder_health.new_nonce()
+        url_host = self.server_host
+        if ":" in url_host and not url_host.startswith("["):
+            url_host = "[%s]" % url_host
         request = urllib.request.Request(
-            "http://127.0.0.1:%s%s" % (self.server_port, sonder_health.PATH),
+            "http://%s:%s%s" % (url_host, self.server_port, sonder_health.PATH),
             headers={sonder_health.NONCE_HEADER: nonce},
             method="GET",
         )
