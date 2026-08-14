@@ -119,6 +119,16 @@ refuses local commits, feature branches, or local edits. Restart the REPL
 after it succeeds. See [Update Manager](13-update-manager.md) for signed
 release bundles and rollback.
 
+When local work needs to be preserved before that guarded update, `/stash`
+shows source-recovery readiness. `/stash save` saves tracked source changes;
+`/stash save-untracked` also saves generated/untracked files; `/stash pop`
+restores the most recent recovery stash only when the canonical `main`
+checkout is clean. These commands use no user-selected repository, remote,
+revision, or stash selector. Saved workflows are per-user state by default
+(`%LOCALAPPDATA%\sonder\workflows.json` on Windows), not installation files.
+On first use, an older checkout-root `workflows.json` is copied into that state
+home and left in place for review.
+
 ## Where to go next
 
 - Turn knobs: [Configuration](03-configuration.md).

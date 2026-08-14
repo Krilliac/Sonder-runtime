@@ -180,6 +180,8 @@ _RULES = [
           _fixed("/env")),
     _rule(r"^(?:which|what)\s+(?:tools?|toolchains?|shells?|compilers?)\s+"
           r"(?:are|do\s+you\s+have)\s+(?:installed|available)\s*\??$", _fixed("/env")),
+    _rule(r"^(?:what\s+)?version\s+(?:is|of)\s+(?P<arg>[A-Za-z][A-Za-z0-9+._-]{0,63})\s*\??$",
+          _with_arg("/toolstatus")),
     _rule(r"^(?:show|inspect|check)\s+(?:me\s+)?(?:my\s+|this\s+|the\s+)?"
           r"(?:(?:gpu|graphics(?:\s+card)?)\s+)?hardware\b\s*\??$", _fixed("/hardware")),
     _rule(r"^what(?:'s|\s+is)\s+(?:my\s+|this\s+|your\s+)"
