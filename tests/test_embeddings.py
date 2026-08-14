@@ -61,6 +61,33 @@ def test_expected_dimension_supports_known_models_and_safe_override(monkeypatch)
     assert e.expected_dimension("unknown-local-model") == 1024
     monkeypatch.setenv("SONDER_EMBED_DIM", "invalid")
     assert e.expected_dimension("nomic-embed-text") is None
+
+
+def test_configure_model_changes_future_embedding_provenance_without_network(
+    monkeypatch, tmp_path,
+):
+    manifest = (
+        tmp_path / "manifests" / "registry.ollama.ai" / "library"
+        / "bge-m3" / "latest"
+    )
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(b'{"config":"sha256:bge"}')
+    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
+    monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
+    monkeypatch.setattr(
+        e.ollama_endpoint, "open_url",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network")),
+    )
+
+    original = (e.EMBED_MODEL, e.EMBED_IDENTITY, e.EMBED_REVISION, e.EXPECTED_DIMENSION)
+    try:
+        state = e.configure_model("BGE-M3")
+
+        assert state["model"] == "bge-m3:latest"
+        assert state["revision"].startswith("ollama-manifest-sha256:")
+        assert state["expected_dimension"] is None
+    finally:
+        e.EMBED_MODEL, e.EMBED_IDENTITY, e.EMBED_REVISION, e.EXPECTED_DIMENSION = original
     monkeypatch.setenv("SONDER_EMBED_DIM", "0")
     assert e.expected_dimension("nomic-embed-text") is None
 
