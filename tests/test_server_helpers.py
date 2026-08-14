@@ -1105,6 +1105,19 @@ def test_exact_model_pin_keeps_the_selected_code_route_augmentation(monkeypatch)
     assert captured == {"model": "gemma3:12b", "augment": True}
 
 
+@pytest.mark.parametrize(
+    ("tier_label", "expected"),
+    [
+        ("cloud-code", True),
+        ("model:kimi-k3:cloud", False),
+        ("model:KIMI-K3:CLOUD", False),
+        ("MODEL:kimi-k3:cloud", False),
+    ],
+)
+def test_only_configured_cloud_tiers_may_substitute_their_model(tier_label, expected):
+    assert server._allow_cloud_fallback_for_target(tier_label) is expected
+
+
 def test_serve_target_unknown_model_is_rejected():
     model, cloud, augment, label = server._serve_target("gpt-4o", None)
     assert label is None
@@ -1148,11 +1161,13 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
 
     def fake_make_generate(*_args, **kwargs):
         seen["schema"] = kwargs["schema"]
+        seen["allow_cloud_fallback"] = kwargs["allow_cloud_fallback"]
         return lambda *_call_args: '{"ok":true}'
 
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
     assert server.structured_answer_with_history("return json", [], schema, tier="fast") == '{"ok":true}'
     assert seen["schema"] == schema
+    assert seen["allow_cloud_fallback"] is True
 
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda *_call_args: '{"ok":"no"}')
     with pytest.raises(server.ModelCallError, match="response_format validation failed"):
@@ -1161,6 +1176,27 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda *_call_args: '{"ok":NaN}')
     with pytest.raises(server.ModelCallError, match="not valid JSON"):
         server.structured_answer_with_history("return json", [], schema, tier="fast")
+
+
+def test_structured_exact_cloud_model_does_not_substitute_on_billing_error(monkeypatch):
+    """A direct model selector is not a tier alias and must stay exact."""
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    seen = {}
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda *_args, **_kwargs: ("kimi-k3:cloud", True, False, "model:kimi-k3:cloud"),
+    )
+    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+
+    def fake_make_generate(*_args, **kwargs):
+        seen["allow_cloud_fallback"] = kwargs["allow_cloud_fallback"]
+        return lambda *_call_args: '{"ok":true}'
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    assert server.structured_answer_with_history("return json", [], schema, tier="kimi-k3:cloud") == '{"ok":true}'
+    assert seen["allow_cloud_fallback"] is False
 
 
 def test_structured_answer_maps_deep_model_json_to_protocol_error(monkeypatch):
