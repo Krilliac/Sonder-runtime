@@ -65,3 +65,26 @@ def test_server_toolchain_status_records_only_safe_result(monkeypatch):
     assert server.toolchain_status("cargo") == '{"ok":true,"output":"cargo 9.9.9","tool":"cargo"}'
     assert records[0][0][0] == "toolchain_status"
     assert records[0][1]["ok"] is True
+
+
+def test_local_agent_can_turn_discovery_into_a_fixed_status_probe(monkeypatch):
+    responses = iter([
+        '{"tool":"toolchain_status","args":{"name":"cargo"}}',
+        '{"final":"Cargo is installed."}',
+    ])
+    called = []
+
+    def generate(prompt, history=None):
+        return next(responses)
+
+    generate.last_usage = {}
+    generate.last_response_meta = {}
+    generate.num_predict_override = None
+    monkeypatch.setattr(server, "_make_generate", lambda *args, **kwargs: generate)
+    monkeypatch.setattr(
+        server,
+        "toolchain_status",
+        lambda name, refresh=False: called.append((name, refresh)) or '{"ok":true,"tool":"cargo","output":"cargo 9.9.9"}',
+    )
+    assert server._agent_impl("verify the discovered cargo tool", max_steps=2).endswith("Cargo is installed.")
+    assert called == [("cargo", False)]
