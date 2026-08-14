@@ -711,6 +711,13 @@ def test_framed_composer_keeps_unicode_text_inside_its_cell_rectangle():
     assert "".join(row[4:-1].rstrip() for row in rows) == "🚀東京́" * 4
 
 
+def test_emoji_graphemes_are_one_two_cell_glyph_for_layout_and_clipping():
+    for glyph in ("👩\u200d💻", "👋🏽", "❤️", "🇺🇸"):
+        assert slash_menu._display_width(glyph) == 2
+        assert slash_menu._clip_cells(glyph + "x", 2) == glyph
+        assert slash_menu._wrap_cells(glyph + "x", 2) == [glyph, "x"]
+
+
 def test_framed_cursor_uses_cells_for_wide_unicode_at_a_wrap_boundary():
     # The 11-column frame has six editable cells.  Three CJK glyphs fill it
     # exactly, so the cursor remains at the first row's right edge.

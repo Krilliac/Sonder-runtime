@@ -504,9 +504,66 @@ def _cell_width(character: str) -> int:
     return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
 
 
+def _grapheme_clusters(text: str):
+    """Yield a small, terminal-focused subset of Unicode grapheme clusters.
+
+    The stdlib has no ``\\X`` grapheme iterator, but terminal input needs the
+    common emoji cases to remain indivisible: combining marks/selectors,
+    skin-tone modifiers, regional-indicator flags, keycaps, and ZWJ sequences.
+    Keeping each sequence together prevents cursor/wrap geometry from counting
+    several code points as several rendered glyphs.
+    """
+    value = str(text or "")
+    index = 0
+    while index < len(value):
+        start = index
+        first = value[index]
+        index += 1
+        regional = 0x1F1E6 <= ord(first) <= 0x1F1FF
+        if regional and index < len(value) and 0x1F1E6 <= ord(value[index]) <= 0x1F1FF:
+            index += 1
+        while index < len(value):
+            character = value[index]
+            codepoint = ord(character)
+            if (
+                unicodedata.combining(character)
+                or 0xFE00 <= codepoint <= 0xFE0F
+                or 0x1F3FB <= codepoint <= 0x1F3FF
+                or codepoint == 0x20E3
+            ):
+                index += 1
+                continue
+            if character == "\u200d" and index + 1 < len(value):
+                # Include the joiner and the following base glyph, then keep
+                # collecting that glyph's modifiers/selectors.
+                index += 2
+                continue
+            break
+        yield value[start:index]
+
+
+def _cluster_width(cluster: str) -> int:
+    """Return one terminal-cell measurement for a complete grapheme cluster."""
+    if not cluster:
+        return 0
+    codepoints = [ord(character) for character in cluster]
+    # Emoji presentation selectors, modifiers, keycaps, flags and joined emoji
+    # each render as a single two-cell glyph on conventional terminals.
+    if (
+        "\u200d" in cluster
+        or 0xFE0F in codepoints
+        or any(0x1F3FB <= codepoint <= 0x1F3FF for codepoint in codepoints)
+        or 0x20E3 in codepoints
+        or sum(0x1F1E6 <= codepoint <= 0x1F1FF for codepoint in codepoints) >= 2
+    ):
+        return 2
+    return max((_cell_width(character) for character in cluster), default=0)
+
+
 def _display_width(text: str) -> int:
     """Return the terminal-cell width of plain text (without ANSI escapes)."""
-    return sum(_cell_width(character) for character in _ANSI_ESCAPE_RE.sub("", str(text or "")))
+    clean = _ANSI_ESCAPE_RE.sub("", str(text or ""))
+    return sum(_cluster_width(cluster) for cluster in _grapheme_clusters(clean))
 
 
 def _clip_cells(text: str, width: int) -> str:
@@ -514,11 +571,11 @@ def _clip_cells(text: str, width: int) -> str:
     limit = max(0, int(width))
     used = 0
     kept: list[str] = []
-    for character in str(text or ""):
-        cells = _cell_width(character)
+    for cluster in _grapheme_clusters(text):
+        cells = _cluster_width(cluster)
         if cells and used + cells > limit:
             break
-        kept.append(character)
+        kept.append(cluster)
         used += cells
     return "".join(kept)
 
@@ -535,13 +592,13 @@ def _wrap_cells(text: str, width: int) -> list[str]:
     rows: list[str] = []
     row: list[str] = []
     used = 0
-    for character in str(text or ""):
-        cells = _cell_width(character)
+    for cluster in _grapheme_clusters(text):
+        cells = _cluster_width(cluster)
         if cells and used + cells > limit and row:
             rows.append("".join(row))
             row = []
             used = 0
-        row.append(character)
+        row.append(cluster)
         used += cells
     if row or not rows:
         rows.append("".join(row))
