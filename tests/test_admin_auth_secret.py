@@ -13,6 +13,7 @@ import pytest
 import admin_auth
 import memory_store
 import sonder_config
+import sonder_secrets
 
 
 @pytest.fixture
@@ -50,6 +51,39 @@ def test_secret_is_stable_across_calls(isolated_home):
     second = admin_auth._secret()
 
     assert first == second
+
+
+def test_private_create_never_replaces_a_first_run_secret(tmp_path):
+    """Concurrent startup must have one durable winner, including Windows."""
+    path = tmp_path / "secrets" / "auth_secret"
+
+    assert sonder_secrets._create_private_if_missing(path, "first") is True
+    assert sonder_secrets._create_private_if_missing(path, "second") is False
+    assert path.read_text(encoding="utf-8") == "first"
+
+
+def test_secret_uses_the_other_process_first_run_value(monkeypatch, isolated_home):
+    """A losing initializer re-reads the atomic winner instead of its draft."""
+    path = admin_auth._auth_secret_file()
+    winner = "winner-" + "w" * 40
+
+    def lose_create(created_path, content):
+        assert created_path == path
+        assert content != winner
+        sonder_secrets._write_private(path, winner)
+        return False
+
+    monkeypatch.setattr(sonder_secrets, "_create_private_if_missing", lose_create)
+    assert admin_auth._secret() == winner
+
+
+def test_secret_never_uses_an_unpersisted_first_run_value(monkeypatch, isolated_home):
+    monkeypatch.setattr(
+        sonder_secrets, "_create_private_if_missing", lambda path, content: False
+    )
+
+    with pytest.raises(RuntimeError, match="persisted account-session secret"):
+        admin_auth._secret()
 
 
 def test_public_constant_is_never_used_to_hash_a_real_token(isolated_home):
