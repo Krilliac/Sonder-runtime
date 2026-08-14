@@ -774,6 +774,49 @@ def test_chat_success_receipt_uses_actual_generation_target(monkeypatch):
     assert "hello" not in json.dumps(receipt)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_completion_model_uses_actual_generation_target(monkeypatch, stream):
+    """The normal OpenAI ``model`` field must not misreport a tier alias."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def fake_answer(prompt, history, *, target_observer=None, **kwargs):
+        target_observer("actual-model:latest", "code", False)
+        return "actual target answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
+    request = json.dumps({
+        "model": "code", "stream": stream,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    if stream:
+        payloads = [
+            json.loads(line[6:]) for line in body.decode("utf-8").splitlines()
+            if line.startswith("data: {")
+        ]
+        assert payloads[0]["model"] == "actual-model:latest"
+        assert payloads[-1]["model"] == "actual-model:latest"
+    else:
+        assert json.loads(body)["model"] == "actual-model:latest"
+
+
 def test_models_response_includes_elapsed_header(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")

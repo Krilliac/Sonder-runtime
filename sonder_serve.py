@@ -3361,9 +3361,18 @@ class Handler(BaseHTTPRequestHandler):
         if response_model and response_tier:
             receipt["model"] = response_model
             receipt["tier"] = response_tier
+        # OpenAI clients use the top-level completion/chunk ``model`` field,
+        # rather than Sonder's optional receipt extension, to correlate
+        # output with the model that actually generated it.  Once the runtime
+        # has accepted a concrete target, do not report the caller's route
+        # alias (for example ``code``) as though it were the served model.
+        # Slash, web, and other synthesized responses have no generation
+        # target, so retain the request value for compatibility in those
+        # cases.
+        response_wire_model = response_model or model
         if stream:
             streamed = self._send_stream(
-                content, model, iid=response_iid, elapsed_ms=elapsed_ms,
+                content, response_wire_model, iid=response_iid, elapsed_ms=elapsed_ms,
                 receipt=receipt,
             )
             self._record_chat_completion_metric(
@@ -3373,7 +3382,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._send_json(
                     _chat_completion_object(
-                        content, model, iid=response_iid,
+                        content, response_wire_model, iid=response_iid,
                         reasoning=response_reasoning, elapsed_ms=elapsed_ms,
                         receipt=receipt,
                     ), elapsed_ms=elapsed_ms,
