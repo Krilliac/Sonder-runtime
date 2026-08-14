@@ -12,6 +12,7 @@ from pathlib import Path
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "codegen-arena-shooter"
 DRIVER = EXAMPLE / "build_with_sonder.py"
 SKELETON_DRIVER = EXAMPLE / "build_skeleton.py"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _driver_module():
@@ -94,6 +95,23 @@ def test_skeleton_unknown_only_fails_before_generation() -> None:
     assert "no such file in skeleton: NotARealSource.cs" in result.stdout
     assert "available files:" in result.stdout
     assert "GameMap.cs" in result.stdout
+
+
+def test_arena_verification_build_output_is_ignored() -> None:
+    """A normal local C# validation run must not dirty the source checkout."""
+    result = subprocess.run(
+        [
+            "git", "-C", str(ROOT), "check-ignore", "-v",
+            "examples/codegen-arena-shooter/Verify/obj/Debug/net8.0/Verify.dll",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "examples/codegen-arena-shooter/Verify/obj/" in result.stdout
 
 
 def test_combatant_weapon_controls_are_host_owned_and_prompted() -> None:
