@@ -152,6 +152,11 @@ def test_environment_phrasings_resolve_to_env():
     assert cr.resolve("which toolchains are installed") == "/env"
 
 
+def test_known_tool_version_phrasing_routes_to_bounded_probe():
+    assert cr.resolve("what version is cargo?") == "/toolstatus cargo"
+    assert cr.resolve("version of cmake") == "/toolstatus cmake"
+
+
 def test_explicit_local_hardware_phrasings_resolve_to_grounded_probe():
     assert cr.resolve("show hardware") == "/hardware"
     assert cr.resolve("show me my GPU hardware") == "/hardware"
