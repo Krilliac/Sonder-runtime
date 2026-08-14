@@ -124,6 +124,20 @@ def test_second_process_can_request_pause(isolated_autopilot_db):
     assert autopilot_store.control_flags(run["id"], "owner")["pause"] is True
 
 
+def test_same_path_database_restore_reinitializes_schema(isolated_autopilot_db, tmp_path):
+    """A restore may replace the ledger while this process retains its cache."""
+    autopilot_store.create_run("before replacement")
+    replacement = tmp_path / "restored-empty.db"
+    sqlite3.connect(replacement).close()
+    os.replace(replacement, isolated_autopilot_db)
+
+    restored = autopilot_store.create_run("after replacement")
+
+    assert restored["objective"] == "after replacement"
+    with sqlite3.connect(isolated_autopilot_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM autopilot_runs").fetchone()[0] == 1
+
+
 def test_existing_database_is_migrated_without_losing_runs(isolated_autopilot_db):
     conn = sqlite3.connect(isolated_autopilot_db)
     conn.executescript("""
