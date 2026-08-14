@@ -520,6 +520,45 @@ def _request(port, method, path, body=None, headers=None):
     return result
 
 
+def test_chat_keepalive_requests_receive_distinct_correlation_ids(monkeypatch):
+    """A response ID names one HTTP request, not a reused socket handler."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ts.server, "answer_with_history", lambda *args, **kwargs: "answer",
+    )
+    # BaseHTTPRequestHandler defaults to HTTP/1.0, but deployments can opt
+    # into HTTP/1.1 keep-alive (and its handler reuse) by setting this normal
+    # stdlib class attribute.
+    monkeypatch.setattr(ts.Handler, "protocol_version", "HTTP/1.1")
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        received = []
+        try:
+            for _ in range(2):
+                conn.request(
+                    "POST", "/v1/chat/completions", body=request,
+                    headers={"Content-Type": "application/json"},
+                )
+                response = conn.getresponse()
+                payload = json.loads(response.read())
+                assert response.status == 200
+                assert response.getheader("X-Sonder-Correlation-Id") == (
+                    payload["sonder_receipt"]["request_id"]
+                )
+                received.append(payload["sonder_receipt"]["request_id"])
+        finally:
+            conn.close()
+
+    assert received[0] != received[1]
+
+
 def test_served_source_update_requires_admin_but_check_remains_read_only(monkeypatch):
     developer = {
         "mode": "account", "authorized": True, "api_key": False,
