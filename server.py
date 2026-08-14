@@ -129,6 +129,7 @@ import code_improve
 import tier_router
 import project_scaffold
 import environment_probe
+import toolchain_status as toolchain_status_module
 import sonder_hardware
 import sonder_logging
 import tool_capabilities
@@ -2793,6 +2794,13 @@ def control_command(prompt: str, history=None, session="", project="",
         if action in ("", "apply", "now"):
             return runtime_source_update()
         return "usage: /update [apply]  (check first with /updatecheck)"
+    if cmd in ("/stash", "/runtime-stash"):
+        action = arg.strip().casefold().replace("_", "-")
+        if action in ("", "status", "list"):
+            return runtime_source_stash_status()
+        if action in ("save", "save-untracked", "pop"):
+            return runtime_source_stash(action)
+        return "usage: /stash [status|save|save-untracked|pop]"
     if cmd in ("/hardware",):
         return _training_command("hardware")
     if cmd in ("/training", "/weighttraining"):
@@ -15588,6 +15596,7 @@ def tool_manifest() -> str:
         "log_inspect": "Inspect one guarded text log with fixed level/timestamp/source extraction, failure clusters, repeats, and bounded context.",
         "scaffold_project": "Write a complete deterministic project skeleton (cpp-msvc .sln/.vcxproj, cpp-cmake, csharp, rust, python, node, typescript, go, java-maven) -- never hand-write solution/build plumbing.",
         "environment_status": "Report the host OS, available shells (PowerShell/cmd/bash/wsl), and installed toolchains -- check before choosing a command shape or assuming a tool exists.",
+        "toolchain_status": "Run one fixed, bounded, local version probe for a tool already discovered by environment_status; it never accepts a command or arguments.",
         "hardware_profile": "Detect cross-vendor accelerators and report conservative resident, unified-memory, and GPU+RAM-spill model plans without changing host settings.",
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
@@ -15714,7 +15723,7 @@ def access_request_preview(path: str, mode: str = "read") -> str:
 
 
 AGENT_TOOL_HELP = """Available tools:
-- run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10}
+- run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10} -- source snippet only; never pass a shell command such as `cargo --version`
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
 - artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, AVI video, MIDI score, captions, textured humanoid 3D mascot with full morph frames and sequenced Idle Walk Run clips", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,animation,video,music,midi,captions,timeline,web,model,rigged_model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
 - artifact_verify: {"path": "artifacts/generated/brand-kit"}
@@ -15763,6 +15772,7 @@ AGENT_TOOL_HELP = """Available tools:
 - file_delete: {"path": "notes.txt", "dry_run": true}
 - scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
 - environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
+- toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed, local-only version probe for a discovered tool; no command or arguments
 - hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false} -- cross-vendor device inventory and conservative local-model fit; detection is not backend readiness
 - script_search: {"query": "build", "root": ".", "max_results": 100}
 - program_search: {"query": "python", "max_results": 50}
@@ -15867,7 +15877,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
-    "self_heal_check", "status", "system_profile_text", "environment_status", "hardware_profile",
+    "self_heal_check", "status", "system_profile_text", "environment_status", "toolchain_status", "hardware_profile",
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
     "test_discover",
@@ -15917,6 +15927,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
 - program_search: {"query": "<required program name>", "max_results": 50}
 - environment_status: {"refresh": false}
+- toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed local version probe; no command, executable path, or arguments
 - hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false}
 - image_inspect: {"path": "<task-relevant image path>"}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
@@ -17080,7 +17091,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
     "elevate", "permission_mode", "permission_rule_set",
     "runtime_policy_update", "update_system_profile",
-    "runtime_source_update",
+    "runtime_source_update", "runtime_source_stash",
     "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
     "self_heal_repair", "memory_export", "memory_privacy_repair",
     "memory_quality_repair", "workflow_list", "workflow_save", "workflow_delete", "workflow_run",
@@ -17187,6 +17198,11 @@ def _agent_dispatch(
             language=args.get("language", "python"),
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
+        )
+    if tool_name == "toolchain_status":
+        return toolchain_status(
+            name=args.get("name", ""),
+            refresh=bool(args.get("refresh", False)),
         )
     if tool_name == "run_project":
         return run_project(
@@ -18315,7 +18331,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "system_improvement_report", "master_status",
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
-        "environment_status", "hardware_profile",
+        "environment_status", "toolchain_status", "hardware_profile",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -18325,7 +18341,7 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "ensemble_codegen_build_loop",
 })
 _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
-    "environment_status", "hardware_profile", "file_policy",
+    "environment_status", "toolchain_status", "hardware_profile", "file_policy",
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
@@ -19650,7 +19666,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "memory_search", "learning_health_status", "evaluation_history_status",
     "memory_quality_report", "memory_privacy_review", "artifact_ground",
     "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
-    "status", "diagnostics", "process_list", "process_memory_risk_inspect",
+    "status", "diagnostics", "toolchain_status", "process_list", "process_memory_risk_inspect",
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_audit", "find_references", "diff_files", "secret_scan",
     "build_run",
@@ -19712,7 +19728,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "environment_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
 })
@@ -21169,7 +21185,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "memory_search", "web_search",
+    "program_search", "image_inspect", "memory_search", "web_search", "toolchain_status",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
     # test_discover / find_references / diff_files / secret_scan /
@@ -22946,6 +22962,61 @@ def runtime_source_update() -> str:
     except (OSError, ValueError, PermissionError, TimeoutError) as exc:
         return "runtime source update refused: %s" % exc
     return _runtime_update_format(result["after"], updated=bool(result["updated"]))
+
+
+def _runtime_stash_format(data, *, action="status"):
+    """Render recovery state without echoing changed paths or stash prose."""
+    if action == "status":
+        return "\n".join((
+            "Sonder source recovery stash:",
+            "  checkout: %s" % ("clean" if data.get("clean") else "dirty"),
+            "  changes: %s" % data.get("change_count", 0),
+            "  recovery stashes: %s" % data.get("stash_count", 0),
+            "  commands: /stash save | /stash save-untracked | /stash pop",
+        ))
+    before = data.get("before") or {}
+    after = data.get("after") or {}
+    if not data.get("changed"):
+        return "runtime source stash: checkout already clean; no stash created"
+    if action.startswith("save"):
+        return "runtime source stash: saved changes; checkout is now %s" % (
+            "clean" if after.get("clean") else "not clean",
+        )
+    return "runtime source stash: restored top recovery stash; checkout is now %s" % (
+        "clean" if after.get("clean") else "dirty",
+    )
+
+
+@mcp.tool()
+def runtime_source_stash_status() -> str:
+    """Show whether canonical Sonder source edits can be stashed safely.
+
+    This is read-only and never names changed paths or stash messages.
+    """
+    _maybe_live_reload()
+    try:
+        return _runtime_stash_format(
+            git_tools.runtime_stash_status(_runtime_source_root())
+        )
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return "runtime source stash status unavailable: %s" % exc
+
+
+@mcp.tool()
+def runtime_source_stash(action: str) -> str:
+    """Save or restore canonical runtime source edits through a fixed stash.
+
+    Allowed actions are ``save``, ``save-untracked``, and ``pop``.  The tool
+    cannot choose a repository, remote, revision, stash selector, or command.
+    ``pop`` refuses unless the canonical main checkout is clean.
+    """
+    _maybe_live_reload()
+    try:
+        selected = str(action or "").strip().casefold().replace("_", "-")
+        result = git_tools.runtime_stash(_runtime_source_root(), selected)
+        return _runtime_stash_format(result, action=selected)
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return "runtime source stash refused: %s" % exc
 
 
 # Ensemble ("ask several models, compound one answer") -------------------------
@@ -24937,6 +25008,33 @@ def compiler_cache_status() -> str:
     _record_direct_tool(
         "compiler_cache_status", {}, ok=bool(data.get("ok")), started=started,
         summary="sccache %s" % data.get("status", "unknown"), output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def toolchain_status(name: str, refresh: bool = False) -> str:
+    """Return a real bounded version/status result for one discovered host tool.
+
+    ``name`` must be a supported executable already shown by
+    ``environment_status``.  Sonder never accepts an executable path, a shell
+    command, or caller-provided arguments: each supported tool receives only
+    its fixed non-interactive version switch.  This is local-only host
+    inspection, not a general command runner.
+    """
+    _maybe_live_reload()
+    started = time.time()
+    result = toolchain_status_module.status(name, refresh=refresh)
+    ok = bool(result.get("ok"))
+    output = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    _record_direct_tool(
+        "toolchain_status",
+        {"name": (name or "").strip().lower(), "refresh": bool(refresh)},
+        ok=ok,
+        started=started,
+        summary="ok" if ok else "unavailable",
+        output=output,
+        evidence={"tool": result.get("tool", ""), "ok": ok},
     )
     return output
 

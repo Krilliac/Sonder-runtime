@@ -29,6 +29,20 @@ build), `parallel_run_code` (many snippets concurrently), `script_run` /
 `workspace_run` (argv-only execution of a real script/program). `script_run`
 first applies the operator's static artifact-risk policy to its exact file.
 
+## Host tool versions — `environment_status` / `toolchain_status`
+
+Use `environment_status` first to discover the local shells, toolchains, and
+specialist utilities actually available on this host. To obtain a grounded
+version for a discovered supported tool, call
+`toolchain_status(name="cargo")` (or `git`, `cmake`, `sccache`, and similar
+listed tools). It invokes only the tool's fixed, non-interactive version
+switch; it accepts no executable path, command text, or extra arguments.
+
+This is intentionally different from `run_code`: `run_code` executes source
+snippets, so a command such as `cargo --version` must not be passed to it.
+`toolchain_status` is local-only and returns a bounded, redacted result. It is
+not a general shell or command-execution feature.
+
 ## Structured data — `data_inspect`
 
 Read-only, never-executing structured preview of a data file inside

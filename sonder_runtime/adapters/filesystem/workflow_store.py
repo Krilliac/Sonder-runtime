@@ -8,6 +8,8 @@ import tempfile
 import threading
 from pathlib import Path
 
+import sonder_paths
+
 
 DEFAULT_WORKFLOWS = {
     "status_sweep": {
@@ -42,24 +44,97 @@ def workspace_root():
 
 
 def default_path():
-    return os.environ.get(
-        "SONDER_WORKFLOWS", os.path.join(workspace_root(), "workflows.json")
-    )
+    """Return the per-user workflow store unless an operator overrides it.
+
+    Saved workflows are mutable local automation, not source.  Keeping the
+    default beside the installed Python files made an ordinary ``/workflow``
+    save dirty a Git checkout and blocked guarded ``/update``.  Other durable
+    Sonder state already lives below ``SONDER_HOME`` / the platform app-data
+    directory, so use the same boundary here.
+
+    ``SONDER_WORKFLOWS`` deliberately retains the historical workspace-only
+    override for operators who intentionally version a workflow file.
+    """
+    configured = os.environ.get("SONDER_WORKFLOWS", "").strip()
+    if configured:
+        return configured
+    return str(sonder_paths.ensure_home() / "workflows.json")
 
 
-def _resolve_path(path=None):
-    path = path or default_path()
-    if not os.path.isabs(path):
-        path = os.path.join(workspace_root(), path)
-    path = os.path.realpath(os.path.abspath(path))
-    root = os.path.realpath(workspace_root())
+def _configured_path():
+    return bool(os.environ.get("SONDER_WORKFLOWS", "").strip())
+
+
+def _workspace_path(path):
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = Path(workspace_root()) / candidate
+    return _resolve_inside(candidate, Path(workspace_root()), "workspace")
+
+
+def _state_path(path):
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        # The per-user default is always absolute, but do not let a malformed
+        # caller reinterpret a relative value outside the state boundary.
+        candidate = sonder_paths.ensure_home() / candidate
+    return _resolve_inside(candidate, sonder_paths.ensure_home(), "Sonder state home")
+
+
+def _resolve_inside(candidate, root, label):
+    candidate = os.path.realpath(os.path.abspath(str(candidate)))
+    root = os.path.realpath(os.path.abspath(str(root)))
     try:
-        inside = os.path.normcase(os.path.commonpath([root, path])) == os.path.normcase(root)
+        inside = os.path.normcase(os.path.commonpath([root, candidate])) == os.path.normcase(root)
     except ValueError:
         inside = False
     if not inside:
-        raise ValueError("workflow path must stay inside workspace: %r" % path)
-    return path
+        raise ValueError("workflow path must stay inside %s: %r" % (label, candidate))
+    return candidate
+
+
+def _resolve_path(path=None):
+    # A caller-provided path and the explicit environment override preserve
+    # the existing workspace-only contract.  Internally, the state path is
+    # passed back into read/write after validation, so recognize that single
+    # managed root as well rather than treating it as an arbitrary escape.
+    if path is None:
+        if _configured_path():
+            return _workspace_path(default_path())
+        return _state_path(default_path())
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            return _state_path(candidate)
+        except ValueError:
+            pass
+    return _workspace_path(candidate)
+
+
+def resolved_path(path=None):
+    """Return the validated absolute path used by workflow operations.
+
+    Callers that create adjacent recovery artifacts must use this rather than
+    the user-facing, possibly relative ``default_path()`` value.
+    """
+    return _resolve_path(path)
+
+
+def _read_workflows_file(path):
+    if not os.path.exists(path):
+        return {}
+    if os.path.getsize(path) > MAX_WORKFLOW_BYTES:
+        raise ValueError("workflows file exceeds the byte limit")
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if not isinstance(raw, dict):
+        raise ValueError("workflows file must contain a JSON object")
+    if len(raw) > MAX_WORKFLOWS:
+        raise ValueError("workflows file exceeds the workflow-count limit")
+    workflows = {}
+    for name, workflow in raw.items():
+        workflows[normalize_name(name)] = normalize_workflow(workflow)
+    return workflows
 
 
 def normalize_name(name):
@@ -108,20 +183,7 @@ def normalize_workflow(workflow):
 def read_workflows(path=None):
     path = _resolve_path(path)
     with _LOCK:
-        if not os.path.exists(path):
-            return {}
-        if os.path.getsize(path) > MAX_WORKFLOW_BYTES:
-            raise ValueError("workflows file exceeds the byte limit")
-        with open(path, "r", encoding="utf-8") as handle:
-            raw = json.load(handle)
-    if not isinstance(raw, dict):
-        raise ValueError("workflows file must contain a JSON object")
-    if len(raw) > MAX_WORKFLOWS:
-        raise ValueError("workflows file exceeds the workflow-count limit")
-    workflows = {}
-    for name, workflow in raw.items():
-        workflows[normalize_name(name)] = normalize_workflow(workflow)
-    return workflows
+        return _read_workflows_file(path)
 
 
 def write_workflows(workflows, path=None):
@@ -164,6 +226,15 @@ def ensure_workflows(path=None):
     path = _resolve_path(path)
     with _LOCK:
         if not os.path.exists(path):
+            # Preserve existing installs without keeping subsequent saves in
+            # the checkout.  This is a copy, never a delete or source-tree
+            # mutation; operators may review/remove the historical file when
+            # they are satisfied with the migration.
+            if path == _state_path(default_path()) and not _configured_path():
+                legacy = _workspace_path("workflows.json")
+                if os.path.exists(legacy) and legacy != path:
+                    write_workflows(_read_workflows_file(legacy), path)
+                    return _read_workflows_file(path), path
             write_workflows(DEFAULT_WORKFLOWS, path)
         return read_workflows(path), path
 
