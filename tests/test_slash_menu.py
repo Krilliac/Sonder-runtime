@@ -661,7 +661,10 @@ def test_raw_reader_raises_keyboard_interrupt_on_ctrl_c(monkeypatch):
 def test_raw_reader_ctrl_l_clears_screen_and_keeps_typed_input(monkeypatch):
     line, out = _drive(monkeypatch, list("draft") + ["\x0c", "\r"])
     assert line == "draft"
-    assert slash_menu.CSI + "2J" + slash_menu.CSI + "H" in out.text
+    assert (
+        slash_menu.CSI + "3J" + slash_menu.CSI + "2J" + slash_menu.CSI + "H"
+        in out.text
+    )
 
 
 def test_raw_reader_clears_the_menu_before_returning(monkeypatch):
