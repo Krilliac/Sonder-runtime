@@ -18,9 +18,15 @@ python build_with_sonder.py --tiers code,reasoning --sequential --attempts 2
 python build_with_sonder.py --only GameMap.cs      # one file
 python build_with_sonder.py --repair-only          # skip generation
 python build_with_sonder.py --resume               # skip files already on disk
+python build_skeleton.py --reset --prepare-only    # create/verify only the deterministic v2 baseline
 ```
 
 Targets `FpsGame_Sonder/` beside it. Needs the .NET SDK and a running Ollama.
+
+The v2 skeleton runner writes its harness-owned `FpsGame_Skeleton.csproj`
+automatically before its first baseline build. It is not model output and is
+never overwritten by `--reset`; this keeps the first `dotnet build` a real
+compile signal rather than a missing-project error.
 
 ## What it measures
 

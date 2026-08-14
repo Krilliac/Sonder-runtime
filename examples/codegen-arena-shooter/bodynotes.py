@@ -195,7 +195,9 @@ TWO EXACT FORMS, both of which have broken this body before:
 
     "LobbyNet.cs:Shutdown": """\
 Close the socket inside try/catch, then set Connected = false, IsHost = false,
-_socket = null, clear _clients and set Status to "offline".""",
+_socket = null!, clear _clients and set Status to "offline". The field is
+intentionally initialized with null! in the deterministic skeleton because it
+is assigned by StartHost/Join before any send or poll.""",
 
     "Screens.cs:Button": """\
 Draw the rectangle with Raylib.DrawRectangle and DrawRectangleLines, centre the

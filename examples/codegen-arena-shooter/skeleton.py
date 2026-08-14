@@ -92,7 +92,7 @@ public enum ClassId { Assault, Scout, Heavy }
 public sealed class ClassKit
 {
     public ClassId Id;
-    public string Name;
+    public string Name = string.Empty;
     public int MaxHealth;
     public float MoveSpeed;
     public int Damage;
@@ -354,8 +354,11 @@ public sealed class LobbyNet
     public bool Connected;
     public string Status = "offline";
 
-    private UdpClient _socket;
-    private IPEndPoint _remote;
+    // These are populated by the generated lifecycle bodies.  The null-forgiving
+    // initializers preserve that runtime contract while keeping the deterministic
+    // baseline warning-free before any model body is installed.
+    private UdpClient _socket = null!;
+    private IPEndPoint _remote = null!;
     private readonly List<IPEndPoint> _clients = new List<IPEndPoint>();
 
     public void StartHost()
@@ -460,11 +463,10 @@ public static class Program
     private static GameMap _map = new GameMap();
     private static MatchState _match = new MatchState();
     private static LobbyNet _net = new LobbyNet();
-    private static Combatant _me;
+    private static Combatant _me = null!;
     private static Screen _screen = Screen.MainMenu;
     private static ClassId _pick = ClassId.Assault;
     private static string _joinAddress = "127.0.0.1";
-    private static bool _typingAddress;
     private static float _netTimer;
     private static Camera3D _camera;
 
