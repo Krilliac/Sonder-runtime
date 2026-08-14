@@ -64,6 +64,32 @@ def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, 
     assert records[0]["path"] == server._agent_normalized_path(str(path))
 
 
+def test_project_bound_sqlite_mutation_cannot_escape_with_trusted_approval(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = outside / "records.db"
+    _database(path)
+
+    output = server._agent_dispatch_observed(
+        "sqlite_mutate", {
+            "path": str(path),
+            "sql": "UPDATE records SET value = ? WHERE id = ?",
+            "parameters": ["escaped", 1],
+            "mode": "apply",
+        },
+        project=str(project),
+    )
+
+    assert output.startswith("ERROR: agent project path rejected")
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("SELECT value FROM records WHERE id = 1").fetchone() == ("before",)
+    finally:
+        conn.close()
+
+
 def test_sqlite_module_participates_in_live_reload(monkeypatch):
     original = server.sqlite_mutate_module
     replacement = object()
