@@ -3,6 +3,7 @@
 import server
 import sonder_lifecycle
 import sonder_serve as serve
+from types import SimpleNamespace
 
 
 def _account(name):
