@@ -478,6 +478,30 @@ def _installed_models():
     return sorted(out)
 
 
+def _model_selection_ineligibility(model):
+    """Return a known reason a discovered model cannot serve REPL chat.
+
+    ``/model`` used to verify only that a tag was installed.  That made an
+    embedding-only model look successfully selected, then deferred the useful
+    rejection until the next ordinary chat turn.  The HTTP chat endpoint
+    already consults the richer catalog record before prewarming, so reuse the
+    same positive capability evidence here.  Discovery remains best-effort:
+    a catalog that omits capability metadata must not turn a valid local model
+    into a false negative.
+    """
+    try:
+        found = server.resolve_discovered_model_record(model)
+        if found is None:
+            return ""
+        _name, record = found
+        return server._fanout_nonchat_reason(record)
+    except Exception:
+        # `/model` has already established that Ollama was reachable enough to
+        # list this tag.  A second metadata lookup is advisory only; preserve
+        # the pre-existing selection behavior if it races a catalog reload.
+        return ""
+
+
 def _home_relative(path):
     """Show ~ instead of the home prefix, the way a shell prompt does."""
     try:
@@ -1264,6 +1288,18 @@ def main():
             else:
                 print("run /model with no argument to list what is installed")
             return
+
+        if selected_model is not None:
+            ineligible = _model_selection_ineligibility(selected_model)
+            if ineligible:
+                print(_paint(
+                    "model %r cannot serve chat (%s)" % (
+                        selected_model, ineligible,
+                    ),
+                    _Ansi.red,
+                ))
+                print("choose a chat-capable model shown by /model")
+                return
 
         active_tier = tier
         # Preserve the catalog's spelling for the actual request.  Ollama's
