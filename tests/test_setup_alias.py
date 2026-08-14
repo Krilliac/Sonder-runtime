@@ -93,6 +93,24 @@ def test_offline_missing_optional_embedding_still_creates_base_alias(monkeypatch
     assert "core chat is ready" in capsys.readouterr().out
 
 
+def test_no_embedding_skips_optional_model_without_discarding_base_alias(monkeypatch, capsys):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
+
+    assert setup_alias.main([
+        "--model", "base:model", "--embed-model", "embed:model", "--no-embedding",
+        "--ollama", "ollama-test",
+    ]) == 0
+    assert not any("embed:model" in command for command in calls)
+    assert calls[-1][1:3] == ["create", setup_alias.STABLE_ALIAS]
+    assert "embedding: skipped" in capsys.readouterr().out
+
+
 def test_failed_alias_creation_is_reported(monkeypatch):
     def fake_run(command, **kwargs):
         return SimpleNamespace(
