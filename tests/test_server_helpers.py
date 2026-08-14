@@ -33,6 +33,32 @@ def test_parse_none_when_absent():
     assert server.parse_interaction_id("just some text") is None
 
 
+def test_answer_with_history_augment_opt_out_cannot_be_reenabled_by_tier(monkeypatch):
+    """A hosted boundary opt-out wins over a local learning route's default."""
+    captured = {}
+
+    class _Connection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "_open_db", lambda: _Connection())
+    monkeypatch.setattr(
+        server, "_serve_target", lambda *_args: ("model", False, True, "sonder")
+    )
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(server, "_should_learn", lambda *_args: True)
+
+    def fake_answer(*_args, **kwargs):
+        captured["augment"] = kwargs["augment"]
+        return "answer", None, {}
+
+    monkeypatch.setattr(server, "_answer", fake_answer)
+    out = server._answer_with_history_impl("hello", [], augment=False)
+
+    assert "answer" in out
+    assert captured["augment"] is False
+
+
 def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch, tmp_path):
     # Regression for a 2026-07-13 bug: master_orchestrate() called
     # creative_router.classify(task) BEFORE checking

@@ -323,6 +323,55 @@ _ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
     "master_retry", "agent_retry", "self_heal_repair",
 ))
 
+# The legacy memory database predates hosted accounts.  Sessions and projects
+# supplied through /v1/chat/completions are principal-namespaced before they
+# reach it, but these direct tools still read or mutate global lesson,
+# interaction, preference, evaluation, and training state.  Letting an
+# authenticated account reach one would either disclose another account's
+# material or let it influence the shared learning corpus.  Direct MCP and a
+# loopback local-open deployment deliberately retain the complete single-user
+# surface; hosted deployments need a first-class per-account memory store
+# before these operations can safely be enabled.
+_ACCOUNT_GLOBAL_MEMORY_TOOLS = frozenset((
+    "apply_learned",
+    "evaluation_history_status",
+    "learn_from_example",
+    "learn_preference",
+    "learning_health_status",
+    "memory_embedding_backfill",
+    "memory_export",
+    "memory_interaction_embedding_backfill",
+    "memory_privacy_review",
+    "memory_quality_report",
+    "memory_search",
+    "preferences_status",
+    "recall",
+    "record_outcome",
+    "session_export",
+    "sonder_remember_fact",
+    "sonder_sessions",
+    "sonder_stats",
+))
+
+
+def _account_global_memory_refusal(tool, context):
+    """Refuse legacy global-memory tools for a hosted account.
+
+    This guard intentionally lives at the HTTP boundary rather than relying on
+    each legacy tool to remember account authorization.  The tools do not
+    accept an account scope, so passing caller-provided IDs or treating a
+    project name as an authorization boundary would be a false isolation
+    guarantee.
+    """
+    if not (context or {}).get("account"):
+        return ""
+    if str(tool or "").lstrip("/") not in _ACCOUNT_GLOBAL_MEMORY_TOOLS:
+        return ""
+    return (
+        "hosted account memory is isolated to chat sessions and projects; "
+        "this global memory tool is local-operator only"
+    )
+
 
 def _account_task_boundary_refusal(tool_name, kwargs, context):
     """Reject account requests whose internal task writes cannot be scoped.
@@ -1269,6 +1318,9 @@ def _http_tool_refusal(tools, label, context=None):
     remembering a second map.
     """
     for tool in tools:
+        memory_error = _account_global_memory_refusal(tool, context)
+        if memory_error:
+            return "refused %s: %s" % (label, memory_error)
         operation = tool_contract.system_operation_for(tool)
         if operation and context is not None:
             if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
@@ -1925,7 +1977,7 @@ def _turn_reasoning():
 
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
-    state=None, return_result=False,
+    state=None, return_result=False, augment=True,
 ):
     """Call Sonder Runtime's learning loop with the UI's prior turns; returns UI text."""
     state = _state_or_legacy(state)
@@ -1941,7 +1993,7 @@ def _run_prompt(
     out = server.answer_with_history(
         prompt, history, trace=state.trace, strict=state.strict, tier=tier,
         context_size=context_size, session=session, project=project,
-        raise_model_errors=True, target_observer=record_target,
+        raise_model_errors=True, target_observer=record_target, augment=augment,
     )
     if out.startswith("ERROR"):
         result = TurnResult(out, None, "")
@@ -3202,6 +3254,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, context=context,
                         )
                     if (structured_schema is None and reply is None
+                            and not context.get("account")
                             and not (natural_model and natural_model["kind"] == "fanout")):
                         reply = _handle_feedback(prompt, state=state)
                     if (structured_schema is None and reply is None
@@ -3255,6 +3308,11 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project,
                             state=state,
                             return_result=True,
+                            # Account-backed deployments intentionally do not
+                            # inject or train the legacy global lesson store.
+                            # Their durable chat/session project IDs remain
+                            # principal-namespaced above.
+                            augment=not bool(context.get("account")),
                         )
                         content = turn.content
                         response_iid = turn.iid
