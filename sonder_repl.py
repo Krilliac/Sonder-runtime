@@ -482,18 +482,19 @@ def _banner(rows, title="Sonder Runtime", subtitle="private AI runtime + orchest
 
 
 def _installed_models():
-    """(name, size) for every model Ollama has locally, newest API shape first.
+    """Return catalog rows, or ``None`` when Ollama discovery is unavailable.
 
-    Returns an empty list when Ollama is unreachable so callers can say so
-    rather than printing an empty list that reads as "none installed".
+    An empty list is a valid successful response from a fresh Ollama instance;
+    it must not be confused with an unreachable/malformed discovery response.
+    ``/model <tag>`` relies on that distinction before creating a session pin.
     """
     try:
         payload = server._get("/api/tags")
     except Exception:
-        return []
+        return None
     models = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(models, list):
-        return []
+        return None
     out = []
     for model in models:
         if not isinstance(model, dict):
@@ -510,6 +511,9 @@ def _installed_models():
     return sorted(out)
 
 
+_MODEL_DISCOVERY_UNSET = object()
+
+
 class _ModelArgumentCompleter:
     """Cached model/tier vocabulary for the interactive ``/model`` palette.
 
@@ -522,8 +526,8 @@ class _ModelArgumentCompleter:
     def __init__(self):
         self._choices = None
 
-    def refresh(self, installed=None):
-        if installed is None:
+    def refresh(self, installed=_MODEL_DISCOVERY_UNSET):
+        if installed is _MODEL_DISCOVERY_UNSET:
             installed = _installed_models()
         try:
             tiers = [str(name) for name in server.TIERS if str(name)]
@@ -1375,13 +1379,15 @@ def main():
                 mark = "*" if name == tier else " "
                 print("  %s %-14s %s" % (mark, name, server.TIERS[name]))
             print()
-            if installed:
+            if installed is None:
+                print(_paint("installed models: (ollama did not answer)", _Ansi.amber))
+            elif installed:
                 print(_paint("installed models (ollama)", _Ansi.muted))
                 for name, size in installed:
                     mark = "*" if name == current else " "
                     print("  %s %-40s %s" % (mark, name, size))
             else:
-                print(_paint("installed models: (ollama did not answer)", _Ansi.amber))
+                print(_paint("installed models (ollama): (none installed)", _Ansi.amber))
             print()
             print(_paint("usage: /model <model-name>  |  /model <tier>", _Ansi.muted))
             return
@@ -1395,10 +1401,17 @@ def main():
                 selected_tier, server.TIERS.get(selected_tier)))
             return
 
+        if installed is None:
+            print(_paint(
+                "cannot verify installed models because Ollama did not answer; model selection was not changed",
+                _Ansi.red,
+            ))
+            return
+
         names = [name for name, _size in installed]
         model_names = {str(name).casefold(): name for name in names}
         selected_model = model_names.get(arg.casefold())
-        if installed and selected_model is None:
+        if selected_model is None:
             # Refuse rather than rebind to something that will fail on the next
             # turn with an opaque ollama error. Suggest, because a near miss is
             # usually a tag typo (":7b" vs ":latest").
