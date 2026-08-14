@@ -102,6 +102,12 @@ def classify(command: str, status: str, reply: str) -> str:
     text = reply.strip()
     if not text:
         return "empty"
+    # Every command admitted by MUTATING is supposed to answer without a model
+    # call.  The host-observed activity footer catches a confident model
+    # fall-through that prose-only heuristics cannot distinguish from a report.
+    model_calls = re.search(r"(?im)^model calls:\s*(\d+)", text)
+    if model_calls and int(model_calls.group(1)) > 0:
+        return "model_fallthrough"
     # The model, handed an unknown slash token, explains or asks about it
     # instead of executing it. Handled commands emit reports, not prose
     # addressed to the reader.
