@@ -207,6 +207,11 @@ def test_git_processes_are_argv_only_noninteractive_and_lock_free(
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "alias.status")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "!echo unsafe")
+    monkeypatch.setenv("GIT_ASKPASS", "hostile-git-askpass")
+    # Use lower case to cover Windows' case-insensitive environment namespace.
+    monkeypatch.setenv("ssh_askpass", "hostile-ssh-askpass")
+    monkeypatch.setenv("SSH_ASKPASS_REQUIRE", "force")
+    monkeypatch.setenv("GCM_INTERACTIVE", "always")
     real_popen = git_tools.subprocess.Popen
     calls = []
 
@@ -223,8 +228,12 @@ def test_git_processes_are_argv_only_noninteractive_and_lock_free(
         assert kwargs["stdin"] is subprocess.DEVNULL
         assert kwargs["env"]["GIT_OPTIONAL_LOCKS"] == "0"
         assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert kwargs["env"]["SSH_ASKPASS_REQUIRE"] == "never"
+        assert kwargs["env"]["GCM_INTERACTIVE"] == "never"
         assert "GIT_CONFIG_COUNT" not in kwargs["env"]
         assert "GIT_CONFIG_KEY_0" not in kwargs["env"]
+        assert "GIT_ASKPASS" not in kwargs["env"]
+        assert "SSH_ASKPASS" not in kwargs["env"]
 
 
 def test_timeout_is_bounded_and_reported(monkeypatch, tmp_path):
