@@ -208,6 +208,13 @@ def test_discover_unknown_framework_returns_empty(tmp_path):
     assert result["test_count"] == 0
 
 
+def test_discover_pytest_no_tests_is_a_completed_zero_inventory(tmp_path):
+    result = harness_tools.test_discover(root=str(tmp_path), framework="pytest")
+    assert result["test_count"] == 0
+    assert result.get("no_tests") is True
+    assert "error" not in result
+
+
 # ---------------------------------------------------------------------------
 # test_run
 # ---------------------------------------------------------------------------
