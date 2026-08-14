@@ -20,6 +20,7 @@ python build_with_sonder.py --repair-only          # skip generation
 python build_with_sonder.py --resume               # skip files already on disk
 python build_skeleton.py --reset --prepare-only    # create/verify only the deterministic v2 baseline
 python build_skeleton.py --verify                  # require build + held-out runtime verification
+python build_skeleton.py --verify-only             # rerun held-out verification without model calls
 ```
 
 By default, generated projects live under Sonder's per-user state directory:

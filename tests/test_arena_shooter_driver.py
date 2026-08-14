@@ -106,6 +106,7 @@ def test_arena_verifier_follows_user_state_or_explicit_target() -> None:
     assert "$(SONDER_HOME)\\examples\\arena-shooter\\FpsGame_Skeleton" in project
     assert "$(LOCALAPPDATA)\\sonder\\examples\\arena-shooter\\FpsGame_Skeleton" in project
     assert "<SonderTarget Condition=\"'$(SonderTarget)' == ''\">..\\FpsGame_Skeleton</SonderTarget>" in project
+    assert "<HintPath>$(SonderTarget)\\bin\\Release\\net10.0\\FpsGameSonder.dll</HintPath>" in project
 
 
 def test_skeleton_unknown_only_fails_before_generation() -> None:
@@ -127,6 +128,17 @@ def test_skeleton_unknown_only_fails_before_generation() -> None:
     assert "no such file in skeleton: NotARealSource.cs" in result.stdout
     assert "available files:" in result.stdout
     assert "GameMap.cs" in result.stdout
+
+
+def test_skeleton_verify_only_is_advertised_as_no_model_path() -> None:
+    """The verifier must be rerunnable without accidentally spending a model call."""
+    source = SKELETON_DRIVER.read_text(encoding="utf-8")
+
+    assert 'parser.add_argument("--verify-only"' in source
+    verify_only = source.index("if args.verify_only:")
+    first_generation = source.index("server.ensemble_answer(")
+    assert verify_only < first_generation
+    assert "held-out verification was not run" in source
 
 
 def test_arena_verification_build_output_is_ignored() -> None:

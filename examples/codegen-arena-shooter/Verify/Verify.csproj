@@ -27,7 +27,7 @@
        runs, and a broken generation must not break this verifier's own build. -->
   <ItemGroup>
     <Reference Include="FpsGameSonder">
-      <HintPath>..\$(SonderTarget)\bin\Release\net10.0\FpsGameSonder.dll</HintPath>
+      <HintPath>$(SonderTarget)\bin\Release\net10.0\FpsGameSonder.dll</HintPath>
     </Reference>
     <PackageReference Include="Raylib-cs" Version="8.0.0" />
   </ItemGroup>

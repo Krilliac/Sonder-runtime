@@ -180,20 +180,39 @@ def run_verifier(project: str) -> tuple[bool, str]:
     assembly cannot break its own build.  It receives the exact project path
     instead of relying on a source-tree-relative default.
     """
+    def bounded_output(stdout, stderr) -> str:
+        output = ((stdout or "") + (stderr or "")).strip()
+        if len(output) > 8_000:
+            output = output[:8_000] + "\n... verifier output truncated"
+        return output
+
+    verifier = os.path.join(HERE, "Verify")
+    target = "-p:SonderTarget=" + os.path.abspath(project)
     try:
-        proc = subprocess.run(
+        # A file reference whose HintPath changes via an MSBuild property is
+        # not reliably recopied by an incremental `dotnet run`: the previous
+        # target can leave a stale/missing FpsGameSonder.dll in Verify/bin.
+        # Build this exact target non-incrementally, then run that artifact.
+        build = subprocess.run(
             [
-                "dotnet", "run", "--project", os.path.join(HERE, "Verify"),
-                "-c", "Release", "--nologo",
-                "-p:SonderTarget=" + os.path.abspath(project),
+                "dotnet", "build", verifier, "-c", "Release", "--nologo",
+                "--no-incremental", target,
             ],
             cwd=HERE, capture_output=True, text=True, timeout=300,
         )
     except Exception as exc:
         return False, "verifier could not run: %s" % exc
-    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    if len(output) > 8_000:
-        output = output[:8_000] + "\n... verifier output truncated"
+    output = bounded_output(build.stdout, build.stderr)
+    if build.returncode != 0:
+        return False, output or "verifier build failed without output"
+    try:
+        proc = subprocess.run(
+            ["dotnet", "run", "--project", verifier, "-c", "Release", "--no-build", "--nologo"],
+            cwd=HERE, capture_output=True, text=True, timeout=300,
+        )
+    except Exception as exc:
+        return False, "verifier could not run: %s" % exc
+    output = bounded_output(proc.stdout, proc.stderr)
     return proc.returncode == 0, output or "verifier produced no output"
 
 
@@ -384,6 +403,8 @@ def main():
                         help="write the deterministic project/skeleton and verify its baseline build; never call a model")
     parser.add_argument("--verify", action="store_true",
                         help="after generation, run Verify/ against this exact project and fail on held-out checks")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="verify an existing generated project without requesting any model bodies")
     parser.add_argument("--model", default="",
                         help="override the ollama model behind --tiers, so two "
                              "models can be compared on identical slots")
@@ -441,6 +462,14 @@ def main():
             return 1
         print("baseline build succeeded; no model bodies were requested.")
         return 0
+    if args.verify_only:
+        if errors:
+            print("ABORT: generated project does not build; held-out verification was not run.")
+            return 1
+        verified, output = run_verifier(PROJECT)
+        print("=== HELD-OUT VERIFIER: %s ===" % ("PASSED" if verified else "FAILED"))
+        print(output)
+        return 0 if verified else 1
 
     slots = []
     for name, skel in skeleton.FILES:
