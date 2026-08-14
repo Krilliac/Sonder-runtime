@@ -108,6 +108,12 @@ _RULES = [
     _rule(r"^(?:list\s+)?(?:all\s+)?commands\b|^command\s+registry\b|"
           r"^what\s+commands(?:\s+are\s+there)?\b", _fixed("/commands")),
     _rule(r"^(?:show\s+)?permissions?\b|^permission\s+policy\b", _fixed("/permissions")),
+    # Checking source freshness is deliberately separate from `/update`: the
+    # former is read-only, while the latter changes the running checkout and
+    # keeps its explicit confirmation/authority boundary.
+    _rule(r"^(?:check(?:\s+for)?|show)\s+(?:runtime\s+|sonder\s+)?updates?\s*\??$|"
+          r"^(?:is|am)\s+(?:sonder|the\s+runtime)\s+(?:up\s+to\s+date|current)\s*\??$",
+          _fixed("/updatecheck")),
     _rule(r"^(?:dump|save)\s+(?:the\s+)?(?:chat|debug)(?:\s+log|\s+dump)?\b"
           r"(?:\s+(?P<arg>\S+))?", lambda m: ("/dump %s" % (m.group("arg") or "")).strip()),
 
