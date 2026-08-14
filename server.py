@@ -4272,44 +4272,9 @@ def _post_model(
                 cloud=cloud,
             ) from error
 
+        detail = embedded_detail or (failure.detail if failure is not None else "")
+        status = None if embedded_detail else (failure.status if failure is not None else None)
         if not compaction_spent:
-            detail = embedded_detail or failure.detail
-            status = None if embedded_detail else failure.status
-            if (
-                not think_option_fallback_spent
-                and not cloud
-                and not remote_endpoint
-                and "think" in payload
-                and _think_option_unsupported(detail)
-            ):
-                remaining = deadline - time.monotonic()
-                if _cancel_requested(cancel_check):
-                    raise ModelCallError(
-                        "cancelled",
-                        "model call cancelled before another request was sent",
-                        attempts=attempt,
-                        cloud=cloud,
-                    )
-                if remaining < 1.0:
-                    if failure is not None:
-                        raise failure
-                    # Preserve the normal in-band-error path when no HTTP
-                    # failure object exists to re-raise.
-                    return result, attempt
-                # Preserve the model, endpoint, messages, context policy, and
-                # ordinary retry budget. This is solely compatibility with
-                # Ollama models that do not implement the optional switch.
-                payload = dict(payload)
-                payload.pop("think", None)
-                _remember_unsupported_think_option(model)
-                think_option_fallback_spent = True
-                max_attempts += 1
-                activity_tracker.record_event(
-                    "model_thinking_option_fallback",
-                    model=str(model or "")[:80],
-                    attempt=attempt + 1,
-                )
-                continue
             verdict = context_overflow.classify(detail, status=status)
             compacted = None
             if verdict.overflow and _overflow_retry_allowed(
@@ -4333,6 +4298,47 @@ def _post_model(
                         control=verdict.control,
                     )
                     continue
+
+        # A context compaction retry and the optional-think compatibility
+        # retry recover independent failures.  In particular, a model may
+        # reject ``think`` only after a compacted retry.  Do not nest this
+        # fallback under ``not compaction_spent`` or that second failure leaks
+        # to the caller instead of retrying once without the optional field.
+        if (
+            not think_option_fallback_spent
+            and not cloud
+            and not remote_endpoint
+            and "think" in payload
+            and _think_option_unsupported(detail)
+        ):
+            remaining = deadline - time.monotonic()
+            if _cancel_requested(cancel_check):
+                raise ModelCallError(
+                    "cancelled",
+                    "model call cancelled before another request was sent",
+                    attempts=attempt,
+                    cloud=cloud,
+                )
+            if remaining < 1.0:
+                if failure is not None:
+                    raise failure
+                # Preserve the normal in-band-error path when no HTTP
+                # failure object exists to re-raise.
+                return result, attempt
+            # Preserve the model, endpoint, messages, context policy, and
+            # ordinary retry budget. This is solely compatibility with
+            # Ollama models that do not implement the optional switch.
+            payload = dict(payload)
+            payload.pop("think", None)
+            _remember_unsupported_think_option(model)
+            think_option_fallback_spent = True
+            max_attempts += 1
+            activity_tracker.record_event(
+                "model_thinking_option_fallback",
+                model=str(model or "")[:80],
+                attempt=attempt + 1,
+            )
+            continue
 
         if embedded_detail:
             # Not an overflow we can act on; hand the in-band error upward
