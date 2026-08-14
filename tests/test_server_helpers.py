@@ -466,14 +466,17 @@ def test_thinking_only_response_reports_sanitized_metadata_without_reasoning(
     assert len(calls) == 1
 
 
-def test_chat_request_strips_inline_reasoning_tags_from_model_content(monkeypatch):
+@pytest.mark.parametrize("tag", ["think", "thinking"])
+def test_chat_request_strips_inline_reasoning_tags_from_model_content(monkeypatch, tag):
     private_reasoning = "private chain of thought: bearer inline-hidden-token"
     monkeypatch.setattr(
         server,
         "_post",
         lambda *args, **kwargs: {
             "message": {
-                "content": "<think>\n%s\n</think>\n\nFinal answer.",
+                "content": "<%s>\n%s\n</%s>\n\nFinal answer." % (
+                    tag, private_reasoning, tag,
+                ),
             },
         },
     )

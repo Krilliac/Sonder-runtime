@@ -542,7 +542,8 @@ _THINKING_CAPABILITY_LOCK = threading.Lock()
 # governed by explicit reasoning exposure policy; a leading closed tag must
 # not become an accidental bypass of the same boundary.
 _INLINE_THINKING_PREFIX_RE = re.compile(
-    r"^\s*(?:<think(?:\s+[^>]*)?>.*?</think>\s*)+", re.IGNORECASE | re.DOTALL,
+    r"^\s*(?:<(think|thinking)(?:\s+[^>]*)?>.*?</\1\s*>\s*)+",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
