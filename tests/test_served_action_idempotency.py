@@ -37,7 +37,7 @@ def test_restart_never_replays_a_completed_action(monkeypatch, tmp_path):
     replay = serve._idempotent_http_action(
         context, "lost-response", action, lambda: calls.append("replayed") or "bad"
     )
-    assert replay.startswith("ERROR: this idempotent action already completed")
+    assert replay.startswith("idempotent action refused: it already completed")
     assert calls == ["run"]
     sonder_lifecycle.reset_for_tests()
 
@@ -56,7 +56,7 @@ def test_interrupted_action_is_uncertain_and_never_replayed(monkeypatch, tmp_pat
     replay = serve._idempotent_http_action(
         context, "interrupted", action, lambda: calls.append("replayed") or "bad"
     )
-    assert replay.startswith("ERROR: this idempotent action has an uncertain")
+    assert replay.startswith("idempotent action refused: it has an uncertain")
     assert calls == []
     sonder_lifecycle.reset_for_tests()
     calls = []

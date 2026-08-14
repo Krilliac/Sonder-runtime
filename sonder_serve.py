@@ -328,22 +328,25 @@ def _idempotent_http_action(context, supplied_key, action, factory):
             # An explicit replay key promises no duplicate side effect.  If its
             # durable guard is unavailable, refusing is safer than executing a
             # long-running mutation without a recoverable receipt.
-            return (
-                "ERROR: idempotency receipt is unavailable; the action was not "
-                "started. Retry after restoring local runtime storage."
+            refusal = (
+                "idempotency receipt unavailable: the action was not started. "
+                "Retry after restoring local runtime storage."
             )
+            return refusal
         if state == "completed":
-            return (
-                "ERROR: this idempotent action already completed before the "
+            refusal = (
+                "idempotent action refused: it already completed before the "
                 "current server process. It was not run again; query its "
                 "status or submit a new action with a new Idempotency-Key."
             )
+            return refusal
         if state in {"started", "uncertain"}:
-            return (
-                "ERROR: this idempotent action has an uncertain prior outcome "
+            refusal = (
+                "idempotent action refused: it has an uncertain prior outcome "
                 "after an interrupted server process. It was not run again; "
                 "inspect the affected project/status before submitting a new action."
             )
+            return refusal
         try:
             result = factory()
         except BaseException:
