@@ -295,8 +295,7 @@ def test_start_sonder_records_real_listener_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "wait_until", lambda fn, seconds: fn())
     monkeypatch.setattr(H, "python_exe", lambda: "python")
     monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: 111)
-    monkeypatch.setattr(H, "_listener_pid", lambda host, port: 222)
-    monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: True)
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda host, port: 222)
 
     out = H.start_sonder("127.0.0.1", 11435)
 
