@@ -27,3 +27,4 @@ Modelfile.personal
 # look modified to the guarded runtime updater.
 examples/codegen-arena-shooter/Verify/bin/
 examples/codegen-arena-shooter/Verify/obj/
+examples/codegen-arena-shooter/FpsGame_Skeleton/
