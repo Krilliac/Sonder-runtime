@@ -18,7 +18,54 @@ unified-memory machines are covered at the end.
 > **consented** cloud call — that is the realistic path to broad coverage, not a
 > small model pretending.
 
-## 1. Find your band
+## 1. What is actually required
+
+Sonder does not require a complete specialist collection to start. The smallest
+useful local installation is **Ollama plus one generative local model**, exposed
+through the stable `sonder:latest` alias. That one model may serve the `fast`,
+`code`, and `general` roles. Bootstrap and `setup_alias.py` additionally pull
+the default embedding model (`nomic-embed-text`) so semantic memory works on a
+fresh installation, but embedding is not a prerequisite for ordinary chat.
+
+| Capability | Required for core chat? | When it becomes required |
+|---|---|---|
+| One local generative model (`sonder:latest`) | **Yes** | Normal local REPL/API chat and code work |
+| Embedding model (`nomic-embed-text`, BGE, E5, mxbai) | No | Semantic memory, lesson recall, and vector search |
+| Separate `fast`, `code`, or `general` models | No | Only when you want different quality/latency tradeoffs; one model can fill all three |
+| `reasoning` model | No | Explicit hard-reasoning routing |
+| `vision` model | No | A configured local vision/image-input feature |
+| Reranker, extraction, tool-oriented, speech, or experimental models | No | Only after their matching integration is enabled and configured |
+| Cloud model | No | Explicit cloud-tier work; it is separately consent-gated |
+
+An unbound optional routing tier degrades to a configured local `general` or
+`code` path; it is not a startup failure. A missing embedding model disables
+semantic retrieval rather than core chat.
+
+> **Installed is not integrated.** Seeing a tag in `ollama list` only proves it
+> is available to the provider. Sonder must also expose a matching, bounded
+> integration and you must bind the model to that supported capability. For
+> example, a downloaded Whisper or reranker tag does not silently turn on speech
+> transcription or retrieval reranking; those remain optional until their
+> provider-backed feature is available.
+
+### Specialist integration backlog
+
+The following is the implementation checklist for optional model families. It
+is intentionally capability-first: no item is considered enabled merely because
+a similarly named tag is installed.
+
+| Priority | Capability | Completion boundary |
+|---|---|---|
+| 1 | Local speech transcription | A bounded audio-input adapter, duration/byte/decoder limits, a provider contract verified on the installed Ollama version, and a local-only transcript route. |
+| 1 | Provider-backed reranking | A confirmed rerank endpoint and score contract; bounded candidate count/text, deterministic fallback when unavailable, and no silent chat-model substitution. |
+| 2 | Specialist structured extraction | An explicit local extraction binding only where it materially improves the existing schema-verified extraction path; exact schema validation, source-span grounding, and no untrusted-output authority. |
+| 2 | Native tool-oriented models | A validated tool-call protocol with strict JSON/schema checks, host-owned permission decisions, and regression coverage for malformed or injected calls. |
+| 3 | Capability evaluation and routing | Reproducible per-model evaluations, latency/quality evidence, and routing changes only after the corresponding provider feature and safety contract pass. |
+
+Until a row is complete, use the existing local text, schema, and host-tool
+paths rather than treating a specialist tag as a substitute.
+
+## 2. Find your band
 
 | VRAM | Largest comfortable model | What the collection looks like |
 |---|---|---|
@@ -32,7 +79,7 @@ unified-memory machines are covered at the end.
 
 Everything below is expressed per-band, so pick your row and read across.
 
-## 2. The collection by role
+## 3. The collection by role
 
 | Tier | Job | 8–12 GB | 16 GB | 24–32 GB | 48 GB+ |
 |---|---|---|---|---|---|
@@ -41,7 +88,7 @@ Everything below is expressed per-band, so pick your row and read across.
 | `general` | general chat, planning | 7–8B | 14B | 14–32B | 70B |
 | `reasoning` | hard multi-step, math, design | *(fold into general)* | 14B reasoning | **32B reasoning** | 70B reasoning |
 | `vision` | image / screenshot input | 3B VL | 7B VL | 7–8B VL | 8B+ VL |
-| *(embed)* | memory & recall (**required**) | small embed | small embed | small embed | small embed |
+| *(embed)* | semantic memory & recall | small embed | small embed | small embed | small embed |
 | `oracle` | the hard 5% | consented cloud | consented cloud | 70B @ Q3 / cloud | **70B local** |
 
 **Model families that fill these roles well** (any Ollama-available equivalent
@@ -54,14 +101,14 @@ works — Sonder is model-agnostic):
   long internal chains — slower, much better on multi-step work.
 - **vision** — vision-language models (Qwen2.5-VL, Llama Vision, Gemma 3 multimodal).
 - **embed** — embedding models (nomic-embed-text, BGE, E5, mxbai). **Required** for
-  memory/recall; not a chat model.
+  semantic memory/recall; not a chat model and not required for core chat.
 - **rerank** *(optional)* — reranker models (bge-reranker) to sharpen retrieval.
 
 Abliterated variants of any of the above trade the model's built-in refusals for
 fewer false-refusals on legitimate dual-use work; Sonder's host guardrails are
 enforced independently of the model ([Security Model](09-security-model.md)).
 
-## 3. Residency: you usually cannot hold them all
+## 4. Residency: you usually cannot hold them all
 
 Ollama keeps a limited set of models resident and swaps the rest on demand, so
 routing between tiers can cost a reload. The pattern that works at any size:
@@ -75,7 +122,7 @@ routing between tiers can cost a reload. The pattern that works at any size:
 The router's job is to make swaps *worth it*: a small `fast` model answers trivia
 without ever waking a large model, and only a genuinely hard task pays the cost.
 
-## 4. Wiring it into Sonder
+## 5. Wiring it into Sonder
 
 ```bash
 ollama pull <fast-model>
@@ -88,9 +135,9 @@ ollama pull <embedding-model>
 /runtime set router=fast workbench=code autopilot=code review=general
 ```
 
-`reasoning` and `vision` are live policy tiers, bound by default and
-repointable with `/runtime set reasoning=<model> vision=<model>`; assign an
-empty value to leave one unset on a smaller collection, and the router degrades
+`reasoning` and `vision` are live optional policy tiers, deliberately **unbound
+by default** and configured with `/runtime set reasoning=<model>
+vision=<model>`. Leave either unset on a smaller collection and the router degrades
 to `general`/`code` automatically — nothing breaks. `oracle` remains
 consent-gated escalation, not a policy tier. Full procedure:
 [assemble-model-collection](../runbooks/assemble-model-collection.md).
@@ -124,7 +171,7 @@ does not silently widen the context/VRAM policy. This initial surface is
 direct/REPL only—agents do not receive an
 image channel until their local-input transcript contract is separately wired.
 
-## 5. Scaling up: multi-GPU
+## 6. Scaling up: multi-GPU
 
 Multi-GPU LLM inference does **not** use SLI or NVLink — those are irrelevant
 here. Frameworks split the model by **layers** across cards and pass a small
@@ -157,7 +204,7 @@ airflow, and enough PCIe slots. Aim at a **capacity target**, not a card count �
 reaching 48 GB (for a 70B `oracle`) means two 24 GB cards, which is worth knowing
 before buying a second smaller one.
 
-## 6. Accelerators: NPUs and TPUs
+## 7. Accelerators: NPUs and TPUs
 
 **Neither an M.2/USB NPU nor a TPU can run an LLM.** They have no usable memory
 for multi-GB weights and target small quantized CNNs. Every tier above runs on
@@ -183,7 +230,7 @@ small enough to be nearly free. Note also that integrated NPUs ship mainly in
 laptop/APU parts; most desktop CPUs have none, so those provider paths simply do
 not apply there.
 
-## 7. No discrete GPU?
+## 8. No discrete GPU?
 
 - **CPU-only** — workable with 3–8B models; expect seconds-per-response. Keep the
   collection small (one general/coder model + embeddings) and prefer the
@@ -200,7 +247,7 @@ not apply there.
   draft-model service. Do not assume unlike adapters can pool memory for one
   model; the backend and topology decide that.
 
-## 8. How the router chooses
+## 9. How the router chooses
 
 `capability_router` classifies each request and picks a tier, with an escalation
 ladder for when the first choice is not enough:
