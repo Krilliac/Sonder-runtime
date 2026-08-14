@@ -82,6 +82,7 @@ REQUIRED_FILES = {
     "permission_modes.py",
     "grounded_outcomes.py",
     "calibration.py",
+    "compiler_cache.py",
     "artifact_fetch.py",
     "engine_bundle.py",
     "endless-train.sh",

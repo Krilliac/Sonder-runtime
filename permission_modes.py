@@ -311,7 +311,7 @@ EXECUTION_TOOLS = frozenset({
     "parallel_run_code", "parallel_generate_run", "parallel_generate_run_languages",
     "game_generate_and_test", "game_generation_campaign", "game_reference_suite",
     "campaign_generate_compile_execute_record", "campaign_repo_repair",
-    "self_heal_repair", "scaffold_project",
+    "self_heal_repair", "scaffold_project", "compiler_cache_status",
 })
 
 # The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``
