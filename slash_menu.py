@@ -730,11 +730,6 @@ def _cell_width(ch: str) -> int:
     return 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
 
 
-def _display_width(text: str) -> int:
-    """Return the approximate number of terminal cells used by *text*."""
-    return sum(_cell_width(ch) for ch in str(text or ""))
-
-
 def _input_lines_by_cells(text: str, columns: int) -> list[str]:
     """Wrap raw input by terminal cells without splitting combining glyphs."""
     limit = max(1, int(columns))

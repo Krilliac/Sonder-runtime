@@ -255,7 +255,7 @@ def test_a_write_enabled_run_is_still_confined_off_its_bound_project(tmp_path):
         read_only=False, project=str(project),
     ))
     assert observation.startswith("ERROR:"), observation
-    assert "outside every authorized root" in observation, observation
+    assert "outside the host-selected project root" in observation, observation
 
 
 # The four tools that take BOTH `root` and a second `path` that harness_tools

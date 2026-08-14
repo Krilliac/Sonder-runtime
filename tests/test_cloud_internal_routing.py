@@ -58,7 +58,7 @@ def _install_request_fakes(monkeypatch, *, model, cloud, tier_label):
 
     def make_generate(
         selected_model, system, temperature, num_predict, num_ctx,
-        cloud=False, timeout=None, cancel_check=None,
+        cloud=False, timeout=None, cancel_check=None, allow_cloud_fallback=True,
     ):
         def generate(prompt, history=None):
             calls.append({"model": selected_model, "cloud": cloud, "prompt": prompt})
@@ -75,7 +75,7 @@ def _install_request_fakes(monkeypatch, *, model, cloud, tier_label):
     def answer(
         conn, prompt, selected_model, effective_system, temperature, num_predict,
         num_ctx, session_id, project, history, trace=False, tier="sonder",
-        cloud=False, augment=True,
+        cloud=False, augment=True, allow_cloud_fallback=True,
     ):
         generate = server._make_generate(
             selected_model, effective_system, temperature, num_predict, num_ctx,

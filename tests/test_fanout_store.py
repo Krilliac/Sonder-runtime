@@ -120,11 +120,11 @@ def test_schema_migration_scrubs_pre_vault_prompt_and_digest(isolated):
     store.reset_schema_cache_for_tests()
 
     migrated = store.get_run(run["id"])
-    assert migrated["prompt"] == "legacy-fanout-prompt:redacted"
+    assert migrated["prompt"] == "sealed-fanout-prompt:redacted"
     conn = sqlite3.connect(isolated)
     raw = conn.execute("SELECT prompt, prompt_sha256 FROM fanout_runs WHERE id=?", (run["id"],)).fetchone()
     conn.close()
-    assert raw == ("legacy-fanout-prompt:redacted", "")
+    assert raw == ("sealed-fanout-prompt:redacted", "")
 
 
 def test_schema_migration_scrubs_vault_backed_legacy_prompt_and_digest(isolated):

@@ -697,11 +697,11 @@ def test_shared_workflow_inventory_requires_lifecycle_authority(monkeypatch):
     assert "developer or administrator authorization is required" in refused
     assert calls == []
 
-    allowed = ts._dispatch_catalogued_tool(
+    denied_developer = ts._dispatch_catalogued_tool(
         "/workflow_list", ts.ConversationState(), context=developer,
     )
-    assert allowed == "workflows"
-    assert calls == [True]
+    assert "account-scoped saved workflows are not available" in denied_developer
+    assert calls == []
 
 
 @pytest.mark.parametrize(
