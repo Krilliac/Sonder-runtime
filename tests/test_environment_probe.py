@@ -51,3 +51,20 @@ def test_format_profile_lists_shells_and_toolchains():
     text = ep.format_profile(refresh=True)
     assert "host environment" in text
     assert "shells:" in text and "toolchains:" in text
+    assert "specialist tools:" in text
+
+
+def test_probe_exposes_specialist_tools_without_subprocesses(monkeypatch):
+    seen = []
+
+    def fake_which(name):
+        seen.append(name)
+        return "C:\\tools\\sccache.exe" if name == "sccache" else None
+
+    monkeypatch.setattr(ep.shutil, "which", fake_which)
+    env = ep.probe(refresh=True)
+    assert env["specialist_tools"] == {"sccache": "C:\\tools\\sccache.exe"}
+    assert "sccache" in seen
+    assert "sccache" in ep.agent_brief()
+    assert "sccache" in ep.format_profile()
+    ep.probe(refresh=True)  # restore a real probe for later tests
