@@ -79,10 +79,18 @@ FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 # contract. They do not attempt to grade gameplay or replace the real build.
 _REQUIRED_BODY_TEXT = {
     ("Program.cs", "StartMatch"): ("_match.AddLocalPlayer(",),
+    # Cell indices outside the map are solid.  Wrapping with modulo both
+    # breaks that collision boundary and can still yield a negative index.
+    ("GameMap.cs", "IsWallCell"): ("Width", "Depth", "_walls"),
+    # IsWallCell owns bounds behavior.  Reimplementing `_walls` directly has
+    # already produced a compiling but inverted/out-of-range IsWallAt body;
+    # preserve the one source of truth rather than grading it only by syntax.
+    ("GameMap.cs", "IsWallAt"): ("IsWallCell(",),
 }
 _FORBIDDEN_BODY_TEXT = {
     ("Program.cs", "DoLobby"): ("Raylib.BeginDrawing", "Raylib.EndDrawing"),
     ("Program.cs", "DoScoreboard"): ("Raylib.BeginDrawing", "Raylib.EndDrawing"),
+    ("GameMap.cs", "IsWallCell"): ("%",),
 }
 
 

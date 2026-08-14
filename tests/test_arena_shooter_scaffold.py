@@ -99,6 +99,20 @@ def test_arena_builder_rejects_known_runtime_lifecycle_contract_violations():
     assert builder["body_contract_issues"](
         "Program.cs", "DoScoreboard", "Ui.Scoreboard(W, H, _match, out bool back);"
     ) == []
+    assert builder["body_contract_issues"](
+        "GameMap.cs", "IsWallAt", "return !_walls[0, 0];"
+    ) == ["must contain IsWallCell("]
+    assert builder["body_contract_issues"](
+        "GameMap.cs", "IsWallAt", "return IsWallCell(x, z);"
+    ) == []
+    assert builder["body_contract_issues"](
+        "GameMap.cs", "IsWallCell", "return _walls[x % Width, z % Depth];"
+    ) == ["must not contain %"]
+    assert builder["body_contract_issues"](
+        "GameMap.cs",
+        "IsWallCell",
+        "if (x < 0 || x >= Width || z < 0 || z >= Depth) return true; return _walls[x, z];",
+    ) == []
 
 
 def test_arena_builder_rejects_unbalanced_wrapped_method_before_compiling():
