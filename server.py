@@ -1124,6 +1124,18 @@ def _developer_gate(tool_name: str, token: str, started):
     return "refused: %s." % msg
 
 
+def reasoning_owner_for_token(token: str = "") -> str:
+    """Return an opaque reasoning-record owner for a direct MCP caller."""
+    if not _deployment_authenticates_callers():
+        return ""
+    account = _admin_account_from_token(token) if token else None
+    username = str((account or {}).get("username") or "").strip()
+    if not username:
+        return ""
+    material = "reasoning-owner\0account:" + username
+    return "ro-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _direct_fanout_identity(token: str):
     """Return the direct-MCP receipt owner and authenticated account.
 
@@ -9267,7 +9279,7 @@ def admin_private_chain_of_thought(token: str = "") -> str:
     refusal = _developer_gate("admin_private_chain_of_thought", token, started)
     if refusal:
         return refusal
-    output = _reasoning_report()
+    output = _reasoning_report(token)
     _record_direct_tool("admin_private_chain_of_thought", {}, ok=True, started=started)
     return output
 
@@ -9680,7 +9692,7 @@ def turn_inspect(index: int = 0, full_prompt: bool = False, token: str = "") -> 
     return output
 
 
-def _reasoning_report() -> str:
+def _reasoning_report(token: str = "") -> str:
     """The model's reasoning for the current/last turn, or why there is none.
 
     Shared verbatim by ``reasoning_show`` and ``admin_private_chain_of_thought``
@@ -9703,7 +9715,7 @@ def _reasoning_report() -> str:
             "  /cot serves this same record and nothing besides it, and only\n"
             "  where that surface is separately opted in."
         )
-    record = activity_tracker.current_reasoning() or activity_tracker.latest_reasoning()
+    record = activity_tracker.reasoning_for_owner(reasoning_owner_for_token(token))
     if not record:
         return (
             "reasoning is enabled, but nothing is recorded for this turn.\n"
@@ -9739,7 +9751,7 @@ def reasoning_show(token: str = "") -> str:
     refusal = _developer_gate("reasoning_show", token, started)
     if refusal:
         return refusal
-    output = _reasoning_report()
+    output = _reasoning_report(token)
     _record_direct_tool("reasoning_show", {}, ok=True, started=started)
     return output
 

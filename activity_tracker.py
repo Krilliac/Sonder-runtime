@@ -68,8 +68,13 @@ if "_DROPPED_EVENTS" not in globals():
 # receives; reasoning is gated separately and must not ride along.
 if "_REASONING" not in globals():
     _REASONING = {}
+if "_REASONING_OWNERS" not in globals():
+    # Authorization data, deliberately outside public response snapshots.
+    _REASONING_OWNERS = {}
 if "_LATEST_REASONING" not in globals():
     _LATEST_REASONING = None
+if "_LATEST_REASONING_OWNER" not in globals():
+    _LATEST_REASONING_OWNER = ""
 
 MAX_REASONING_CHARS = 20000
 
@@ -421,7 +426,10 @@ def _event(response, kind, **fields):
 
 
 @contextlib.contextmanager
-def response_span(label, prompt="", *, surface="", model="", session="", project=""):
+def response_span(
+    label, prompt="", *, surface="", model="", session="", project="",
+    reasoning_owner="",
+):
     """Track one user-visible response.
 
     Nested spans reuse the outer response so helpers can be composed safely.
@@ -461,6 +469,9 @@ def response_span(label, prompt="", *, surface="", model="", session="", project
     }
     with _LOCK:
         _ACTIVE[response_id] = response
+        # Never add this opaque principal to ``response``: that object is
+        # projected to public activity clients.
+        _REASONING_OWNERS[response_id] = str(reasoning_owner or "")
         if len(_ACTIVE) > MAX_ACTIVE:
             oldest = sorted(_ACTIVE, key=lambda k: _ACTIVE[k]["started_at"])[:1]
             for key in oldest:
@@ -480,12 +491,13 @@ def response_span(label, prompt="", *, surface="", model="", session="", project
         if response["status"] == "complete":
             record_event("response_complete", summary="%d tool call(s)" % response["tool_calls"])
         with _LOCK:
-            global _LATEST, _LATEST_REASONING
+            global _LATEST, _LATEST_REASONING, _LATEST_REASONING_OWNER
             _ACTIVE.pop(response_id, None)
             _LATEST = deepcopy(response)
             # Promote alongside _LATEST so the pair always describes the same
             # turn, then drop the per-span buffer.
             _LATEST_REASONING = _collect_reasoning(response_id)
+            _LATEST_REASONING_OWNER = _REASONING_OWNERS.pop(response_id, "")
             _REASONING.pop(response_id, None)
         _LOCAL.response_id = None
 
@@ -557,6 +569,20 @@ def current_reasoning():
         return None
     with _LOCK:
         return deepcopy(_collect_reasoning(response_id))
+
+
+def reasoning_for_owner(owner=""):
+    """Return current/latest reasoning only when it belongs to ``owner``."""
+    wanted = str(owner or "")
+    response_id = getattr(_LOCAL, "response_id", None)
+    with _LOCK:
+        if response_id and _REASONING_OWNERS.get(response_id, "") == wanted:
+            record = _collect_reasoning(response_id)
+            if record is not None:
+                return deepcopy(record)
+        if _LATEST_REASONING is not None and _LATEST_REASONING_OWNER == wanted:
+            return deepcopy(_LATEST_REASONING)
+    return None
 
 
 def record_model_call(
@@ -1376,7 +1402,7 @@ def format_response(response=None):
 
 def reset_for_tests():
     with _LOCK:
-        global _LATEST, _TOTAL_TOOL_CALLS, _LATEST_REASONING
+        global _LATEST, _TOTAL_TOOL_CALLS, _LATEST_REASONING, _LATEST_REASONING_OWNER
         global _NEXT_EVENT_SEQUENCE, _DROPPED_EVENTS
         _ACTIVE.clear()
         _LATEST = None
@@ -1385,5 +1411,7 @@ def reset_for_tests():
         _NEXT_EVENT_SEQUENCE = 1
         _DROPPED_EVENTS = 0
         _REASONING.clear()
+        _REASONING_OWNERS.clear()
         _LATEST_REASONING = None
+        _LATEST_REASONING_OWNER = ""
     _LOCAL.response_id = None

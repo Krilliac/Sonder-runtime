@@ -13,6 +13,7 @@ import re
 import activity_tracker as at
 import permission_rules
 import server
+import sonder_serve as ts
 from sonder_runtime.domain.execution import policy
 
 import pytest
@@ -240,6 +241,38 @@ def test_opted_in_still_refuses_a_caller_without_a_developer_token(monkeypatch):
         out = server.admin_private_chain_of_thought("")
     assert out.startswith("refused:")
     assert "private deliberation" not in out
+
+
+def test_reasoning_show_never_falls_back_to_another_developers_record(monkeypatch):
+    """The private latest-record cache must remain principal-scoped."""
+    monkeypatch.setenv("SONDER_EXPOSE_REASONING", "1")
+    monkeypatch.setenv("SONDER_REQUIRE_ACCOUNT", "1")
+    accounts = {
+        "alice-token": {"username": "alice", "role": "developer"},
+        "bob-token": {"username": "bob", "role": "developer"},
+    }
+    monkeypatch.setattr(server, "_admin_account_from_token", accounts.get)
+
+    with at.response_span(
+        "alice-turn", "private", reasoning_owner=server.reasoning_owner_for_token("alice-token"),
+    ):
+        at.record_reasoning("ALICE_PRIVATE_REASONING", model="m")
+
+    assert "ALICE_PRIVATE_REASONING" in server.reasoning_show("alice-token")
+    bob = server.reasoning_show("bob-token")
+    assert "ALICE_PRIVATE_REASONING" not in bob
+    assert "nothing is recorded" in bob
+
+
+def test_http_and_direct_reasoning_owner_keys_match_for_an_account(monkeypatch):
+    """A developer can inspect their own HTTP turn, never another account's."""
+    monkeypatch.setenv("SONDER_REQUIRE_ACCOUNT", "1")
+    account = {"username": "alice", "role": "developer"}
+    monkeypatch.setattr(server, "_admin_account_from_token", lambda token: account)
+
+    assert ts._reasoning_request_owner({"account": account}) == (
+        server.reasoning_owner_for_token("alice-token")
+    )
 
 
 # --- the surfaces that describe this behaviour ----------------------------
