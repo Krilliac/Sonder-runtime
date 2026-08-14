@@ -31,6 +31,7 @@ from pathlib import Path
 
 import permission_modes
 import server
+import activity_tracker
 import command_catalog
 import admin_auth
 import sonder_config
@@ -49,9 +50,6 @@ import unsafe_lab
 
 DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
-_LOCAL_LOG_SECRET = re.compile(
-    r"(?i)\b(authorization|api[_-]?key|token|password|credential)\s*[:=]\s*(?:bearer\s+)?\S+"
-)
 
 
 def _local_server_log_tail():
@@ -68,7 +66,12 @@ def _local_server_log_tail():
     text = raw.decode("utf-8", errors="replace")
     if size > len(raw):
         text = "(showing the latest %d KiB)\n%s" % (_LOCAL_LOG_TAIL_BYTES // 1024, text)
-    return _LOCAL_LOG_SECRET.sub(r"\1=<redacted>", text)
+    # This page is intentionally read-only and loopback-only, but its content
+    # is still browser-visible diagnostic data.  Do not keep a smaller,
+    # drift-prone log-only secret matcher here: use the same conservative
+    # projection that protects activity output (quoted assignments, bearer
+    # credentials, URI credentials, JWTs, and recognizable provider keys).
+    return activity_tracker._redact_text(text)
 
 
 _LOCAL_LOG_PAGE = """<!doctype html>
