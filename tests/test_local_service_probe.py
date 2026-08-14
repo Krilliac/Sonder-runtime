@@ -62,6 +62,17 @@ def test_dns_name_must_resolve_exclusively_to_loopback(monkeypatch):
         probe._validate_target("http://dev.local:8080/health")
 
 
+def test_dns_name_with_excessive_loopback_answers_is_rejected(monkeypatch):
+    rows = [
+        _addr("127.0.0.%d" % index)
+        for index in range(1, probe.MAX_DNS_ADDRESSES + 2)
+    ]
+    monkeypatch.setattr(probe.socket, "getaddrinfo", lambda *args, **kwargs: rows)
+
+    with pytest.raises(ValueError, match="too many addresses"):
+        probe._validate_target("http://dev.local:8080/health")
+
+
 def test_dns_is_rechecked_and_rebinding_is_refused_before_socket(monkeypatch):
     answers = [
         [_addr("127.0.0.1")],
