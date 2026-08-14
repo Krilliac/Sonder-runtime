@@ -111,10 +111,11 @@ def _console_has_operator():
     next line of the script.
 
     Deliberately narrower than ``slash_menu.available()``, which also consults
-    ``NO_COLOR``, ``TERM=dumb`` and ``SONDER_NO_MENU``. Those decide whether a
-    fancy prompt can be *drawn*; none of them is evidence about whether a
-    person is there, and letting ``NO_COLOR=1`` quietly change what the
-    permission gate enforces would be its own defect.
+    ``TERM=dumb`` and ``SONDER_NO_MENU``. Those decide whether the raw composer
+    can be *drawn*; ``NO_COLOR`` only removes styling and deliberately keeps
+    the composer's keyboard behavior. None of these is evidence about whether
+    a person is there, and letting them quietly change what the permission gate
+    enforces would be its own defect.
     """
     stream = getattr(sys, "stdin", None)
     if stream is None:
