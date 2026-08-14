@@ -34,6 +34,11 @@ def test_status_uses_only_discovered_path_and_fixed_arguments(monkeypatch):
     }
     assert seen["argv"] == ["C:\\tools\\cargo.exe", "--version"]
     assert seen["kwargs"]["shell"] is False
+    assert seen["kwargs"]["close_fds"] is True
+    if toolchain_status.os.name == "nt":
+        assert "creationflags" in seen["kwargs"]
+    else:
+        assert seen["kwargs"]["start_new_session"] is True
     assert "timeout" not in seen["kwargs"]
     assert seen["kwargs"]["stdin"] is subprocess.DEVNULL
 
@@ -84,6 +89,32 @@ def test_bounded_capture_terminates_overproducing_probe(monkeypatch):
     assert outcome == "output_limit"
     assert len(output) == toolchain_status.MAX_OUTPUT_CHARS
     assert proc.killed
+
+
+def test_tree_termination_uses_taskkill_for_windows_probe(monkeypatch):
+    seen = {}
+
+    class RunningProcess:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            seen["fallback"] = True
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(toolchain_status.os, "name", "nt", raising=False)
+    monkeypatch.setattr(toolchain_status.subprocess, "run", fake_run)
+    toolchain_status._terminate_process_tree(RunningProcess())
+
+    assert seen["argv"] == ["taskkill", "/PID", "4242", "/T", "/F"]
+    assert seen["kwargs"]["shell"] is False
+    assert "fallback" not in seen
 
 
 def test_server_toolchain_status_records_only_safe_result(monkeypatch):

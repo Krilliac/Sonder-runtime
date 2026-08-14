@@ -8,6 +8,8 @@ or caller-controlled arguments.
 """
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -69,19 +71,58 @@ def _safe_output(text: str) -> str:
     return text
 
 
+def _terminate_process_tree(proc) -> None:
+    """Best-effort teardown of the fixed probe and ordinary descendants."""
+    if proc.poll() is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" and pid:
+        # The PID originates from our own fixed-argv Popen call.  `/T` covers
+        # a wrapper's ordinary helper children, avoiding a timeout that only
+        # kills the parent while its spawned work continues.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+                shell=False,
+            )
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    elif pid:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            return
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def _run_bounded(argv: list[str]) -> tuple[str, str]:
     """Run fixed argv while retaining at most one shared pipe-output budget."""
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=sonder_logging.child_environment(),
-        shell=False,
-    )
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "env": sonder_logging.child_environment(),
+        "shell": False,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(argv, **kwargs)
     chunks: list[str] = []
     size = 0
     lock = threading.Lock()
@@ -116,18 +157,18 @@ def _run_bounded(argv: list[str]) -> tuple[str, str]:
         while proc.poll() is None:
             if overflow.is_set():
                 outcome = "output_limit"
-                proc.kill()
+                _terminate_process_tree(proc)
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 outcome = "timeout"
-                proc.kill()
+                _terminate_process_tree(proc)
                 break
             time.sleep(min(0.02, remaining))
         proc.wait(timeout=1)
     finally:
         if proc.poll() is None:
-            proc.kill()
+            _terminate_process_tree(proc)
             proc.wait(timeout=1)
         for reader in readers:
             reader.join(timeout=1)
