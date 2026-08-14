@@ -36,6 +36,23 @@ def test_banned_account_cannot_login_or_authenticate():
         admin_auth.login(conn, "user1", "password123")
 
 
+def test_ban_revokes_existing_sessions_even_after_unban():
+    conn = memory_store.connect(":memory:")
+    admin_auth.register(conn, "user1", "password123")
+    token, _ = admin_auth.login(conn, "user1", "password123")
+
+    admin_auth.set_account(conn, "user1", banned=True)
+    admin_auth.set_account(conn, "user1", banned=False)
+
+    # Unbanning permits a new login, but it must never revive a bearer token
+    # issued before the administrative ban.
+    assert admin_auth.authenticate(conn, token) is None
+    fresh_token, account = admin_auth.login(conn, "user1", "password123")
+    assert fresh_token != token
+    assert account["username"] == "user1"
+    assert admin_auth.authenticate(conn, fresh_token)["username"] == "user1"
+
+
 def test_rate_limit_blocks_free_tier_after_limit():
     conn = memory_store.connect(":memory:")
     account = admin_auth.register(conn, "user1", "password123")

@@ -287,6 +287,16 @@ def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
     if assignments:
         values.append(username)
         conn.execute("UPDATE accounts SET %s WHERE username=?" % ", ".join(assignments), values)
+        # A ban must terminate already-issued credentials, not merely make
+        # them temporarily unusable.  Otherwise unbanning an account silently
+        # resurrects every bearer token that existed before the ban.  Keep the
+        # account change and revocation in the same transaction so another
+        # connection cannot observe an unbanned account with a live old token.
+        if changes.get("banned"):
+            conn.execute(
+                "UPDATE account_sessions SET revoked=1 WHERE username=? AND revoked=0",
+                (username,),
+            )
         conn.commit()
     return public_account(conn, username)
 
