@@ -2163,18 +2163,24 @@ def _chat_completion_object(
     return obj
 
 
-def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None):
+def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
+           usage=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        "choices": (
+            [] if usage is not None and not delta and finish_reason is None else
+            [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+        ),
     }
     if elapsed_ms is not None:
         obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
     if receipt:
         obj["sonder_receipt"] = receipt
+    if usage is not None:
+        obj["usage"] = usage
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -3099,6 +3105,31 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
+        include_stream_usage = False
+        if "stream_options" in req:
+            stream_options = req["stream_options"]
+            if not isinstance(stream_options, dict):
+                record_early_chat_metric("invalid_stream_options")
+                self._send_json_payload(
+                    {"error": {
+                        "message": "stream_options must be an object",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            include_usage = stream_options.get("include_usage", False)
+            if not isinstance(include_usage, bool):
+                record_early_chat_metric("invalid_stream_options")
+                self._send_json_payload(
+                    {"error": {
+                        "message": "stream_options.include_usage must be a boolean",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            include_stream_usage = include_usage
         model = req.get("model", "sonder")
         if not isinstance(model, str):
             record_early_chat_metric("invalid_model")
@@ -3383,6 +3414,7 @@ class Handler(BaseHTTPRequestHandler):
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,
                 receipt=receipt,
+                usage=_chat_usage(activity_response) if include_stream_usage else None,
             )
             self._record_chat_completion_metric(
                 _lifecycle, "ok" if streamed else "cancelled", request_started,
@@ -3411,7 +3443,8 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, elapsed_ms=None):
         self._send_json_payload(obj, elapsed_ms=elapsed_ms)
 
-    def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None):
+    def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None,
+                     usage=None):
         iid = iid or uuid.uuid4().hex[:12]
         self.send_response(200)
         self._cors()
@@ -3434,6 +3467,8 @@ class Handler(BaseHTTPRequestHandler):
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
                 receipt=receipt,
             ).encode("utf-8"))
+            if usage is not None:
+                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
             return True
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
