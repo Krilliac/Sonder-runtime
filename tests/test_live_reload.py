@@ -113,6 +113,67 @@ def test_reload_removal_drops_stale_module_symbols(monkeypatch, tmp_path):
         live_reload._ERRORS.pop(module_name, None)
 
 
+def test_reload_preserves_only_explicitly_guarded_private_state(monkeypatch, tmp_path):
+    module_name = "live_reload_preserved_state_mod"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text(
+        'if "_STATE" not in globals():\n    _STATE = []\nVALUE = 1\n',
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        original = importlib.import_module(module_name)
+        original._STATE.append("kept")
+        live_reload.reload_changed_modules([module_name])
+
+        module_path.write_text(
+            'if "_STATE" not in globals():\n    _STATE = []\nVALUE = 2\n',
+            encoding="utf-8",
+        )
+        future = time.time() + 2
+        os.utime(module_path, (future, future))
+
+        refreshed = live_reload.reload_changed_modules([module_name])[module_name]
+        assert refreshed.VALUE == 2
+        assert refreshed._STATE is original._STATE
+        assert refreshed._STATE == ["kept"]
+    finally:
+        sys.modules.pop(module_name, None)
+        live_reload._MTIMES.pop(module_name, None)
+        live_reload._SIGNATURES.pop(module_name, None)
+        live_reload._ERRORS.pop(module_name, None)
+
+
+def test_reload_rebinds_existing_importer_module_references(monkeypatch, tmp_path):
+    dependency_name = "live_reload_imported_dependency"
+    importer_name = "live_reload_existing_importer"
+    dependency_path = tmp_path / (dependency_name + ".py")
+    dependency_path.write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / (importer_name + ".py")).write_text(
+        "import %s\n" % dependency_name, encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        dependency = importlib.import_module(dependency_name)
+        importer = importlib.import_module(importer_name)
+        assert getattr(importer, dependency_name) is dependency
+        live_reload.reload_changed_modules([dependency_name])
+
+        dependency_path.write_text("VALUE = 2\n", encoding="utf-8")
+        future = time.time() + 2
+        os.utime(dependency_path, (future, future))
+
+        refreshed = live_reload.reload_changed_modules([dependency_name])[dependency_name]
+        assert getattr(importer, dependency_name) is refreshed
+        assert getattr(importer, dependency_name).VALUE == 2
+    finally:
+        sys.modules.pop(importer_name, None)
+        sys.modules.pop(dependency_name, None)
+        live_reload._MTIMES.pop(dependency_name, None)
+        live_reload._SIGNATURES.pop(dependency_name, None)
+        live_reload._ERRORS.pop(dependency_name, None)
+
+
 def test_server_rebinds_reloaded_modules(monkeypatch):
     import server
 
