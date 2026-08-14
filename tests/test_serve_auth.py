@@ -26,6 +26,37 @@ def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
 
+def test_admin_account_rejection_is_structured_http_error(monkeypatch):
+    """A rejected admin mutation must not be represented as a successful POST.
+
+    The REPL/MCP wrapper deliberately returns legacy ``ERROR:`` text, but the
+    direct HTTP route is consumed by programmatic clients and must preserve a
+    non-2xx status plus the standard error object.
+    """
+    admin = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "admin", "role": "admin"},
+    }
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda _self: admin)
+    monkeypatch.setattr(
+        ts.server, "admin_set_account",
+        lambda **_kwargs: "ERROR: unknown account",
+    )
+    request = json.dumps({"username": "missing"}).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/sonder/admin/account", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body) == {
+        "error": {"message": "unknown account", "type": "invalid_request"},
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
 def test_query_string_does_not_change_openai_route_or_terminal_metric(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
