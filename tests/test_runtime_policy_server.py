@@ -78,7 +78,7 @@ def test_guarded_update_requires_installed_local_model(
     def offline_inventory():
         raise OSError("Ollama is offline")
 
-    monkeypatch.setattr(server, "_runtime_installed_models", offline_inventory)
+    monkeypatch.setattr(server, "_runtime_installed_model_records", offline_inventory)
     optional_unset = server.runtime_policy_update(
         local_models_json='{"reasoning":""}',
     )
@@ -225,7 +225,12 @@ def test_runtime_embedding_binding_uses_show_when_tags_omit_capabilities(
     result = server.runtime_policy_update(embedding_model="bge-m3:latest")
 
     assert "embeddings: bge-m3:latest" in result
-    assert show_calls == [("/api/show", {"name": "bge-m3:latest"}, 30)]
+    assert show_calls == [
+        ("/api/show", {"name": "bge-m3:latest"}, 30),
+        # The post-update status now checks that restored/seeding policy is
+        # genuinely embedding-capable before printing readiness.
+        ("/api/show", {"name": "bge-m3:latest"}, 30),
+    ]
 
 
 def test_runtime_slash_applies_embedding_with_other_bindings(monkeypatch):
@@ -265,8 +270,11 @@ def test_runtime_policy_data_reports_missing_models(
     })
     monkeypatch.setattr(
         server,
-        "_runtime_installed_models",
-        lambda: {"qwen2.5:3b", "sonder:latest"},
+        "_runtime_installed_model_records",
+        lambda: (
+            ("qwen2.5:3b", {"capabilities": ["completion"]}),
+            ("sonder:latest", {"capabilities": ["completion"]}),
+        ),
     )
 
     data = server.runtime_policy_data()
@@ -303,6 +311,61 @@ def test_runtime_model_readiness_distinguishes_core_memory_and_optional_models()
     ]
 
 
+def test_runtime_model_readiness_requires_capability_compatible_models():
+    data = {
+        "local_models": {
+            "fast": "nomic-embed-text:latest",
+            "code": "sonder:latest",
+            "general": "sonder:latest",
+            "reasoning": "",
+            "vision": "",
+        },
+        "embedding_model": "sonder:latest",
+        "missing_models": [],
+        "capability_errors": {
+            "fast": "embedding-only capability",
+            "embedding": "does not declare embedding capability",
+        },
+    }
+
+    assert server._runtime_model_readiness_lines(data) == [
+        "  readiness:",
+        "    local chat/code: requires fast=nomic-embed-text:latest (embedding-only capability)",
+        "    semantic memory: requires embedding model sonder:latest (does not declare embedding capability)",
+        "    reasoning: not configured (optional)",
+        "    vision: not configured (optional)",
+    ]
+
+
+def test_runtime_policy_data_marks_seeded_nonchat_models_not_ready(
+    isolated_runtime_policy, monkeypatch,
+):
+    runtime_policy.load(create=True)
+    # ``runtime_policy.update`` models an already-restored/seeding policy; it
+    # intentionally bypasses the interactive validation route this status
+    # projection is meant to audit.
+    runtime_policy.update(
+        local_models={"fast": "nomic-embed-text:latest"},
+        embedding_model="sonder:latest",
+    )
+    monkeypatch.setattr(
+        server,
+        "_runtime_installed_model_records",
+        lambda: (
+            ("nomic-embed-text:latest", {"capabilities": ["embedding"]}),
+            ("sonder:latest", {"capabilities": ["completion"]}),
+        ),
+    )
+
+    data = server.runtime_policy_data()
+
+    assert data["missing_models"] == []
+    assert data["capability_errors"] == {
+        "fast": "embedding-only capability",
+        "embedding": "does not declare embedding capability",
+    }
+
+
 def test_runtime_model_readiness_is_unknown_without_inventory():
     assert server._runtime_model_readiness_lines({
         "inventory_error": "OSError: offline",
@@ -315,10 +378,16 @@ def test_runtime_policy_status_includes_live_model_readiness(
     policy = runtime_policy.load(create=True)
     runtime_policy.update(local_models={"reasoning": "", "vision": ""})
     monkeypatch.setattr(
-        server, "_runtime_installed_models",
-        lambda: {
-            *policy["local_models"].values(), policy["embedding_model"],
-        },
+        server,
+        "_runtime_installed_model_records",
+        lambda: tuple(
+            (model, {"capabilities": ["embedding"]})
+            if model == policy["embedding_model"]
+            else (model, {"capabilities": ["completion"]})
+            for model in {
+                *policy["local_models"].values(), policy["embedding_model"],
+            }
+        ),
     )
 
     status = server.runtime_policy_status()
