@@ -84,6 +84,7 @@ ollama pull <general-model>
 ollama pull <embedding-model>
 # bind tiers -> models, lanes -> tiers (developer/admin auth)
 /runtime set fast=<fast-model> code=<coder-model> general=<general-model>
+/runtime set embedding=<embedding-model>
 /runtime set router=fast workbench=code autopilot=code review=general
 ```
 
@@ -93,6 +94,13 @@ empty value to leave one unset on a smaller collection, and the router degrades
 to `general`/`code` automatically — nothing breaks. `oracle` remains
 consent-gated escalation, not a policy tier. Full procedure:
 [assemble-model-collection](../runbooks/assemble-model-collection.md).
+
+`embedding` is deliberately a separate local-only binding, not a chat tier.
+Sonder accepts it only when the live Ollama catalog declares embedding
+capability. Changing it affects **future** vectors; stored lessons and sessions
+keep their original model/revision provenance until the operator explicitly runs
+`/embeddings apply` to refresh them. This prevents a model swap from silently
+mixing incompatible vector spaces.
 
 ## 5. Scaling up: multi-GPU
 
