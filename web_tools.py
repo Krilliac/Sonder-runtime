@@ -119,6 +119,15 @@ _UPCOMING_RECENCY_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
+# Exact conversational wrappers that carry no provider-search meaning.  Keep
+# this narrow and only strip the opening form: a literal phrase mentioned in a
+# question or quoted content must remain untouched.
+_EXPLICIT_SEARCH_PREFIX = re.compile(
+    r"^\s*(?:please\s+)?(?:web\s+search|search\s+(?:the\s+)?web)"
+    r"\s+(?:to\s+)?(?:find|for)\s+",
+    re.IGNORECASE,
+)
+
 
 def build_search_query(prompt, intent_kind="research", now=None):
     """Construct a purposeful provider query from conversational phrasing.
@@ -630,6 +639,13 @@ def _search_query_variants(query):
     return variants[:4]
 
 
+def _provider_search_query(query):
+    """Remove one exact imperative wrapper before sending a provider query."""
+    original = str(query or "").strip()
+    cleaned = _EXPLICIT_SEARCH_PREFIX.sub("", original, count=1).strip()
+    return cleaned or original
+
+
 def _search_relevance(query, results):
     def normalized_terms(value):
         normalized = set()
@@ -733,6 +749,7 @@ def web_search(query, limit=5, timeout=10):
     if not query:
         raise ValueError("empty search query")
     limit = max(1, min(int(limit or 5), 10))
+    provider_query_root = _provider_search_query(query)
     configured_endpoint = os.environ.get("SONDER_SEARCH_URL", "").strip()
     endpoints = (
         [configured_endpoint] if configured_endpoint
@@ -743,7 +760,7 @@ def web_search(query, limit=5, timeout=10):
     best_relevance = -1
     for endpoint in endpoints:
         provider_queries = (
-            [query] if configured_endpoint else _search_query_variants(query)
+            [provider_query_root] if configured_endpoint else _search_query_variants(provider_query_root)
         )
         for provider_query in provider_queries:
             url = endpoint.format(query=urllib.parse.quote_plus(provider_query))
@@ -773,7 +790,7 @@ def web_search(query, limit=5, timeout=10):
                 else:
                     results = _search_rows(text, url, limit)
                 if results:
-                    relevance, required = _search_relevance(query, results)
+                    relevance, required = _search_relevance(provider_query_root, results)
                     if relevance > best_relevance:
                         best_results = results
                         best_relevance = relevance

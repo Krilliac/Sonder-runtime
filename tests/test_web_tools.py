@@ -321,6 +321,22 @@ def test_web_search_rejects_weak_generic_fallback_for_local_intent(monkeypatch):
         web_tools.web_search("computer repair shops near 67215")
 
 
+def test_web_search_strips_exact_imperative_wrapper_for_provider(monkeypatch):
+    requested = []
+    page = b'''<html><a class="result__a" href="https://repair.example/">Computer repair shops</a></html>'''
+
+    def fake_request(url, timeout=10):
+        requested.append(url)
+        return page, "text/html"
+
+    monkeypatch.setattr(web_tools, "_request", fake_request)
+    results = web_tools.web_search("web search to find computer repair shops near 67215")
+
+    assert results
+    assert "computer+repair+shops+near+67215" in requested[0]
+    assert "web+search+to+find" not in requested[0]
+
+
 def test_format_search_results_empty():
     assert web_tools.format_search_results([]) == "(no results)"
 
