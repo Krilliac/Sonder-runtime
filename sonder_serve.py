@@ -828,10 +828,14 @@ class HTTPRequestError(Exception):
 
 
 def _strip_footer(text):
-    idx = text.find(server.FOOTER_PREFIX)
+    value = str(text or "")
+    idx = value.find(server.FOOTER_PREFIX)
     if idx == -1:
-        return text
-    return text[:idx]
+        return server._strip_activity_block(value)
+    # ``server.with_footer`` appends the activity block before its invisible
+    # interaction token. Terminal users receive that human-readable evidence;
+    # OpenAI-compatible `message.content` must remain only the model answer.
+    return server._strip_activity_block(value[:idx])
 
 
 def _strip_trace(text):
@@ -2129,11 +2133,30 @@ def _receipt_text(value):
     )
 
 
+def _chat_usage(response=None):
+    """Return bounded OpenAI usage fields from this request's activity span."""
+    try:
+        prompt = max(0, int((response or {}).get("tokens_in") or 0))
+        completion = max(0, int((response or {}).get("tokens_out") or 0))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        prompt = completion = 0
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+
+
 def _chat_completion_object(
     content, model="sonder", iid=None, reasoning="", elapsed_ms=None,
-    receipt=None,
+    receipt=None, activity_response=None,
 ):
     iid = iid or uuid.uuid4().hex[:12]
+    activity = server.activity_tracker.public_response(
+        activity_response, include_detail=False,
+    ) if isinstance(activity_response, dict) else (
+        server.activity_tracker.public_snapshot(include_detail=False) or {}
+    ).get("latest")
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion",
@@ -2144,10 +2167,8 @@ def _chat_completion_object(
             "message": {"role": "assistant", "content": content},
             "finish_reason": "stop",
         }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "sonder_activity": (
-            server.activity_tracker.public_snapshot(include_detail=False) or {}
-        ).get("latest"),
+        "usage": _chat_usage(activity_response),
+        "sonder_activity": activity,
     }
     # Mirrors sonder_activity: present only when there is something to show, so
     # clients can treat absence as "this deployment does not expose reasoning".
@@ -2162,18 +2183,24 @@ def _chat_completion_object(
     return obj
 
 
-def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None):
+def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
+           usage=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        "choices": (
+            [] if usage is not None and not delta and finish_reason is None else
+            [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+        ),
     }
     if elapsed_ms is not None:
         obj["sonder_elapsed_ms"] = max(0, int(elapsed_ms))
     if receipt:
         obj["sonder_receipt"] = receipt
+    if usage is not None:
+        obj["usage"] = usage
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -3132,6 +3159,31 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
+        include_stream_usage = False
+        if "stream_options" in req:
+            stream_options = req["stream_options"]
+            if not isinstance(stream_options, dict):
+                record_early_chat_metric("invalid_stream_options")
+                self._send_json_payload(
+                    {"error": {
+                        "message": "stream_options must be an object",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            include_usage = stream_options.get("include_usage", False)
+            if not isinstance(include_usage, bool):
+                record_early_chat_metric("invalid_stream_options")
+                self._send_json_payload(
+                    {"error": {
+                        "message": "stream_options.include_usage must be a boolean",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            include_stream_usage = include_usage
         model = req.get("model", "sonder")
         if not isinstance(model, str):
             record_early_chat_metric("invalid_model")
@@ -3317,10 +3369,10 @@ class Handler(BaseHTTPRequestHandler):
                         response_reasoning = turn.thinking
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                if structured_schema is None:
-                    content = server._append_activity(
-                        content, response=activity_response, replace=True,
-                    )
+                # OpenAI-compatible content is the answer only.  Observable
+                # execution data is returned separately in the bounded
+                # ``sonder_activity`` vendor extension, never appended where
+                # clients would replay it as assistant text.
                 _record_chat(
                     "assistant",
                     content,
@@ -3421,6 +3473,7 @@ class Handler(BaseHTTPRequestHandler):
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,
                 receipt=receipt,
+                usage=_chat_usage(activity_response) if include_stream_usage else None,
             )
             self._record_chat_completion_metric(
                 _lifecycle, "ok" if streamed else "cancelled", request_started,
@@ -3431,7 +3484,7 @@ class Handler(BaseHTTPRequestHandler):
                     _chat_completion_object(
                         content, model, iid=response_iid,
                         reasoning=response_reasoning, elapsed_ms=elapsed_ms,
-                        receipt=receipt,
+                        receipt=receipt, activity_response=activity_response,
                     ), elapsed_ms=elapsed_ms,
                 )
             finally:
@@ -3449,7 +3502,8 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, elapsed_ms=None):
         self._send_json_payload(obj, elapsed_ms=elapsed_ms)
 
-    def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None):
+    def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None,
+                     usage=None):
         iid = iid or uuid.uuid4().hex[:12]
         try:
             self.send_response(200)
@@ -3472,6 +3526,8 @@ class Handler(BaseHTTPRequestHandler):
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
                 receipt=receipt,
             ).encode("utf-8"))
+            if usage is not None:
+                self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
             return True
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):

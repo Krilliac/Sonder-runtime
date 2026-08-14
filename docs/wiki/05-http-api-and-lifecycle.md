@@ -13,7 +13,7 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /version` | loopback or key | Build version + commit. |
 | `GET /metrics` | loopback or key | Prometheus exposition (or a disabled comment). |
 | `POST /v1/chat/completions` | key | OpenAI-compatible chat. |
-| `GET /v1/models` | key | Advertised tiers. |
+| `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
 | `GET /v1/sonder/status` | key | Rich runtime/stats snapshot. |
@@ -21,6 +21,12 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the
 reverse proxy restricts those paths to loopback upstream).
+
+`GET /v1/models` always includes the `sonder` runtime route and configured
+tier IDs. It also includes exact installed/discovered models that declare a
+chat capability; embedding- or vision-only entries are omitted. Cloud models
+appear only after the operator enables cloud use, so clients must treat the
+response as the live allowlist rather than a static catalog.
 
 ## Chat request
 
@@ -35,10 +41,22 @@ POST /v1/chat/completions
 A full chat UI owns conversation state (resends the transcript). A thin
 client that names a `session` but sends only the current message gets
 server-side history rebuilt from the stored session — so both contracts
-work. The reply carries an activity footer of observable actions.
+work. `choices[0].message.content` contains only the answer; bounded
+observable execution metadata is returned separately as `sonder_activity`.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
 `session`, `project`, `context_size`, and the consented location fields.
+
+Non-streaming responses populate standard OpenAI `usage` from the current
+request's observed model counters. For an SSE response, request an additional
+terminal usage chunk with:
+
+```json
+{ "stream": true, "stream_options": { "include_usage": true } }
+```
+
+That final chunk has an empty `choices` array and a `usage` object. It appears
+immediately before `[DONE]`; ordinary streams remain unchanged.
 
 `response_format` is available only for an isolated direct-model turn:
 

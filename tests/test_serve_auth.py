@@ -51,6 +51,114 @@ def test_query_string_does_not_change_openai_route_or_terminal_metric(monkeypatc
     assert json.loads(models_body)["object"] == "list"
 
 
+def test_chat_content_excludes_terminal_activity_block(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    answer = (
+        "pin-ok\n\n=== ACTIVITY (observable work) ===\n"
+        "response: complete\n=== END ACTIVITY ===\n\n"
+        + ts.server.FOOTER_PREFIX + "r000001]"
+    )
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: answer)
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    content = json.loads(body)["choices"][0]["message"]["content"]
+    assert content == "pin-ok"
+    assert "=== ACTIVITY" not in content
+
+
+def test_chat_usage_comes_from_the_current_request_span(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def answer(*_args, **_kwargs):
+        ts.server.activity_tracker.record_model_call(
+            "model:latest", tokens_in=23, tokens_out=5,
+        )
+        return "answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["usage"] == {
+        "prompt_tokens": 23, "completion_tokens": 5, "total_tokens": 28,
+    }
+
+
+def test_chat_completion_activity_comes_from_its_own_span(monkeypatch):
+    monkeypatch.setattr(
+        ts.server.activity_tracker, "public_snapshot",
+        lambda **_kwargs: {"latest": {"id": "r_other"}},
+    )
+    activity = {
+        "id": "r_current", "label": "chat:sonder", "surface": "http",
+        "model": "sonder", "status": "complete", "started_ts": "now",
+        "events": [], "files": [],
+    }
+
+    payload = ts._chat_completion_object("answer", activity_response=activity)
+
+    assert payload["sonder_activity"]["id"] == "r_current"
+
+
+def test_stream_options_include_current_request_usage_in_terminal_chunk(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def answer(*_args, **_kwargs):
+        ts.server.activity_tracker.record_model_call(
+            "model:latest", tokens_in=23, tokens_out=5,
+        )
+        return "answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "sonder", "stream": True,
+        "stream_options": {"include_usage": True},
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    chunks = [
+        json.loads(line[6:]) for line in body.decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert chunks[-1]["choices"] == []
+    assert chunks[-1]["usage"] == {
+        "prompt_tokens": 23, "completion_tokens": 5, "total_tokens": 28,
+    }
+
+
 @pytest.mark.parametrize("model", [None, 7, True, {}, []])
 def test_chat_rejects_non_string_model_before_selector_routing(monkeypatch, model):
     monkeypatch.setattr(ts, "API_KEY", "")
@@ -94,6 +202,37 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
     assert status == 400
     assert json.loads(body)["error"] == {
         "message": "stream must be a boolean", "type": "invalid_request",
+    }
+    assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
+
+
+@pytest.mark.parametrize(
+    ("stream_options", "message"),
+    [
+        (None, "stream_options must be an object"),
+        ([], "stream_options must be an object"),
+        ({"include_usage": "yes"}, "stream_options.include_usage must be a boolean"),
+    ],
+)
+def test_chat_rejects_invalid_stream_options_before_response_routing(
+        monkeypatch, stream_options, message):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = json.dumps({
+        "model": "sonder", "stream": True, "stream_options": stream_options,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": message, "type": "invalid_request",
     }
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
