@@ -488,6 +488,32 @@ def test_chat_request_strips_inline_reasoning_tags_from_model_content(monkeypatc
     assert "<think>" not in content
 
 
+def test_chat_request_strips_nested_inline_reasoning_without_tail_leak(monkeypatch):
+    private = "outer <think>inner</think> still-private"
+    monkeypatch.setattr(
+        server, "_post", lambda *args, **kwargs: {
+            "message": {"content": "<think>%s</think>Final answer." % private},
+        },
+    )
+
+    _out, content = server._chat_request({}, model="local")
+
+    assert content == "Final answer."
+    assert private not in content
+
+
+def test_chat_request_retries_thinking_only_inline_length_completion(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server, "_post", lambda *args, **kwargs: calls.append(kwargs.get("payload")) or {
+            "done_reason": "length", "message": {"content": "<think>private</think>"},
+        },
+    )
+    with pytest.raises(server.ModelCallError, match="no assistant content"):
+        server._chat_request({"options": {"num_predict": 8}}, model="local")
+    assert len(calls) == 2
+
+
 def test_chat_request_keeps_nonleading_literal_think_tags(monkeypatch):
     literal = "Use the literal <think> tag in this XML example."
     monkeypatch.setattr(
