@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -36,6 +37,30 @@ def _authorize_pytest_tmp_roots(tmp_path_factory, monkeypatch):
 def test_detect_test_framework_conftest(tmp_path):
     (tmp_path / "conftest.py").write_text("", encoding="utf-8")
     assert harness_tools._detect_test_framework(tmp_path) == "pytest"
+
+
+def test_child_environment_removes_runtime_secrets_and_compiler_overrides(monkeypatch):
+    """Repository-controlled developer commands must not receive host gates."""
+    monkeypatch.setenv("SONDER_API_KEY", "api-secret-for-child")
+    monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "approval-secret-for-child")
+    monkeypatch.setenv("SONDER_FILE_BYPASS", "1")
+    monkeypatch.setenv("SONDER_ISOLATED_APPROVAL_CODE", "isolated-execute-secret")
+    monkeypatch.setenv("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "isolated-write-secret")
+    monkeypatch.setenv("CC", "unexpected-compiler")
+    monkeypatch.setenv("CXX", "unexpected-cxx")
+    monkeypatch.setenv("SAFE_BUILD_FLAG", "preserved")
+
+    env = harness_tools._child_env()
+
+    assert "SONDER_API_KEY" not in env
+    assert "SONDER_FILE_APPROVAL_CODE" not in env
+    assert "SONDER_FILE_BYPASS" not in env
+    assert "SONDER_ISOLATED_APPROVAL_CODE" not in env
+    assert "SONDER_ISOLATED_WRITE_APPROVAL_CODE" not in env
+    assert "CC" not in env
+    assert "CXX" not in env
+    assert env["SAFE_BUILD_FLAG"] == "preserved"
+    assert os.environ["SONDER_API_KEY"] == "api-secret-for-child"
 
 
 def test_detect_test_framework_pyproject(tmp_path):
