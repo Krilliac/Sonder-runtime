@@ -85,6 +85,7 @@ def test_self_heal_repairs_invalid_json_configs(monkeypatch, tmp_path):
     assert not any(i.code.endswith("_invalid") for i in after)
     assert json.loads((tmp_path / "emotion_vectors.json").read_text(encoding="utf-8"))
     assert json.loads((tmp_path / "workflows.json").read_text(encoding="utf-8"))
+    assert list(tmp_path.glob("workflows.json.bak-*"))
 
 
 def test_server_self_heal_tools(monkeypatch, tmp_path):

@@ -111,6 +111,15 @@ def _resolve_path(path=None):
     return _workspace_path(candidate)
 
 
+def resolved_path(path=None):
+    """Return the validated absolute path used by workflow operations.
+
+    Callers that create adjacent recovery artifacts must use this rather than
+    the user-facing, possibly relative ``default_path()`` value.
+    """
+    return _resolve_path(path)
+
+
 def _read_workflows_file(path):
     if not os.path.exists(path):
         return {}

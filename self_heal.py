@@ -126,7 +126,7 @@ def _repair_file_backed_config(issue):
         emotion_vectors.write_vectors(emotion_vectors.DEFAULT_VECTORS)
         return "rewrote emotion vectors defaults%s" % ((" after backup %s" % backup) if backup else "")
     if issue.code == "workflows_invalid":
-        path = workflow_store.default_path()
+        path = workflow_store.resolved_path(workflow_store.default_path())
         backup = _backup_file(path)
         workflow_store.write_workflows(workflow_store.DEFAULT_WORKFLOWS)
         return "rewrote workflow defaults%s" % ((" after backup %s" % backup) if backup else "")
