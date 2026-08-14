@@ -673,6 +673,14 @@ def _latest_repl_turn_metrics(session_id="", *, surfaces=("terminal/mcp",)):
 def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
                     width=None, model_override=None):
     """Live model, runtime, context and last-turn status for the composer."""
+    # Resolve the live execution state once. A title that is subsequently
+    # compacted must keep this lanes/agents snapshot rather than falling back
+    # to compact-mode zero values.
+    if status is None:
+        try:
+            status = server.execution_status_data()
+        except Exception:
+            status = None
     resolved_tier = str(tier or "code")
     try:
         model = str(model_override or server.TIERS.get(resolved_tier) or "unknown")
@@ -712,7 +720,23 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
             parts.append(("M%s T%s" if compact else "calls %sM/%sT") % (
                 _compact_count(calls), _compact_count(tools),
             ))
-    return (" | " if compact else "  |  ").join(parts)
+    title = (" | " if compact else "  |  ").join(parts)
+    # A wide terminal can still have a long active model tag plus a complete
+    # metrics suffix.  The frame truncates titles rather than wrapping them,
+    # which previously left an unhelpful clipped tail such as ``ca-``.  Switch
+    # to the compact vocabulary whenever the actual composed title will not
+    # fit, not merely below one fixed terminal-width threshold.
+    if not compact and width is not None:
+        try:
+            title_budget = max(0, int(width) - 4)
+        except (TypeError, ValueError, OverflowError):
+            title_budget = 0
+        if title_budget and _visible_len(title) > title_budget:
+            return _composer_title(
+                tier, status, context=context, last_turn=last_turn,
+                width=88, model_override=model_override,
+            )
+    return title
 
 
 def _composer_frame_width():
