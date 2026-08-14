@@ -301,6 +301,25 @@ def _state_principal(context):
     return "local-open"
 
 
+def _request_idempotency_key(context, endpoint, supplied_key):
+    """Return an opaque idempotency key bound to one HTTP principal.
+
+    Idempotency keys are client-chosen and the lifecycle cache is process-wide.
+    Reusing a key across two hosted accounts must not replay one administrator's
+    response to another, even when they happen to choose the same key.  Hashing
+    also keeps the cache bounded by a fixed-size key rather than retaining a
+    potentially large HTTP header verbatim.  A missing key preserves the
+    lifecycle's existing non-idempotent behavior.
+    """
+    supplied_key = str(supplied_key or "").strip()
+    if not supplied_key:
+        return ""
+    material = "http-idempotency\0%s\0%s\0%s" % (
+        str(endpoint or ""), _state_principal(context), supplied_key,
+    )
+    return "hi-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _task_account_scope(context):
     """Return an opaque durable task boundary for an authenticated account.
 
@@ -2460,7 +2479,10 @@ class Handler(BaseHTTPRequestHandler):
             }
 
         payload = lifecycle.idempotent(
-            self.headers.get("Idempotency-Key", ""), start_drain
+            _request_idempotency_key(
+                context, "/v1/admin/drain", self.headers.get("Idempotency-Key", ""),
+            ),
+            start_drain,
         )
         self._send_json_payload(payload, status=202)
 
