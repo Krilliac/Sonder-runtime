@@ -2020,6 +2020,43 @@ def test_fanout_cancel_after_dispatch_fence_stops_transport_and_keeps_truthful_r
     assert receipt["failures"][0]["failure_class"] == "execution_uncertain"
 
 
+def test_fanout_revoked_cloud_opt_in_cancels_before_provider_send(monkeypatch, tmp_path):
+    """A policy revocation after claim must fence the cloud retry/send path."""
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+    ))
+    run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
+    provider_calls = []
+
+    def fake_make(_model, *_args, **kwargs):
+        # Simulate the operator revoking consent after invoke's initial
+        # admission check but before the provider path's final fence.
+        monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
+
+        def generate(_prompt):
+            if kwargs["cancel_check"]():
+                raise server.ModelCallError("cancelled", "model call cancelled before another request was sent")
+            provider_calls.append(True)
+            return "answer"
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+
+    with server.activity_tracker.response_span("chat", "fanout") as activity:
+        receipt = server._execute_fanout_run(run["id"])
+
+    assert provider_calls == []
+    assert receipt["models_answered"] == 0
+    assert receipt["models_failed"] == 0
+    assert receipt["models_skipped"] == 1
+    assert receipt["skipped"][0]["model"] == "remote:cloud"
+    assert server.fanout_store.resume_run(run["id"]) is not None
+    event = next(event for event in activity["events"] if event["kind"] == "model_fanout")
+    assert event["cloud_model_calls"] == 0
+
+
 def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("use model phi4: /run echo should-not-run", session="none")
 

@@ -23492,12 +23492,31 @@ def _execute_fanout_run(run_id):
         exc = None
         generate = None
         try:
+            # ``_post_model`` consults this gate immediately before every
+            # provider attempt (including its bounded retry path).  The
+            # earlier check above makes a disabled receipt visibly skipped,
+            # while this closure closes the small check-to-send race: an
+            # operator revoking cloud opt-in after a worker claimed a row must
+            # prevent that sealed prompt from leaving the host.  The immutable
+            # row target is still passed verbatim and cloud fallback remains
+            # disabled, so a policy/default change can neither broaden nor
+            # substitute the selected route.
+            def dispatch_cancelled():
+                if not fanout_store.worker_can_dispatch(run_id, owner_id):
+                    return True
+                return bool(
+                    _is_cloud_model_name(model)
+                    and (not run.get("cloud_opt_in") or not cloud_allowed())
+                )
+
             generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
                                       timeout=limits["timeout"],
                                       allow_cloud_fallback=False,
-                                      cancel_check=lambda: not fanout_store.worker_can_dispatch(
-                                          run_id, owner_id,
-                                      ))
+                                      cancel_check=dispatch_cancelled)
+            # A consent or ownership fence which wins before the durable
+            # handoff has made no provider request, so it remains resumable.
+            if dispatch_cancelled():
+                return row, "skipped", "", "cloud access disabled before provider dispatch", 0, None, {}
             # Persist a host-owned handoff fence immediately before invoking
             # the provider closure.  Cancellation can still stop the transport
             # if it wins before its own pre-send check, but after this point we
@@ -23526,6 +23545,25 @@ def _execute_fanout_run(run_id):
                 metadata = dict(metadata)
                 metadata["tokens_in"] = usage.get("tokens_in", 0)
                 metadata["tokens_out"] = usage.get("tokens_out", 0)
+            # A cloud-policy revocation that wins the final pre-send fence is
+            # not a provider failure and has not made a metered request. Keep
+            # the row resumable by the normal skipped-result path rather than
+            # forcing an operator to opt into retrying a failed cloud call.
+            if (
+                isinstance(caught, ModelCallError)
+                and caught.kind == "cancelled"
+                and _is_cloud_model_name(model)
+                and (not run.get("cloud_opt_in") or not cloud_allowed())
+            ):
+                return (
+                    row,
+                    "skipped",
+                    "",
+                    "cloud access disabled before provider dispatch",
+                    int((time.monotonic() - started) * 1000),
+                    None,
+                    metadata or {},
+                )
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
             if (
