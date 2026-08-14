@@ -124,12 +124,13 @@ def test_fanout_recent_display_is_content_free_and_reports_recovery_ids():
         "run_id": "fan-123", "status": "completed", "scope": "cloud",
         "models_selected": 4, "models_answered": 3,
         "models_failed": 1, "models_unknown": 1, "models_pending": 2,
-        "models_running": 1, "models_skipped": 0,
+        "models_running": 1, "models_skipped": 0, "total_elapsed_ms": 12_340,
         "prompt": "must not appear", "answer": "must not appear",
     }]})
 
     assert "fan-123" in text and "3/4 answered" in text and "1 unknown" in text
     assert "2 pending" in text and "1 running" in text
+    assert "12.34s" in text
     assert "must not appear" not in text
     assert "model_fanout_status" in text
 

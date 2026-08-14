@@ -1021,11 +1021,16 @@ def _format_fanout_summaries(payload):
         return "no durable fanout runs"
     lines = ["recent fanouts (%d)" % len(rows)]
     for row in rows:
+        elapsed_ms = row.get("total_elapsed_ms")
+        try:
+            elapsed = "  %s" % _elapsed_label(max(0, int(elapsed_ms)))
+        except (TypeError, ValueError, OverflowError):
+            elapsed = ""
         lines.append(
             "  %(run_id)s  %(status)s  %(scope)s  "
             "%(models_answered)s/%(models_selected)s answered  "
             "%(models_failed)s failed  %(models_unknown)s unknown  "
-            "%(models_pending)s pending  %(models_running)s running  %(models_skipped)s skipped" % {
+            "%(models_pending)s pending  %(models_running)s running  %(models_skipped)s skipped%(elapsed)s" % {
                 "run_id": str(row.get("run_id") or "unknown"),
                 "status": str(row.get("status") or "unknown"),
                 "scope": str(row.get("scope") or "unknown"),
@@ -1036,6 +1041,7 @@ def _format_fanout_summaries(payload):
                 "models_pending": int(row.get("models_pending") or 0),
                 "models_running": int(row.get("models_running") or 0),
                 "models_skipped": int(row.get("models_skipped") or 0),
+                "elapsed": elapsed,
             }
         )
     lines.append("  use /model_fanout_status run_id=<id> for an authorized full receipt")
