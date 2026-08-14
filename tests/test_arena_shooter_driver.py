@@ -11,6 +11,7 @@ from pathlib import Path
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "codegen-arena-shooter"
 DRIVER = EXAMPLE / "build_with_sonder.py"
+SKELETON_DRIVER = EXAMPLE / "build_skeleton.py"
 
 
 def _driver_module():
@@ -65,3 +66,24 @@ def test_model_headroom_allows_a_small_model_with_live_reserves() -> None:
     ok, _detail = driver._model_headroom_report({"qwen2.5-coder:7b": 4.7}, profile)
 
     assert ok
+
+
+def test_skeleton_unknown_only_fails_before_generation() -> None:
+    """The one-body driver must not turn a typo into a clean ``0 / 0`` run."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKELETON_DRIVER),
+            "--only",
+            "NotARealSource.cs",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        cwd=EXAMPLE,
+    )
+
+    assert result.returncode == 2
+    assert "no such file in skeleton: NotARealSource.cs" in result.stdout
+    assert "available files:" in result.stdout
+    assert "GameMap.cs" in result.stdout
