@@ -113,9 +113,11 @@ a standardized model capability or safety specification: inspect the published
 base model, Modelfile, quantization, license, and behavior before adopting one.
 **Abliterated** usually describes a model whose refusal/alignment behavior was
 modified, but the exact method and effect are likewise publisher-specific. In
-both cases, downloading a tag changes only the weights available to Ollama. It
-does not grant new Sonder tools, relax workspace containment, bypass permission
-rules, or permit network/desktop side effects; those remain host-enforced.
+both cases, downloading a tag can install the publisher's weights together
+with its Modelfile-defined template, system prompt, parameters, and other
+model-side defaults. It does not grant new Sonder tools, relax workspace
+containment, bypass permission rules, or permit network/desktop side effects;
+those remain host-enforced.
 
 ## 4. Residency: you usually cannot hold them all
 
