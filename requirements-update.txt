@@ -8,6 +8,6 @@
 # Pin the exact tested releases for release builds; a bump requires re-running
 # the adversarial acceptance suite (tests/production/test_tuf_publisher.py and
 # the archive-safety / rollback / freeze tests) before shipping (SPEC-4 §16).
-tuf==6.0.0
-cryptography==45.0.7
+tuf==7.0.0
+cryptography==50.0.0
 securesystemslib==1.4.0
