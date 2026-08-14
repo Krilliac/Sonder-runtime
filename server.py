@@ -1859,6 +1859,17 @@ def _serve_target(tier, strict):
     return None, False, True, None
 
 
+def _allow_cloud_fallback_for_target(tier_label):
+    """Whether an availability fallback may replace this resolved target.
+
+    A configured cloud *tier* is an operator-selected route and can use its
+    documented K3-to-K2.7 availability fallback. A ``model:<name>`` label came
+    from an exact user-supplied live-catalog selector, so it must never spend
+    tokens on, or return a response from, a different model.
+    """
+    return not str(tier_label or "").casefold().startswith("model:")
+
+
 def _control_history_messages(history, prompt):
     messages = []
     for msg in history or []:
@@ -3076,7 +3087,8 @@ def _capture_preferences(conn, text, source_interaction=None, scope="global"):
 
 def _answer(conn, prompt, model, effective_system, temperature, num_predict,
             num_ctx, session_id, project, history, trace=False,
-            tier="sonder", cloud=False, augment=True):
+            tier="sonder", cloud=False, augment=True,
+            allow_cloud_fallback=True):
     """Core answer path shared by the tool and serve: (optionally) augment
     (facts/lessons/recall), generate with `history`, capture. Returns
     (response, interaction_id, trace_ctx).
@@ -3087,8 +3099,10 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  answers clean), but the turn is still captured (with its task
                  embedding) so record_outcome can ground and distill it.
     """
-    gen = _make_generate(model, effective_system, temperature, num_predict, num_ctx,
-                         cloud=cloud)
+    gen = _make_generate(
+        model, effective_system, temperature, num_predict, num_ctx,
+        cloud=cloud, allow_cloud_fallback=allow_cloud_fallback,
+    )
     qv = embeddings.embed(prompt)
     if not embeddings.valid_vector(qv):
         qv = None
@@ -5401,6 +5415,7 @@ def _sonder_impl_serialized(
             conn, prompt, tgt_model, effective_system, temperature, num_predict,
             num_ctx_eff, session_id, project_id, history, trace=trace,
             tier=tier_label, cloud=cloud, augment=augment,
+            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
         )
         _capture_turn(tgt_model, tier_label, trace_ctx, prompt, response, iid)
         if iid is not None:
@@ -5443,6 +5458,7 @@ def _sonder_impl_serialized(
         gen = _make_generate(
             tgt_model, effective_system, temperature, num_predict,
             num_ctx_eff, cloud=cloud,
+            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
         )
         repair_history = list(history or []) + [
             {"role": "user", "content": prompt},
@@ -5675,13 +5691,16 @@ def _answer_with_history_impl(
                 conn, prompt, model, effective_system, 0.2, 1024, req_ctx,
                 session_id, capture_project, history or None, trace=trace,
                 tier=tier_label, cloud=cloud, augment=augment,
+                allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
             )
             _capture_turn(model, tier_label, trace_ctx, prompt, response, iid)
             if iid is not None:
                 interaction_snapshot = memory_store.get_interaction(conn, iid)
         else:
-            gen = _make_generate(model, effective_system, 0.2, 1024,
-                                 req_ctx, cloud=cloud)
+            gen = _make_generate(
+                model, effective_system, 0.2, 1024, req_ctx, cloud=cloud,
+                allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+            )
             response = gen(prompt, history or None)
             iid, trace_ctx = None, None
     except ModelCallError as error:
@@ -5710,8 +5729,10 @@ def _answer_with_history_impl(
     repair_usage = {}
 
     def _code_repair(repair_prompt):
-        gen = _make_generate(model, effective_system, 0.2, 1024, req_ctx,
-                             cloud=cloud)
+        gen = _make_generate(
+            model, effective_system, 0.2, 1024, req_ctx, cloud=cloud,
+            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+        )
         repair_history = list(history or []) + [
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": captured_response},
@@ -5824,6 +5845,7 @@ def structured_answer_with_history(
     system = _build_system("", False, "", model=model, cloud=cloud)
     response = _make_generate(
         model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
+        allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
     )(prompt, history or None)
     try:
         data = json.loads(
