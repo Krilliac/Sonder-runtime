@@ -22201,9 +22201,11 @@ def runtime_policy_data() -> dict:
         "routing": dict(policy["routing"]),
         "embedding_model": policy["embedding_model"],
         "missing_models": [],
+        "capability_errors": {},
     }
     try:
-        installed = _runtime_installed_models()
+        records = _runtime_installed_model_records()
+        installed = {name for name, _record in records}
         configured = list(data["local_models"].values()) + [
             data["embedding_model"],
         ]
@@ -22213,9 +22215,93 @@ def runtime_policy_data() -> dict:
             if str(model or "").strip()
             and not _runtime_model_is_installed(model, installed)
         ))
+        # Policies restored from disk or seeded through environment variables
+        # predate interactive ``/runtime set`` validation. Presence in the
+        # local catalog alone does not make an embedding-only model usable for
+        # chat, nor a chat model usable for semantic memory. Preserve the
+        # compatibility rule for sparse base-tier metadata, but positively
+        # require the embedding capability just as the policy update path does.
+        for tier in runtime_policy.BASE_LOCAL_TIERS:
+            model = data["local_models"].get(tier)
+            if model and _runtime_model_is_installed(model, installed):
+                reason = _runtime_model_capability_error(tier, model, records)
+                if reason:
+                    data["capability_errors"][tier] = reason
+        embedding = data["embedding_model"]
+        if embedding and _runtime_model_is_installed(embedding, installed):
+            if not _runtime_model_has_capability(embedding, "embedding", records):
+                data["capability_errors"]["embedding"] = "does not declare embedding capability"
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
     return data
+
+
+def _runtime_model_readiness_lines(data: dict) -> list[str]:
+    """Render a bounded operator-facing readiness summary for `/runtime`.
+
+    Runtime policy is allowed to map several base tiers to one local model, so
+    merely listing mappings does not tell an operator whether the minimum chat
+    path is usable.  Keep this projection local to the server: it is derived
+    from the live inventory that ``runtime_policy_data`` already collected. A
+    sparse embedding tag may require one narrow ``/api/show`` lookup so the
+    status never calls a chat-only model memory-ready.
+    """
+    if data.get("inventory_error"):
+        return [
+            "  readiness: unknown (local model inventory unavailable)",
+        ]
+
+    local_models = data.get("local_models") or {}
+    missing = {
+        str(model or "").strip().casefold()
+        for model in data.get("missing_models") or ()
+        if str(model or "").strip()
+    }
+
+    def unavailable(model) -> bool:
+        return str(model or "").strip().casefold() in missing
+
+    capability_errors = data.get("capability_errors") or {}
+
+    base_missing = [
+        "%s=%s%s" % (
+            tier,
+            local_models.get(tier) or "(unset)",
+            " (%s)" % capability_errors[tier] if tier in capability_errors else "",
+        )
+        for tier in runtime_policy.BASE_LOCAL_TIERS
+        if not str(local_models.get(tier) or "").strip()
+        or unavailable(local_models.get(tier))
+        or tier in capability_errors
+    ]
+    lines = ["  readiness:"]
+    if base_missing:
+        lines.append("    local chat/code: requires %s" % ", ".join(base_missing))
+    else:
+        lines.append("    local chat/code: ready")
+
+    embedding = str(data.get("embedding_model") or "").strip()
+    if not embedding or unavailable(embedding) or "embedding" in capability_errors:
+        lines.append(
+            "    semantic memory: requires embedding model%s%s"
+            % (
+                " %s" % embedding if embedding else "",
+                " (%s)" % capability_errors["embedding"]
+                if "embedding" in capability_errors else "",
+            )
+        )
+    else:
+        lines.append("    semantic memory: ready (%s)" % embedding)
+
+    for tier in runtime_policy.OPTIONAL_LOCAL_TIERS:
+        model = str(local_models.get(tier) or "").strip()
+        if not model:
+            lines.append("    %s: not configured (optional)" % tier)
+        elif unavailable(model):
+            lines.append("    %s: requires %s" % (tier, model))
+        else:
+            lines.append("    %s: configured (%s)" % (tier, model))
+    return lines
 
 
 @mcp.tool()
@@ -22224,6 +22310,7 @@ def runtime_policy_status() -> str:
     _maybe_live_reload()
     data = runtime_policy_data()
     output = runtime_policy.format_policy(data)
+    output += "\n" + "\n".join(_runtime_model_readiness_lines(data))
     if data.get("missing_models"):
         output += "\n  WARNING missing local model(s): %s" % ", ".join(
             sorted(set(data["missing_models"]))
