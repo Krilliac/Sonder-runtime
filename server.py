@@ -511,12 +511,21 @@ def _private_cot_rule_allows() -> bool:
     Fails closed: an unreadable or malformed policy is not an opt-in.
     """
     try:
-        rule = permission_rules.check(
-            sonder_paths.default_home(), "admin_private_chain_of_thought"
+        # Keep the decision and the load health from one snapshot.  A partial
+        # policy must not leave a surviving ``allow`` sufficient to expose
+        # private reasoning while a malformed row may have discarded a
+        # compensating deny or other operator constraint.  This is a distinct
+        # opt-in gate, so it cannot rely on permission_modes' generic
+        # degraded-policy handling.
+        rules, report = permission_rules.load_report(sonder_paths.default_home())
+        if report.degraded:
+            return False
+        rule = permission_rules.rule_lookup(rules)(
+            "admin_private_chain_of_thought"
         )
     except Exception:
         return False
-    return str(rule.get("action", "")).strip().lower() == "allow"
+    return bool(rule) and str(rule.get("action", "")).strip().lower() == "allow"
 
 
 # Which local models are known to reason. Learned from responses that carry
