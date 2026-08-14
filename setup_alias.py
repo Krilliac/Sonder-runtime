@@ -274,18 +274,24 @@ def main(argv=None) -> int:
     # fresh setup feature-complete by acquiring the default embedder too, but
     # do not discard a usable local chat installation when an optional pull is
     # offline, unavailable, or rejected by the provider.
+    embedding_note = ""
     if embed_model:
         ok, message = ensure_model(ollama, embed_model, offline=args.offline, env=env)
         print(f"  embedding: {message}")
         if not ok:
-            print("  note: core chat is ready; recall/lessons need an embedding model. "
-                  "Pull %s later, or set SONDER_EMBED_MODEL." % embed_model)
+            embedding_note = (
+                "  note: core chat is ready; recall/lessons need an embedding model. Pull %s later, "
+                "or set SONDER_EMBED_MODEL." % embed_model
+            )
     else:
-        print("  embedding: skipped; core chat is ready without semantic memory")
+        print("  embedding: skipped; semantic memory can be enabled later")
+        embedding_note = "  note: core chat is ready without semantic memory"
     ok, message = create_alias(ollama, base_model, env=env)
     print(f"  alias: {message}")
     if not ok:
         return 3
+    if embedding_note:
+        print(embedding_note)
     print("Done. Verify with: ollama list")
     return 0
 
