@@ -997,7 +997,37 @@ def test_agent_allows_identical_inspection_after_mutation(monkeypatch, without_s
     ]
 
 
-def test_agent_stops_repeating_identical_successful_inspection(monkeypatch):
+def test_read_only_agent_finalizes_from_cached_evidence_after_repeated_inspection(
+    monkeypatch, without_standing,
+):
+    responses = [
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"tool":"file_read","args":{"path":"README.md"}}',
+        '{"final":"grounded summary from the README evidence"}',
+    ]
+    dispatches = []
+    prompts = []
+
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: lambda prompt, history=None: prompts.append(prompt) or responses.pop(0),
+    )
+    monkeypatch.setattr(
+        server,
+        "_agent_dispatch_observed",
+        lambda *a, **k: dispatches.append(a) or "README evidence",
+    )
+
+    output = server._agent_impl("keep reading", max_steps=4, read_only=True)
+
+    assert without_standing(output) == "grounded summary from the README evidence"
+    assert len(dispatches) == 1
+    assert "HOST LOOP GUARD" in prompts[-1]
+
+
+def test_mutating_agent_still_stops_repeated_identical_successful_inspection(monkeypatch):
     responses = [
         '{"tool":"file_read","args":{"path":"README.md"}}',
         '{"tool":"file_read","args":{"path":"README.md"}}',

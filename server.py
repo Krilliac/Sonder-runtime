@@ -20722,6 +20722,27 @@ def _agent_turn(
             repeated = repeated_inspection_counts.get(call_signature, 0) + 1
             repeated_inspection_counts[call_signature] = repeated
             if repeated >= 3:
+                # A read-only agent has already collected the exact current
+                # observation.  Let a local model turn that evidence into one
+                # final answer instead of converting a bounded no-progress
+                # guard into a synthetic task failure.  This is deliberately
+                # not an extra hosted request, and it never applies after a
+                # mutation where an invented completion would be unsafe.
+                if read_only and not cloud and not mutated:
+                    finalize_prompt = transcript
+                    if observations:
+                        finalize_prompt += "\n\n" + _agent_observation_prompt(observations)
+                    finalize_prompt += (
+                        "\n\nHOST LOOP GUARD: the same successful inspection was "
+                        "requested repeatedly. Do not call another tool. Return a "
+                        "final answer now using only the host observations above; "
+                        "do not claim any unobserved mutation or validation."
+                    )
+                    forced, _forced_raw, _forced_error = _agent_generate_decision(
+                        gen, finalize_prompt,
+                    )
+                    if isinstance(forced, dict) and "final" in forced:
+                        return finish_final(str(forced.get("final") or ""))
                 if auto_checklist:
                     _agent_checklist_fail(
                         checklist_id, checklist_states,
