@@ -98,6 +98,22 @@ def test_chat_usage_comes_from_the_current_request_span(monkeypatch):
     }
 
 
+def test_chat_completion_activity_comes_from_its_own_span(monkeypatch):
+    monkeypatch.setattr(
+        ts.server.activity_tracker, "public_snapshot",
+        lambda **_kwargs: {"latest": {"id": "r_other"}},
+    )
+    activity = {
+        "id": "r_current", "label": "chat:sonder", "surface": "http",
+        "model": "sonder", "status": "complete", "started_ts": "now",
+        "events": [], "files": [],
+    }
+
+    payload = ts._chat_completion_object("answer", activity_response=activity)
+
+    assert payload["sonder_activity"]["id"] == "r_current"
+
+
 def test_stream_options_include_current_request_usage_in_terminal_chunk(monkeypatch):
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")

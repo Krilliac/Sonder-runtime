@@ -2135,6 +2135,11 @@ def _chat_completion_object(
     receipt=None, activity_response=None,
 ):
     iid = iid or uuid.uuid4().hex[:12]
+    activity = server.activity_tracker.public_response(
+        activity_response, include_detail=False,
+    ) if isinstance(activity_response, dict) else (
+        server.activity_tracker.public_snapshot(include_detail=False) or {}
+    ).get("latest")
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion",
@@ -2146,9 +2151,7 @@ def _chat_completion_object(
             "finish_reason": "stop",
         }],
         "usage": _chat_usage(activity_response),
-        "sonder_activity": (
-            server.activity_tracker.public_snapshot(include_detail=False) or {}
-        ).get("latest"),
+        "sonder_activity": activity,
     }
     # Mirrors sonder_activity: present only when there is something to show, so
     # clients can treat absence as "this deployment does not expose reasoning".

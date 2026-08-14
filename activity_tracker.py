@@ -989,6 +989,16 @@ def _public_response(response, *, include_detail=False):
     return out
 
 
+def public_response(response, *, include_detail=None):
+    """Project one response without consulting the process-global snapshot.
+
+    Request handlers that already own a completed span use this to avoid a
+    concurrent response replacing ``latest`` between generation and encoding.
+    """
+    detail = detail_enabled() if include_detail is None else bool(include_detail)
+    return _public_response(response, include_detail=detail)
+
+
 def public_snapshot(source=None, *, include_detail=None):
     """App-safe activity shape compatible with the historical status payload."""
     source = snapshot() if source is None else source
