@@ -32,6 +32,25 @@ def test_mcp_activity_preview_apply_and_error(monkeypatch, tmp_path):
     assert server.sqlite_mutate(str(path), "SELECT ?", "[1]").startswith("ERROR:")
 
 
+def test_preview_token_is_returned_but_not_written_to_activity(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    path = tmp_path / "records.db"
+    _database(path)
+    recorded = []
+    monkeypatch.setattr(
+        server, "_record_direct_tool",
+        lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+
+    preview = json.loads(server.sqlite_mutate(
+        str(path), "UPDATE records SET value = ? WHERE id = ?", '["after",1]',
+    ))
+    token = preview["preview_token"]
+    assert token and token != "<redacted>"
+    assert recorded and token not in recorded[-1][1]["output"]
+    assert "<redacted>" in recorded[-1][1]["output"]
+
+
 def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, tmp_path):
     assert "sqlite_mutate" in server.tool_manifest()
     assert "- sqlite_mutate:" in server._agent_tool_help()
