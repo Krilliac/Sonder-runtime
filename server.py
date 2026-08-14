@@ -7178,16 +7178,20 @@ def context_health(session: str = "", project: str = "") -> str:
     return format_context_health(context_health_data(session=session, project=project))
 
 
-@mcp.tool()
-def activity_status(include_events: bool = True) -> str:
-    """Show active and most recent observable response activity."""
-    _maybe_live_reload()
-    source = activity_tracker.snapshot()
+def _format_activity_status(source: dict, include_events: bool = True, *, scope="") -> str:
+    """Render an already-authorized activity source.
+
+    ``activity_status`` is intentionally an operator surface and may describe
+    the runtime globally.  A tool-using model, on the other hand, must never
+    receive another request's activity merely because it asked for its own
+    progress.  Keeping source selection outside this formatter makes that
+    authority boundary explicit and testable.
+    """
     snap = activity_tracker.public_snapshot(source)
     if snap is None:
         return "sonder activity\n  state: unknown"
     lines = [
-        "sonder activity",
+        "sonder activity%s" % (" (%s)" % scope if scope else ""),
         "  active responses: %s" % snap.get("active_count", 0),
         "  total tool calls since start: %s" % snap.get("total_tool_calls", 0),
     ]
@@ -7220,6 +7224,40 @@ def activity_status(include_events: bool = True) -> str:
             ),
         ])
     return "\n".join(lines)
+
+
+@mcp.tool()
+def activity_status(include_events: bool = True) -> str:
+    """Show active and most recent observable response activity."""
+    _maybe_live_reload()
+    return _format_activity_status(activity_tracker.snapshot(), include_events)
+
+
+def _agent_activity_status(include_events: bool = True) -> str:
+    """Return only the calling agent's host-owned activity span.
+
+    Agent observations are fed straight back into the model.  The global
+    activity snapshot contains concurrent response labels, model metadata,
+    and bounded result/event detail, so using ``activity_status`` directly
+    here turned a harmless progress check into a cross-run observation channel.
+    Do not accept a response id from tool arguments: the current thread's
+    bound span is the sole host-selected scope.
+    """
+    current = activity_tracker.current()
+    if not isinstance(current, dict):
+        return "sonder activity (current agent response only)\n  state: unavailable"
+    source = {
+        "active_count": 1,
+        "active": [current],
+        "latest": None,
+        # This is deliberately per-response, unlike the operator surface's
+        # process-lifetime counter.  It avoids leaking aggregate use by other
+        # callers while remaining useful to the model as a progress meter.
+        "total_tool_calls": int(current.get("tool_calls") or 0),
+    }
+    return _format_activity_status(
+        source, include_events, scope="current agent response only",
+    )
 
 
 @mcp.tool()
@@ -17522,7 +17560,10 @@ def _agent_dispatch(
     if tool_name == "command_registry_list":
         return command_registry_list(args.get("filter_text", args.get("filter", "")))
     if tool_name == "activity_status":
-        return activity_status(include_events=args.get("include_events", True))
+        # Agent tool observations return to the model.  Do not route this
+        # through the operator-facing global status function: it would expose
+        # concurrent responses and the latest unrelated result to this run.
+        return _agent_activity_status(include_events=args.get("include_events", True))
     if tool_name == "permission_policy":
         return permission_policy(args.get("tool_name", args.get("tool", "")))
     if tool_name == "context_compaction_plan":
