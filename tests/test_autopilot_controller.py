@@ -376,6 +376,24 @@ def test_pause_and_cancel_are_checked_between_tasks():
     assert cancelled["cycles"] == 0
 
 
+def test_cancellation_wins_when_active_work_raises():
+    run = autopilot_store.create_run("cancel an interrupted task")
+
+    def cancel_then_raise(current, _task, _prior):
+        autopilot_store.request_cancel(current["id"])
+        raise RuntimeError("tool process stopped unexpectedly")
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(), work_fn=cancel_then_raise,
+        review_fn=_complete,
+    )
+
+    assert result["status"] == "cancelled"
+    assert result["summary"] == "cancelled while controller unwound an error"
+    assert "tool process stopped unexpectedly" in result["last_error"]
+
+
 def test_per_invocation_cycle_budget_pauses_with_progress():
     run = autopilot_store.create_run("bounded progress")
     result = autopilot_controller.execute_run(

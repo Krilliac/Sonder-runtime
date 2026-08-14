@@ -858,6 +858,16 @@ def execute_run(
         ) or run
     except Exception as exc:
         latest = autopilot_store.get_run(run["id"]) or run
+        flags = autopilot_store.control_flags(run["id"], owner_id)
+        if not flags.get("lost") and flags.get("cancel"):
+            stored = autopilot_store.finish_run(
+                run["id"], owner_id, "cancelled",
+                summary="cancelled while controller unwound an error",
+                last_error=str(exc),
+                final_report=format_report(latest, str(exc)),
+            )
+            if stored:
+                return stored
         stored = autopilot_store.finish_run(
             run["id"], owner_id, "failed",
             summary="autopilot controller failed safely",
