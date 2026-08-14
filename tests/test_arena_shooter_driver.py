@@ -98,6 +98,16 @@ def test_generated_projects_default_to_per_user_sonder_home(monkeypatch, tmp_pat
     assert Path(skeleton_driver.default_project_path()) == home / "examples" / "arena-shooter" / "FpsGame_Skeleton"
 
 
+def test_arena_verifier_follows_user_state_or_explicit_target() -> None:
+    """Moving generated output must not strand the held-out verifier."""
+    project = (EXAMPLE / "Verify" / "Verify.csproj").read_text(encoding="utf-8")
+
+    assert "$(SONDER_GAME_SKELETON_PROJECT)" in project
+    assert "$(SONDER_HOME)\\examples\\arena-shooter\\FpsGame_Skeleton" in project
+    assert "$(LOCALAPPDATA)\\sonder\\examples\\arena-shooter\\FpsGame_Skeleton" in project
+    assert "<SonderTarget Condition=\"'$(SonderTarget)' == ''\">..\\FpsGame_Skeleton</SonderTarget>" in project
+
+
 def test_skeleton_unknown_only_fails_before_generation() -> None:
     """The one-body driver must not turn a typo into a clean ``0 / 0`` run."""
     result = subprocess.run(

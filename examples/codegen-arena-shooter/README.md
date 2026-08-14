@@ -27,6 +27,16 @@ By default, generated projects live under Sonder's per-user state directory:
 to choose an explicit reproducible output location. Needs the .NET SDK and a
 running Ollama.
 
+After a successful skeleton build, run its held-out verifier with:
+
+```bash
+dotnet run --project Verify
+```
+
+`Verify/Verify.csproj` resolves the same default user-state location on
+Windows. On another platform or a custom output directory, pass the target
+explicitly: `dotnet run --project Verify -p:SonderTarget=/path/to/FpsGame_Skeleton`.
+
 The v2 skeleton runner writes its harness-owned `FpsGame_Skeleton.csproj`
 automatically before its first baseline build. It is not model output and is
 never overwritten by `--reset`; this keeps the first `dotnet build` a real
