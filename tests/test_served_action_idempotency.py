@@ -10,6 +10,15 @@ def _account(name):
     return {"account": {"username": name, "role": "developer"}}
 
 
+def _authorized_account(name):
+    return {
+        "mode": "account",
+        "authorized": True,
+        "api_key": False,
+        "account": {"username": name, "role": "developer"},
+    }
+
+
 def test_work_retry_is_idempotent_per_principal_and_exact_action(monkeypatch):
     sonder_lifecycle.reset_for_tests()
     calls = []
