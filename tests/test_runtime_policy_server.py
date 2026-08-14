@@ -186,6 +186,22 @@ def test_runtime_embedding_binding_is_capability_checked_and_does_not_rewrite_ve
     )
 
 
+def test_runtime_slash_applies_embedding_with_other_bindings(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server, "runtime_policy_update", lambda **kwargs: calls.append(kwargs) or "updated",
+    )
+
+    assert server.control_command(
+        "/runtime set embedding=bge-m3:latest general=gemma3:4b review=general"
+    ) == "updated"
+    assert calls == [{
+        "local_models_json": '{"general": "gemma3:4b"}',
+        "embedding_model": "bge-m3:latest",
+        "routing_json": '{"review": "general"}',
+    }]
+
+
 def test_runtime_http_status_is_safe_but_updates_require_developer():
     assert sonder_serve._dangerous_http_slash("/runtime") is False
     assert sonder_serve._dangerous_http_slash("/runtime status") is False

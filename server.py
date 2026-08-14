@@ -2108,6 +2108,7 @@ def _runtime_command(arg: str) -> str:
     if action == "set":
         local_models = {}
         routing = {}
+        embedding_model = ""
         for item in rest.split():
             if "=" not in item:
                 return "ERROR: runtime assignment must use key=value: %s" % item
@@ -2119,19 +2120,24 @@ def _runtime_command(arg: str) -> str:
                 if not value:
                     refusal = "ERROR: embedding model cannot be empty."
                     return refusal
-                return runtime_policy_update(embedding_model=value)
+                embedding_model = value
             elif key in runtime_policy.ROUTING_LANES:
                 routing[key] = value
             else:
                 return "ERROR: unknown runtime policy key '%s'." % key
-        if not local_models and not routing:
+        if not local_models and not routing and not embedding_model:
             return (
                 "usage: /runtime set code=<local-model> reasoning=<local-model> "
                 "embedding=<local-embedding-model> workbench=<fast|code|general>"
             )
+        update_args = {
+            "local_models_json": json.dumps(local_models),
+            "routing_json": json.dumps(routing),
+        }
+        if embedding_model:
+            update_args["embedding_model"] = embedding_model
         return runtime_policy_update(
-            local_models_json=json.dumps(local_models),
-            routing_json=json.dumps(routing),
+            **update_args,
         )
     if action in {"help", "?"}:
         return (
