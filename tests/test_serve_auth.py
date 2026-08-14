@@ -520,6 +520,41 @@ def _request(port, method, path, body=None, headers=None):
     return result
 
 
+def test_admin_drain_idempotency_key_is_scoped_to_authenticated_principal(monkeypatch):
+    """A shared hosted deployment must not replay an admin's cached receipt."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda _self: False)
+
+    def account_for(header):
+        token = ts._bearer_token(header)
+        return {"username": token, "role": "admin"}
+
+    monkeypatch.setattr(ts, "_auth_account", account_for)
+    keys = []
+
+    class FakeLifecycle:
+        def idempotent(self, key, _factory):
+            keys.append(key)
+            return {"draining": True, "correlation_id": "stable"}
+
+    monkeypatch.setattr(ts.sonder_lifecycle, "get", lambda: FakeLifecycle())
+    headers = {"Content-Type": "application/json", "Idempotency-Key": "same-key"}
+    with _http_server(monkeypatch) as port:
+        for token in ("admin-a", "admin-b", "admin-a"):
+            status, _, body = _request(
+                port, "POST", "/v1/admin/drain", body=b"{}",
+                headers={**headers, "Authorization": "Bearer " + token},
+            )
+            assert status == 202
+            assert json.loads(body)["draining"] is True
+
+    assert keys[0] != keys[1]
+    assert keys[0] == keys[2]
+    assert all(key.startswith("hi-") and "same-key" not in key for key in keys)
+
+
 def test_served_source_update_requires_admin_but_check_remains_read_only(monkeypatch):
     developer = {
         "mode": "account", "authorized": True, "api_key": False,
