@@ -121,6 +121,11 @@ base model. See the [Model Catalog](docs/wiki/18-model-catalog.md) for tier
 bindings and the [collection runbook](docs/runbooks/assemble-model-collection.md)
 for specialist setups.
 
+> Installing a tag only puts a model in Ollama's catalog; it does not by itself
+> enable a Sonder feature. Bind supported models through `/runtime set ...` and
+> use the matching tool or route. A downloaded speech or reranker tag remains
+> optional until Sonder has a provider-backed integration for that capability.
+
 ## Quick start
 
 The `app-latest` badges are a mutable prerelease snapshot. They may lag `main`

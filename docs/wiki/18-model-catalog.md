@@ -41,6 +41,13 @@ An unbound optional routing tier degrades to a configured local `general` or
 `code` path; it is not a startup failure. A missing embedding model disables
 semantic retrieval rather than core chat.
 
+> **Installed is not integrated.** Seeing a tag in `ollama list` only proves it
+> is available to the provider. Sonder must also expose a matching, bounded
+> integration and you must bind the model to that supported capability. For
+> example, a downloaded Whisper or reranker tag does not silently turn on speech
+> transcription or retrieval reranking; those remain optional until their
+> provider-backed feature is available.
+
 ## 2. Find your band
 
 | VRAM | Largest comfortable model | What the collection looks like |
