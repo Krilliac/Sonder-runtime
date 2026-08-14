@@ -8849,6 +8849,9 @@ def master_orchestrate(
     Status is visible through master_status().
     """
     _maybe_live_reload()
+    refusal = intents.containment_egress_refusal(task)
+    if refusal:
+        return refusal
     task = (task or "").strip()
     try:
         protected_objectives = master_orchestrator.fleet_provenance.parse_objectives(task)
@@ -14597,6 +14600,9 @@ def chat_web_response(
 ) -> str | None:
     """Handle explicit web chat intent before the plain model fallback."""
     _maybe_live_reload()
+    refusal = intents.containment_egress_refusal(prompt)
+    if refusal:
+        return refusal
     # This function is the shared boundary for HTTP, MCP, and REPL chat. Keep
     # developer/work requests on the execution/model path even when their text
     # mentions a volatile noun ("build a current-price widget"). Explicit web
@@ -21647,6 +21653,9 @@ def _autopilot_start(
 ) -> str:
     """Create and start a persistent, locally planned autonomous goal run."""
     _maybe_live_reload()
+    refusal = intents.containment_egress_refusal(objective)
+    if refusal:
+        return refusal
     try:
         tier = _runtime_lane_tier("autopilot", tier)
         tier = autopilot_controller.normalize_tier(tier)

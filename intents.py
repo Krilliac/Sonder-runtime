@@ -118,10 +118,14 @@ _CONTAINMENT_EVASION_RE = re.compile(
     re.I,
 )
 _EXTERNAL_CONTACT_RE = re.compile(
-    r"\b(?:send|message|notify|contact|post|deliver)\b.*\b"
+    r"\b(?:email|sms|webhook)\b|\b(?:send|message|notify|contact|post|deliver)\b.*\b"
     r"(?:outside|external|off[-\s]?host|another\s+(?:app|process)|"
     r"windows\s+notifications?|email|sms|webhook|slack|discord)\b",
     re.I | re.S,
+)
+_DEFENSIVE_CONTAINMENT_RE = re.compile(
+    r"^\s*(?:fix|prevent|block|deny|refuse|harden)\b|^\s*add\s+(?:a\s+)?"
+    r"(?:policy|guard|protection|test)\b", re.I,
 )
 
 CONTAINMENT_EGRESS_REFUSAL = (
@@ -295,7 +299,9 @@ def containment_egress_refusal(text):
     separately-gated routes.
     """
     value = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not value or len(value) > 12000:
+    if not value:
+        return None
+    if _DEFENSIVE_CONTAINMENT_RE.search(value):
         return None
     if _CONTAINMENT_EVASION_RE.search(value) and _EXTERNAL_CONTACT_RE.search(value):
         return CONTAINMENT_EGRESS_REFUSAL
