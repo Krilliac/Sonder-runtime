@@ -111,6 +111,18 @@ _RULES = [
     _rule(r"^(?:dump|save)\s+(?:the\s+)?(?:chat|debug)(?:\s+log|\s+dump)?\b"
           r"(?:\s+(?P<arg>\S+))?", lambda m: ("/dump %s" % (m.group("arg") or "")).strip()),
 
+    # Source-update discovery is read-only, but must still use the dedicated
+    # refresh path rather than letting a chat model guess the checkout state.
+    # These are whole-turn forms with no captured prose: an instruction copied
+    # out of a page (or a request to do more after checking) cannot become an
+    # update check by accident.
+    _rule(r"^(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+          r"check\s+(?:whether\s+)?(?:sonder\s+)?(?:is\s+)?up\s+to\s+date\s*[?!.]*$",
+          _fixed("/updatecheck")),
+    _rule(r"^(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+          r"check\s+for\s+(?:a\s+)?(?:sonder\s+)?updates?\s*[?!.]*$",
+          _fixed("/updatecheck")),
+
     # --- quality / privacy / emotion / prefs / improvement ---
     _rule(r"^(?:fix|repair)\s+(?:the\s+)?(?:memory\s+)?quality\b", _fixed("/qualityfix apply")),
     _rule(r"^(?:show\s+)?(?:memory\s+)?quality(?:\s+report)?\b", _fixed("/quality")),
@@ -136,6 +148,17 @@ _RULES = [
           _fixed("/fanouts")),
     _rule(r"^(?:tool\s+)?activity\b|^recent\s+tools?\b|^what\s+tools\s+ran\b",
           _fixed("/activity")),
+    # These are deliberately exact whole-turn lifecycle requests.  Listing a
+    # goal/workflow is read-only; starting a saved workflow remains an
+    # explicitly named request and still goes through the REPL's ordinary
+    # ``workflow_run`` permission gate before any saved action can execute.
+    _rule(r"^(?:show\s+(?:me\s+)?(?:my\s+)?|what(?:'s|\s+is)\s+(?:my\s+)?)"
+          r"(?:(?:current|active)\s+)?goals?\s*[?!.]*$", _fixed("/goal")),
+    _rule(r"^(?:show|list)\s+(?:my\s+)?(?:saved\s+)?workflows?\s*[?!.]*$",
+          _fixed("/workflow_list")),
+    _rule(r"^(?:run|start)\s+(?:the\s+)?(?:saved\s+)?workflow\s+"
+          r"(?P<arg>[A-Za-z][A-Za-z0-9_-]{1,63})\s*[?!.]*$",
+          lambda m: "/workflow_run " + m.group("arg").lower()),
     _rule(r"^(?:orchestrate|master)\s+(?P<arg>.+)$", _with_arg("/master")),
     _rule(r"^autopilot\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/autopilot %s" % (m.group("arg") or "")).strip()),
