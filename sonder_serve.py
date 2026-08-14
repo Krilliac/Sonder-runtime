@@ -811,10 +811,14 @@ class HTTPRequestError(Exception):
 
 
 def _strip_footer(text):
-    idx = text.find(server.FOOTER_PREFIX)
+    value = str(text or "")
+    idx = value.find(server.FOOTER_PREFIX)
     if idx == -1:
-        return text
-    return text[:idx]
+        return server._strip_activity_block(value)
+    # ``server.with_footer`` appends the activity block before its invisible
+    # interaction token. Terminal users receive that human-readable evidence;
+    # OpenAI-compatible `message.content` must remain only the model answer.
+    return server._strip_activity_block(value[:idx])
 
 
 def _strip_trace(text):
@@ -3261,10 +3265,10 @@ class Handler(BaseHTTPRequestHandler):
                         response_reasoning = turn.thinking
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                if structured_schema is None:
-                    content = server._append_activity(
-                        content, response=activity_response, replace=True,
-                    )
+                # OpenAI-compatible content is the answer only.  Observable
+                # execution data is returned separately in the bounded
+                # ``sonder_activity`` vendor extension, never appended where
+                # clients would replay it as assistant text.
                 _record_chat(
                     "assistant",
                     content,

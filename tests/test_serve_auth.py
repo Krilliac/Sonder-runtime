@@ -42,6 +42,33 @@ def test_query_string_does_not_change_openai_route_or_terminal_metric(monkeypatc
     assert json.loads(models_body)["object"] == "list"
 
 
+def test_chat_content_excludes_terminal_activity_block(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+    answer = (
+        "pin-ok\n\n=== ACTIVITY (observable work) ===\n"
+        "response: complete\n=== END ACTIVITY ===\n\n"
+        + ts.server.FOOTER_PREFIX + "r000001]"
+    )
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *args, **kwargs: answer)
+    request = json.dumps({
+        "model": "sonder", "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    content = json.loads(body)["choices"][0]["message"]["content"]
+    assert content == "pin-ok"
+    assert "=== ACTIVITY" not in content
+
+
 @pytest.mark.parametrize("model", [None, 7, True, {}, []])
 def test_chat_rejects_non_string_model_before_selector_routing(monkeypatch, model):
     monkeypatch.setattr(ts, "API_KEY", "")
