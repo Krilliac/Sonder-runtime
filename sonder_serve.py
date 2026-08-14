@@ -2823,6 +2823,20 @@ class Handler(BaseHTTPRequestHandler):
             status, message = error
             self._send_json_payload({"error": {"message": message, "type": "forbidden" if status == 403 else "not_found"}}, status=status)
             return True
+        supplied_key = self.headers.get("Idempotency-Key", "")
+
+        def replay(action_name, factory):
+            # The run is already owner-authorized above.  Bind each replay to
+            # both that durable run and the complete small action payload, so
+            # a client key cannot turn a cancel into a resume or select a
+            # different synthesis model.  _http_action_idempotency_key hashes
+            # this text; neither it nor the raw header is retained.
+            return _idempotent_http_action(
+                context,
+                supplied_key,
+                "fanout\0%s\0%s" % (run_id, action_name),
+                factory,
+            )
         if action == "synthesize":
             if set(req) - {"synth_model"}:
                 self._send_json_payload({"error": {"message": "synthesis accepts only synth_model", "type": "invalid_request"}}, status=400)
@@ -2847,7 +2861,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return True
             try:
-                self._send_json_payload(server._fanout_synthesize_run(_run, synth_model))
+                payload = replay(
+                    "synthesize\0%s" % synth_model,
+                    lambda: server._fanout_synthesize_run(_run, synth_model),
+                )
+                self._send_json_payload(payload)
             except server.ModelCallError as exc:
                 status = exc.status or (
                     400 if exc.kind == "configuration" else
@@ -2869,28 +2887,46 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return True
         if action == "cancel":
-            server.fanout_store.request_cancel(run_id)
+            replay("cancel", lambda: server.fanout_store.request_cancel(run_id))
         else:
             for name in ("include_failed", "retry_unknown"):
                 if name in req and not isinstance(req[name], bool):
                     self._send_json_payload({"error": {"message": "%s must be a boolean" % name, "type": "invalid_request"}}, status=400)
                     return True
-            resumed = server.fanout_store.resume_run(
-                run_id, include_failed=req.get("include_failed") is True,
-                retry_unknown=req.get("retry_unknown") is True,
+            include_failed = req.get("include_failed") is True
+            retry_unknown = req.get("retry_unknown") is True
+
+            def resume():
+                resumed = server.fanout_store.resume_run(
+                    run_id,
+                    include_failed=include_failed,
+                    retry_unknown=retry_unknown,
+                )
+                if resumed is None:
+                    return False
+                # A resume is an explicit replay instruction. _execute
+                # preserves the stored snapshot and never retries unknown rows
+                # unless this request included retry_unknown=true.
+                server._execute_fanout_run(run_id)
+                return True
+
+            resumed = replay(
+                "resume\0include_failed=%d\0retry_unknown=%d" % (
+                    include_failed, retry_unknown,
+                ),
+                resume,
             )
             if resumed is None:
                 self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
                 return True
-            # A resume is an explicit replay instruction. _execute preserves
-            # the stored snapshot and never retries unknown rows unless this
-            # request included retry_unknown=true.
-            server._execute_fanout_run(run_id)
+            if not resumed:
+                self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
+                return True
         receipt = server._fanout_receipt(run_id)
         self._send_json_payload(receipt or {"error": {"message": "fanout receipt was unavailable", "type": "not_found"}}, status=200 if receipt else 404)
         return True
 
-    def _handle_permission_mode_post(self, req):
+    def _handle_permission_mode_post(self, req, context=None):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
         wanted = ""
         if isinstance(req, dict):
@@ -2902,7 +2938,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         try:
-            permission_modes.set_mode(wanted)
+            _idempotent_http_action(
+                context,
+                self.headers.get("Idempotency-Key", ""),
+                "permission-mode\0%s" % wanted,
+                lambda: permission_modes.set_mode(wanted),
+            )
         except ValueError as exc:
             self._send_json_payload(
                 {"error": str(exc), "modes": list(permission_modes.MODES)},
@@ -2967,7 +3008,7 @@ class Handler(BaseHTTPRequestHandler):
                     status=403,
                 )
                 return
-            self._handle_permission_mode_post(req)
+            self._handle_permission_mode_post(req, context=context)
             return
         if path == "/v1/sonder/register":
             conn = server._open_db()
