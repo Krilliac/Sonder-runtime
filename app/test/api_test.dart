@@ -7,6 +7,15 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/models.dart';
 
 void main() {
+  test('model catalog refresh preserves a case-insensitive saved selection', () {
+    expect(
+      resolveCatalogModel(['sonder', 'gemma3:12b'], 'Gemma3:12B'),
+      'gemma3:12b',
+    );
+    expect(resolveCatalogModel(['sonder'], 'removed:latest'), 'sonder');
+    expect(resolveCatalogModel(const [], 'sonder'), 'sonder');
+  });
+
   test('host launcher status uses its independent bearer token', () async {
     late http.Request seen;
     final client = MockClient((request) async {

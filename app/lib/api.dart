@@ -6,6 +6,23 @@ import 'package:http/http.dart' as http;
 
 import 'models.dart';
 
+/// Return the catalog spelling of a saved model selector when it still exists.
+///
+/// Ollama tags and Sonder's exact-model resolver are case-insensitive, while
+/// preferences survive across catalog refreshes. Keeping the server-advertised
+/// spelling avoids silently falling back to the first route solely because a
+/// user originally typed a different case.
+String resolveCatalogModel(Iterable<String> models, String selected) {
+  final available = models.toList(growable: false);
+  final normalized = selected.trim().toLowerCase();
+  if (normalized.isNotEmpty) {
+    for (final model in available) {
+      if (model.trim().toLowerCase() == normalized) return model;
+    }
+  }
+  return available.isEmpty ? selected : available.first;
+}
+
 class LauncherOperation {
   static const terminalPhases = {
     'succeeded',

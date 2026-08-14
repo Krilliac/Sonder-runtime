@@ -442,7 +442,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (!mounted || models.isEmpty) return;
       setState(() {
         _models = models;
-        if (!_models.contains(_model)) _model = _models.first;
+        _model = resolveCatalogModel(_models, _model);
       });
     } catch (_) {
       // Offline / no auth — keep the static fallback list.
