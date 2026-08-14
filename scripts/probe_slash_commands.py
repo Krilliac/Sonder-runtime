@@ -116,6 +116,24 @@ def classify(command: str, status: str, reply: str) -> str:
     return "handled"
 
 
+def probe_exit_code(missing: list[str], rows: list[dict]) -> int:
+    """Return a CI-friendly failure for a palette or handling contract break."""
+    failures = [
+        row for row in rows
+        if str(row.get("verdict") or "") != "handled"
+    ]
+    if missing or failures:
+        if missing:
+            print("FAIL: app commands missing from server: %s" % ", ".join(missing))
+        if failures:
+            print("FAIL: command probe failures: " + ", ".join(
+                "%s=%s" % (row.get("command"), row.get("verdict"))
+                for row in failures
+            ))
+        return 1
+    return 0
+
+
 def main() -> int:
     port = 11435
     out_path = None
@@ -163,7 +181,7 @@ def main() -> int:
                        indent=2),
             encoding="utf-8")
         print("wrote", out_path)
-    return 0
+    return probe_exit_code(missing, rows)
 
 
 if __name__ == "__main__":

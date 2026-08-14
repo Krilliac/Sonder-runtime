@@ -19,3 +19,12 @@ def test_read_only_probe_excludes_updates_and_model_work():
     assert "/agent" not in probe
     assert "/ensemble" not in probe
     assert "/council" not in probe
+
+
+def test_probe_exit_code_fails_for_contract_breaks():
+    namespace = runpy.run_path(str(_PROBE))
+    exit_code = namespace["probe_exit_code"]
+
+    assert exit_code([], [{"command": "/help", "verdict": "handled"}]) == 0
+    assert exit_code(["/missing"], []) == 1
+    assert exit_code([], [{"command": "/help", "verdict": "fellthrough?"}]) == 1
