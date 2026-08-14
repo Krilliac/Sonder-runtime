@@ -2116,9 +2116,23 @@ def _receipt_text(value):
     )
 
 
+def _chat_usage(response=None):
+    """Return bounded OpenAI usage fields from this request's activity span."""
+    try:
+        prompt = max(0, int((response or {}).get("tokens_in") or 0))
+        completion = max(0, int((response or {}).get("tokens_out") or 0))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        prompt = completion = 0
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+
+
 def _chat_completion_object(
     content, model="sonder", iid=None, reasoning="", elapsed_ms=None,
-    receipt=None,
+    receipt=None, activity_response=None,
 ):
     iid = iid or uuid.uuid4().hex[:12]
     obj = {
@@ -2131,7 +2145,7 @@ def _chat_completion_object(
             "message": {"role": "assistant", "content": content},
             "finish_reason": "stop",
         }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": _chat_usage(activity_response),
         "sonder_activity": (
             server.activity_tracker.public_snapshot(include_detail=False) or {}
         ).get("latest"),
@@ -3379,7 +3393,7 @@ class Handler(BaseHTTPRequestHandler):
                     _chat_completion_object(
                         content, model, iid=response_iid,
                         reasoning=response_reasoning, elapsed_ms=elapsed_ms,
-                        receipt=receipt,
+                        receipt=receipt, activity_response=activity_response,
                     ), elapsed_ms=elapsed_ms,
                 )
             finally:
