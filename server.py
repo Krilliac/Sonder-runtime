@@ -5630,6 +5630,7 @@ def sonder(
         model=tier or "sonder",
         session=session,
         project=project,
+        reasoning_owner=reasoning_owner_for_token(token),
     ) as response:
         result = _sonder_impl(
             prompt,

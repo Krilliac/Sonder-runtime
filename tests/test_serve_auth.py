@@ -190,6 +190,36 @@ def test_stream_options_include_current_request_usage_in_terminal_chunk(monkeypa
     }
 
 
+def test_stream_includes_the_current_request_activity_in_terminal_chunk(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *args, **kwargs: None)
+
+    def answer(*_args, **_kwargs):
+        ts.server.activity_tracker.record_model_call("model:latest")
+        return "answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "sonder", "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    chunks = [
+        json.loads(line[6:]) for line in body.decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert chunks[-1]["sonder_activity"]["model_calls"] == 1
+
+
 @pytest.mark.parametrize("model", [None, 7, True, {}, []])
 def test_chat_rejects_non_string_model_before_selector_routing(monkeypatch, model):
     monkeypatch.setattr(ts, "API_KEY", "")

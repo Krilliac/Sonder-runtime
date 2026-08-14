@@ -71,6 +71,20 @@ def test_reasoning_is_kept_out_of_the_activity_snapshot():
     assert "secret deliberation" not in repr(at.snapshot())
 
 
+def test_direct_mcp_span_uses_the_token_reasoning_owner(monkeypatch):
+    token = "developer-token"
+
+    def impl(*_args, **_kwargs):
+        at.record_reasoning("owned reasoning", model="local")
+        return "answer"
+
+    monkeypatch.setattr(server, "_sonder_impl", impl)
+    assert server.sonder("hello", token=token).startswith("answer")
+    record = at.reasoning_for_owner(server.reasoning_owner_for_token(token))
+    assert record is not None
+    assert record["text"] == "owned reasoning"
+
+
 def test_current_reasoning_does_not_leak_the_previous_turn():
     """The HTTP path reads reasoning INSIDE its own still-open span.
 

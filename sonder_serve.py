@@ -2502,7 +2502,7 @@ def _chat_completion_object(
 
 
 def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
-           usage=None):
+           usage=None, activity=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
@@ -2519,6 +2519,11 @@ def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
         obj["sonder_receipt"] = receipt
     if usage is not None:
         obj["usage"] = usage
+    if activity is not None:
+        # The streaming counterpart of the bounded vendor extension returned
+        # by _chat_completion_object.  Keep execution evidence out of content
+        # so callers can safely replay assistant text as conversation history.
+        obj["sonder_activity"] = activity
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -4032,6 +4037,7 @@ class Handler(BaseHTTPRequestHandler):
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,
                 receipt=receipt,
                 usage=_chat_usage(activity_response) if include_stream_usage else None,
+                activity_response=activity_response,
             )
             self._record_chat_completion_metric(
                 _lifecycle,
@@ -4065,7 +4071,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(obj, elapsed_ms=elapsed_ms)
 
     def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None,
-                     usage=None):
+                     usage=None, activity_response=None):
         """Send one complete SSE response.
 
         ``True`` is a normal completed stream and ``False`` means the client
@@ -4075,6 +4081,13 @@ class Handler(BaseHTTPRequestHandler):
         retain the ordinary pre-header JSON error contract.
         """
         iid = iid or uuid.uuid4().hex[:12]
+        activity = (
+            server.activity_tracker.public_response(
+                activity_response, include_detail=False,
+            )
+            if isinstance(activity_response, dict)
+            else (server.activity_tracker.public_snapshot(include_detail=False) or {}).get("latest")
+        )
         headers_sent = False
         try:
             self.send_response(200)
@@ -4096,7 +4109,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
             self.wfile.write(_chunk(
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
-                receipt=receipt,
+                receipt=receipt, activity=activity,
             ).encode("utf-8"))
             if usage is not None:
                 self.wfile.write(_chunk(iid, model, {}, usage=usage).encode("utf-8"))
