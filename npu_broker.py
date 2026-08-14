@@ -79,12 +79,30 @@ def _worker_environment(source=None) -> dict:
     worker still runs as the same OS account and is not an OS sandbox.
     """
     source = os.environ if source is None else source
-    environment = {}
+    # Windows environment names are case-insensitive, while a mapping supplied
+    # to ``Popen`` can still contain PATH and Path as separate entries.  The
+    # resulting winner is platform-dependent, which would make a hostile
+    # case-variant vendor path or PATH value part of the child-process trust
+    # boundary.  Canonicalize the names ourselves and drop conflicting values.
+    # A lone ``Path`` from a normal Windows parent is still accepted as PATH.
+    values = {}
+    conflicts = set()
     for name, value in source.items():
         upper = str(name).upper()
-        if upper in _WORKER_ENV_KEYS:
-            environment[str(name)] = str(value)
-    if not any(name.upper() == "PATH" for name in environment):
+        if upper not in _WORKER_ENV_KEYS:
+            continue
+        text = str(value)
+        previous = values.get(upper)
+        if previous is None:
+            values[upper] = text
+        elif previous != text:
+            conflicts.add(upper)
+    environment = {
+        name: value
+        for name, value in values.items()
+        if name not in conflicts
+    }
+    if "PATH" not in environment:
         environment["PATH"] = os.defpath
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONUTF8"] = "1"
