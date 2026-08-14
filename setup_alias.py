@@ -257,11 +257,20 @@ def main(argv=None) -> int:
     if not base_model or not embed_model:
         parser.error("model names may not be empty")
 
-    for model, label in ((base_model, "base"), (embed_model, "embedding")):
-        ok, message = ensure_model(ollama, model, offline=args.offline, env=env)
-        print(f"  {label}: {message}")
-        if not ok:
-            return 2
+    ok, message = ensure_model(ollama, base_model, offline=args.offline, env=env)
+    print(f"  base: {message}")
+    if not ok:
+        return 2
+
+    # Core REPL/API chat needs the generative base model only.  Try to make a
+    # fresh setup feature-complete by acquiring the default embedder too, but
+    # do not discard a usable local chat installation when an optional pull is
+    # offline, unavailable, or rejected by the provider.
+    ok, message = ensure_model(ollama, embed_model, offline=args.offline, env=env)
+    print(f"  embedding: {message}")
+    if not ok:
+        print("  note: core chat is ready; recall/lessons need an embedding model. "
+              "Pull %s later, or set SONDER_EMBED_MODEL." % embed_model)
     ok, message = create_alias(ollama, base_model, env=env)
     print(f"  alias: {message}")
     if not ok:
