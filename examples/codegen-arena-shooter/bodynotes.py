@@ -288,7 +288,11 @@ Screen.MainMenu.""",
 Apply Raylib.GetMouseDelta() to _me.Yaw and _me.Pitch, clamping Pitch to plus
 or minus 1.5f. Build a move vector from W/A/S/D relative to _me.Forward, scale
 it by ClassKit.Get(_me.Kit).MoveSpeed * dt, and assign _me.Position =
-_map.MoveWithSlide(_me.Position, move, 0.4f). Call _match.Update(dt, _map).
+_map.MoveWithSlide(_me.Position, move, 0.4f). If the left mouse button was
+pressed, call _me.TryFire(); it returns false without changing state while the
+weapon is cooling down, empty, dead, or waiting to respawn. If R was pressed,
+call _me.TryReload(); it only refills a living, non-full combatant. Call
+_match.Update(dt, _map).
 Accumulate dt into _netTimer and every 0.05s, when _net.Connected, send
 NetProtocol.EncodeState if IsHost else EncodeInput. Drain foreach (string msg
 in _net.Poll()) and when !_net.IsHost call NetProtocol.ApplyState(msg,

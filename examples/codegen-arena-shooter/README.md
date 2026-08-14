@@ -357,6 +357,16 @@ That is the whole cross-file failure of v1 in miniature — and the fix is not a
 better model, it is refusing to make one body depend on another being guessed
 correctly.
 
+### Host-owned weapon controls
+
+The skeleton owns `Combatant.TryFire()` and `Combatant.TryReload()` instead of
+asking a generated frame loop to reproduce weapon invariants. A shot spends one
+round only when the combatant is alive, spawned, off cooldown, and has ammo;
+reload only refills a living combatant whose weapon is not already full.
+`Program.DoMatch` is instructed to map left-click and `R` to those methods.
+The reflection verifier exercises fire, cooldown, reload, and full-magazine
+rejection, so a green build cannot silently weaken the contract.
+
 ### What the check covers
 
 `ClassKit`, `GameMap`, `Combatant`, `NetProtocol`, `MatchState` — everything
