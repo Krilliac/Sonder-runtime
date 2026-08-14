@@ -278,6 +278,20 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
     }
 
 
+def test_make_generate_marks_partial_provider_usage_as_mixed(monkeypatch):
+    def fake_post(_path, _payload):
+        return {"message": {"content": "ok"}, "eval_count": 2}
+
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    gen = server._make_generate("local-model", "system", 0.2, 20, 4096)
+
+    assert gen("hello") == "ok"
+    assert gen.last_usage["tokens_in"] > 0
+    assert gen.last_usage["tokens_out"] == 2
+    assert gen.last_usage["token_source"] == "mixed"
+
+
 def test_local_model_options_clamps_native_context(monkeypatch):
     monkeypatch.setenv("SONDER_NATIVE_CONTEXT_MAX", "256k")
 

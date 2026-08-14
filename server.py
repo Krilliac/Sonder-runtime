@@ -1329,7 +1329,7 @@ def _make_generate(
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
-            source = "ollama" if tokens_in is not None or tokens_out is not None else "estimated"
+            source = _model_usage_source(tokens_in, tokens_out)
             if tokens_in is None:
                 tokens_in = sum(_rough_token_count(m.get("content", "")) for m in messages)
             if tokens_out is None:
@@ -4355,6 +4355,20 @@ def _model_usage_count(value):
     return value if value >= 0 else None
 
 
+def _model_usage_source(tokens_in, tokens_out):
+    """Describe whether both persisted token counts came from Ollama.
+
+    Some compatible gateways return only one of ``prompt_eval_count`` and
+    ``eval_count``.  Keep the available counter, but do not label the other
+    side's character estimate as an exact provider measurement.
+    """
+    if tokens_in is not None and tokens_out is not None:
+        return "ollama"
+    if tokens_in is None and tokens_out is None:
+        return "estimated"
+    return "mixed"
+
+
 def _empty_model_response_detail(out, message):
     """Describe an empty response without exposing model reasoning content."""
     metadata = {}
@@ -4847,11 +4861,7 @@ def _offload_impl(
                 )
             tokens_in = _model_usage_count(out.get("prompt_eval_count"))
             tokens_out = _model_usage_count(out.get("eval_count"))
-            source = (
-                "ollama"
-                if tokens_in is not None or tokens_out is not None
-                else "estimated"
-            )
+            source = _model_usage_source(tokens_in, tokens_out)
             if tokens_in is None:
                 tokens_in = sum(
                     _rough_token_count(message.get("content", ""))
@@ -6932,9 +6942,11 @@ def sonder_stats() -> str:
             token_totals["tokens_out"],
             token_totals["tokens_total"],
         ),
-        "  token rows: exact=%d estimated_legacy=%d" % (
+        "  token rows: measured=%d estimated=%d mixed=%d unknown=%d" % (
             token_totals["exact_rows"],
             token_totals["estimated_rows"],
+            token_totals["mixed_rows"],
+            token_totals["unknown_rows"],
         ),
         "  outcomes by signal: %s" % signals_line,
     ]
@@ -6942,10 +6954,11 @@ def sonder_stats() -> str:
         lines.append("  tokens by tier:")
         for row in token_by_tier[:8]:
             lines.append(
-                "    - %s: in=%d out=%d total=%d interactions=%d exact=%d estimated=%d" % (
+                "    - %s: in=%d out=%d total=%d interactions=%d measured=%d estimated=%d mixed=%d unknown=%d" % (
                     row["tier"], row["tokens_in"], row["tokens_out"],
                     row["tokens_total"], row["interactions"],
                     row["exact_rows"], row["estimated_rows"],
+                    row["mixed_rows"], row["unknown_rows"],
                 )
             )
     if lessons:
