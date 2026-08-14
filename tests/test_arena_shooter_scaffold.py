@@ -101,9 +101,18 @@ def test_arena_builder_rejects_known_runtime_lifecycle_contract_violations():
     ) == []
     assert builder["body_contract_issues"](
         "GameMap.cs", "IsWallAt", "return !_walls[0, 0];"
-    ) == ["must contain IsWallCell("]
+    ) == [
+        "must contain MathF.Floor",
+        "must contain CellSize",
+        "must contain IsWallCell(",
+    ]
     assert builder["body_contract_issues"](
         "GameMap.cs", "IsWallAt", "return IsWallCell(x, z);"
+    ) == ["must contain MathF.Floor", "must contain CellSize"]
+    assert builder["body_contract_issues"](
+        "GameMap.cs",
+        "IsWallAt",
+        "return IsWallCell((int)MathF.Floor(p.X / CellSize), (int)MathF.Floor(p.Z / CellSize));",
     ) == []
     assert builder["body_contract_issues"](
         "GameMap.cs", "IsWallCell", "return _walls[x % Width, z % Depth];"

@@ -85,7 +85,7 @@ _REQUIRED_BODY_TEXT = {
     # IsWallCell owns bounds behavior.  Reimplementing `_walls` directly has
     # already produced a compiling but inverted/out-of-range IsWallAt body;
     # preserve the one source of truth rather than grading it only by syntax.
-    ("GameMap.cs", "IsWallAt"): ("IsWallCell(",),
+    ("GameMap.cs", "IsWallAt"): ("MathF.Floor", "CellSize", "IsWallCell("),
 }
 _FORBIDDEN_BODY_TEXT = {
     ("Program.cs", "DoLobby"): ("Raylib.BeginDrawing", "Raylib.EndDrawing"),
