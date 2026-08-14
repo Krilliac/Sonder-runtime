@@ -498,6 +498,23 @@ def test_chat_request_keeps_nonleading_literal_think_tags(monkeypatch):
     assert content == literal
 
 
+def test_chat_request_refuses_inline_thinking_only_content(monkeypatch):
+    private_reasoning = "private inline deliberation: bearer no-leak-token"
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda *args, **kwargs: {
+            "message": {"content": "<think>%s</think>" % private_reasoning},
+        },
+    )
+
+    with pytest.raises(server.ModelCallError) as captured:
+        server._chat_request({}, model="local")
+
+    assert "no assistant content" in captured.value.detail
+    assert private_reasoning not in captured.value.detail
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
