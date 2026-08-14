@@ -21072,7 +21072,7 @@ def _autopilot_start(
             run["id"], max_cycles=max_cycles, plan_only=plan_only, **launch_kwargs,
         )
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
-        return "ERROR: %s" % exc
+        return "autopilot request failed: %s" % exc
     prefix = "autopilot plan started" if plan_only else "autopilot started"
     if not launched:
         prefix = "autopilot already active"
@@ -21091,9 +21091,9 @@ def _autopilot_resume(
     _maybe_live_reload()
     run = _application().automation.get_run(run_id, request_owner=request_owner)
     if not run:
-        return "ERROR: no unambiguous autopilot run matches '%s'." % run_id
+        return "autopilot request rejected: no accessible run matches '%s'." % run_id
     if run.get("status") not in autopilot_store.RESUMABLE_STATUSES:
-        return "ERROR: run %s is %s and cannot be resumed." % (run["id"], run.get("status"))
+        return "autopilot request rejected: run %s is %s and cannot be resumed." % (run["id"], run.get("status"))
     try:
         if wait:
             execute_kwargs = {"request_owner": request_owner} if request_owner else {}
@@ -21103,7 +21103,7 @@ def _autopilot_resume(
         launch_kwargs = {"request_owner": request_owner} if request_owner else {}
         launched = _launch_autopilot(run["id"], max_cycles=max_cycles, **launch_kwargs)
     except (OSError, RuntimeError, ValueError, autopilot_controller.AutopilotError) as exc:
-        return "ERROR: %s" % exc
+        return "autopilot request failed: %s" % exc
     return "%s\n%s" % (
         "autopilot resumed" if launched else "autopilot already active",
         autopilot_controller.format_run(run, include_report=False),
@@ -21116,7 +21116,7 @@ def _autopilot_pause(run_id: str, request_owner: str | None = None) -> str:
     run = autopilot_store.request_pause(run_id, request_owner=request_owner)
     return (
         autopilot_controller.format_run(run, include_report=False)
-        if run else "ERROR: no unambiguous autopilot run matches '%s'." % run_id
+        if run else "autopilot request rejected: no accessible run matches '%s'." % run_id
     )
 
 
@@ -21126,7 +21126,7 @@ def _autopilot_cancel(run_id: str, request_owner: str | None = None) -> str:
     run = autopilot_store.request_cancel(run_id, request_owner=request_owner)
     return (
         autopilot_controller.format_run(run, include_report=False)
-        if run else "ERROR: no unambiguous autopilot run matches '%s'." % run_id
+        if run else "autopilot request rejected: no accessible run matches '%s'." % run_id
     )
 
 
