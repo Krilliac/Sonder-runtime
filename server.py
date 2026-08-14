@@ -5644,6 +5644,7 @@ def _answer_with_history_impl(
     project="",
     raise_model_errors=False,
     target_observer=None,
+    augment=True,
 ):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
@@ -5662,7 +5663,7 @@ def _answer_with_history_impl(
     command = control_command(prompt, history=history, session=session, project=project)
     if command is not None:
         return _append_activity(command)
-    model, cloud, augment, tier_label = _serve_target(tier, strict)
+    model, cloud, model_augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -5700,7 +5701,12 @@ def _answer_with_history_impl(
             response, iid, trace_ctx = _answer(
                 conn, prompt, model, effective_system, 0.2, 1024, req_ctx,
                 session_id, capture_project, history or None, trace=trace,
-                tier=tier_label, cloud=cloud, augment=augment,
+                # ``augment`` is an HTTP-owned privacy boundary.  A model
+                # route can further opt out (for example cloud teacher mode),
+                # but it must never re-enable retrieval that the caller
+                # disabled.
+                tier=tier_label, cloud=cloud,
+                augment=bool(augment and model_augment),
                 allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
             )
             _capture_turn(model, tier_label, trace_ctx, prompt, response, iid)
@@ -5789,6 +5795,7 @@ def answer_with_history(
     project="",
     raise_model_errors=False,
     target_observer=None,
+    augment=True,
 ):
     label = "chat:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
@@ -5810,6 +5817,7 @@ def answer_with_history(
             project=project,
             raise_model_errors=raise_model_errors,
             target_observer=target_observer,
+            augment=augment,
         )
     return _append_activity(result, response=response, replace=True)
 

@@ -2463,7 +2463,7 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
     forwarded = []
 
     def fake_answer(prompt, history, **kwargs):
-        forwarded.append((kwargs["session"], kwargs["project"]))
+        forwarded.append((kwargs["session"], kwargs["project"], kwargs["augment"]))
         return "answer\n\n[interaction_id: abc123]"
 
     monkeypatch.setattr(ts.server, "answer_with_history", fake_answer)
@@ -2489,9 +2489,29 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
             assert status == 200
 
     assert forwarded[0] == forwarded[2]
-    assert forwarded[0] != forwarded[1]
-    assert all(session != "common-session" for session, _ in forwarded)
-    assert all(project != "common-project" for _, project in forwarded)
+    assert forwarded[0][:2] != forwarded[1][:2]
+    assert all(session != "common-session" for session, _, _ in forwarded)
+    assert all(project != "common-project" for _, project, _ in forwarded)
+    assert all(augment is False for _, _, augment in forwarded)
+
+
+def test_account_catalogued_global_memory_tools_are_refused(monkeypatch):
+    """Hosted accounts must not query or influence the shared legacy corpus."""
+    context = {
+        "mode": "account",
+        "authorized": True,
+        "account": {"username": "alice", "role": "user"},
+    }
+    local = {"mode": "local-open", "authorized": True, "account": None}
+    tools = (
+        "memory_search", "apply_learned", "sonder_sessions", "session_export",
+        "memory_export", "learning_health_status", "evaluation_history_status",
+        "sonder_remember_fact", "record_outcome", "learn_from_example",
+    )
+    for tool in tools:
+        refused = ts._http_tool_refusal((tool,), "/" + tool, context)
+        assert "global memory tool is local-operator only" in refused
+        assert ts._account_global_memory_refusal(tool, local) == ""
 
 
 def test_deployment_gating_summary_covers_every_auth_mode(monkeypatch):
