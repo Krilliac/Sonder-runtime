@@ -439,6 +439,11 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             f"[ollama].url host {parts.hostname!r} is not loopback and "
             "allow_remote is false (remote-Ollama consent gate)"
         )
+    elif not _is_loopback_host(parts.hostname) and parts.scheme != "https":
+        errors.append(
+            "[ollama].url remote Ollama must use https so prompts and "
+            "embeddings are protected in transit"
+        )
 
     for name in ("model_generations", "http_requests", "tool_processes",
                  "fleet_workers", "autopilot_runs", "training_jobs",

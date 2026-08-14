@@ -90,7 +90,7 @@ def test_remote_ollama_is_blocked_before_cli_without_explicit_opt_in(monkeypatch
 
 def test_remote_ollama_opt_in_allows_cli(monkeypatch):
     calls = []
-    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
 
     def fake_run(command, **kwargs):

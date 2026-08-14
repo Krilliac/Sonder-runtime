@@ -1231,9 +1231,9 @@ def test_fanout_synthesis_rejects_cloud_before_vault_or_source_construction(monk
 
 
 def test_fanout_synthesis_rejects_remote_ollama_before_vault_or_generation(monkeypatch):
-    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
-    monkeypatch.setattr(server, "BASE", "http://models.example.test:11434")
+    monkeypatch.setattr(server, "BASE", "https://models.example.test:11434")
     monkeypatch.setattr(server, "_direct_fanout_access", lambda *_args: ({"id": "fan-test", "status": "completed"}, None))
     monkeypatch.setattr(
         server, "_fanout_synthesis_sources",
