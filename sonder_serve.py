@@ -3930,7 +3930,11 @@ class Handler(BaseHTTPRequestHandler):
                 usage=_chat_usage(activity_response) if include_stream_usage else None,
             )
             self._record_chat_completion_metric(
-                _lifecycle, "ok" if streamed else "cancelled", request_started,
+                _lifecycle,
+                "ok" if streamed is True else
+                "cancelled" if streamed is False else
+                "stream_error",
+                request_started,
             )
         else:
             try:
@@ -3958,7 +3962,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_stream(self, content, model, iid=None, elapsed_ms=None, receipt=None,
                      usage=None):
+        """Send one complete SSE response.
+
+        ``True`` is a normal completed stream and ``False`` means the client
+        left.  ``None`` is a server-side streaming failure after the response
+        became SSE; callers must record it as a non-success result.  Model
+        calls themselves complete before this method begins, so their errors
+        retain the ordinary pre-header JSON error contract.
+        """
         iid = iid or uuid.uuid4().hex[:12]
+        headers_sent = False
         try:
             self.send_response(200)
             self._cors()
@@ -3975,6 +3988,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.close_connection = True
             self.end_headers()
+            headers_sent = True
             self.wfile.write(_chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
             self.wfile.write(_chunk(
                 iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
@@ -3989,6 +4003,38 @@ class Handler(BaseHTTPRequestHandler):
             # can.  Return the same cancellation signal so the caller records
             # one truthful terminal metric instead of leaking a socket error.
             self.close_connection = True
+            return False
+        except Exception as error:
+            # HTTP status and headers are immutable now.  Do not try to append
+            # a JSON error body to an SSE response: a parser would see a bare
+            # close or malformed event stream.  A functioning connection gets
+            # a terminal, non-sensitive SSE error and [DONE] instead.
+            self.log_error("stream response failed: %s", type(error).__name__)
+            if headers_sent:
+                Handler._send_stream_terminal_error(self, iid, model)
+            self.close_connection = True
+            return None
+
+    def _send_stream_terminal_error(self, iid, model):
+        """Best-effort terminal SSE error after an already-started stream."""
+        payload = {
+            "id": "chatcmpl-%s" % iid,
+            "object": "error",
+            "model": model,
+            "error": {
+                "message": "stream interrupted before completion",
+                "type": "server_error",
+                "code": "STREAM_INTERRUPTED",
+            },
+        }
+        try:
+            self.wfile.write(("data: %s\n\n" % json.dumps(payload)).encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+            return True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return False
+        except Exception as error:
+            self.log_error("stream terminal error write failed: %s", type(error).__name__)
             return False
 
 

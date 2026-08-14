@@ -1863,6 +1863,99 @@ def test_stream_swallows_a_client_disconnect_during_headers():
     assert probe.wfile.getvalue() == b""
 
 
+def test_stream_terminalizes_internal_failure_after_content_event(monkeypatch):
+    class StreamProbe:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = io.BytesIO()
+            self.close_connection = False
+
+        def send_response(self, status):
+            assert status == 200
+
+        def _cors(self):
+            pass
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            pass
+
+        def log_error(self, _fmt, *_args):
+            pass
+
+    real_chunk = ts._chunk
+    calls = []
+
+    def fail_after_content(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            raise RuntimeError("finish chunk failed")
+        return real_chunk(*args, **kwargs)
+
+    monkeypatch.setattr(ts, "_chunk", fail_after_content)
+    probe = StreamProbe()
+    assert ts.Handler._send_stream(probe, "partial", "sonder", iid="broken") is None
+
+    payloads = [
+        json.loads(line[6:])
+        for line in probe.wfile.getvalue().decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert payloads[0]["choices"][0]["delta"]["content"] == "partial"
+    assert payloads[-1] == {
+        "id": "chatcmpl-broken",
+        "object": "error",
+        "model": "sonder",
+        "error": {
+            "message": "stream interrupted before completion",
+            "type": "server_error",
+            "code": "STREAM_INTERRUPTED",
+        },
+    }
+    assert probe.wfile.getvalue().endswith(b"data: [DONE]\n\n")
+    assert probe.close_connection is True
+
+
+def test_chat_records_terminal_stream_failure_as_non_success(monkeypatch):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ts.server, "answer_with_history", lambda *_args, **_kwargs: "answer")
+    recorded = []
+    monkeypatch.setattr(
+        ts.Handler, "_record_chat_completion_metric",
+        lambda _self, _lifecycle, result, _started: recorded.append(result),
+    )
+
+    def terminal_failure(self, _content, _model, **_kwargs):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        self.wfile.write(b'data: {"error":{"type":"server_error"}}\n\ndata: [DONE]\n\n')
+        return None
+
+    monkeypatch.setattr(ts.Handler, "_send_stream", terminal_failure)
+    request = json.dumps({
+        "model": "sonder", "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }).encode("utf-8")
+    with _http_server(monkeypatch) as port:
+        status, _headers, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert body.endswith(b"data: [DONE]\n\n")
+    assert recorded == ["stream_error"]
+
+
 def test_json_payload_swallows_a_client_disconnect_during_headers():
     class JsonProbe:
         def __init__(self):
