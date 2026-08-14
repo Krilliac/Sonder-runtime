@@ -143,7 +143,8 @@ _RULES = [
     # facts.  These are deliberately complete, question-shaped turns only;
     # a request to inspect a particular file or quoted page text still falls
     # through to the normal conversation/work routes.
-    _rule(r"^(?:can|could)\s+you\s+(?:inspect|audit)\s+yourself\s+"
+    _rule(r"^(?:(?:please\s+)?(?:can|could)\s+you\s+|please\s+)"
+          r"(?:inspect|audit)\s+yourself\s+"
           r"(?:and\s+)?(?:tell|show)\s+me\s+(?:the\s+)?next\s+"
           r"(?:grounded\s+)?improvements?\s*[?!.]*$", _fixed("/improve")),
     _rule(r"^(?:can|could)\s+you\s+find\s+something\s+to\s+do\s*[?!.]*$",
