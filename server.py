@@ -20617,7 +20617,7 @@ def agent(
         surface="agent",
         model=tier,
         project=project,
-    ):
+    ) as response:
         result = _agent_impl(
             prompt,
             tier=tier,
@@ -20627,7 +20627,11 @@ def agent(
             project=project,
             allow_location=bool(allow_location),
         )
-    response = activity_tracker.current() if nested else activity_tracker.latest()
+    # Keep the report bound to this invocation's span.  Once an outer span
+    # closes, ``latest()`` is a process-global last-completed value; another
+    # MCP/HTTP request can complete in the small gap before this formatting
+    # code runs.  The yielded span remains the authoritative record for both
+    # nested and standalone calls.
     if nested and response:
         # The inner agent may have deliberately downgraded the shared outer
         # response to unverified (or terminally failed/cancelled). Completing

@@ -3325,3 +3325,26 @@ def test_identity_block_does_not_place_a_cloud_model_on_this_machine():
     assert "not on this machine" in block
     local = server._runtime_identity_block("sonder:latest", cloud=False)
     assert _LOCAL_CLAIM in local
+
+
+def test_agent_report_stays_bound_to_its_span_when_latest_changes(monkeypatch):
+    """MCP agent results must not format a concurrently completed response."""
+    server.activity_tracker.reset_for_tests()
+    monkeypatch.setattr(server, "_agent_impl", lambda *args, **kwargs: "own result")
+    monkeypatch.setattr(
+        server.activity_tracker,
+        "latest",
+        lambda: {
+            "id": "r_other", "status": "complete", "label": "other request",
+            "elapsed_ms": 1, "model_calls": 9, "tool_calls": 8,
+            "tokens_in": 7, "tokens_out": 6, "file_creates": 0,
+            "file_edits": 0, "file_deletes": 0, "lines_added": 0,
+            "lines_edited": 0, "lines_deleted": 0, "events": [], "files": [],
+        },
+    )
+
+    output = server.agent("inspect this")
+
+    assert "own result" in output
+    assert "agent:code" in output
+    assert "r_other" not in output
