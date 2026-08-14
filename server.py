@@ -5528,6 +5528,13 @@ def sonder(
             ))
         prompt = natural["prompt"]
         tier = natural["model"]
+        # A model named in this turn is an explicit, request-scoped choice.
+        # In particular, it must win over a REPL session's earlier `/model`
+        # pin: otherwise the implementation resolves this new tier and then
+        # silently replaces it with the stale pin via ``model_override``.
+        # Keep the natural selector in ``tier`` so the shared live-catalog and
+        # cloud-policy checks in _serve_target remain the single authority.
+        model_override = ""
     label = "sonder:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
         label,
