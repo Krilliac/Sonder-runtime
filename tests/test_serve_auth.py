@@ -1574,10 +1574,17 @@ def test_api_key_mode_cannot_be_bypassed_by_account_token(monkeypatch):
 def test_non_loopback_bind_fails_without_strong_auth():
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(
-            "0.0.0.0", api_key="", auth_mode="local-open", auth_secret=""
+            "0.0.0.0", api_key="", auth_mode="local-open", auth_secret="",
+            tls_terminated_by_proxy=True,
+        )
+    with pytest.raises(RuntimeError, match="TLS-terminating"):
+        ts._validate_bind_security(
+            "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret="",
+            tls_terminated_by_proxy=False,
         )
     ts._validate_bind_security(
-        "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret=""
+        "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret="",
+        tls_terminated_by_proxy=True,
     )
     ts._validate_bind_security(
         "127.0.0.1", api_key="", auth_mode="local-open", auth_secret=""
@@ -2101,10 +2108,12 @@ def test_bind_gate_tracks_the_named_minimum_key_length(monkeypatch):
 
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(
-            "0.0.0.0", api_key="k" * 30, auth_mode="api-key", auth_secret=""
+            "0.0.0.0", api_key="k" * 30, auth_mode="api-key", auth_secret="",
+            tls_terminated_by_proxy=True,
         )
     ts._validate_bind_security(
-        "0.0.0.0", api_key="k" * 40, auth_mode="api-key", auth_secret=""
+        "0.0.0.0", api_key="k" * 40, auth_mode="api-key", auth_secret="",
+        tls_terminated_by_proxy=True,
     )
 
 

@@ -423,6 +423,12 @@ def _export_runtime_environment(config) -> None:
     os.environ["SONDER_PORT"] = str(config.server.port)
     os.environ["SONDER_AUTH_MODE"] = config.server.auth_mode
     os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
+    # The stdlib HTTP adapter has a final bind-time gate as well as config
+    # validation.  Export the validated proxy declaration so a direct adapter
+    # import cannot weaken a non-loopback deployment between those boundaries.
+    os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] = (
+        "1" if config.server.tls_terminated_by_proxy else "0"
+    )
     os.environ["OLLAMA_HOST"] = config.ollama.url
     os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
         "1" if config.ollama.allow_remote else "0"
