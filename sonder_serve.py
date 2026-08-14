@@ -52,6 +52,30 @@ DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 
 
+class _DuplicateJsonObjectKey(ValueError):
+    """A request JSON object repeated a member name.
+
+    JSON decoders conventionally accept repeated object members and silently
+    keep the final value.  That is unsafe at an HTTP trust boundary: a proxy,
+    audit record, or future validator could observe a different occurrence
+    from the application.  Reject them before request routing instead.
+    """
+
+
+def _reject_duplicate_json_object_key(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonObjectKey("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_number(value):
+    """Keep the HTTP boundary to standard finite JSON numbers."""
+    raise ValueError("non-finite JSON number is not allowed")
+
+
 def _local_server_log_tail():
     """Return a bounded, redacted tail for the loopback-only diagnostics page."""
     path = Path(server.sonder_paths.default_home()) / "run" / "sonder_serve.log"
@@ -2872,8 +2896,14 @@ class Handler(BaseHTTPRequestHandler):
         if len(raw) != length:
             raise HTTPRequestError(400, "request body is incomplete")
         try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_object_key,
+                parse_constant=_reject_nonfinite_json_number,
+            )
+        except _DuplicateJsonObjectKey:
+            raise HTTPRequestError(400, "request JSON must not contain duplicate object keys")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             raise HTTPRequestError(400, "request body must contain valid JSON")
         if not isinstance(payload, dict):
             raise HTTPRequestError(400, "request JSON must be an object")
