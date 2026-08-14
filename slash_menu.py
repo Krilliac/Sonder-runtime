@@ -477,13 +477,13 @@ def available() -> bool:
 
     False for every reason a raw read would be wrong -- piped or redirected
     stdin (how the test suite and sonder_client drive the REPL), a non-Windows
-    interpreter with no ``msvcrt``, a dumb terminal, or ``NO_COLOR`` -- so the
-    caller silently gets plain :func:`input` instead of a broken prompt.
+    interpreter with no ``msvcrt``, or a dumb terminal -- so the caller
+    silently gets plain :func:`input` instead of a broken prompt.  ``NO_COLOR``
+    is intentionally *not* a reason to opt out: it requests unstyled output,
+    not the loss of keyboard editing, history, or completion.
     """
     try:
         if os.environ.get("SONDER_NO_MENU"):
-            return False
-        if os.environ.get("NO_COLOR"):
             return False
         if (os.environ.get("TERM") or "").lower() in ("dumb", "unknown"):
             return False

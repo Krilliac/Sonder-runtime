@@ -54,9 +54,18 @@ def test_available_is_false_without_a_tty():
     assert slash_menu.available() is False
 
 
-def test_available_is_false_when_no_color_is_set(monkeypatch):
+def test_no_color_preserves_raw_keyboard_composer(monkeypatch):
+    """NO_COLOR disables decoration, not completion/history/editing support."""
+    class _Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(slash_menu.sys, "stdin", _Tty())
+    monkeypatch.setattr(slash_menu.sys, "stdout", _Tty())
+    monkeypatch.setattr(slash_menu, "_msvcrt", lambda: object())
     monkeypatch.setenv("NO_COLOR", "1")
-    assert slash_menu.available() is False
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert slash_menu.available() is True
 
 
 def test_available_is_false_on_a_dumb_terminal(monkeypatch):
