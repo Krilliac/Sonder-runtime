@@ -642,11 +642,25 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
     # /model changes should be visible before the very next submitted turn.
     compact = width is not None and int(width) <= 88
     if compact:
-        try:
-            lanes = int((status or {}).get("running_lanes") or 0)
-            agents = int((status or {}).get("running_agents") or 0)
-        except (AttributeError, TypeError, ValueError):
+        # The wide composer delegates to _execution_prompt(), which refreshes
+        # a missing status snapshot and explicitly renders an unavailable
+        # lookup as unknown.  Do the same here: treating ``None`` as an empty
+        # mapping made narrow terminals claim L0/A0 when the status service
+        # was unavailable -- an especially misleading place to hide a live
+        # fanout or failed status read.
+        if status is None:
+            try:
+                status = server.execution_status_data()
+            except Exception:
+                status = None
+        if not isinstance(status, dict) or not status.get("known"):
             lanes, agents = "?", "?"
+        else:
+            try:
+                lanes = int(status.get("running_lanes") or 0)
+                agents = int(status.get("running_agents") or 0)
+            except (TypeError, ValueError):
+                lanes, agents = "?", "?"
         parts = ["S %s" % resolved_tier, "L%s A%s" % (lanes, agents)]
     else:
         parts = ["Sonder %s (%s)  %s" % (

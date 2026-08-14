@@ -339,6 +339,19 @@ def test_composer_title_keeps_all_stats_inside_a_standard_80_column_frame(monkey
     assert "1.50s" in title and "M1 T2" in title
 
 
+def test_compact_composer_reports_unknown_execution_status_without_fake_idle(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(
+        sonder_repl.server, "execution_status_data",
+        lambda: {"known": False, "error": "status unavailable"},
+    )
+
+    title = sonder_repl._composer_title("code", width=80)
+
+    assert "L? A?" in title
+    assert "L0 A0" not in title
+
+
 def test_composer_context_and_last_turn_degrade_without_a_fake_value(monkeypatch):
     monkeypatch.setattr(sonder_repl.server, "context_health_data", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(sonder_repl.activity_tracker, "latest", lambda: {"surface": "chat-api"})
