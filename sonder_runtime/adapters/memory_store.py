@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS lesson_tombstones (
     embedding_dim INTEGER,
     reason TEXT NOT NULL CHECK(reason IN ('near_duplicate_pruned')),
     source_lesson_id TEXT,
+    source_interaction TEXT,
     created_ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -429,6 +430,14 @@ def _migrate(conn):
             "WHERE embedding IS NOT NULL AND embedding_dim IS NULL "
             "AND length(embedding) > 0 AND length(embedding) % 4 = 0"
         )
+    tombstone_cols = _column_names(conn, "lesson_tombstones")
+    if "source_interaction" not in tombstone_cols:
+        # Legacy tombstones cannot be safely attributed to an interaction after
+        # their lesson row was deleted. Keep their provenance NULL rather than
+        # inventing a purge relationship.
+        conn.execute(
+            "ALTER TABLE lesson_tombstones ADD COLUMN source_interaction TEXT"
+        )
     preference_cols = _column_names(conn, "preferences")
     if "revision" not in preference_cols:
         conn.execute(
@@ -484,7 +493,7 @@ def _migrate(conn):
 # Bump when _migrate()/post-migration indexes gain a step that _SCHEMA's own
 # text does not change.
 # Schema-text edits are picked up automatically -- see _schema_stamp().
-_MIGRATION_REVISION = 3
+_MIGRATION_REVISION = 4
 
 
 def _schema_stamp():
@@ -679,6 +688,13 @@ def delete_interaction(conn, interaction_id):
     ]
     for lesson_id in distilled:
         _delete_lesson_rows(conn, lesson_id)
+    # A tombstone derived from this interaction is still a learning trace: it
+    # can reject a future candidate even though its lesson was already pruned.
+    # Purging the interaction must remove that denial record too.
+    conn.execute(
+        "DELETE FROM lesson_tombstones WHERE source_interaction=?",
+        (interaction_id,),
+    )
     conn.execute(
         "DELETE FROM outcomes WHERE interaction_id=?", (interaction_id,)
     )
@@ -2197,7 +2213,7 @@ def tombstone_lesson(conn, lesson_id):
     """
     row = conn.execute(
         "SELECT text, embedding, embedding_model, embedding_revision, "
-        "embedding_dim FROM lessons WHERE id=?",
+        "embedding_dim, source_interaction FROM lessons WHERE id=?",
         (lesson_id,),
     ).fetchone()
     if row is None:
@@ -2207,11 +2223,13 @@ def tombstone_lesson(conn, lesson_id):
         conn.execute(
             "INSERT OR IGNORE INTO lesson_tombstones("
             "text_sha256, embedding, embedding_model, embedding_revision, "
-            "embedding_dim, reason, source_lesson_id) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "embedding_dim, reason, source_lesson_id, source_interaction) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 digest, row["embedding"], row["embedding_model"],
                 row["embedding_revision"], row["embedding_dim"],
                 "near_duplicate_pruned", str(lesson_id),
+                row["source_interaction"],
             ),
         )
     deleted = _delete_lesson_rows(conn, lesson_id)
