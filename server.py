@@ -11637,9 +11637,26 @@ def test_discover(
     except Exception as exc:
         _record_direct_tool("test_discover", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
+    # Discovery is an observation tool, but a collector/manifest failure is
+    # still a failed observation. Previously it printed a normal-looking
+    # header and recorded ok=True even when pytest failed during collection.
+    # Keep the framework/error details, but use the standard ERROR contract so
+    # direct callers, agent activity, and retry logic agree that no discovery
+    # result exists.
+    if data.get("error"):
+        output = "ERROR: test discovery failed\n  framework: %s\n  error: %s" % (
+            data.get("framework", "?"), data["error"],
+        )
+        _record_direct_tool(
+            "test_discover", args, ok=False, started=started,
+            summary="%s discovery failed" % data.get("framework", "?"),
+            output=output, evidence=data,
+        )
+        return output
     _record_direct_tool(
         "test_discover", args, ok=True, started=started,
         summary="%s: %d tests in %d files" % (data.get("framework"), data.get("test_count", 0), len(data.get("test_files", []))),
+        evidence=data,
     )
     lines = ["test discovery: %s" % data.get("framework"), "  tests: %d" % data.get("test_count", 0)]
     if data.get("test_files"):
