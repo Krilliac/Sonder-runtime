@@ -435,11 +435,30 @@ def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str 
     from sonder_runtime.bootstrap.app import default_app
 
     automation = default_app().automation
-    data = automation.snapshot(include_finished=include_finished, limit=limit, request_owner=request_owner)
+    # ``request_owner`` was added for served-account filtering after the
+    # original AutomationRepository port.  Local/open callers have no owner,
+    # and must retain compatibility with a faithful legacy port that accepts
+    # only the published ``snapshot(include_finished, limit)`` contract.
+    # Account-backed callers deliberately do *not* fall back: omitting their
+    # owner would turn an adapter mismatch into a cross-account disclosure.
+    if request_owner is None:
+        data = automation.snapshot(include_finished=include_finished, limit=limit)
+    else:
+        data = automation.snapshot(
+            include_finished=include_finished,
+            limit=limit,
+            request_owner=request_owner,
+        )
     latest = data.get("latest")
-    data["events"] = (
-        automation.events(latest["id"], limit=12, request_owner=request_owner) if latest else []
-    )
+    if latest:
+        if request_owner is None:
+            data["events"] = automation.events(latest["id"], limit=12)
+        else:
+            data["events"] = automation.events(
+                latest["id"], limit=12, request_owner=request_owner,
+            )
+    else:
+        data["events"] = []
     return data
 
 

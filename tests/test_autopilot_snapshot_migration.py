@@ -6,6 +6,8 @@ runs and per-run events, resolved against the same database.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import autopilot_controller
@@ -47,3 +49,54 @@ def test_snapshot_matches_direct_store_shape(autopilot_db):
     # Same run set and counts; the port adds only the events enrichment.
     assert {r["id"] for r in via_port["runs"]} == {r["id"] for r in direct["runs"]}
     assert via_port.get("active_runs") == direct.get("active_runs")
+
+
+def test_unscoped_snapshot_uses_the_published_legacy_port_contract(monkeypatch):
+    """A local status view must work with an adapter predating owner scopes."""
+    calls = []
+
+    class LegacyAutomation:
+        def snapshot(self, *, include_finished, limit):
+            calls.append(("snapshot", include_finished, limit))
+            return {"latest": {"id": "run-1"}}
+
+        def events(self, selector, *, limit):
+            calls.append(("events", selector, limit))
+            return [{"kind": "created"}]
+
+    monkeypatch.setattr(
+        bootstrap_app, "default_app",
+        lambda: SimpleNamespace(automation=LegacyAutomation()),
+    )
+
+    assert autopilot_controller.snapshot(include_finished=False, limit=7) == {
+        "latest": {"id": "run-1"}, "events": [{"kind": "created"}],
+    }
+    assert calls == [("snapshot", False, 7), ("events", "run-1", 12)]
+
+
+def test_scoped_snapshot_never_drops_the_account_owner(monkeypatch):
+    calls = []
+
+    class ScopedAutomation:
+        def snapshot(self, **kwargs):
+            calls.append(("snapshot", kwargs))
+            return {"latest": {"id": "run-1"}}
+
+        def events(self, selector, **kwargs):
+            calls.append(("events", selector, kwargs))
+            return []
+
+    monkeypatch.setattr(
+        bootstrap_app, "default_app",
+        lambda: SimpleNamespace(automation=ScopedAutomation()),
+    )
+
+    autopilot_controller.snapshot(request_owner="acct-opaque")
+
+    assert calls == [
+        ("snapshot", {
+            "include_finished": True, "limit": 20, "request_owner": "acct-opaque",
+        }),
+        ("events", "run-1", {"limit": 12, "request_owner": "acct-opaque"}),
+    ]
