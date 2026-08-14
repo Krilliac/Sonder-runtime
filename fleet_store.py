@@ -53,7 +53,10 @@ DEFAULT_MESSAGE_PENDING_TTL_SECONDS = 24 * 60 * 60
 MESSAGE_MODES = frozenset(("follow_up", "steer"))
 
 _SCHEMA_LOCK = threading.RLock()
-_INITIALIZED_PATHS: set[str] = set()
+# Cache the database identity, not merely its pathname.  A recovered or
+# restored fleet ledger may replace the database while this process remains
+# alive; its schema must be rechecked before it is used.
+_INITIALIZED_PATHS: dict[str, tuple[int, int]] = {}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fleet_owners (
@@ -299,12 +302,22 @@ def _drift_metrics_json(value) -> str:
     }, sort_keys=True, separators=(",", ":"))
 
 
+def _database_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_dev, stat.st_ino
+
+
 def _ensure_schema(path: str) -> None:
     resolved = str(Path(path).expanduser().resolve())
+    resolved_path = Path(resolved)
     with _SCHEMA_LOCK:
-        if resolved in _INITIALIZED_PATHS:
+        identity = _database_identity(resolved_path)
+        if identity is not None and _INITIALIZED_PATHS.get(resolved) == identity:
             return
-        Path(resolved).parent.mkdir(parents=True, exist_ok=True)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
         last_error = None
         for attempt in range(4):
             conn = None
@@ -372,7 +385,10 @@ def _ensure_schema(path: str) -> None:
                 if os.name != "nt":
                     with contextlib.suppress(OSError):
                         os.chmod(resolved, 0o600)
-                _INITIALIZED_PATHS.add(resolved)
+                identity = _database_identity(resolved_path)
+                if identity is None:  # pragma: no cover - SQLite just committed it
+                    raise RuntimeError("fleet database disappeared during schema setup")
+                _INITIALIZED_PATHS[resolved] = identity
                 return
             except sqlite3.OperationalError as exc:
                 last_error = exc

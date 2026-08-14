@@ -72,6 +72,21 @@ def test_agent_lifecycle_is_durable_and_queryable(monkeypatch, tmp_path):
     assert snap["latest_master"]["task"] == "work"
 
 
+def test_same_path_database_restore_reinitializes_schema(monkeypatch, tmp_path):
+    _isolated_store(monkeypatch, tmp_path)
+    database = Path(fleet_store.database_path())
+    fleet_store.register_owner("owner-before", 100, 1.0)
+    replacement = tmp_path / "restored-empty.db"
+    sqlite3.connect(replacement).close()
+    os.replace(replacement, database)
+
+    fleet_store.register_owner("owner-after", 101, 2.0)
+
+    with sqlite3.connect(database) as conn:
+        owners = conn.execute("SELECT owner_id FROM fleet_owners").fetchall()
+    assert owners == [("owner-after",)]
+
+
 def test_repository_project_scope_is_durable(monkeypatch, tmp_path):
     _isolated_store(monkeypatch, tmp_path)
     fleet_store.register_owner("owner-project", 111, 100.0)
