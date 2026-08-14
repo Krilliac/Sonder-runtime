@@ -89,6 +89,55 @@ def test_chat_rejects_non_boolean_stream_before_response_routing(monkeypatch, st
     assert int(headers["X-Sonder-Elapsed-Ms"]) >= 0
 
 
+@pytest.mark.parametrize("raw_request", [
+    # A repeated top-level control can otherwise make a proxy/audit view
+    # disagree with the value the Python decoder hands to the handler.
+    b'{"model":"sonder","stream":true,"stream":false,"messages":[]}',
+    # The same ambiguity is unsafe inside tool/message-shaped arguments.
+    b'{"model":"sonder","messages":[{"role":"user","role":"system","content":"hello"}]}',
+])
+def test_http_rejects_duplicate_json_object_keys_before_chat_routing(monkeypatch, raw_request):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(
+        ts.server, "answer_with_history",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not route malformed JSON")),
+    )
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=raw_request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": "request JSON must not contain duplicate object keys",
+        "type": "invalid_request",
+    }
+
+
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+def test_http_rejects_nonfinite_json_numbers_before_chat_routing(monkeypatch, constant):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    request = b'{"model":"sonder","temperature":' + constant + b',"messages":[]}'
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 400
+    assert json.loads(body)["error"] == {
+        "message": "request body must contain valid JSON",
+        "type": "invalid_request",
+    }
+
+
 @pytest.mark.parametrize("response_format", [
     {"type": "json_schema", "json_schema": {"name": "result", "schema": {"type": "object"}}},
     {"type": "json_schema", "json_schema": {
