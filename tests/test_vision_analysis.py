@@ -22,8 +22,8 @@ def test_vision_analysis_sends_guarded_png_to_bound_local_model(monkeypatch, tmp
     monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: True)
     monkeypatch.setattr(server.context_policy, "native", lambda *_args: 4000)
     monkeypatch.setattr(
-        server, "resolve_discovered_model_record",
-        lambda _model: ("qwen2.5vl:3b", {"capabilities": ["vision", "completion"]}),
+        server, "_runtime_installed_model_records",
+        lambda: (("qwen2.5vl:3b", {"capabilities": ["vision", "completion"]}),),
     )
     monkeypatch.setattr(server.file_ops, "require_read_access", lambda *_args, **_kwargs: image)
     monkeypatch.setattr(
@@ -69,8 +69,8 @@ def test_vision_analysis_requires_catalog_vision_capability(monkeypatch, tmp_pat
     monkeypatch.setitem(server.TIERS, "vision", "text-model:latest")
     monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: True)
     monkeypatch.setattr(
-        server, "resolve_discovered_model_record",
-        lambda _model: ("text-model:latest", {"capabilities": ["completion"]}),
+        server, "_runtime_installed_model_records",
+        lambda: (("text-model:latest", {"capabilities": ["completion"]}),),
     )
     monkeypatch.setattr(
         server.file_ops, "require_read_access",
@@ -87,8 +87,8 @@ def test_vision_analysis_refuses_small_operator_context_before_image_read(monkey
     monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: True)
     monkeypatch.setattr(server.context_policy, "native", lambda *_args: 2048)
     monkeypatch.setattr(
-        server, "resolve_discovered_model_record",
-        lambda _model: ("qwen2.5vl:3b", {"capabilities": ["vision"]}),
+        server, "_runtime_installed_model_records",
+        lambda: (("qwen2.5vl:3b", {"capabilities": ["vision"]}),),
     )
     monkeypatch.setattr(
         server.file_ops, "require_read_access",
@@ -97,6 +97,39 @@ def test_vision_analysis_refuses_small_operator_context_before_image_read(monkey
 
     with pytest.raises(server.ModelCallError, match="contextsize 4k"):
         server._vision_analyze_impl(str(image), "describe")
+
+
+def test_vision_analysis_uses_show_for_sparse_catalog_capability(monkeypatch):
+    monkeypatch.setitem(server.TIERS, "vision", "qwen2.5vl:3b")
+    monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: True)
+    monkeypatch.setattr(
+        server, "_runtime_installed_model_records",
+        lambda: (("qwen2.5vl:3b", {}),),
+    )
+    seen = {}
+
+    def show(path, payload, **kwargs):
+        seen.update(path=path, payload=payload, kwargs=kwargs)
+        return {"capabilities": ["vision", "completion"]}
+
+    monkeypatch.setattr(server, "_post", show)
+
+    assert server._vision_local_target() == "qwen2.5vl:3b"
+    assert seen == {
+        "path": "/api/show", "payload": {"name": "qwen2.5vl:3b"},
+        "kwargs": {"timeout": 30},
+    }
+
+
+def test_vision_analysis_resolves_omitted_latest_tag(monkeypatch):
+    monkeypatch.setitem(server.TIERS, "vision", "llava")
+    monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: True)
+    monkeypatch.setattr(
+        server, "_runtime_installed_model_records",
+        lambda: (("llava:latest", {"capabilities": ["vision"]}),),
+    )
+
+    assert server._vision_local_target() == "llava:latest"
 
 
 def test_vision_command_requires_path_and_question(monkeypatch):

@@ -12696,17 +12696,25 @@ def _vision_local_target() -> str:
             "vision analysis requires an installed local vision model",
         )
     try:
-        resolved = resolve_discovered_model_record(configured)
+        records = _runtime_installed_model_records()
     except Exception as exc:
         raise ModelCallError(
             "configuration", "could not verify configured vision model"
         ) from exc
+    resolved = next(
+        (
+            (name, record)
+            for name, record in records
+            if _runtime_model_is_installed(configured, (name,))
+        ),
+        None,
+    )
     if not resolved:
         raise ModelCallError(
             "configuration", "configured vision model is not installed: %s" % configured,
         )
     model, record = resolved
-    if "vision" not in _fanout_capabilities(record):
+    if not _runtime_model_has_capability(configured, "vision", records):
         raise ModelCallError(
             "configuration",
             "configured vision model does not declare vision capability: %s" % model,
