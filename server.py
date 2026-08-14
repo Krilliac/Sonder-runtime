@@ -538,6 +538,18 @@ def _private_cot_rule_allows() -> bool:
 _THINKING_CAPABILITY_CACHE = {}
 _THINKING_CAPABILITY_LOCK = threading.Lock()
 
+# A model can emit a ``message.thinking`` field yet reject the optional Ollama
+# request switch that asks for it.  Keep that transport capability separate
+# from the observed reasoning cache: disabling the request switch must not
+# make the model look non-reasoning for budgeting or output handling.
+_THINK_OPTION_UNSUPPORTED_CACHE = set()
+_THINK_OPTION_UNSUPPORTED_RE = re.compile(
+    r"\b(?:think|thinking)\b.*\b(?:unsupported|not\s+supported)\b"
+    r"|\b(?:unsupported|does\s+not\s+support|not\s+supported)\b"
+    r"(?:\s+\w+){0,3}\s+\b(?:think|thinking)\b",
+    re.IGNORECASE,
+)
+
 # Some local community models serialize deliberation into ordinary ``content``
 # rather than Ollama's separate ``message.thinking`` field.  That field is
 # governed by explicit reasoning exposure policy; a leading closed tag must
@@ -642,6 +654,26 @@ def _known_thinking_model(model) -> bool:
     """Whether we already know this model reasons. Never performs I/O."""
     with _THINKING_CAPABILITY_LOCK:
         return _THINKING_CAPABILITY_CACHE.get(str(model or "").strip(), False)
+
+
+def _think_option_supported(model) -> bool:
+    """Whether a local model has not rejected Ollama's ``think`` option."""
+    with _THINKING_CAPABILITY_LOCK:
+        return str(model or "").strip() not in _THINK_OPTION_UNSUPPORTED_CACHE
+
+
+def _remember_unsupported_think_option(model) -> None:
+    """Avoid repeatedly sending a local model an option it rejected."""
+    name = str(model or "").strip()
+    if not name:
+        return
+    with _THINKING_CAPABILITY_LOCK:
+        _THINK_OPTION_UNSUPPORTED_CACHE.add(name)
+
+
+def _think_option_unsupported(detail) -> bool:
+    """Whether Ollama explicitly refused only the optional ``think`` control."""
+    return bool(_THINK_OPTION_UNSUPPORTED_RE.search(str(detail or "")))
 
 
 def _thinking_exhausted_budget(out, message, *, inline_thinking=False) -> bool:
@@ -4124,16 +4156,16 @@ def _post_model(
 
     Cloud calls stay single-attempt to avoid duplicate metered work. Local calls
     retry only transport failures and explicitly transient HTTP statuses, using
-    the original timeout as one total monotonic budget. The endpoint, model, and
-    payload never change between attempts.
+    the original timeout as one total monotonic budget. The endpoint and model
+    never change between attempts; ordinary retry payloads are unchanged.
 
-    The single exception is a *classified* context overflow. When the failure
-    text itself says the prompt did not fit, this function may spend exactly one
-    extra attempt on a compacted prompt - within the same monotonic deadline and
-    behind the same cancellation gate as every other attempt. `idempotent` is the
-    caller's declaration that repeating this request is safe; it is required (on
-    top of an operator opt-in) before a hosted or remote route will take even
-    that one retry.
+    Exceptions are a *classified* context overflow and a loopback Ollama model
+    explicitly rejecting the optional ``think`` request field. Each can spend
+    exactly one extra attempt within the same monotonic deadline. The latter
+    retry removes only that optional field and never changes model or endpoint.
+    `idempotent` is the caller's declaration that repeating a hosted/remote
+    request is safe; it is required (on top of an operator opt-in) before such
+    a route will take even the overflow retry.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
     if cloud and not cloud_allowed():
@@ -4154,6 +4186,7 @@ def _post_model(
     # Bumped by exactly one if a classified context overflow earns a compaction
     # retry, so that recovery cannot eat the ordinary transient retry budget.
     compaction_spent = False
+    think_option_fallback_spent = False
     attempt_index = 0
     while attempt_index < max_attempts:
         attempt = attempt_index + 1
@@ -4242,6 +4275,41 @@ def _post_model(
         if not compaction_spent:
             detail = embedded_detail or failure.detail
             status = None if embedded_detail else failure.status
+            if (
+                not think_option_fallback_spent
+                and not cloud
+                and not remote_endpoint
+                and "think" in payload
+                and _think_option_unsupported(detail)
+            ):
+                remaining = deadline - time.monotonic()
+                if _cancel_requested(cancel_check):
+                    raise ModelCallError(
+                        "cancelled",
+                        "model call cancelled before another request was sent",
+                        attempts=attempt,
+                        cloud=cloud,
+                    )
+                if remaining < 1.0:
+                    if failure is not None:
+                        raise failure
+                    # Preserve the normal in-band-error path when no HTTP
+                    # failure object exists to re-raise.
+                    return result, attempt
+                # Preserve the model, endpoint, messages, context policy, and
+                # ordinary retry budget. This is solely compatibility with
+                # Ollama models that do not implement the optional switch.
+                payload = dict(payload)
+                payload.pop("think", None)
+                _remember_unsupported_think_option(model)
+                think_option_fallback_spent = True
+                max_attempts += 1
+                activity_tracker.record_event(
+                    "model_thinking_option_fallback",
+                    model=str(model or "")[:80],
+                    attempt=attempt + 1,
+                )
+                continue
             verdict = context_overflow.classify(detail, status=status)
             compacted = None
             if verdict.overflow and _overflow_retry_allowed(
@@ -4380,7 +4448,11 @@ def _chat_request(
         # Never override an explicit choice; the cloud policy sets `think`
         # itself. Ollama returns message.thinking for these models regardless,
         # so this is belt-and-braces rather than the mechanism.
-        if reasoning_exposure_enabled() and "think" not in payload:
+        if (
+            reasoning_exposure_enabled()
+            and "think" not in payload
+            and _think_option_supported(model)
+        ):
             payload["think"] = True
     out, attempts = _post_model(
         "/api/chat",
