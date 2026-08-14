@@ -70,7 +70,10 @@ def test_self_heal_repairs_invalid_json_configs(monkeypatch, tmp_path):
     monkeypatch.setattr(emotion_vectors, "workspace_root", lambda: str(tmp_path))
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_EMOTION_VECTORS", raising=False)
-    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+    # Workflows now live in per-user state by default.  Keep exercising the
+    # supported checkout-local operator override rather than treating a
+    # historical source file as active configuration.
+    monkeypatch.setenv("SONDER_WORKFLOWS", "workflows.json")
     (tmp_path / "emotion_vectors.json").write_text("{bad", encoding="utf-8")
     (tmp_path / "workflows.json").write_text("{bad", encoding="utf-8")
     db = str(tmp_path / "mem.db")
@@ -82,6 +85,7 @@ def test_self_heal_repairs_invalid_json_configs(monkeypatch, tmp_path):
     assert not any(i.code.endswith("_invalid") for i in after)
     assert json.loads((tmp_path / "emotion_vectors.json").read_text(encoding="utf-8"))
     assert json.loads((tmp_path / "workflows.json").read_text(encoding="utf-8"))
+    assert list(tmp_path.glob("workflows.json.bak-*"))
 
 
 def test_server_self_heal_tools(monkeypatch, tmp_path):

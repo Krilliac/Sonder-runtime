@@ -144,6 +144,7 @@ _CATEGORY_BY_TOOL = {
     "sonder_remember_fact": "memory",
     "hardware_profile": "system",
     "environment_status": "system",
+    "toolchain_status": "system",
     "npu_status": "system",
     "system_profile_text": "persona",
     "update_system_profile": "persona",
@@ -153,6 +154,8 @@ _CATEGORY_BY_TOOL = {
     # `/git` completion cohesive rather than surfacing unrelated system rows.
     "runtime_source_update": "repo",
     "runtime_source_update_status": "repo",
+    "runtime_source_stash": "repo",
+    "runtime_source_stash_status": "repo",
     "data_convert": "data",
     "elevate": "security",
 }
@@ -227,12 +230,13 @@ _CATEGORY_BY_SLASH = {
     "/learn": "memory", "/good": "memory", "/bad": "memory",
     "/accept": "memory", "/pass": "memory", "/fail": "memory",
     "/todo": "planning", "/plan": "planning",
-    "/cot": "system", "/debug": "system", "/env": "system",
+    "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
     "/trace": "system", "/strict": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/goal": "system", "/improve": "system", "/append": "filesystem",
     "/updatecheck": "repo", "/update": "repo", "/updatesource": "repo",
+    "/stash": "repo", "/runtime-stash": "repo",
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
@@ -258,6 +262,7 @@ _DANGEROUS = frozenset({
     # Fast-forwarding the source tree changes the bytes enforcing every later
     # request.  The paired status tool is separately marked read-only below.
     "runtime_source_update",
+    "runtime_source_stash",
     # `admin_login` is the console's elevation primitive by that same
     # definition, and was missing from this set because it looks like a read:
     # the login call mutates nothing itself. What it *returns* does. It is the
@@ -293,6 +298,7 @@ _READ_ONLY = frozenset({
     "sonder_sessions", "sonder_stats", "turn_inspect", "workflow_list",
     "memory_export", "policy_explain",
     "runtime_source_update_status",
+    "runtime_source_stash_status",
 })
 
 # Branches whose real work is done by module-level functions that front no

@@ -861,6 +861,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /refactor <file> <fn> [goal]  propose a guarded improvement to one function
   /scaffold <kind> <name> [root]  write a full project skeleton (cpp-msvc, csharp, rust, ...)
   /env [refresh]     show the host OS, shells, and installed toolchains
+  /toolstatus <name> run the fixed local version probe for a discovered tool
   /location [on|off] allow approximate IP location for "my area" weather answers
   /stats             show Sonder Runtime's learning stats
   /context           show context, session, and memory health meters
@@ -871,6 +872,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
   /runtime ...       shared local model mappings and execution-lane tiers
+  /stash ...         save/restore this install's source edits for a guarded update
   /hardware          detect RAM, GPU runtime, VRAM, and offload support
   /training ...      plan/start/status/deploy/rollback attended weight training
   /selfmod ...       inspect/plan/test/approve/deploy/rollback isolated improvements
@@ -1662,6 +1664,12 @@ def main():
             elif cmd in ("/env", "/environment"):
                 print(server.environment_status(
                     refresh=(arg or "").strip().lower() == "refresh"))
+            elif cmd in ("/toolstatus", "/toolversion"):
+                name = (arg or "").strip()
+                if not name:
+                    print("usage: /toolstatus <discovered-tool-name>  (try /env first)")
+                else:
+                    print(server.toolchain_status(name=name))
             elif cmd == "/scaffold":
                 parts = arg.split()
                 if len(parts) < 2:
@@ -1806,6 +1814,7 @@ def main():
             elif cmd in (
                 "/runtime", "/models", "/mcp", "/convergence",
                 "/update", "/updatecheck", "/updatesource",
+                "/stash", "/runtime-stash",
                 "/hardware", "/training", "/weighttraining",
                 "/selfmod", "/selfmodify",
                 "/learning", "/learnhealth", "/metrics",
