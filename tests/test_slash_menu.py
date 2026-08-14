@@ -321,6 +321,40 @@ def test_argument_context_does_not_replace_input_on_tab():
     assert state.buffer == "/read notes.txt"
 
 
+def test_bounded_argument_completer_renders_and_completes_model_choices():
+    calls = []
+
+    def choices(command, prefix, *, limit):
+        calls.append((command, prefix, limit))
+        return ["gemma3:12b", "gemma3:4b"]
+
+    state = slash_menu.MenuState(completer=_completer, argument_completer=choices)
+    state.feed("/model gem")
+
+    assert state.has_palette_matches() is True
+    assert state.render_rows(width=200) == [
+        "> gemma3:12b  ", "  gemma3:4b   ",
+    ]
+    state.handle_key(slash_menu.KEY_DOWN)
+    state.handle_key("\t")
+    assert state.buffer == "/model gemma3:4b"
+    assert calls == [("/model", "gem", 8)]
+
+
+def test_bounded_argument_completer_never_claims_free_form_second_arguments():
+    calls = []
+    state = slash_menu.MenuState(
+        completer=_completer,
+        argument_completer=lambda *args, **kwargs: calls.append((args, kwargs)) or ["x"],
+        hint_provider=lambda _buffer: "usage",
+    )
+    state.feed("/model gemma extra")
+
+    assert state.argument_matches() == []
+    assert state.render_rows(width=200) == ["  usage"]
+    assert calls == []
+
+
 def test_enter_accepts_the_line_as_typed():
     state = _state("/read notes.txt")
     assert state.handle_key("\r") == slash_menu.ACCEPT
@@ -422,6 +456,21 @@ def test_rows_never_exceed_the_terminal_height():
     assert len(state.render_rows(height=100)) <= slash_menu.MAX_ROWS
     assert len(state.render_rows(height=5)) == 3   # height - 2
     assert state.render_rows(height=2) == []
+
+
+def test_navigation_and_tab_never_select_a_height_clipped_row():
+    entries = [_Entry("/c%d" % i, "summary %d" % i) for i in range(8)]
+    state = slash_menu.MenuState(completer=lambda _p, limit=8: entries[:limit])
+    state.feed("/c")
+    assert len(state.render_rows(width=200, height=5)) == 3
+
+    for _ in range(8):
+        state.handle_key(slash_menu.KEY_DOWN)
+
+    assert state.selected == 2
+    assert state.selection() is entries[2]
+    state.handle_key("\t")
+    assert state.buffer == "/c2"
 
 
 def test_render_rows_accepts_an_explicit_prefix():
