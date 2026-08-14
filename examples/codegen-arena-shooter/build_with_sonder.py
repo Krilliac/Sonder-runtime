@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -36,6 +37,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import specs  # noqa: E402
 import apiextract  # noqa: E402
 import sonder_paths  # noqa: E402
+
+# Load this example's harness-owned manifest helper under a private module
+# identity.  The runtime also has project scaffolding support, and a previous
+# import must not redirect a generated game to a different project format.
+_SCAFFOLD_SPEC = importlib.util.spec_from_file_location(
+    "arena_shooter_v1_project_scaffold",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "project_scaffold.py"),
+)
+if _SCAFFOLD_SPEC is None or _SCAFFOLD_SPEC.loader is None:
+    raise RuntimeError("arena shooter project scaffold is unavailable")
+_SCAFFOLD_MODULE = importlib.util.module_from_spec(_SCAFFOLD_SPEC)
+_SCAFFOLD_SPEC.loader.exec_module(_SCAFFOLD_MODULE)
+ensure_project_file = _SCAFFOLD_MODULE.ensure_project_file
 
 
 def default_project_path() -> str:
@@ -702,6 +716,12 @@ def main() -> int:
         print("no such file in specs: %s" % args.only)
         print("available files: %s" % ", ".join(sorted(known_files)))
         return 2
+
+    # The per-user destination starts empty.  Create only the deterministic
+    # manifest before any model request so sequential generation, repair, and
+    # the first write all have a valid project directory.  Model-authored C#
+    # remains absent until the selected generation mode writes it.
+    ensure_project_file(PROJECT)
 
     import server  # late import so the sys.path insert applies
 

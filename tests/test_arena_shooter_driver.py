@@ -98,6 +98,26 @@ def test_generated_projects_default_to_per_user_sonder_home(monkeypatch, tmp_pat
     assert Path(skeleton_driver.default_project_path()) == home / "examples" / "arena-shooter" / "FpsGame_Skeleton"
 
 
+def test_v1_driver_initializes_empty_user_project_before_build(monkeypatch, tmp_path: Path) -> None:
+    """A first --repair-only run has deterministic harness plumbing to build."""
+    driver = _driver_module()
+    output = tmp_path / "first-run-game"
+    fake_server = SimpleNamespace(
+        _ensemble_targets=lambda _tiers: ([('code', 'local')], []),
+    )
+    monkeypatch.setitem(sys.modules, "server", fake_server)
+    monkeypatch.setattr(driver, "ensure_model_headroom", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(driver, "build", lambda: (True, []))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(DRIVER), "--repair-only", "--project", str(output)],
+    )
+
+    assert driver.main() == 0
+    assert (output / "FpsGame_Skeleton.csproj").is_file()
+
+
 def test_arena_verifier_follows_user_state_or_explicit_target() -> None:
     """Moving generated output must not strand the held-out verifier."""
     project = (EXAMPLE / "Verify" / "Verify.csproj").read_text(encoding="utf-8")
