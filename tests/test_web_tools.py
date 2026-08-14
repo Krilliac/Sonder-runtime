@@ -301,6 +301,19 @@ def test_http_content_encoding_rejects_expansion_bomb():
         web_tools._decode_content_encoding(compressed, "gzip")
 
 
+def test_web_fetch_rejects_oversized_raw_body_instead_of_truncating(monkeypatch):
+    monkeypatch.setattr(
+        web_tools,
+        "_urlopen",
+        lambda req, timeout=10: FakeResponse(
+            b"x" * (web_tools.MAX_RESPONSE_BYTES + 1), "text/plain",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="raw body safety limit"):
+        web_tools.web_fetch("https://example.com/too-large")
+
+
 def test_web_fetch_rejects_localhost():
     with pytest.raises(ValueError):
         web_tools.web_fetch("http://127.0.0.1/private")

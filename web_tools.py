@@ -28,6 +28,10 @@ BING_SEARCH_URL = "https://www.bing.com/search?q={query}"
 BING_SEARCH_RSS_URL = "https://www.bing.com/search?q={query}&format=rss"
 USER_AGENT = "sonder-local-agent/1.0"
 MAX_REDIRECTS = 5
+# Fetching more than this is neither necessary for the bounded text surface nor
+# safe to present as a complete document.  Read one byte beyond this limit in
+# _request so an over-limit response is rejected rather than silently truncated.
+MAX_RESPONSE_BYTES = 512_000
 MAX_DECOMPRESSED_BYTES = 2_000_000
 # A DNS response is attacker-controlled for arbitrary fetched URLs.  Trying an
 # unbounded number of individually pinned addresses turns one fetch into many
@@ -735,7 +739,12 @@ def _request(url, timeout=10):
                 current_url = urllib.parse.urljoin(current_url, location)
                 redirects += 1
                 continue
-            raw = resp.read(512000)
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    "HTTP response exceeds the raw body safety limit "
+                    "(max %d bytes)" % MAX_RESPONSE_BYTES
+                )
             raw = _decode_content_encoding(
                 raw, resp.headers.get("Content-Encoding", "")
             )
