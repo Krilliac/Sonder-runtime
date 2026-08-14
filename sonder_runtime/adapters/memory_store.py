@@ -90,6 +90,20 @@ CREATE TABLE IF NOT EXISTS lessons (
     ts TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(lesson_id UNINDEXED, text);
+-- A pruned lesson is no longer retrievable, but its content identity must not
+-- disappear with it: otherwise a later distillation can silently recreate the
+-- same rejected value.  Keep only a normalized-text digest plus the existing
+-- vector provenance; never retain the lesson text in this denial record.
+CREATE TABLE IF NOT EXISTS lesson_tombstones (
+    text_sha256 TEXT PRIMARY KEY CHECK(length(text_sha256) = 64),
+    embedding BLOB,
+    embedding_model TEXT,
+    embedding_revision TEXT,
+    embedding_dim INTEGER,
+    reason TEXT NOT NULL CHECK(reason IN ('near_duplicate_pruned')),
+    source_lesson_id TEXT,
+    created_ts TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     title TEXT,
@@ -2146,6 +2160,63 @@ def _delete_lesson_rows(conn, lesson_id):
     conn.execute("DELETE FROM lessons_fts WHERE lesson_id=?", (lesson_id,))
     conn.execute("DELETE FROM lesson_usage WHERE lesson_id=?", (lesson_id,))
     return cur.rowcount > 0
+
+
+def normalized_lesson_text_digest(text):
+    """Stable, content-free identity used by rejected-value tombstones."""
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().casefold())
+    if not normalized:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def lesson_text_tombstoned(conn, text):
+    digest = normalized_lesson_text_digest(text)
+    if not digest:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM lesson_tombstones WHERE text_sha256=? LIMIT 1",
+        (digest,),
+    ).fetchone() is not None
+
+
+def all_lesson_tombstones(conn):
+    rows = conn.execute(
+        "SELECT text_sha256, embedding, embedding_model, embedding_revision, "
+        "embedding_dim, reason FROM lesson_tombstones"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def tombstone_lesson(conn, lesson_id):
+    """Remove a duplicate lesson while preserving a non-retrievable denial record.
+
+    This intentionally differs from ``delete_lesson``: explicit privacy/user
+    deletion must be able to erase a lesson completely, whereas the pruner is
+    rejecting a value as redundant and must prevent re-distillation.
+    """
+    row = conn.execute(
+        "SELECT text, embedding, embedding_model, embedding_revision, "
+        "embedding_dim FROM lessons WHERE id=?",
+        (lesson_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    digest = normalized_lesson_text_digest(row["text"])
+    if digest is not None:
+        conn.execute(
+            "INSERT OR IGNORE INTO lesson_tombstones("
+            "text_sha256, embedding, embedding_model, embedding_revision, "
+            "embedding_dim, reason, source_lesson_id) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                digest, row["embedding"], row["embedding_model"],
+                row["embedding_revision"], row["embedding_dim"],
+                "near_duplicate_pruned", str(lesson_id),
+            ),
+        )
+    deleted = _delete_lesson_rows(conn, lesson_id)
+    conn.commit()
+    return deleted
 
 
 def delete_lesson(conn, lesson_id):

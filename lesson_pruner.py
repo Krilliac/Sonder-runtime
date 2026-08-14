@@ -206,8 +206,8 @@ def format_report(plan):
     return "\n".join(lines)
 
 
-def apply_plan(conn, plan, delete_fn=memory_store.delete_lesson):
-    """Delete every prune_id in plan via delete_fn. Returns count deleted."""
+def apply_plan(conn, plan, delete_fn=memory_store.tombstone_lesson):
+    """Prune every loser while retaining a rejected-value tombstone."""
     deleted = 0
     for entry in plan:
         for lid in entry["prune_ids"]:
@@ -217,7 +217,7 @@ def apply_plan(conn, plan, delete_fn=memory_store.delete_lesson):
 
 
 def prune(conn, threshold=DEFAULT_THRESHOLD, dry_run=True, cosine_fn=embeddings.cosine,
-          delete_fn=memory_store.delete_lesson):
+          delete_fn=memory_store.tombstone_lesson):
     """End-to-end: build the plan, apply it unless dry_run. Returns (plan, deleted)."""
     plan = build_plan(conn, threshold=threshold, cosine_fn=cosine_fn)
     deleted = 0 if dry_run else apply_plan(conn, plan, delete_fn=delete_fn)
