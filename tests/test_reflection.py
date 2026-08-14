@@ -194,6 +194,51 @@ def test_store_prepared_lesson_dedupes_inside_transaction_without_committing():
     assert len(ms.all_lessons(c)) == 1
 
 
+def test_store_prepared_lesson_refuses_pruned_value_tombstone():
+    c = ms.connect(":memory:")
+    ms.add_lesson(
+        c, "old", "Use pathlib.Path.resolve() before comparison.", None, "old-source",
+    )
+    assert ms.tombstone_lesson(c, "old") is True
+    candidate = {
+        "status": "candidate", "lesson_id": "reintroduced",
+        "text": " use  pathlib.Path.resolve() before comparison. ",
+        "embedding": None, "embedding_blob": None,
+        "embedding_model": None, "embedding_revision": None, "embedding_dim": None,
+    }
+    c.execute("BEGIN IMMEDIATE")
+    result = reflection.store_prepared_lesson(c, "new-source", candidate)
+    c.commit()
+    assert result == {"terminal_state": ms.DISTILLATION_NO_LESSON, "result": "rejected_value"}
+    assert ms.all_lessons(c) == []
+
+
+def test_store_prepared_lesson_refuses_semantic_pruned_tombstone():
+    c = ms.connect(":memory:")
+    vector = [1.0, 0.0]
+    ms.add_lesson(
+        c, "old", "Use pathlib.Path.resolve() before comparison.",
+        e.to_blob(vector), "old-source",
+        embedding_model=e.EMBED_IDENTITY,
+        embedding_revision=e.EMBED_REVISION,
+        embedding_dim=2,
+    )
+    assert ms.tombstone_lesson(c, "old") is True
+    candidate = {
+        "status": "candidate", "lesson_id": "reintroduced",
+        "text": "Resolve a path before comparing it.",
+        "embedding": vector, "embedding_blob": e.to_blob(vector),
+        "embedding_model": e.EMBED_IDENTITY,
+        "embedding_revision": e.EMBED_REVISION,
+        "embedding_dim": 2,
+    }
+    c.execute("BEGIN IMMEDIATE")
+    result = reflection.store_prepared_lesson(c, "new-source", candidate)
+    c.commit()
+    assert result == {"terminal_state": ms.DISTILLATION_NO_LESSON, "result": "rejected_value"}
+    assert ms.all_lessons(c) == []
+
+
 def test_store_prepared_lesson_requires_finalizer_transaction():
     c = ms.connect(":memory:")
     with pytest.raises(RuntimeError, match="active transaction"):

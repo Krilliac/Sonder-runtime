@@ -284,6 +284,10 @@ def test_prune_apply_deletes_losers_keeps_keepers():
     assert deleted == 2
     assert remaining == {"a2", "b1", "u1"}
     assert "a1" not in remaining and "b2" not in remaining
+    tombstones = memory_store.all_lesson_tombstones(conn)
+    assert {row["reason"] for row in tombstones} == {"near_duplicate_pruned"}
+    assert len(tombstones) == 2
+    assert all("text" not in row for row in tombstones)
 
 
 def test_apply_plan_uses_injected_delete_fn():
