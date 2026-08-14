@@ -695,7 +695,13 @@ def _is_loopback_host(host):
         return False
 
 
-def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None):
+def _validate_bind_security(
+    host,
+    api_key=None,
+    auth_mode=None,
+    auth_secret=None,
+    tls_terminated_by_proxy=None,
+):
     # Unsafe lab acknowledgement tightens exposure: unlike normal served mode,
     # there is deliberately no authenticated non-loopback topology available.
     unsafe_lab.require_startup(host=host)
@@ -708,6 +714,20 @@ def _validate_bind_security(host, api_key=None, auth_mode=None, auth_secret=None
         raise RuntimeError("both auth mode requires API key and account auth secret")
     if _is_loopback_host(host):
         return
+    # ``sonder_runtime serve`` reaches this module after validating the typed
+    # config.  This script is also a supported direct entrypoint, though, so it
+    # must not silently turn ``SONDER_HOST=0.0.0.0`` plus a key into a plaintext
+    # public listener.  The exported declaration is intentionally checked at
+    # the last responsible moment, immediately before ``serve_forever`` can
+    # bind.  An operator who uses the direct entrypoint must make the same
+    # explicit reverse-proxy assertion as a configured deployment.
+    if tls_terminated_by_proxy is None:
+        tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
+    if not tls_terminated_by_proxy:
+        raise RuntimeError(
+            "non-loopback bind requires SONDER_TLS_TERMINATED_BY_PROXY=1 "
+            "for a TLS-terminating reverse proxy"
+        )
     # The same policy sonder_config.validate enforces, read from the same
     # constant. It was restated here as a bare 24, so raising the named
     # MIN_API_KEY_LENGTH -- the obvious single-point edit -- would have
