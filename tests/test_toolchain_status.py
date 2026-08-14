@@ -118,3 +118,9 @@ def test_local_agent_can_turn_discovery_into_a_fixed_status_probe(monkeypatch):
     )
     assert server._agent_impl("verify the discovered cargo tool", max_steps=2).endswith("Cargo is installed.")
     assert called == [("cargo", False)]
+
+
+def test_agent_help_distinguishes_source_runner_from_toolchain_probe():
+    help_text = server._agent_tool_help()
+    assert "source snippet only; never pass a shell command" in help_text
+    assert "toolchain_status:" in help_text
