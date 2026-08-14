@@ -43,7 +43,7 @@ auth_mode = "api-key"               # api-key | account | both | either
 max_request_bytes = 1048576
 max_concurrent_requests = 4
 request_timeout_seconds = 300
-tls_terminated_by_proxy = false     # true required for a non-loopback bind
+tls_terminated_by_proxy = true      # reference TLS-proxy deployment; also hides the local log dashboard
 trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 
 [state]
@@ -84,7 +84,10 @@ retention_monthly = 6
 A non-loopback `[server].host` is **rejected before bind** unless *both*
 `tls_terminated_by_proxy = true` and a `SONDER_API_KEY` of ≥24 chars are
 set. The reference topology keeps Sonder on loopback behind a TLS proxy
-regardless. See [Security Model](09-security-model.md).
+regardless; it still sets `tls_terminated_by_proxy = true` so the
+unauthenticated loopback-only log dashboard is not made available through the
+proxy. Set it to `false` only for a direct local development listener. See
+[Security Model](09-security-model.md).
 
 ## Secrets file (`packaging/sonder.env.example`, mode 0600)
 

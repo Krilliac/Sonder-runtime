@@ -6,8 +6,10 @@ proxy in front of that loopback listener.
 
 ## Rules (SPEC-2, non-negotiable)
 
-- `[server].host` stays `127.0.0.1`. The configuration loader rejects a
-  non-loopback bind without `tls_terminated_by_proxy = true` **and** a
+- `[server].host` stays `127.0.0.1`. Set `tls_terminated_by_proxy = true`
+  whenever the reference proxy is in use: this disables the unauthenticated
+  loopback log dashboard before the proxy can publish it. The configuration
+  loader also rejects a non-loopback bind without that declaration **and** a
   strong API key — and even then the reference topology keeps loopback.
 - The proxy terminates TLS 1.2+, enforces body limits, forwards only
   approved paths, and strips inbound forwarding headers.

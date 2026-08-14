@@ -357,6 +357,7 @@ def test_serve_exports_validated_config_before_migrations(
     for name in (
         "SONDER_FILE_ROOTS", "OLLAMA_HOST", "SONDER_ALLOW_REMOTE_OLLAMA",
         "SONDER_WEB_TOOLS", "SONDER_LIVE_RELOAD", "SONDER_HOST", "SONDER_PORT",
+        "SONDER_TLS_TERMINATED_BY_PROXY",
     ):
         monkeypatch.setenv(name, os.environ.get(name, ""))
 
@@ -368,6 +369,7 @@ def test_serve_exports_validated_config_before_migrations(
             roots=os.environ.get("SONDER_FILE_ROOTS", ""),
             ollama=os.environ.get("OLLAMA_HOST", ""),
             web=os.environ.get("SONDER_WEB_TOOLS", ""),
+            tls_proxy=os.environ.get("SONDER_TLS_TERMINATED_BY_PROXY", ""),
         )
         raise sonder_migrations.MigrationError("stop before binding")
 
@@ -379,6 +381,7 @@ def test_serve_exports_validated_config_before_migrations(
             "--set", f"state.workspace_roots={workspace}",
             "--set", "ollama.url=http://127.0.0.1:11500",
             "--set", "features.web=true",
+            "--set", "server.tls_terminated_by_proxy=true",
         ]
     )
     capsys.readouterr()
@@ -387,6 +390,7 @@ def test_serve_exports_validated_config_before_migrations(
     assert str(workspace) in seen["roots"]
     assert seen["ollama"] == "http://127.0.0.1:11500"
     assert seen["web"] == "1"
+    assert seen["tls_proxy"] == "1"
 
 
 def test_serve_exports_feature_gates_closed_by_default(
