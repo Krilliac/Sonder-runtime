@@ -25,5 +25,4 @@ class _TestCredentialStore implements CredentialStore {
 Future<void> testExecutable(FutureOr<void> Function() testMain) async {
   Settings.testingCredentialStore = _TestCredentialStore();
   await testMain();
-  Settings.testingCredentialStore = null;
 }
