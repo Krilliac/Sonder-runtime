@@ -243,6 +243,13 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             text=True,
             timeout=timeout,
             env=_child_environment(),
+            # On Windows close_fds otherwise defaults to false.  The code is
+            # model-authored and can inspect arbitrary inherited handles, so
+            # do not hand it a live server pipe, log/database handle, or IPC
+            # channel merely because another runtime component opened one as
+            # inheritable.  stdin/stdout/stderr above remain the intentional
+            # communication boundary.
+            close_fds=True,
         )
     except FileNotFoundError:
         missing = SUPPORTED_LANGUAGES.get(language, {}).get(
@@ -291,6 +298,9 @@ def _launch_console(launcher, cwd, language, timeout):
             cwd=cwd,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             env=_child_environment(),
+            # A detached window is still executing model-authored code.  It
+            # has no legitimate reason to inherit the host's other handles.
+            close_fds=True,
         )
     except FileNotFoundError:
         return _error_result(language, cwd, timeout, "cmd.exe not found")
