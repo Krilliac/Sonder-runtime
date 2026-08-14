@@ -35,6 +35,10 @@ MUTATING = {
     "/asset", "/assetgen", "/assets", "/artifact", "/groundartifact",
     "/verifyartifact",
     "/selfmod", "/selfmodify",
+    # These mutate the source checkout itself.  A read-only contract probe
+    # must never fast-forward a clean runtime merely because it accepts the
+    # alias as a slash command.
+    "/update", "/updatesource",
     "/admin", "/register", "/login", "/setaccount", "/accounts", "/whoami",
     "/autopilot", "/auto", "/goal", "/goals", "/plan", "/work",
     "/master", "/agentcancel", "/cancelagents", "/agentretry", "/retryagent",
