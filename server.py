@@ -5524,12 +5524,17 @@ def sonder(
     if command is not None:
         return command
     natural = natural_model_request(prompt)
-    if natural and natural["kind"] == "fanout":
+    if natural and natural["kind"] in ("fanout", "ensemble"):
         if natural["prompt"].lstrip().startswith("/"):
             return _format_model_call_error(ModelCallError(
                 "configuration",
                 "model selection cannot wrap a slash command; issue the command directly.",
             ))
+        if natural["kind"] == "ensemble":
+            return ensemble_answer(
+                natural["prompt"], tiers=natural["tiers"], project=project,
+                num_predict=num_predict, require_all_tiers=True,
+            )
         return model_fanout(
             natural["prompt"], scope=natural["scope"], profile=natural.get("profile", ""),
             num_predict=num_predict, token=token,
@@ -15114,7 +15119,7 @@ def tool_manifest() -> str:
         "admin_status/debug_inspect/admin_private_chain_of_thought": "Inspect admin/debug state; private chain-of-thought is refused unless the operator opted in twice (SONDER_ALLOW_PRIVATE_COT plus an explicit allow rule), and then serves only the reasoning record reasoning_show serves.",
         "sonder": "Ask through Sonder Runtime's local learning loop.",
         "offload": "Route a self-contained task to a configured local/cloud tier.",
-        "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; list caller-scoped safe recent-run summaries after a restart, inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, `healthy-chat`, and `loaded-local-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. `loaded-local-chat` is local-only and fails closed unless Ollama confirms residency at both planning and dispatch, so it never triggers a model load. Natural chat supports `ask all healthy local chat models: ...`, `ask all loaded local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `ask all Sonder models + cloud: ...`, `run every available cloud models to answer: ...`, `run phi4:latest to ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout to developer-authorized callers.",
+        "model_fanout/model_fanout_recent/model_fanout_status/model_fanout_cancel/model_fanout_resume/model_fanout_synthesize": "Run a durable, bounded fanout across discovered local, cloud, or all chat models; list caller-scoped safe recent-run summaries after a restart, inspect its owner-scoped receipt, cancel it, explicitly retry finished results, or locally synthesize one completed receipt's exact complete answer previews. Synthesis has no natural-language route, requires two non-truncated answered receipts and a fixed/discovered local generative model, and persists neither synthesis nor reasoning. Fixed profiles are `healthy-local-chat`, `healthy-cloud-chat`, `healthy-chat`, and `loaded-local-chat`; they exclude non-chat targets and active health cooldowns, but never accept arbitrary selectors. `loaded-local-chat` is local-only and fails closed unless Ollama confirms residency at both planning and dispatch, so it never triggers a model load. Natural chat supports `use code and reasoning ensemble to review ...` for a fixed local two-tier answer, `ask all healthy local chat models: ...`, `ask all loaded local chat models: ...`, `ask all available models for ...`, `ask all available local models: ...`, `ask all local and cloud models: ...`, `ask all local models and cloud models: ...`, `ask all Sonder models + cloud: ...`, `run every available cloud models to answer: ...`, `run phi4:latest to ...`, `ask the phi4:latest model to ...`, `run using model phi4:latest: ...`, `run using phi4:latest: ...`, `run using phi4:latest to ...`, and `ask with qwen2.5-coder:14b for ...`. Compiler-feedback repair remains the explicit `codegen_build_loop` tool because it needs an approved project root, an exact file contract, and an exact build command; it is never inferred from conversational text. Cloud use still needs explicit operator opt-in; shared deployments restrict fanout and ensembles to developer-authorized callers.",
         "web_search/web_fetch/weather_lookup/approximate_location_lookup": "Search/fetch public pages, get sourced weather, or resolve an explicitly consented approximate IP location without retaining the IP.",
         "local_service_probe": "Bounded unauthenticated GET/HEAD health probe for an explicit-port HTTP/HTTPS service resolving exclusively to loopback.",
         "workspace_inventory/workspace_compare/dependency_inventory/directory_tree/directory_create/text_search/file_read_range/context_pack": "Budgeted guarded workspace/dependency inventory and metadata-only comparison, folder discovery, creation, text search, bounded line-range reads, and multi-file context packs.",
@@ -22151,6 +22156,22 @@ def natural_model_request(text):
     untrusted inputs from spending local compute or cloud budget.
     """
     value = str(text or "").strip()
+    ensemble = re.match(
+        # A small, named local ensemble is useful for an explicit second
+        # opinion without turning broad prose about "reasoning" into an
+        # execution request. Keep the same imperative whole-turn and prompt
+        # delimiter contract as model fanout. Compiler-feedback repair is a
+        # separate, explicitly parameterized codegen_build_loop tool: it must
+        # know the approved root, files, and build command and cannot safely
+        # be inferred from free-form chat.
+        r"^(?:ask|run|try|query|use)\s+(?:a\s+|the\s+)?(?:code\s+(?:and|\+)\s+reasoning|reasoning\s+(?:and|\+)\s+code)\s+(?:models?|ensemble)\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
+        value, re.IGNORECASE | re.DOTALL,
+    )
+    if ensemble:
+        return {
+            "kind": "ensemble", "tiers": "code,reasoning",
+            "prompt": ensemble.group(1).strip(),
+        }
     profiled_fanout = re.match(
         # Keep this whole-turn syntax as constrained as the existing all-model
         # grammar.  In particular, no trailing selector or embedded prose may
@@ -23678,6 +23699,7 @@ def ensemble_answer(
     num_predict: int = 700,
     mode: str = "prose",
     project: str = "",
+    require_all_tiers: bool = False,
 ) -> str:
     """Ask several local models the same question, then compound one answer.
 
@@ -23705,6 +23727,9 @@ def ensemble_answer(
             than through the learning orchestrator, so without this it never
             sees the facts -- and code generation is exactly where recorded
             failure modes pay off.
+        require_all_tiers: refuse rather than degrade to a single answer when
+            an explicitly named multi-tier ensemble cannot supply two distinct
+            available models. Natural code-and-reasoning routing enables this.
     """
     _maybe_live_reload()
     question = (prompt or "").strip()
@@ -23720,6 +23745,13 @@ def ensemble_answer(
         return "ERROR: no bound local tiers to poll%s." % (
             " (unknown: %s)" % ", ".join(unknown) if unknown else ""
         )
+    if require_all_tiers and len(targets) < 2:
+        return _format_model_call_error(ModelCallError(
+            "configuration",
+            "requested ensemble needs two distinct available models%s." % (
+                " (unavailable: %s)" % ", ".join(unknown) if unknown else ""
+            ),
+        ))
 
     answers, failures = [], []
     for tier, model in targets:

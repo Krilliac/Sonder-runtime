@@ -990,6 +990,45 @@ def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     assert json.loads(body)["choices"][0]["message"]["content"].startswith('{"models_answered": 1}')
 
 
+def test_http_developer_natural_ensemble_uses_fixed_local_tiers(monkeypatch):
+    """The whole-turn wrapper cannot be reclassified before its own dispatch."""
+    api_key = "k" * 32
+    monkeypatch.setattr(ts, "API_KEY", api_key)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ts.server, "_open_db", lambda: FakeConnection())
+    monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: pytest.fail("ensemble reached feedback"))
+    monkeypatch.setattr(ts, "_handle_intent", lambda *_args, **_kwargs: pytest.fail("ensemble reached work intent"))
+    calls = []
+    monkeypatch.setattr(
+        ts.server, "ensemble_answer",
+        lambda prompt, **kwargs: calls.append((prompt, kwargs)) or "two local answers",
+    )
+    request = json.dumps({
+        "model": "sonder",
+        "messages": [{"role": "user", "content": "use code and reasoning ensemble to review this patch"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key},
+        )
+
+    assert status == 200
+    assert calls and calls[0][0] == "review this patch"
+    assert calls[0][1]["tiers"] == "code,reasoning"
+    assert calls[0][1]["require_all_tiers"] is True
+    assert json.loads(body)["choices"][0]["message"]["content"].startswith("two local answers")
+
+
 def test_http_fanout_wrapper_is_not_reclassified_as_work_or_feedback(monkeypatch):
     """The extracted fanout question is data, not an independent control turn."""
     api_key = "k" * 32
