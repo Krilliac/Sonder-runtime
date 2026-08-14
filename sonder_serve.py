@@ -12,6 +12,7 @@ Run:
 Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key).
 """
 import json
+import contextlib
 import hmac
 import hashlib
 import ipaddress
@@ -45,6 +46,7 @@ import debug_dump
 import sonder_health
 import sonder_lifecycle
 import sonder_secrets
+import served_action_receipts
 import tool_contract
 import unsafe_lab
 
@@ -374,11 +376,55 @@ def _http_action_idempotency_key(context, supplied_key, action):
 
 
 def _idempotent_http_action(context, supplied_key, action, factory):
-    """Run an opt-in long-running action once for this caller and request."""
+    """Run an opt-in action once, preserving uncertainty across restarts."""
     cache_key = _http_action_idempotency_key(context, supplied_key, action)
     if not cache_key:
         return factory()
-    return sonder_lifecycle.get().idempotent(cache_key, factory)
+
+    def durable_factory():
+        try:
+            state = served_action_receipts.claim(cache_key)
+        except (OSError, sqlite3.Error, ValueError):
+            # An explicit replay key promises no duplicate side effect.  If its
+            # durable guard is unavailable, refusing is safer than executing a
+            # long-running mutation without a recoverable receipt.
+            refusal = (
+                "idempotency receipt unavailable: the action was not started. "
+                "Retry after restoring local runtime storage."
+            )
+            return refusal
+        if state == "completed":
+            refusal = (
+                "idempotent action refused: it already completed before the "
+                "current server process. It was not run again; query its "
+                "status or submit a new action with a new Idempotency-Key."
+            )
+            return refusal
+        if state in {"started", "uncertain"}:
+            refusal = (
+                "idempotent action refused: it has an uncertain prior outcome "
+                "after an interrupted server process. It was not run again; "
+                "inspect the affected project/status before submitting a new action."
+            )
+            return refusal
+        try:
+            result = factory()
+        except BaseException:
+            # An exception after tool admission is not proof of no side
+            # effect. Preserve the receipt as uncertain so the next process
+            # cannot blindly replay it.
+            with contextlib.suppress(OSError, sqlite3.Error):
+                served_action_receipts.finish(cache_key, uncertain=True)
+            raise
+        try:
+            served_action_receipts.finish(cache_key)
+        except (OSError, sqlite3.Error):
+            # The side effect returned but its terminal record did not commit.
+            # Leaving `started` is intentionally conservative on retry.
+            pass
+        return result
+
+    return sonder_lifecycle.get().idempotent(cache_key, durable_factory)
 
 
 def _task_account_scope(context):

@@ -1,6 +1,7 @@
 """HTTP long-running control retries must not duplicate work."""
 
 import server
+import served_action_receipts
 import sonder_lifecycle
 import sonder_serve as serve
 from types import SimpleNamespace
@@ -17,6 +18,48 @@ def _authorized_account(name):
         "api_key": False,
         "account": {"username": name, "role": "developer"},
     }
+
+
+def _receipt_store(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "SONDER_SERVED_ACTION_RECEIPTS_DB", str(tmp_path / "receipts.db")
+    )
+    served_action_receipts.reset_for_tests()
+
+
+def test_restart_never_replays_a_completed_action(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    sonder_lifecycle.reset_for_tests()
+    calls = []
+    context = _account("alice")
+    action = "workbench\0demo\0/work repair"
+    assert serve._idempotent_http_action(
+        context, "lost-response", action, lambda: calls.append("run") or "done"
+    ) == "done"
+    sonder_lifecycle.reset_for_tests()
+    replay = serve._idempotent_http_action(
+        context, "lost-response", action, lambda: calls.append("replayed") or "bad"
+    )
+    assert replay.startswith("idempotent action refused: it already completed")
+    assert calls == ["run"]
+    sonder_lifecycle.reset_for_tests()
+
+
+def test_interrupted_action_is_uncertain_and_never_replayed(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    sonder_lifecycle.reset_for_tests()
+    calls = []
+    context = _account("alice")
+    action = "natural-work\0demo\0/build"
+    key = serve._http_action_idempotency_key(context, "interrupted", action)
+    assert served_action_receipts.claim(key) == "claimed"
+    sonder_lifecycle.reset_for_tests()
+    replay = serve._idempotent_http_action(
+        context, "interrupted", action, lambda: calls.append("replayed") or "bad"
+    )
+    assert replay.startswith("idempotent action refused: it has an uncertain")
+    assert calls == []
+    sonder_lifecycle.reset_for_tests()
 
 
 def test_work_retry_is_idempotent_per_principal_and_exact_action(monkeypatch):
