@@ -63,6 +63,48 @@ def test_rate_limit_blocks_free_tier_after_limit():
     assert "rate limit" in msg
 
 
+def test_rate_limit_is_atomic_across_concurrent_connections(monkeypatch, tmp_path):
+    """Concurrent HTTP connections cannot each admit the same final slot."""
+    path = str(tmp_path / "accounts.db")
+    initial = memory_store.connect(path)
+    account = admin_auth.register(initial, "user1", "password123")
+    initial.close()
+    monkeypatch.setattr(admin_auth, "_now", lambda: 1_700_000_000)
+
+    attempts = admin_auth.DEFAULT_RATE_LIMIT + 12
+    barrier = threading.Barrier(attempts)
+    outcomes = []
+    outcome_lock = threading.Lock()
+
+    def attempt():
+        conn = memory_store.connect(path)
+        try:
+            barrier.wait()
+            outcome = admin_auth.rate_limit(conn, account)
+            with outcome_lock:
+                outcomes.append(outcome)
+        finally:
+            conn.close()
+
+    workers = [threading.Thread(target=attempt) for _ in range(attempts)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=30)
+
+    assert len(outcomes) == attempts
+    assert sum(ok for ok, _message in outcomes) == admin_auth.DEFAULT_RATE_LIMIT
+    check = memory_store.connect(path)
+    try:
+        row = check.execute(
+            "SELECT count FROM account_rate WHERE username=?",
+            (account["username"],),
+        ).fetchone()
+        assert row["count"] == attempts
+    finally:
+        check.close()
+
+
 def test_public_bootstrap_requires_secret_and_is_one_use(monkeypatch):
     secret = "bootstrap-secret-123456"
     monkeypatch.setenv("SONDER_BOOTSTRAP_SECRET", secret)
