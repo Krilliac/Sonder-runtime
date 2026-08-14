@@ -312,7 +312,15 @@ _SCOPED_TASK_TOOLS = frozenset((
 # fail closed here rather than create durable state in the shared namespace.
 _ACCOUNT_UNSCOPED_TASK_TOOLS = frozenset((
     "agent", "workbench_agent", "master_orchestrate", "master_retry",
-    "agent_retry", "workflow_run", "self_heal_repair",
+    "agent_retry", "self_heal_repair",
+))
+_ACCOUNT_UNSCOPED_SAVED_WORKFLOW_TOOLS = frozenset((
+    # Saved workflows live in one operator-owned workflows.json.  Letting a
+    # hosted account list it exposes another account's action payloads, and
+    # save/delete/run would let one account overwrite, remove, or execute
+    # another account's durable automation.  Do not pretend the file is
+    # account-scoped until the repository has a first-class owner boundary.
+    "workflow_list", "workflow_save", "workflow_delete", "workflow_run",
 ))
 _ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
     "checklist_create", "checklist_update", "checklist_show",
@@ -341,6 +349,11 @@ def _account_task_boundary_refusal(tool_name, kwargs, context):
         return (
             "refused /%s: account-scoped task state is not available for "
             "this autonomous tool; use the scoped task/checklist commands."
+        ) % name
+    if name in _ACCOUNT_UNSCOPED_SAVED_WORKFLOW_TOOLS:
+        return (
+            "refused /%s: account-scoped saved workflows are not available; "
+            "use an operator-managed local workflow session."
         ) % name
     if name != "loop":
         return ""
