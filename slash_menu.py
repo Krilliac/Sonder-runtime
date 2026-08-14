@@ -121,9 +121,15 @@ class MenuState:
     """
 
     def __init__(self, completer=None, limit: int = MAX_ROWS, buffer: str = "",
-                 hint_provider=None, frame: str = "", frame_style: str = ""):
+                 hint_provider=None, argument_completer=None, frame: str = "",
+                 frame_style: str = ""):
         self.completer = completer or _default_completer
         self.hint_provider = hint_provider or _default_argument_hint
+        # Argument candidates are deliberately opt-in. Most commands accept
+        # free-form paths or prose, where a palette would hide the useful
+        # usage hint and make Tab surprising. Callers can opt in for bounded
+        # vocabularies such as the live /model choices.
+        self.argument_completer = argument_completer
         # ``frame`` is presentation only.  The input state stays exactly the
         # same, so a terminal that cannot draw chrome still gets the ordinary
         # prompt and the full, unmodified buffer.
@@ -139,6 +145,12 @@ class MenuState:
         self.dismissed = False
         self._cache_key = None
         self._cache: list = []
+        self._argument_cache_key = None
+        self._argument_cache: list = []
+        # The raw reader renders before processing the next key.  Retain the
+        # current height-derived selection ceiling so Tab and arrows cannot
+        # refer to an entry that was clipped off the visible palette.
+        self._visible_row_limit = self.limit
         # Rendering state only.  The pure key/menu state above never relies on
         # it; retaining the number of drawn physical rows lets the raw reader
         # erase a wrapped message before redrawing it after the next key.
@@ -169,11 +181,56 @@ class MenuState:
             self._cache = found[: self.limit]
         return self._cache
 
+    def _argument_query(self):
+        """Return ``(command, prefix, start, end)`` for one editable argument.
+
+        Completion is intentionally limited to the first whitespace-delimited
+        argument. That keeps it safe for commands whose later text is a path,
+        a prompt, or another free-form value, while still allowing a cursor in
+        the middle of a selected argument to replace just that argument.
+        """
+        text = self.buffer
+        cursor = max(0, min(len(text), self.cursor))
+        head = text[:cursor]
+        match = re.match(r"^(\/[^\s]+)(\s+)([^\s]*)$", head)
+        if match is None:
+            return None
+        command = match.group(1)
+        prefix = match.group(3)
+        start = len(match.group(1)) + len(match.group(2))
+        end = cursor
+        while end < len(text) and not text[end].isspace():
+            end += 1
+        # A second argument means this is no longer a bounded completion slot.
+        if text[end:].strip():
+            return None
+        return command, prefix, start, end
+
+    def argument_matches(self) -> list:
+        """Return optional candidates for the current bounded argument slot."""
+        query = self._argument_query()
+        if query is None or self.argument_completer is None:
+            return []
+        command, prefix, _start, _end = query
+        key = (command, prefix)
+        if self._argument_cache_key != key:
+            try:
+                found = list(self.argument_completer(command, prefix, limit=self.limit))
+            except Exception:
+                found = []
+            self._argument_cache_key = key
+            self._argument_cache = found[: self.limit]
+        return self._argument_cache
+
+    def _selection_matches(self) -> list:
+        return self.argument_matches() if self.argument_context else self.matches()
+
+    def _visible_selection_matches(self) -> list:
+        return self._selection_matches()[:self._visible_row_limit]
+
     def selection(self):
         """The highlighted entry, or None when nothing is highlighted."""
-        if self.argument_context:
-            return None
-        rows = self.matches()
+        rows = self._visible_selection_matches()
         if not rows:
             return None
         return rows[max(0, min(self.selected, len(rows) - 1))]
@@ -188,12 +245,13 @@ class MenuState:
 
     def has_palette_matches(self) -> bool:
         """Whether arrows should select a completion instead of recall history."""
-        return not self.argument_context and bool(self.matches())
+        return bool(self._visible_selection_matches())
 
     # -- transitions ------------------------------------------------------
 
     def _reset_selection(self) -> None:
         self.selected = 0
+        self._visible_row_limit = self.limit
 
     def handle_key(self, ch: str) -> str:
         if ch == KEY_LEFT:
@@ -220,7 +278,7 @@ class MenuState:
                 self.selected = max(0, self.selected - 1)
             return CONTINUE
         if ch == KEY_DOWN:
-            rows = self.matches() if self.menu_active and not self.argument_context else []
+            rows = self._visible_selection_matches() if self.menu_active else []
             if rows:
                 self.selected = min(len(rows) - 1, self.selected + 1)
             return CONTINUE
@@ -265,8 +323,16 @@ class MenuState:
             if self.menu_active:
                 entry = self.selection()
                 if entry is not None:
-                    self.buffer = _name_of(entry)
-                    self.cursor = len(self.buffer)
+                    if self.argument_context:
+                        query = self._argument_query()
+                        if query is not None:
+                            _command, _prefix, start, end = query
+                            value = _name_of(entry)
+                            self.buffer = self.buffer[:start] + value + self.buffer[end:]
+                            self.cursor = start + len(value)
+                    else:
+                        self.buffer = _name_of(entry)
+                        self.cursor = len(self.buffer)
                     self._reset_selection()
             return CONTINUE
         if ch in _BACKSPACE:
@@ -306,13 +372,30 @@ class MenuState:
         if prefix is not None and prefix != self.buffer:
             probe = MenuState(
                 self.completer, self.limit, buffer=str(prefix),
-                hint_provider=self.hint_provider, frame=self.frame,
+                hint_provider=self.hint_provider,
+                argument_completer=self.argument_completer, frame=self.frame,
             )
             probe.selected = self.selected
             return probe.render_rows(width=width, height=height)
         if not self.menu_active:
             return []
         if self.argument_context:
+            entries = self.argument_matches()
+            if entries:
+                cols, lines = _terminal_size()
+                width = int(width) if width else cols
+                height = int(height) if height else lines
+                budget = max(0, min(self.limit, MAX_ROWS, height - 2))
+                self._visible_row_limit = budget
+                entries = entries[:budget]
+                if not entries:
+                    return []
+                namewidth = max(len(_name_of(entry)) for entry in entries)
+                picked = max(0, min(self.selected, len(entries) - 1))
+                return [_truncate("%s %-*s  %s" % (
+                    ">" if index == picked else " ", namewidth,
+                    _name_of(entry), _summary_of(entry),
+                ), width) for index, entry in enumerate(entries)]
             try:
                 hint = str(self.hint_provider(self.buffer) or "")
             except Exception:
@@ -327,6 +410,7 @@ class MenuState:
         # Never claim more rows than the screen has: the reader has to move the
         # cursor back up over exactly this many lines.
         budget = max(0, min(self.limit, MAX_ROWS, height - 2))
+        self._visible_row_limit = budget
         entries = entries[:budget]
         if not entries:
             return []
@@ -713,10 +797,13 @@ def _clear_screen(state: MenuState, stream) -> None:
 
 
 def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
-                   frame_style: str = "") -> str:
+                   frame_style: str = "", argument_completer=None) -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
-    state = MenuState(completer=completer, frame=frame, frame_style=frame_style)
+    state = MenuState(
+        completer=completer, frame=frame, frame_style=frame_style,
+        argument_completer=argument_completer,
+    )
     recalled = HistoryCursor(history)
     try:
         _paint(state, prompt, stream)
@@ -789,7 +876,7 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
 
 
 def read_line(prompt: str = "", *, enabled: bool = True, history=None,
-              frame: str = "", frame_style: str = "",
+              frame: str = "", frame_style: str = "", argument_completer=None,
               fallback_prompt: str | None = None) -> str:
     """Read one line, showing a live command menu while it starts with ``/``.
 
@@ -804,7 +891,8 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
         return input(fallback)
     try:
         return _read_line_raw(prompt, history=history, frame=frame,
-                              frame_style=frame_style)
+                              frame_style=frame_style,
+                              argument_completer=argument_completer)
     except KeyboardInterrupt:
         raise
     except EOFError:
