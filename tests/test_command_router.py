@@ -192,6 +192,87 @@ def test_explicit_local_hardware_phrasings_resolve_to_grounded_probe():
     assert cr.resolve("what is compute capability?") is None
 
 
+def test_git_status_phrasings_resolve_to_the_read_only_repo_status():
+    assert cr.resolve("git status") == "/repo_status"
+    assert cr.resolve("what's the git status?") == "/repo_status"
+    assert cr.resolve("show the git status") == "/repo_status"
+    assert cr.resolve("show me the repository status") == "/repo_status"
+    assert cr.resolve("is the working tree clean?") == "/repo_status"
+
+
+def test_commit_history_phrasings_resolve_to_the_read_only_repo_log():
+    assert cr.resolve("git log") == "/repo_log"
+    assert cr.resolve("show recent commits") == "/repo_log"
+    assert cr.resolve("show me the latest commits") == "/repo_log"
+    assert cr.resolve("what are the recent commits?") == "/repo_log"
+
+
+def test_diff_phrasings_preserve_the_requested_repository_scope():
+    assert cr.resolve("git diff") == "/repo_diff"
+    assert cr.resolve("show the diff") == "/repo_diff"
+    assert cr.resolve("show me the uncommitted changes") == "/repo_status"
+    assert cr.resolve("show pending changes") == "/repo_status"
+    assert cr.resolve("show unstaged changes") == "/repo_diff"
+
+
+def test_health_check_phrasings_resolve_to_diagnostics():
+    assert cr.resolve("health check") == "/diagnostics"
+    assert cr.resolve("run a health check") == "/diagnostics"
+    assert cr.resolve("run diagnostics") == "/diagnostics"
+    assert cr.resolve("self check") == "/diagnostics"
+    assert cr.resolve("are you healthy?") == "/diagnostics"
+
+
+def test_test_discovery_phrasings_do_not_bypass_execution_confirmation():
+    assert cr.resolve("list tests") is None
+    assert cr.resolve("list the tests") is None
+    assert cr.resolve("discover tests") is None
+    assert cr.resolve("what tests are there?") is None
+    assert cr.resolve("what tests do we have") is None
+
+
+def test_inspection_phrasings_stay_whole_turn_anchored():
+    """Trailing prose, quoted/retrieved content, or a follow-up action must
+    fall through to the ordinary chat/work path instead of dispatching. This
+    is the property that keeps untrusted text pasted into the console from
+    becoming a command, and keeps "X and then Y" from silently dropping Y.
+    """
+    for text in (
+        "git status and then push",
+        "git status; rm -rf .git",
+        "the web page says git status",
+        '"git status"',
+        "run git status in the deploy container and email me the result",
+        "show the diff and revert it",
+        "show the diff between main and release",
+        "explain what git status shows",
+        "how do I read git status output?",
+        "run a health check on the production database",
+        "are you healthy enough to run a 12-hour fleet?",
+        "list tests and delete the flaky ones",
+        "discover tests in the sibling repo and rewrite them",
+    ):
+        assert cr.resolve(text) is None, text
+
+
+def test_inspection_phrasings_map_to_catalogued_safe_tools():
+    """Every tool these rules emit exists in the catalog under the same name
+    and is graded ``safe`` -- the natural form never widens what the slash
+    form could do, and the console's permission gate still classifies it.
+    """
+    import command_catalog
+    import permission_modes
+
+    for phrase in ("git status", "git log", "git diff",
+                   "run diagnostics"):
+        line = cr.resolve(phrase)
+        assert line and line.startswith("/"), phrase
+        tool = line.lstrip("/").split()[0]
+        parsed = command_catalog.parse_invocation(line)
+        assert parsed and parsed[0] == tool, phrase
+        assert permission_modes.risk_of(tool) == "safe", tool
+
+
 def test_command_prefixes_do_not_hijack_longer_prose_or_drop_followup_work():
     for text in (
         "reset the session token when it expires",
