@@ -5760,9 +5760,14 @@ def sonder(
     token: str = "",
 ) -> str:
     """Ask through Sonder Runtime and show observable activity for the response."""
-    command = control_command(prompt, session=session, project=project)
-    if command is not None:
-        return command
+    # An explicitly selected target is a caller-owned routing contract.  Do
+    # not reinterpret its prompt as a local control command before it reaches
+    # that model; ``_answer_with_history_impl`` applies the same rule for the
+    # OpenAI HTTP surface.  The default route keeps command ergonomics.
+    if not str(tier or model_override or "").strip():
+        command = control_command(prompt, session=session, project=project)
+        if command is not None:
+            return command
     natural = natural_model_request(prompt)
     if natural and natural["kind"] in ("fanout", "ensemble"):
         if natural["prompt"].lstrip().startswith("/"):
@@ -5850,9 +5855,17 @@ def _answer_with_history_impl(
     (with footer).
     """
     _maybe_live_reload()
-    command = control_command(prompt, history=history, session=session, project=project)
-    if command is not None:
-        return _append_activity(command)
+    # An explicit OpenAI/MCP target is a routing contract, not a hint.  In
+    # particular, never let conversational control routing reinterpret an
+    # explicit cloud or exact-model request as local workbench activity before
+    # the selected model has a chance to run.  The default route (no ``tier``)
+    # intentionally retains its ergonomic slash/control commands.
+    if not str(tier or "").strip():
+        command = control_command(
+            prompt, history=history, session=session, project=project,
+        )
+        if command is not None:
+            return _append_activity(command)
     model, cloud, model_augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
