@@ -98,7 +98,9 @@ python setup_alias.py --from-usb              # discover a GGUF on removable med
 
 ## 3. Verify what is installed
 
-All of these are read-only.
+These commands report installation state. `ollama list` and `ollama show` are
+read-only provider queries; `doctor`, `preflight`, and `diagnostics` may create
+or update the runtime's local SQLite schema metadata while checking it.
 
 ```bash
 ollama list                                   # the provider's own catalog
@@ -178,10 +180,11 @@ hot-reloadable `runtime_policy.json` that every surface reads:
 /runtime reset                                    # back to built-in defaults
 ```
 
-Only installed local models are accepted, an embedding binding must positively
-declare the embedding capability, execution lanes may pin to `fast`, `code`, or
-`general` only, and the policy can never name a cloud model or widen a
-permission.
+Installed models are accepted, an embedding binding must positively declare the
+embedding capability, execution lanes may pin to `fast`, `code`, or `general`
+only, and the policy can never widen a permission. Keep runtime bindings local
+unless the operator has explicitly enabled hosted cloud tiers; cloud tags are
+otherwise withheld from selection surfaces.
 
 **Per request** — an API caller sets `"model"` to a tier name (`sonder`,
 `code`, `general`, `cloud-code`, …) or to an exact installed tag; the
@@ -252,7 +255,7 @@ Two independent consent gates, neither on by default:
   which vendor sees it.
 - **Hosted cloud tiers** — `cloud-code` and `cloud-general` run on Ollama's
   servers. They are withheld from every selection surface until
-  `SONDER_ALLOW_CLOUD=1` / `[features].cloud = true`, and prompts sent to them
+  `SONDER_ALLOW_CLOUD=1`, and prompts sent to them
   leave this machine.
 
 Cloud tiers need no local weights, so they are never a startup requirement.
