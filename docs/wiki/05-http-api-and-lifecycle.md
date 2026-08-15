@@ -17,6 +17,7 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
 | `GET /v1/admin/updates/status` | admin | Durable update state (System page). |
 | `GET /v1/sonder/status` | admin/owner | Rich host-wide runtime/stats snapshot. Ordinary hosted accounts receive only their account and the model catalog. |
+| `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
 
 `/live` may be unauthenticated so an external check never needs the key;
 everything else requires the bearer key unless the peer is loopback (the
