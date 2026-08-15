@@ -2232,6 +2232,16 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
             adaptive=adaptive,
             plan_only=action == "plan",
         )
+    if action in ("steer", "clarify"):
+        run_selector, _, message = rest.partition(" ")
+        message = message.strip()
+        if not run_selector or not message:
+            return "usage: /autopilot %s <run-id> <message>" % action
+        return _autopilot_steer(
+            run_selector, message,
+            kind="clarify" if action == "clarify" else "guidance",
+            request_owner=request_owner,
+        )
     if action == "resume":
         return _autopilot_resume(rest, request_owner=request_owner) if rest else "usage: /autopilot resume <run-id>"
     if action == "pause":
@@ -2244,7 +2254,9 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
             "  /autopilot status [id]\n"
             "  /autopilot plan [--observe] [--no-web] [--static] <objective>\n"
             "  /autopilot run [--observe] [--no-web] [--static] <objective>\n"
-            "  /autopilot resume|pause|cancel <id>"
+            "  /autopilot resume|pause|cancel <id>\n"
+            "  /autopilot steer|clarify <id> <message>   (owner-scoped note; "
+            "clarify also requests a pause)"
         )
     return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
 
@@ -22027,6 +22039,46 @@ def _autopilot_resume(
     return "%s\n%s" % (
         "autopilot resumed" if launched else "autopilot already active",
         autopilot_controller.format_run(run, include_report=False),
+    )
+
+
+def _autopilot_steer(
+    run_id: str,
+    message: str,
+    kind: str = "guidance",
+    request_owner: str | None = None,
+) -> str:
+    """Attach an owner-scoped steering note; 'clarify' also requests a pause.
+
+    Deliberately absent from the unscoped MCP tool surface: steering is only
+    meaningful with an authenticated account scope, and the store fails closed
+    for unscoped callers and for legacy runs that predate account ownership.
+    """
+    _maybe_live_reload()
+    if not request_owner:
+        return (
+            "autopilot request rejected: steering requires an account-scoped "
+            "owner; unscoped sessions and legacy runs cannot be steered."
+        )
+    try:
+        note = autopilot_store.attach_steering(
+            run_id, message, kind=kind, request_owner=request_owner,
+        )
+    except ValueError as exc:
+        return "autopilot request rejected: %s" % exc
+    if note is None:
+        return (
+            "autopilot request rejected: no accessible run matches '%s' "
+            "(or its steering backlog is full)." % run_id
+        )
+    if kind == "clarify":
+        return (
+            "clarification requested for %s; the run pauses at the next host "
+            "checkpoint and reads the note when it is resumed." % note["run_id"]
+        )
+    return (
+        "steering attached to %s; the worker reads it at the next safe "
+        "checkpoint as untrusted guidance." % note["run_id"]
     )
 
 
