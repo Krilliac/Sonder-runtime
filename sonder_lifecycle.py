@@ -57,6 +57,7 @@ def error_envelope(
     """SPEC-2 WP4 envelope, plus the legacy "type" key OpenAI clients read."""
     legacy_type = {
         "CAPACITY_EXHAUSTED": "rate_limit_error",
+        "OWNER_CAPACITY_EXHAUSTED": "rate_limit_error",
         "ADMISSION_TIMEOUT": "server_error",
         "MAINTENANCE_MODE": "server_error",
         "DRAINING": "server_error",
@@ -96,6 +97,7 @@ class RuntimeLifecycle:
         queue_depth: int | None = None,
         admission_timeout_seconds: float = 10.0,
         drain_deadline_seconds: float = 25.0,
+        owner_max_inflight: int | None = None,
     ) -> None:
         def _env_int(name: str, default: int) -> int:
             try:
@@ -124,6 +126,27 @@ class RuntimeLifecycle:
         self._slots = threading.BoundedSemaphore(self._max_concurrent)
         self._waiters = 0
         self._admission_lock = threading.Lock()
+        # One authenticated principal must never occupy every slot and queue
+        # position at once; the default cap always leaves the majority of
+        # total admission capacity to other owners.
+        configured_owner_cap = owner_max_inflight or _env_int(
+            "SONDER_OWNER_MAX_INFLIGHT",
+            max(1, (self._max_concurrent + self._queue_depth) // 4),
+        )
+        # An override at or above total capacity would negate the fairness
+        # bound entirely, so whenever total capacity exceeds one the
+        # effective cap is clamped strictly below it: at least one admission
+        # position always remains for a different owner.  With a total
+        # capacity of one there is no second position to reserve and the cap
+        # floors at one admission.
+        total_capacity = self._max_concurrent + self._queue_depth
+        if total_capacity > 1:
+            self._owner_max_inflight = max(
+                1, min(configured_owner_cap, total_capacity - 1)
+            )
+        else:
+            self._owner_max_inflight = 1
+        self._owner_inflight: dict[str, int] = {}
 
         self._auth_buckets: dict[str, _TokenBucket] = {}
         self._auth_lock = threading.Lock()
@@ -272,14 +295,37 @@ class RuntimeLifecycle:
         self._maintenance_cache = (now, active)
         return active
 
-    def acquire_request_slot(self, *, mutating: bool = True):
-        """Context manager running the SPEC-2 admission algorithm."""
+    def acquire_request_slot(self, *, mutating: bool = True, owner: str = ""):
+        """Context manager running the SPEC-2 admission algorithm.
+
+        ``owner`` is an opaque per-principal key used only for in-memory
+        fairness accounting: an owner already at its in-flight cap is refused
+        with an owner-scoped 429 *before* it consumes a queue position, so a
+        single principal can never occupy every slot and queue slot at once.
+        An empty owner (local-open deployments: one operator, no second party
+        to protect) is bounded only by the global limits.  Owner keys are
+        never persisted and never used as metric labels.
+        """
         lifecycle = self
 
         class _Slot:
             def __init__(self) -> None:
                 self._acquired = False
                 self._counted_mutation = False
+                self._counted_owner = False
+
+            def _release_owner(self) -> None:
+                if not self._counted_owner:
+                    return
+                self._counted_owner = False
+                with lifecycle._admission_lock:
+                    remaining = lifecycle._owner_inflight.get(owner, 0) - 1
+                    if remaining > 0:
+                        lifecycle._owner_inflight[owner] = remaining
+                    else:
+                        # Remove entries at zero so the map stays bounded by
+                        # concurrently active owners.
+                        lifecycle._owner_inflight.pop(owner, None)
 
             def __enter__(self):
                 if mutating:
@@ -299,6 +345,16 @@ class RuntimeLifecycle:
                             retryable=True,
                         )
                 with lifecycle._admission_lock:
+                    if owner:
+                        held = lifecycle._owner_inflight.get(owner, 0)
+                        if held >= lifecycle._owner_max_inflight:
+                            raise AdmissionRejected(
+                                429,
+                                "OWNER_CAPACITY_EXHAUSTED",
+                                "this account has reached its concurrent "
+                                "request limit",
+                                retryable=True,
+                            )
                     if lifecycle._waiters >= lifecycle._queue_depth:
                         raise AdmissionRejected(
                             429,
@@ -307,14 +363,22 @@ class RuntimeLifecycle:
                             retryable=True,
                         )
                     lifecycle._waiters += 1
+                    if owner:
+                        lifecycle._owner_inflight[owner] = held + 1
+                        self._counted_owner = True
                 try:
                     acquired = lifecycle._slots.acquire(
                         timeout=lifecycle._admission_timeout
                     )
-                finally:
+                except BaseException:
                     with lifecycle._admission_lock:
                         lifecycle._waiters -= 1
+                    self._release_owner()
+                    raise
+                with lifecycle._admission_lock:
+                    lifecycle._waiters -= 1
                 if not acquired:
+                    self._release_owner()
                     raise AdmissionRejected(
                         504,
                         "ADMISSION_TIMEOUT",
@@ -333,6 +397,7 @@ class RuntimeLifecycle:
                 if self._acquired:
                     lifecycle.metrics.active_requests.dec()
                     lifecycle._slots.release()
+                self._release_owner()
                 return False
 
         return _Slot()
