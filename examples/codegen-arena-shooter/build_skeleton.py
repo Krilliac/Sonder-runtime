@@ -238,6 +238,97 @@ def strip_fences(text: str) -> str:
     return FENCE.sub("", text or "").strip()
 
 
+_IDENT_TAIL = re.compile(r"([A-Za-z_]\w*)\s*$")
+
+
+def _strip_generic_args(head: str) -> str:
+    """Drop a trailing ``<...>`` argument list, so ``Pick<T>`` reads as ``Pick``."""
+    depth = 0
+    for index in range(len(head) - 1, -1, -1):
+        char = head[index]
+        if char == ">":
+            depth += 1
+        elif char == "<":
+            depth -= 1
+            if depth == 0:
+                return head[:index].rstrip()
+    return head
+
+
+def _identifier_before(head: str) -> str:
+    """The identifier ahead of a parameter list, skipping any generic arguments."""
+    head = head.rstrip()
+    if head.endswith(">"):
+        head = _strip_generic_args(head)
+    match = _IDENT_TAIL.search(head)
+    return match.group(1) if match else ""
+
+
+def method_name(signature: str) -> str:
+    """The declared method name, whatever the return type looks like.
+
+    The previous rule was ``signature.split("(")[0]``, which reads the return
+    type instead of the name whenever the return type contains a parenthesis --
+    and two of this skeleton's own slots do:
+
+        public IEnumerable<(int x, int z)> WallCells()          -> "IEnumerable<"
+        public static (int id, ...)? DecodeInput(string payload) -> "static"
+
+    That matters because the name is what decides whether a reply is a complete
+    method the harness must unwrap, so a wrong name silently disarms the
+    recovery for exactly those two slots. Take the identifier in front of the
+    parameter list instead, skipping a parenthesised return type, a generic
+    argument list, and any parenthesised parameter default.
+    """
+    text = str(signature or "")
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] != "(":
+            continue
+        name = _identifier_before(text[:index])
+        if name:
+            return name
+    return ""
+
+
+def returns_void(signature: str, name: str) -> bool:
+    """Whether the slot returns nothing, read from the tokens before the name."""
+    if not name:
+        return False
+    head = re.split(r"\b%s\b" % re.escape(name), str(signature or ""))[0].split()
+    return bool(head) and head[-1] == "void"
+
+
+def declares_method(prefix: str, name: str) -> bool:
+    """Whether text ahead of a body's first brace or arrow is a DECLARATION.
+
+    Testing ``name in prefix`` was what turned correct bodies into wrappers. A
+    body of ``Main`` that opens with ``_screen = Screen.MainMenu;`` contains
+    ``Main`` before its first brace, so the reply was unwrapped and the whole
+    body was replaced by the inside of its own frame loop -- InitWindow, the
+    Shutdown call and the return silently dropped. The mangled body then fails
+    to compile and is reverted, which reads as the model failing the slot.
+
+    A declaration ends with this method's own parameter list, so require the
+    text to close a balanced ``(...)`` introduced by the method name. Matching
+    the shape rather than banning statement terminators keeps the recovery
+    working when the model prefixes the method with `using` lines or a doc
+    comment, while ``if (Update(dt))`` and ``while (Tick())`` -- statements that
+    also end in a parameter list -- are named by a keyword and rejected.
+    """
+    head = str(prefix or "").rstrip()
+    if not name or not head.endswith(")"):
+        return False
+    depth = 0
+    for index in range(len(head) - 1, -1, -1):
+        if head[index] == ")":
+            depth += 1
+        elif head[index] == "(":
+            depth -= 1
+            if depth == 0:
+                return _identifier_before(head[:index]) == name
+    return False
+
+
 def wrapped_body_issue(text: str, signature: str) -> str:
     """Reject an incomplete method wrapper before it can poison the skeleton.
 
@@ -248,10 +339,8 @@ def wrapped_body_issue(text: str, signature: str) -> str:
     precise host observation instead.
     """
     cleaned = strip_fences(text)
-    head = signature.split("(")[0].strip().split()
-    name = head[-1] if head else ""
     prefix, marker, tail = cleaned.partition("{")
-    if not name or not marker or name not in prefix:
+    if not marker or not declares_method(prefix, method_name(signature)):
         return ""
     depth = 1
     for char in tail:
@@ -326,23 +415,40 @@ def extract_body(text: str, signature: str) -> str:
     text = strip_fences(text)
     if not text:
         return ""
-    head = signature.split("(")[0].strip().split()
-    name = head[-1] if head else ""
+    name = method_name(signature)
+    # A property accessor slot is represented by its owning `get` line, so it
+    # deliberately has no method name or parameter list. Models still often
+    # return `get { ... }`; recover its statements before inserting them inside
+    # the harness-owned accessor braces.
+    accessor = str(signature or "").strip()
+    if accessor in ("get", "set", "init", "add", "remove"):
+        prefix, marker, tail = text.partition("{")
+        if marker and prefix.strip() == accessor:
+            depth = 1
+            for index, char in enumerate(tail):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        inner = tail[:index].strip()
+                        return inner or text
+            return ""
     # C# permits ``T Method(...) => expression;``.  It is a complete method
     # wrapper just like the brace form, but has no opening brace for the
     # recovery logic below to find.  Normalize it into the statements that
     # belong inside the harness-owned braces instead of splicing a second
-    # signature into the skeleton.
+    # signature into the skeleton.  Only a declaration counts: an ordinary
+    # body's lambda is also an ``=>``.
     arrow = text.find("=>")
-    if name and arrow >= 0 and name in text[:arrow]:
+    if arrow >= 0 and declares_method(text[:arrow], name):
         expression = text[arrow + 2:].strip()
         if not expression:
             return ""
         if not expression.endswith(";"):
             expression += ";"
-        return expression if len(head) >= 2 and head[-2] == "void" else "return " + expression
-    looks_wrapped = name and name in text.split("{")[0]
-    if not looks_wrapped:
+        return expression if returns_void(signature, name) else "return " + expression
+    if not declares_method(text.split("{")[0], name):
         return text
     start = text.find("{")
     if start < 0:
