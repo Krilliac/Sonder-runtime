@@ -3875,6 +3875,11 @@ class Handler(BaseHTTPRequestHandler):
         activity_response = None
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
+        # Selecting a concrete model is an API routing contract.  The default
+        # route retains Sonder's slash, feedback, web, and work conveniences;
+        # an explicit target receives the caller's text unchanged instead of
+        # allowing any of those local dispatchers to consume it.
+        allow_control_routes = _uses_default_model_route(model)
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness.
@@ -3897,17 +3902,17 @@ class Handler(BaseHTTPRequestHandler):
                         content = turn.content
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                    else:
+                    elif allow_control_routes:
                         reply = _handle_slash(
                             prompt, messages=messages, state=state,
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
                         )
-                    if (structured_schema is None and reply is None
+                    if (allow_control_routes and reply is None
                             and not context.get("account")
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_feedback(prompt, state=state)
-                    if (structured_schema is None and reply is None
+                    if (allow_control_routes and reply is None
                             and _developer_authorized(context)
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_intent(
@@ -3930,7 +3935,7 @@ class Handler(BaseHTTPRequestHandler):
                             natural_model["prompt"], tiers=natural_model["tiers"],
                             project=storage_project, require_all_tiers=True,
                         )
-                    if structured_schema is None and reply is None:
+                    if allow_control_routes and reply is None:
                         reply = server.chat_web_response(
                             prompt,
                             history=history,
@@ -3945,7 +3950,7 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                         )
                         web_routed = reply is not None
-                    if structured_schema is None and reply is None:
+                    if allow_control_routes and reply is None:
                         reply = _handle_work_intent(
                             prompt,
                             project=storage_project,

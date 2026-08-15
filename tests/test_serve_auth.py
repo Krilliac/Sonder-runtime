@@ -1418,6 +1418,42 @@ def test_http_explicit_model_suppresses_natural_fanout_routing(monkeypatch):
     assert seen == {"prompt": "ask all local models: summarize this", "tier": "fast"}
 
 
+def test_http_explicit_model_bypasses_control_dispatchers(monkeypatch):
+    """A selected model receives slash-looking text instead of local dispatch."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "_request_model_selector", lambda model: model)
+    monkeypatch.setattr(ts, "_chat_model_selection_error", lambda _selector: None)
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(ts, "_handle_slash", lambda *_args, **_kwargs: pytest.fail("slash dispatch must not run"))
+    monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: pytest.fail("feedback dispatch must not run"))
+    monkeypatch.setattr(ts, "_handle_intent", lambda *_args, **_kwargs: pytest.fail("intent dispatch must not run"))
+    monkeypatch.setattr(ts, "_handle_work_intent", lambda *_args, **_kwargs: pytest.fail("work dispatch must not run"))
+    monkeypatch.setattr(ts.server, "chat_web_response", lambda *_args, **_kwargs: pytest.fail("web dispatch must not run"))
+    seen = {}
+
+    def answer(prompt, history, **kwargs):
+        seen.update(prompt=prompt, tier=kwargs["tier"])
+        return "selected-model answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "cloud-general",
+        "messages": [{"role": "user", "content": "/hardware"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"] == "selected-model answer"
+    assert seen == {"prompt": "/hardware", "tier": "cloud-general"}
+
+
 def test_http_developer_natural_ensemble_uses_fixed_local_tiers(monkeypatch):
     """The whole-turn wrapper cannot be reclassified before its own dispatch."""
     api_key = "k" * 32
