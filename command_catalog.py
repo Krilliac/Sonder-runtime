@@ -25,6 +25,7 @@ this module for /help, so a module-level import would be circular.
 from __future__ import annotations
 
 import ast
+import difflib
 import functools
 import os
 import re
@@ -1384,6 +1385,83 @@ def complete(prefix: str = "", limit: int = 12) -> list:
     return ranked[:limit]
 
 
+# A submitted miss gets one guess that `complete` deliberately will not make.
+# 0.75 was picked by measuring, not taste: it is the highest cutoff that still
+# recovers every ordinary slip (transposition "mdoel", dropped letter "moel",
+# "helo", "dianostics", "securty") while answering nothing at all for a word
+# that is simply not a command. Loosening it to 0.6 starts pairing "systm"
+# with "asset" and "permisions" with "persona", which is worse than silence:
+# a wrong guess costs a second failed attempt, and the user cannot tell a
+# guess from a match.
+_NEAR_MISS_CUTOFF = 0.75
+
+# Two characters cannot be a typo of anything in particular -- every short
+# stem sits within one edit of a dozen others -- so guessing from them would
+# only ever produce noise.
+_NEAR_MISS_MIN_LEN = 3
+
+
+def near_misses(text: str, limit: int = 5) -> list:
+    """Names close enough to `text` to be worth suggesting after a miss.
+
+    This is deliberately NOT part of ``complete``. ``complete`` runs on every
+    keystroke behind the slash menu, where the list must shrink as the query
+    grows; a fuzzy tier there would make a more specific query offer *more*
+    commands. Here the line has already been submitted and already matched
+    nothing, so the only alternative to a guess is a dead end.
+
+    Categories are searched alongside commands because ``/help`` invites the
+    reader to type one (``/help <category>``) and a typo there previously came
+    back as "no command", naming the wrong kind of thing entirely.
+
+    Returns display-ready strings: ``"/model"`` for a command, a bare
+    ``"security"`` for a category. Aliases are matched but reported under the
+    command they belong to, so a suggestion is never a second spelling of a
+    suggestion already in the list.
+    """
+    limit = int(limit)
+    if limit <= 0:
+        return []
+    wanted = str(text or "").strip().lower().lstrip("/")
+    if len(wanted) < _NEAR_MISS_MIN_LEN:
+        return []
+    try:
+        commands = catalog()
+        groups = categories()
+    except CatalogUnavailable:
+        # The caller is already rendering a failure; a guess is not worth
+        # turning that into a second, unrelated one.
+        return []
+
+    canonical: dict[str, str] = {}
+    for command in commands:
+        for name in command.all_names:
+            canonical.setdefault(name.lstrip("/").lower(), command.name)
+    for key in groups:
+        canonical.setdefault(key.lower(), key)
+
+    ordered: list[str] = []
+    for stem in difflib.get_close_matches(
+        wanted, list(canonical), n=limit * 3, cutoff=_NEAR_MISS_CUTOFF,
+    ):
+        suggestion = canonical[stem]
+        if suggestion not in ordered:
+            ordered.append(suggestion)
+    return ordered[:limit]
+
+
+def _did_you_mean(text: str) -> str:
+    """The one-line recovery appended to a miss, or "" when nothing is close."""
+    guesses = near_misses(text)
+    if not guesses:
+        return ""
+    rendered = ", ".join(
+        guess if guess.startswith("/") else "%s (category)" % guess
+        for guess in guesses
+    )
+    return "did you mean: %s" % rendered
+
+
 # --- rendering ------------------------------------------------------------
 
 # One mark per class the gate decides on. ``safe`` is deliberately blank --
@@ -1472,7 +1550,9 @@ def _help_command(name: str) -> str:
     if not command:
         matches = complete(name, limit=8)
         if not matches:
-            return "no command '%s'. try /help for categories." % name
+            miss = "no command '%s'. try /help for categories." % name
+            recovery = _did_you_mean(name)
+            return "%s\n%s" % (miss, recovery) if recovery else miss
         lines = ["no exact command '%s'. did you mean:" % name, ""]
         width = max(len(c.name) for c in matches)
         return "\n".join(lines + [_line(c, width) for c in matches])
@@ -1538,7 +1618,9 @@ def format_matches(prefix: str, limit: int = 12) -> str:
     except CatalogUnavailable as exc:
         return _UNAVAILABLE_TEXT % exc
     if not matches:
-        return "no command matches '%s'. /help lists every category." % prefix
+        miss = "no command matches '%s'. /help lists every category." % prefix
+        recovery = _did_you_mean(prefix)
+        return "%s\n%s" % (miss, recovery) if recovery else miss
     header = "most used" if not str(prefix or "").strip("/ ") else (
         "commands matching '%s'" % prefix
     )
