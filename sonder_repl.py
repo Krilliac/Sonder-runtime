@@ -2360,8 +2360,8 @@ def main():
                 last_turn_metrics = None
                 print(
                     "Where should I create or work on this project?\n"
-                    "  Existing folder: /workspace C:\\Users\\you\\Projects\\MyProject\n"
-                    "  New folder:      /workspace-create C:\\Users\\you\\Projects\\MyProject\n"
+                    "  Existing folder: /workspace <project-folder>\n"
+                    "  New folder:      /workspace-create <project-folder>\n"
                     "I will keep all guarded project work and requested runs inside that directory."
                 )
                 continue
