@@ -128,6 +128,31 @@ smallest chat-only installation.
 > use the matching tool or route. A downloaded speech or reranker tag remains
 > optional until Sonder has a provider-backed integration for that capability.
 
+### Verify and choose your models
+
+All read-only. Run these after bootstrap, or any time a model-related error
+looks like configuration rather than capability.
+
+```bash
+ollama list                          # what the provider actually has
+ollama show sonder:latest            # prove the stable alias exists
+python -m sonder_runtime doctor      # config, runtime policy, Ollama reachability
+python -m sonder_runtime preflight   # startup checks without binding a port
+```
+
+In the REPL, `/model` lists every selectable tier plus the installed tags and
+switches this session (`/model general`, `/model qwen2.5-coder:7b`); `/runtime`
+shows the shared tier→model and lane→tier policy with a readiness summary, and
+`/runtime set code=<installed-model>` rebinds it for every surface.
+
+Missing models degrade rather than crash: an unbound `reasoning`/`vision` tier
+is simply not offered and the router falls back to a base tier, a missing
+embedding model disables semantic recall while chat and lexical retrieval keep
+working, and a `cloud-*` tier is withheld entirely until you opt in. If
+`sonder:latest` itself is gone, re-run `setup_alias.py`. Full behavior table,
+per-surface commands, and the local-vs-cloud gates:
+[Model Requirements & Onboarding](docs/wiki/19-model-requirements-and-onboarding.md).
+
 ## Quick start
 
 The `app-latest` badges are a mutable prerelease snapshot. They may lag `main`
@@ -294,6 +319,7 @@ authentication, hosting, and full command details.
 - [Configuration](docs/wiki/03-configuration.md)
 - [Agent, autopilot, and fleets](docs/wiki/07-agent-autopilot-fleet.md)
 - [Models and gateways](docs/wiki/08-model-tiers-and-gateway.md)
+- [Model requirements and onboarding](docs/wiki/19-model-requirements-and-onboarding.md)
 - [Tools and languages](docs/wiki/10-tools-and-languages.md)
 - [Training](TRAINING.md)
 - [Client and private hosting](CLIENT.md)
