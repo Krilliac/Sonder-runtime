@@ -375,6 +375,18 @@ def _http_action_idempotency_key(context, supplied_key, action):
     return "act-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _receipt_owner_scope(context):
+    """Opaque per-principal budget key for durable action receipts.
+
+    The receipt store never holds account identity; like the fanout and task
+    scopes above, a domain-separated digest of the principal gives it a stable
+    counter key so one account's distinct Idempotency-Keys draw down that
+    account's admission budget instead of the shared store.
+    """
+    material = "served-receipt-owner\0" + _state_principal(context)
+    return "rw-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _idempotent_http_action(context, supplied_key, action, factory):
     """Run an opt-in action once, preserving uncertainty across restarts."""
     cache_key = _http_action_idempotency_key(context, supplied_key, action)
@@ -383,7 +395,9 @@ def _idempotent_http_action(context, supplied_key, action, factory):
 
     def durable_factory():
         try:
-            state = served_action_receipts.claim(cache_key)
+            state = served_action_receipts.claim(
+                cache_key, owner_scope=_receipt_owner_scope(context)
+            )
         except (OSError, sqlite3.Error, ValueError):
             # An explicit replay key promises no duplicate side effect.  If its
             # durable guard is unavailable, refusing is safer than executing a
@@ -391,6 +405,17 @@ def _idempotent_http_action(context, supplied_key, action, factory):
             refusal = (
                 "idempotency receipt unavailable: the action was not started. "
                 "Retry after restoring local runtime storage."
+            )
+            return refusal
+        if state == served_action_receipts.REJECTED:
+            # Admitting this new key would exceed the durable receipt budget
+            # (global or this principal's).  Refusing is deterministic
+            # backpressure: running without a receipt would silently drop the
+            # no-duplicate promise the client asked for.
+            refusal = (
+                "idempotency receipt capacity exhausted: the action was not "
+                "started. Reuse the Idempotency-Key of the retried action, or "
+                "retry after older completed receipts expire."
             )
             return refusal
         if state == "completed":
