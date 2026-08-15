@@ -2149,6 +2149,18 @@ def _model_to_tier(model):
     return None
 
 
+def _uses_default_model_route(model):
+    """Whether a request leaves model selection to Sonder's default router.
+
+    OpenAI-style ``gpt-*`` names deliberately retain the compatibility default
+    unless the live catalog later resolves one as a concrete local model.  This
+    helper is intentionally syntactic: it runs before rate limiting and must
+    not trigger catalog discovery or other I/O.
+    """
+    m = str(model or "").strip()
+    return not m or m in ("sonder", "local") or m.startswith("gpt-")
+
+
 def _request_model_selector(model):
     """Keep OpenAI defaults, but pass explicit non-default selectors to server.
 
@@ -3694,11 +3706,28 @@ class Handler(BaseHTTPRequestHandler):
                     status=error.status,
                 )
                 return
+        model = req.get("model", "sonder")
+        if not isinstance(model, str):
+            record_early_chat_metric("invalid_model")
+            self._send_json_payload(
+                {"error": {
+                    "message": "model must be a string",
+                    "type": "invalid_request",
+                }},
+                status=400,
+            )
+            return
         prompt = _last_user_message(messages)
         # Normalize an explicitly recognized whole-turn model request before
         # policy checks.  Otherwise ``use model x: /run ...`` could evade the
         # initial slash-command gate and execute after the rewrite below.
-        natural_model = server.natural_model_request(prompt)
+        # An explicit API model is a routing contract.  Do not reinterpret its
+        # ordinary text as a fanout, ensemble, or named-model instruction;
+        # direct MCP and the generation path apply the same precedence rule.
+        natural_model = (
+            server.natural_model_request(prompt)
+            if _uses_default_model_route(model) else None
+        )
         if structured_schema is not None and natural_model is not None:
             record_early_chat_metric("structured_control_route")
             self._send_json_payload(
@@ -3788,17 +3817,6 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             include_stream_usage = include_usage
-        model = req.get("model", "sonder")
-        if not isinstance(model, str):
-            record_early_chat_metric("invalid_model")
-            self._send_json_payload(
-                {"error": {
-                    "message": "model must be a string",
-                    "type": "invalid_request",
-                }},
-                status=400,
-            )
-            return
         if natural_model and natural_model["kind"] in ("fanout", "ensemble"):
             # These routes spend several model calls. Local-open keeps its
             # single-user/full-tool behavior; shared deployments require the
@@ -3882,6 +3900,11 @@ class Handler(BaseHTTPRequestHandler):
         activity_response = None
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
+        # Selecting a concrete model is an API routing contract.  The default
+        # route retains Sonder's slash, feedback, web, and work conveniences;
+        # an explicit target receives the caller's text unchanged instead of
+        # allowing any of those local dispatchers to consume it.
+        allow_control_routes = _uses_default_model_route(model)
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness.
@@ -3904,17 +3927,17 @@ class Handler(BaseHTTPRequestHandler):
                         content = turn.content
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                    else:
+                    elif allow_control_routes:
                         reply = _handle_slash(
                             prompt, messages=messages, state=state,
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
                         )
-                    if (structured_schema is None and reply is None
+                    if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_feedback(prompt, state=state)
-                    if (structured_schema is None and reply is None
+                    if (structured_schema is None and allow_control_routes and reply is None
                             and _developer_authorized(context)
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_intent(
@@ -3937,7 +3960,7 @@ class Handler(BaseHTTPRequestHandler):
                             natural_model["prompt"], tiers=natural_model["tiers"],
                             project=storage_project, require_all_tiers=True,
                         )
-                    if structured_schema is None and reply is None:
+                    if structured_schema is None and allow_control_routes and reply is None:
                         reply = server.chat_web_response(
                             prompt,
                             history=history,
@@ -3952,7 +3975,7 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                         )
                         web_routed = reply is not None
-                    if structured_schema is None and reply is None:
+                    if structured_schema is None and allow_control_routes and reply is None:
                         reply = _handle_work_intent(
                             prompt,
                             project=storage_project,
