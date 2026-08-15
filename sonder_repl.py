@@ -535,6 +535,52 @@ def _installed_models():
     return sorted(out)
 
 
+def _selectable_tiers():
+    """Tiers the REPL may actually route a turn to, with policy applied.
+
+    ``server.TIERS`` is the raw table: it still lists the hosted cloud tiers
+    when ``SONDER_ALLOW_CLOUD`` is unset.  ``server.available_tiers()`` is the
+    filtered view the serve layer and ``/v1/models`` already publish and that
+    ``_serve_target`` enforces.  Reading the raw table here made the console
+    the one surface that offered a route it could not take: ``/model
+    cloud-code`` reported a successful switch, and then every following chat
+    turn came back "hosted/cloud tiers are disabled" -- the rejection the
+    selection itself should have carried.
+    """
+    try:
+        tiers = server.available_tiers()
+    except Exception:
+        tiers = None
+    if isinstance(tiers, dict):
+        return tiers
+    # Availability filtering is a courtesy, not a gate: the real refusal still
+    # happens in `_serve_target`. A policy read that raises must not be able to
+    # empty the tier list and leave `/model` with nothing to offer.
+    try:
+        return dict(server.TIERS)
+    except Exception:
+        return {}
+
+
+def _unselectable_tier_reason(name):
+    """Why a configured tier is withheld right now, or "" when it is offered.
+
+    Only names that exist in the raw table can be withheld; an unknown word is
+    not a tier at all and must keep falling through to model-tag resolution so
+    it still gets the catalog's "did you mean" suggestions.
+    """
+    try:
+        if not name or name not in server.TIERS or name in _selectable_tiers():
+            return ""
+        if name in getattr(server, "CLOUD_TIERS", ()):
+            # One copy of the wording: the console explains a refusal exactly
+            # the way the chat turn it prevents would have.
+            return server._cloud_disabled_message().removeprefix("ERROR: ")
+        return "tier %r is configured but not currently available" % name
+    except Exception:
+        return ""
+
+
 _MODEL_DISCOVERY_UNSET = object()
 
 
@@ -553,8 +599,10 @@ class _ModelArgumentCompleter:
     def refresh(self, installed=_MODEL_DISCOVERY_UNSET):
         if installed is _MODEL_DISCOVERY_UNSET:
             installed = _installed_models()
+        # The palette must offer only what `/model` will actually accept, or
+        # keyboard selection becomes a shortcut to a refusal.
         try:
-            tiers = [str(name) for name in server.TIERS if str(name)]
+            tiers = [str(name) for name in _selectable_tiers() if str(name)]
         except Exception:
             tiers = []
         models = [str(name) for name, _size in (installed or []) if str(name)]
@@ -1394,6 +1442,7 @@ def main():
         nonlocal active_tier, active_model
         arg = (arg or "").strip()
         tier = active_tier or "code"
+        tiers = _selectable_tiers()
         installed = _installed_models()
         model_argument_completer.refresh(installed)
 
@@ -1403,9 +1452,16 @@ def main():
                 _paint(tier, _Ansi.cyan), _paint(current, _Ansi.cyan, _Ansi.bold)))
             print()
             print(_paint("tiers", _Ansi.muted))
-            for name in sorted(server.TIERS):
+            for name in sorted(tiers):
                 mark = "*" if name == tier else " "
-                print("  %s %-14s %s" % (mark, name, server.TIERS[name]))
+                print("  %s %-14s %s" % (mark, name, tiers[name]))
+            # A withheld tier is named rather than silently omitted: the user
+            # configured it, and "where did cloud-code go" is a worse answer
+            # than one line saying what would turn it back on.
+            for name in sorted(set(server.TIERS).difference(tiers)):
+                print(_paint("  - %-14s %s" % (
+                    name, _unselectable_tier_reason(name) or "unavailable",
+                ), _Ansi.muted))
             print()
             if installed is None:
                 print(_paint("installed models: (ollama did not answer)", _Ansi.amber))
@@ -1420,13 +1476,26 @@ def main():
             print(_paint("usage: /model <model-name>  |  /model <tier>", _Ansi.muted))
             return
 
-        tier_names = {str(name).casefold(): name for name in server.TIERS}
+        tier_names = {str(name).casefold(): name for name in tiers}
         selected_tier = tier_names.get(arg.casefold())
         if selected_tier is not None:
             active_tier = selected_tier
             active_model = None
             print("active tier: %s  ->  %s" % (
-                selected_tier, server.TIERS.get(selected_tier)))
+                selected_tier, tiers.get(selected_tier)))
+            return
+
+        # A configured-but-withheld tier is a near miss, not an unknown word.
+        # Refuse it here, with the reason, instead of letting it fall through
+        # to "no installed model named 'cloud-code'" -- or, before the tier
+        # vocabulary was filtered, into a pin whose failure only showed up on
+        # the next chat turn.
+        withheld = {str(name).casefold(): name for name in server.TIERS}.get(
+            arg.casefold())
+        withheld_reason = _unselectable_tier_reason(withheld)
+        if withheld_reason:
+            print(_paint("cannot select tier %r: %s" % (
+                withheld, withheld_reason), _Ansi.red))
             return
 
         if installed is None:
@@ -1574,7 +1643,12 @@ def main():
         if not question:
             print("usage: /route <request>")
             return
-        decision = tier_router.route(question, available_tiers=set(server.TIERS))
+        # `tier_router.route` falls back precisely so it never names a tier the
+        # next call would fail on. Handing it the raw table defeated that: with
+        # cloud opt-in off, a recall question was routed to `cloud-general`,
+        # which answers only "hosted/cloud tiers are disabled".
+        decision = tier_router.route(
+            question, available_tiers=set(_selectable_tiers()))
         print("kind:   %s" % _paint(decision["kind"], _Ansi.cyan))
         print("tier:   %s" % _paint(decision["tier"], _Ansi.cyan, _Ansi.bold))
         print("reason: %s" % _paint(decision["reason"], _Ansi.muted))
@@ -1594,7 +1668,7 @@ def main():
             return
         chosen = active_tier or tier_router.route(
             objective or "improve %s" % fname,
-            available_tiers=set(server.TIERS))["tier"]
+            available_tiers=set(_selectable_tiers()))["tier"]
         print(_paint("asking %s to improve %s ..." % (chosen, fname), _Ansi.muted))
         res = code_improve.improve_function(
             src, fname,

@@ -686,6 +686,128 @@ def test_model_completer_does_not_repeat_unavailable_discovery(monkeypatch):
     assert calls == []
 
 
+def _repl_with_cloud_tier(monkeypatch, lines, *, cloud_allowed, seen=None):
+    """Drive `main()` over `lines` with one hosted tier configured."""
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {
+        "code": "qwen2.5-coder:7b",
+        "general": "qwen2.5-coder:7b",
+        "cloud-code": "kimi-k2:cloud",
+        "cloud-general": "kimi-k2:cloud",
+    })
+    monkeypatch.setattr(sonder_repl.server, "cloud_allowed", lambda: cloud_allowed)
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_a, **_k: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_a, **_k: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda _prompt, **kwargs: (seen if seen is not None else []).append(kwargs) or "answer",
+    )
+    sonder_repl.main()
+
+
+def test_model_listing_withholds_a_disabled_cloud_tier_and_says_why(monkeypatch, capsys):
+    lines = iter(("/model", "/exit"))
+    _repl_with_cloud_tier(monkeypatch, lines, cloud_allowed=False)
+
+    out = capsys.readouterr().out
+    # Named, so the tier does not simply vanish -- but never as a selectable row.
+    assert "cloud-code" in out
+    assert "  cloud-code     kimi-k2:cloud" not in out
+    assert "SONDER_ALLOW_CLOUD=1" in out
+
+
+def test_model_listing_offers_a_cloud_tier_once_cloud_is_enabled(monkeypatch, capsys):
+    lines = iter(("/model", "/exit"))
+    _repl_with_cloud_tier(monkeypatch, lines, cloud_allowed=True)
+
+    out = capsys.readouterr().out
+    assert "  cloud-code     kimi-k2:cloud" in out
+    assert "SONDER_ALLOW_CLOUD=1" not in out
+
+
+def test_model_switch_refuses_a_disabled_cloud_tier_instead_of_the_next_turn(
+    monkeypatch, capsys,
+):
+    seen = []
+    lines = iter(("/model cloud-code", "hello", "/exit"))
+    _repl_with_cloud_tier(monkeypatch, lines, cloud_allowed=False, seen=seen)
+
+    out = capsys.readouterr().out
+    assert "cannot select tier 'cloud-code'" in out
+    assert "SONDER_ALLOW_CLOUD=1" in out
+    # A near miss on a real tier must not be reported as an unknown model tag.
+    assert "no installed model named" not in out
+    # The chat turn that follows keeps the working local route.
+    assert len(seen) == 1
+    assert seen[0]["tier"] == ""
+    assert seen[0]["model_override"] == ""
+
+
+def test_model_switch_selects_a_cloud_tier_when_cloud_is_enabled(monkeypatch, capsys):
+    seen = []
+    lines = iter(("/model cloud-code", "hello", "/exit"))
+    _repl_with_cloud_tier(monkeypatch, lines, cloud_allowed=True, seen=seen)
+
+    assert "active tier: cloud-code  ->  kimi-k2:cloud" in capsys.readouterr().out
+    assert len(seen) == 1
+    assert seen[0]["tier"] == "cloud-code"
+
+
+def test_model_completer_does_not_offer_a_disabled_cloud_tier(monkeypatch):
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {
+        "code": "qwen2.5-coder:7b", "cloud-code": "kimi-k2:cloud",
+    })
+    monkeypatch.setattr(sonder_repl.server, "cloud_allowed", lambda: False)
+    completer = sonder_repl._ModelArgumentCompleter()
+
+    completer.refresh([("cloud-ready:12b", "8 GB")])
+
+    assert completer("/model", "cloud") == ["cloud-ready:12b"]
+
+
+def test_route_does_not_recommend_a_disabled_cloud_tier(monkeypatch, capsys):
+    lines = iter(("/route what is the exact signature of memcpy", "/exit"))
+    _repl_with_cloud_tier(monkeypatch, lines, cloud_allowed=False)
+
+    out = capsys.readouterr().out
+    assert "kind:   recall" in out
+    assert "tier:   code" in out
+    assert "preferred tier unavailable" in out
+
+
+def test_route_still_recommends_a_cloud_tier_when_cloud_is_enabled(monkeypatch, capsys):
+    lines = iter(("/route what is the exact signature of memcpy", "/exit"))
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {
+        "code": "qwen2.5-coder:7b", "cloud-general": "kimi-k2:cloud",
+    })
+    monkeypatch.setattr(sonder_repl.server, "cloud_allowed", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+
+    sonder_repl.main()
+
+    assert "tier:   cloud-general" in capsys.readouterr().out
+
+
+def test_selectable_tiers_falls_back_to_the_raw_table_when_policy_raises(monkeypatch):
+    def _raise():
+        raise RuntimeError("policy unreadable")
+
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl.server, "available_tiers", _raise)
+
+    assert sonder_repl._selectable_tiers() == {"code": "qwen2.5-coder:7b"}
+    assert sonder_repl._unselectable_tier_reason("code") == ""
+    assert sonder_repl._unselectable_tier_reason("not-a-tier") == ""
+
+
 def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
     lines = iter(("web search to find computer repair shops near 67215", "/exit"))
     calls = []
