@@ -2019,6 +2019,39 @@ def test_stream_exposes_same_elapsed_header_as_terminal_chunk():
     assert body.endswith("data: [DONE]\n\n")
 
 
+def test_stream_applies_configured_idle_write_timeout(monkeypatch):
+    class Connection:
+        def __init__(self):
+            self.timeout = None
+
+        def settimeout(self, value):
+            self.timeout = value
+
+    class StreamProbe:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = io.BytesIO()
+            self.close_connection = False
+            self.connection = Connection()
+
+        def send_response(self, status):
+            assert status == 200
+
+        def _cors(self):
+            pass
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            pass
+
+    monkeypatch.setattr(ts, "STREAM_IDLE_TIMEOUT_SECONDS", 19)
+    probe = StreamProbe()
+    assert ts.Handler._send_stream(probe, "hello", "sonder")
+    assert probe.connection.timeout == 19
+
+
 def test_stream_swallows_a_client_disconnect_during_headers():
     class StreamProbe:
         def __init__(self):

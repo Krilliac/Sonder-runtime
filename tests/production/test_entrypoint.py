@@ -107,6 +107,19 @@ def test_exported_runtime_posture_includes_proxy_declaration(monkeypatch):
     assert os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] == "1"
 
 
+def test_require_account_translates_default_api_key_mode(monkeypatch):
+    import sonder_config
+    from sonder_runtime.__main__ import _export_runtime_environment
+
+    config = sonder_config.SonderConfig(
+        server=sonder_config.ServerConfig(require_account=True),
+        secrets=sonder_config.Secrets(auth_secret="private-test-secret"),
+    )
+    monkeypatch.setenv("SONDER_AUTH_MODE", "")
+    _export_runtime_environment(config)
+    assert os.environ["SONDER_AUTH_MODE"] == "account"
+
+
 def test_user_global_config_is_discovered_when_present(monkeypatch, tmp_path):
     from sonder_runtime.__main__ import _configured_path
 

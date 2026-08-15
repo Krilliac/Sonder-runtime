@@ -439,7 +439,13 @@ def _export_runtime_environment(config) -> None:
         )
     os.environ["SONDER_HOST"] = config.server.host
     os.environ["SONDER_PORT"] = str(config.server.port)
-    os.environ["SONDER_AUTH_MODE"] = config.server.auth_mode
+    # ``require_account`` predates the explicit mode field.  Preserve its
+    # documented meaning when a configuration relies on the default api-key
+    # mode rather than quietly letting the explicit default take precedence.
+    auth_mode = config.server.auth_mode
+    if config.server.require_account and auth_mode == "api-key":
+        auth_mode = "account"
+    os.environ["SONDER_AUTH_MODE"] = auth_mode
     os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] = (
         "1" if config.server.tls_terminated_by_proxy else "0"
     )

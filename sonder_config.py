@@ -464,12 +464,13 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[server].request_timeout_seconds must be >= 1")
     if server.stream_idle_timeout_seconds < 1:
         errors.append("[server].stream_idle_timeout_seconds must be >= 1")
-    if server.session_state_limit < 1:
-        errors.append("[server].session_state_limit must be >= 1")
-    if server.session_state_owner_limit < 1:
-        errors.append("[server].session_state_owner_limit must be >= 1")
-    if server.session_state_owner_limit > server.session_state_limit:
-        errors.append("[server].session_state_owner_limit must not exceed session_state_limit")
+    if not 2 <= server.session_state_limit <= 1024:
+        errors.append("[server].session_state_limit must be within 2..1024")
+    if not 1 <= server.session_state_owner_limit < server.session_state_limit:
+        errors.append(
+            "[server].session_state_owner_limit must be within "
+            "1..session_state_limit-1"
+        )
     if server.train_max_n < 1:
         errors.append("[server].train_max_n must be >= 1")
     if server.reasoning_audience not in ("developer", "all"):
@@ -502,8 +503,13 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 f"{MIN_API_KEY_LENGTH} characters"
             )
 
+    effective_auth_mode = (
+        "account"
+        if server.require_account and server.auth_mode == "api-key"
+        else server.auth_mode
+    )
     if (
-        server.auth_mode in ACCOUNT_BEARING_AUTH_MODES
+        effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES
         and config.secrets.auth_secret == BUILTIN_DEV_AUTH_SECRET
     ):
         errors.append(
