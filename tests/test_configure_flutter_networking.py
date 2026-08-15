@@ -173,6 +173,16 @@ def test_production_workflow_never_enables_android_cleartext():
     assert "--allow-android-cleartext" not in workflow
 
 
+def test_android_workflow_retries_only_transient_gradle_artifact_failures():
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/build-apps.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "for attempt in 1 2 3" in workflow
+    assert "Received status code (429|502|503|504)" in workflow
+    assert "Transient Gradle artifact download failure" in workflow
+
+
 def test_malformed_generated_project_fails_closed(tmp_path):
     manifest = tmp_path / "android/app/src/main/AndroidManifest.xml"
     manifest.parent.mkdir(parents=True)
