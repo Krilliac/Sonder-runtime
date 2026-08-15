@@ -19,9 +19,29 @@ python build_with_sonder.py --only GameMap.cs      # one file
 python build_with_sonder.py --repair-only          # skip generation
 python build_with_sonder.py --resume               # skip files already on disk
 python build_skeleton.py --reset --prepare-only    # create/verify only the deterministic v2 baseline
+python build_skeleton.py --verify                  # require build + held-out runtime verification
+python build_skeleton.py --verify-only             # rerun held-out verification without model calls
 ```
 
-Targets `FpsGame_Sonder/` beside it. Needs the .NET SDK and a running Ollama.
+By default, generated projects live under Sonder's per-user state directory:
+`%LOCALAPPDATA%\\sonder\\examples\\arena-shooter\\` on Windows. Use
+`--project <path>` (or `SONDER_GAME_PROJECT` / `SONDER_GAME_SKELETON_PROJECT`)
+to choose an explicit reproducible output location. Needs the .NET SDK and a
+running Ollama.
+
+After a successful skeleton build, run its held-out verifier with:
+
+```bash
+dotnet run --project Verify
+```
+
+The generator's `--verify` flag performs this same check automatically against
+the exact project it generated and returns a nonzero exit code on a build or
+held-out verification failure.
+
+`Verify/Verify.csproj` resolves the same default user-state location on
+Windows. On another platform or a custom output directory, pass the target
+explicitly: `dotnet run --project Verify -p:SonderTarget=/path/to/FpsGame_Skeleton`.
 
 The v2 skeleton runner writes its harness-owned `FpsGame_Skeleton.csproj`
 automatically before its first baseline build. It is not model output and is
