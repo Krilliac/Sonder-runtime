@@ -13,6 +13,13 @@ max_request_bytes = 1048576
 max_concurrent_requests = 4
 request_timeout_seconds = 300
 stream_idle_timeout_seconds = 60
+cors_origins = []
+require_account = false
+allow_registration = false
+reasoning_audience = "developer"
+session_state_limit = 128
+session_state_owner_limit = 32
+train_max_n = 500
 trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 # The packaged reverse-proxy topology terminates TLS before this loopback
 # listener. Keep this true there: it also disables the unauthenticated local
@@ -39,6 +46,9 @@ source_modification = false
 host_control = false
 training = false
 npu = false
+expose_reasoning = false
+allow_private_cot = false
+location_consent = false
 
 [capacity]
 model_generations = 1

@@ -38,10 +38,28 @@ def _load_config(args) -> "sonder_config.SonderConfig":
         key, _, value = item.partition("=")
         overrides[key.strip()] = value.strip()
     return sonder_config.load_config(
-        args.config,
-        secrets_path=args.secrets,
+        _configured_path(getattr(args, "config", None), "SONDER_CONFIG", "sonder.toml"),
+        secrets_path=_configured_path(
+            getattr(args, "secrets", None), "SONDER_SECRETS", "sonder.env"
+        ),
         overrides=overrides or None,
     )
+
+
+def _configured_path(explicit, env_name: str, filename: str):
+    """Resolve the one user-global config location without requiring flags.
+
+    An explicit CLI/environment path is authoritative and therefore reported if
+    it is missing.  The conventional per-user file is optional: first-run
+    installations continue to use the typed safe defaults until it exists.
+    """
+    if explicit:
+        return explicit
+    configured = os.environ.get(env_name, "").strip()
+    if configured:
+        return configured
+    candidate = sonder_config.sonder_paths.default_home() / filename
+    return str(candidate) if candidate.is_file() else None
 
 
 def _emit(payload: dict, *, as_json: bool) -> None:
@@ -426,6 +444,26 @@ def _export_runtime_environment(config) -> None:
         "1" if config.server.tls_terminated_by_proxy else "0"
     )
     os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
+    os.environ["SONDER_MAX_CONCURRENT_REQUESTS"] = str(
+        config.server.max_concurrent_requests
+    )
+    os.environ["SONDER_REQUEST_TIMEOUT_SECONDS"] = str(
+        config.server.request_timeout_seconds
+    )
+    os.environ["SONDER_STREAM_IDLE_TIMEOUT_SECONDS"] = str(
+        config.server.stream_idle_timeout_seconds
+    )
+    os.environ["SONDER_CORS_ORIGINS"] = ",".join(config.server.cors_origins)
+    os.environ["SONDER_REQUIRE_ACCOUNT"] = "1" if config.server.require_account else "0"
+    os.environ["SONDER_ALLOW_REGISTRATION"] = (
+        "1" if config.server.allow_registration else "0"
+    )
+    os.environ["SONDER_REASONING_AUDIENCE"] = config.server.reasoning_audience
+    os.environ["SONDER_HTTP_SESSION_STATE_LIMIT"] = str(config.server.session_state_limit)
+    os.environ["SONDER_HTTP_SESSION_STATE_OWNER_LIMIT"] = str(
+        config.server.session_state_owner_limit
+    )
+    os.environ["SONDER_TRAIN_MAX_N"] = str(config.server.train_max_n)
     # The stdlib HTTP adapter has a final bind-time gate as well as config
     # validation.  Export the validated proxy declaration so a direct adapter
     # import cannot weaken a non-loopback deployment between those boundaries.
@@ -438,6 +476,17 @@ def _export_runtime_environment(config) -> None:
     )
     os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
     os.environ["SONDER_LIVE_RELOAD"] = "1" if config.features.live_reload else "0"
+    os.environ["SONDER_EXPOSE_REASONING"] = (
+        "1" if config.features.expose_reasoning else "0"
+    )
+    os.environ["SONDER_ALLOW_PRIVATE_COT"] = (
+        "1" if config.features.allow_private_cot else "0"
+    )
+    os.environ["SONDER_LOCATION_CONSENT"] = (
+        "1" if config.features.location_consent else "0"
+    )
+    os.environ["SONDER_QUEUE_DEPTH"] = str(config.capacity.queue_depth)
+    os.environ["SONDER_METRICS"] = "1" if config.observability.metrics_enabled else "0"
     if config.secrets.api_key:
         os.environ["SONDER_API_KEY"] = config.secrets.api_key
     if config.secrets.auth_secret:
@@ -489,7 +538,11 @@ def cmd_serve(args) -> int:
 
 
 def cmd_repl(args) -> int:
-    del args
+    try:
+        _export_runtime_environment(_load_config(args))
+    except sonder_config.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     import sonder_repl
 
     sonder_repl.main()
@@ -497,7 +550,11 @@ def cmd_repl(args) -> int:
 
 
 def cmd_mcp(args) -> int:
-    del args
+    try:
+        _export_runtime_environment(_load_config(args))
+    except sonder_config.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     import server
 
     server.run_mcp()
@@ -759,9 +816,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("repl", help="run the interactive REPL")
+    common(p)
     p.set_defaults(func=cmd_repl)
 
     p = sub.add_parser("mcp", help="run the MCP adapter")
+    common(p)
     p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("drain", help="request graceful drain")

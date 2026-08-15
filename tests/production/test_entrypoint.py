@@ -93,11 +93,29 @@ def test_exported_runtime_posture_includes_proxy_declaration(monkeypatch):
         "SONDER_HOST", "SONDER_PORT", "SONDER_AUTH_MODE",
         "SONDER_MAX_REQUEST_BYTES", "SONDER_TLS_TERMINATED_BY_PROXY",
         "OLLAMA_HOST", "SONDER_ALLOW_REMOTE_OLLAMA", "SONDER_WEB_TOOLS",
-        "SONDER_LIVE_RELOAD",
+        "SONDER_LIVE_RELOAD", "SONDER_MAX_CONCURRENT_REQUESTS",
+        "SONDER_REQUEST_TIMEOUT_SECONDS", "SONDER_STREAM_IDLE_TIMEOUT_SECONDS",
+        "SONDER_CORS_ORIGINS", "SONDER_REQUIRE_ACCOUNT",
+        "SONDER_ALLOW_REGISTRATION", "SONDER_REASONING_AUDIENCE",
+        "SONDER_HTTP_SESSION_STATE_LIMIT", "SONDER_HTTP_SESSION_STATE_OWNER_LIMIT",
+        "SONDER_TRAIN_MAX_N", "SONDER_EXPOSE_REASONING",
+        "SONDER_ALLOW_PRIVATE_COT", "SONDER_LOCATION_CONSENT",
+        "SONDER_QUEUE_DEPTH", "SONDER_METRICS",
     ):
         monkeypatch.setenv(name, os.environ.get(name, ""))
     _export_runtime_environment(config)
     assert os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] == "1"
+
+
+def test_user_global_config_is_discovered_when_present(monkeypatch, tmp_path):
+    from sonder_runtime.__main__ import _configured_path
+
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    config = tmp_path / "sonder.toml"
+    config.write_text("[server]\nport=12001\n", encoding="utf-8")
+
+    assert _configured_path(None, "SONDER_CONFIG", "sonder.toml") == str(config)
+    assert _configured_path(str(tmp_path / "chosen.toml"), "SONDER_CONFIG", "sonder.toml") == str(tmp_path / "chosen.toml")
 
 
 def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(monkeypatch):

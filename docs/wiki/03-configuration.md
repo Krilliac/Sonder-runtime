@@ -147,3 +147,13 @@ Update/publish (optional): `SONDER_RELEASES_DIR`, `SONDER_CURRENT_LINK`,
 
 `python -m sonder_runtime diagnostics` prints a redacted bundle of the
 effective configuration, schema state, and preflight for support.
+
+## One user-global file
+
+For a workstation install, Sonder automatically uses
+`%LOCALAPPDATA%\\sonder\\sonder.toml` on Windows (or the platform-specific
+Sonder state home elsewhere) when that file exists. The optional matching
+secret file is `sonder.env`. `SONDER_CONFIG` and `SONDER_SECRETS`, then the
+explicit `--config` and `--secrets` flags, select a different file. This same
+resolved configuration is now applied by `serve`, `repl`, and `mcp`; command
+line flags remain only explicit, higher-precedence one-shot overrides.
