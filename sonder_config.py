@@ -66,6 +66,13 @@ class ServerConfig:
     max_concurrent_requests: int = 4
     request_timeout_seconds: int = 300
     stream_idle_timeout_seconds: int = 60
+    cors_origins: tuple[str, ...] = ()
+    require_account: bool = False
+    allow_registration: bool = False
+    reasoning_audience: str = "developer"
+    session_state_limit: int = 128
+    session_state_owner_limit: int = 32
+    train_max_n: int = 500
     trusted_proxy_cidrs: tuple[str, ...] = ("127.0.0.1/32", "::1/128")
     # Explicit operator declaration that a TLS-terminating proxy fronts any
     # non-loopback exposure.  Loopback binding never needs it; non-loopback
@@ -98,6 +105,9 @@ class FeaturesConfig:
     host_control: bool = False
     training: bool = False
     npu: bool = False
+    expose_reasoning: bool = False
+    allow_private_cot: bool = False
+    location_consent: bool = False
 
 
 @dataclass(frozen=True)
@@ -294,6 +304,18 @@ def _env_bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int(name: str, env: dict[str, str], current: int, errors: list[str]) -> int:
+    """Read one compatibility integer without letting malformed env bypass TOML."""
+    raw = env.get(name, "").strip()
+    if not raw:
+        return current
+    try:
+        return int(raw)
+    except ValueError:
+        errors.append(f"{name} is not an integer")
+        return current
+
+
 def _apply_environment(
     config: SonderConfig, env: dict[str, str], errors: list[str]
 ) -> SonderConfig:
@@ -320,6 +342,48 @@ def _apply_environment(
             )
         except ValueError:
             errors.append("SONDER_MAX_REQUEST_BYTES is not an integer")
+    server = replace(
+        server,
+        max_concurrent_requests=_env_int(
+            "SONDER_MAX_CONCURRENT_REQUESTS", env,
+            server.max_concurrent_requests, errors,
+        ),
+        request_timeout_seconds=_env_int(
+            "SONDER_REQUEST_TIMEOUT_SECONDS", env,
+            server.request_timeout_seconds, errors,
+        ),
+        stream_idle_timeout_seconds=_env_int(
+            "SONDER_STREAM_IDLE_TIMEOUT_SECONDS", env,
+            server.stream_idle_timeout_seconds, errors,
+        ),
+        session_state_limit=_env_int(
+            "SONDER_HTTP_SESSION_STATE_LIMIT", env,
+            server.session_state_limit, errors,
+        ),
+        session_state_owner_limit=_env_int(
+            "SONDER_HTTP_SESSION_STATE_OWNER_LIMIT", env,
+            server.session_state_owner_limit, errors,
+        ),
+        train_max_n=_env_int("SONDER_TRAIN_MAX_N", env, server.train_max_n, errors),
+    )
+    if "SONDER_CORS_ORIGINS" in env:
+        server = replace(
+            server,
+            cors_origins=tuple(
+                part.strip() for part in env["SONDER_CORS_ORIGINS"].split(",")
+                if part.strip()
+            ),
+        )
+    if "SONDER_REQUIRE_ACCOUNT" in env:
+        server = replace(server, require_account=_env_bool(env["SONDER_REQUIRE_ACCOUNT"]))
+    if "SONDER_ALLOW_REGISTRATION" in env:
+        server = replace(
+            server, allow_registration=_env_bool(env["SONDER_ALLOW_REGISTRATION"])
+        )
+    if env.get("SONDER_REASONING_AUDIENCE", "").strip():
+        server = replace(
+            server, reasoning_audience=env["SONDER_REASONING_AUDIENCE"].strip().lower()
+        )
     if env.get("SONDER_HOME", "").strip():
         state = replace(state, home=env["SONDER_HOME"].strip())
     if env.get("SONDER_FILE_ROOTS", "").strip():
@@ -345,6 +409,18 @@ def _apply_environment(
     if "SONDER_LIVE_RELOAD" in env:
         features = replace(
             features, live_reload=_env_bool(env["SONDER_LIVE_RELOAD"])
+        )
+    if "SONDER_EXPOSE_REASONING" in env:
+        features = replace(
+            features, expose_reasoning=_env_bool(env["SONDER_EXPOSE_REASONING"])
+        )
+    if "SONDER_ALLOW_PRIVATE_COT" in env:
+        features = replace(
+            features, allow_private_cot=_env_bool(env["SONDER_ALLOW_PRIVATE_COT"])
+        )
+    if "SONDER_LOCATION_CONSENT" in env:
+        features = replace(
+            features, location_consent=_env_bool(env["SONDER_LOCATION_CONSENT"])
         )
     if env.get("SONDER_API_KEY", "").strip():
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
@@ -386,6 +462,19 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[server].max_concurrent_requests must be >= 1")
     if server.request_timeout_seconds < 1:
         errors.append("[server].request_timeout_seconds must be >= 1")
+    if server.stream_idle_timeout_seconds < 1:
+        errors.append("[server].stream_idle_timeout_seconds must be >= 1")
+    if not 2 <= server.session_state_limit <= 1024:
+        errors.append("[server].session_state_limit must be within 2..1024")
+    if not 1 <= server.session_state_owner_limit < server.session_state_limit:
+        errors.append(
+            "[server].session_state_owner_limit must be within "
+            "1..session_state_limit-1"
+        )
+    if server.train_max_n < 1:
+        errors.append("[server].train_max_n must be >= 1")
+    if server.reasoning_audience not in ("developer", "all"):
+        errors.append("[server].reasoning_audience must be developer or all")
     for cidr in server.trusted_proxy_cidrs:
         try:
             ipaddress.ip_network(cidr)
@@ -414,8 +503,13 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 f"{MIN_API_KEY_LENGTH} characters"
             )
 
+    effective_auth_mode = (
+        "account"
+        if server.require_account and server.auth_mode == "api-key"
+        else server.auth_mode
+    )
     if (
-        server.auth_mode in ACCOUNT_BEARING_AUTH_MODES
+        effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES
         and config.secrets.auth_secret == BUILTIN_DEV_AUTH_SECRET
     ):
         errors.append(

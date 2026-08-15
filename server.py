@@ -26072,9 +26072,15 @@ def _prompt_debug_failure(symptom: str, evidence: str = "") -> str:
 mcp.finish_module_refresh(__name__, __file__, globals())
 
 
-def run_mcp() -> None:
-    """Run the MCP adapter only after the process-level lab gate succeeds."""
+def require_mcp_startup_safety() -> None:
+    """Apply the process-level safety fence before MCP configuration is read."""
     unsafe_lab.require_startup()
+
+
+def run_mcp(*, safety_checked: bool = False) -> None:
+    """Run the MCP adapter only after the process-level lab gate succeeds."""
+    if not safety_checked:
+        require_mcp_startup_safety()
     mcp.run()
 
 

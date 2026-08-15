@@ -179,6 +179,55 @@ def test_env_compatibility_and_precedence(tmp_path):
     assert config.server.port == 14000  # CLI beats env
 
 
+def test_http_and_reasoning_options_are_typed_toml_settings(tmp_path):
+    toml = tmp_path / "sonder.toml"
+    toml.write_text(
+        """
+[server]
+max_concurrent_requests = 7
+request_timeout_seconds = 91
+stream_idle_timeout_seconds = 19
+cors_origins = ["https://console.example"]
+require_account = true
+allow_registration = true
+reasoning_audience = "all"
+session_state_limit = 48
+session_state_owner_limit = 12
+train_max_n = 77
+
+[features]
+expose_reasoning = true
+allow_private_cot = true
+location_consent = true
+""",
+        encoding="utf-8",
+    )
+    config = load_config(toml, env={"SONDER_AUTH_SECRET": "private-test-secret"})
+    assert config.server.max_concurrent_requests == 7
+    assert config.server.cors_origins == ("https://console.example",)
+    assert config.server.require_account is True
+    assert config.server.reasoning_audience == "all"
+    assert config.server.session_state_owner_limit == 12
+    assert config.features.allow_private_cot is True
+    assert config.features.location_consent is True
+
+
+@pytest.mark.parametrize(
+    "setting, value",
+    [
+        ("session_state_limit", "1"),
+        ("session_state_limit", "1025"),
+        ("session_state_owner_limit", "0"),
+    ],
+)
+def test_session_state_limits_match_http_adapter_bounds(tmp_path, setting, value):
+    toml = tmp_path / "sonder.toml"
+    toml.write_text("[server]\n%s = %s\n" % (setting, value), encoding="utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(toml, env=_CLEAN_ENV)
+    assert "session_state" in "\n".join(excinfo.value.errors)
+
+
 def test_secrets_file_loaded_and_permission_checked(tmp_path):
     secrets = tmp_path / "sonder.env"
     secrets.write_text(f"SONDER_API_KEY={_strong_key()}\n", encoding="utf-8")

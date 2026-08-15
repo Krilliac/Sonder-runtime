@@ -182,6 +182,12 @@ MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
 # the wait; it does not fire during generation, because a long model call
 # performs no socket operation while it runs.
 REQUEST_TIMEOUT_SECONDS = max(5, _env_int("SONDER_REQUEST_TIMEOUT_SECONDS", 60))
+# Bound blocking SSE writes independently of header/body reads.  The stream is
+# emitted only after generation has completed, so this never shortens a model
+# call; it limits an idle client that stops accepting the response.
+STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
+    "SONDER_STREAM_IDLE_TIMEOUT_SECONDS", REQUEST_TIMEOUT_SECONDS
+))
 # Several routes answer before the request body is read: the origin rejection,
 # the framing and media-type errors, the oversized-body refusal, the
 # authentication-failure limiter, and /v1/admin/drain. A response that skips the
@@ -4498,6 +4504,15 @@ class Handler(BaseHTTPRequestHandler):
             else (server.activity_tracker.public_snapshot(include_detail=False) or {}).get("latest")
         )
         headers_sent = False
+        connection = getattr(self, "connection", None)
+        if connection is not None:
+            try:
+                connection.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)
+            except (AttributeError, OSError):
+                # Test probes and exotic socket wrappers may not expose a
+                # writable timeout.  The handler's ordinary connection limit
+                # still protects those paths.
+                pass
         try:
             self.send_response(200)
             self._cors()
