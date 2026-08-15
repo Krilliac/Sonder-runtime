@@ -26,6 +26,49 @@ void main() {
     expect(await LocalManager.readLogTail(path('absent.log')), '');
   });
 
+  test('waitForServer backs off signed-health retries without weakening trust',
+      () async {
+    var attempts = 0;
+    final waits = <Duration>[];
+
+    final reachable = await LocalManager.waitForServer(
+      timeout: const Duration(seconds: 10),
+      interval: const Duration(milliseconds: 100),
+      reachabilityProbe: () async => ++attempts == 5,
+      delay: (duration) async => waits.add(duration),
+    );
+
+    expect(reachable, isTrue);
+    expect(attempts, 5);
+    expect(waits, const [
+      Duration(milliseconds: 100),
+      Duration(milliseconds: 200),
+      Duration(milliseconds: 400),
+      Duration(milliseconds: 800),
+    ]);
+  });
+
+  test('waitForServer caps signed-health retry backoff', () async {
+    var attempts = 0;
+    final waits = <Duration>[];
+
+    final reachable = await LocalManager.waitForServer(
+      timeout: const Duration(seconds: 10),
+      interval: const Duration(milliseconds: 500),
+      reachabilityProbe: () async => ++attempts == 6,
+      delay: (duration) async => waits.add(duration),
+    );
+
+    expect(reachable, isTrue);
+    expect(waits, const [
+      Duration(milliseconds: 500),
+      Duration(seconds: 1),
+      Duration(seconds: 2),
+      Duration(seconds: 2),
+      Duration(seconds: 2),
+    ]);
+  });
+
   test('readLogTail returns empty for an empty log', () async {
     final file = File(path('empty.log'));
     await file.writeAsString('');

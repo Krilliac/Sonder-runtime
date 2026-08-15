@@ -61,6 +61,7 @@ class LocalManager {
   static const _logTailBytes = 64 * 1024;
   static const _managedOutputLineLimit = 60;
   static const _serverReadyTimeout = Duration(seconds: 25);
+  static const _maxServerProbeInterval = Duration(seconds: 2);
   static Process? _managedServer;
   static int? _managedServerPid;
   static final List<String> _managedServerOutput = <String>[];
@@ -232,13 +233,30 @@ class LocalManager {
   static Future<bool> waitForServer({
     Duration timeout = _serverReadyTimeout,
     Duration interval = const Duration(milliseconds: 400),
+    Future<bool> Function()? reachabilityProbe,
+    Future<void> Function(Duration)? delay,
   }) async {
     final deadline = DateTime.now().add(timeout);
+    final probe = reachabilityProbe ?? defaultServerReachable;
+    final wait = delay ?? Future<void>.delayed;
+    var nextInterval = interval;
     while (true) {
-      if (await defaultServerReachable()) return true;
+      if (await probe()) return true;
       if (!DateTime.now().isBefore(deadline)) return false;
-      await Future<void>.delayed(interval);
+      await wait(nextInterval);
+      nextInterval = _nextServerProbeInterval(nextInterval);
     }
+  }
+
+  /// Keep an unavailable signed-health endpoint from filling the local server
+  /// log during startup, while still discovering a healthy launcher promptly.
+  static Duration _nextServerProbeInterval(Duration current) {
+    if (current <= Duration.zero) return Duration.zero;
+    final currentMs = current.inMilliseconds;
+    final maxMs = _maxServerProbeInterval.inMilliseconds;
+    if (currentMs >= maxMs) return _maxServerProbeInterval;
+    if (currentMs > maxMs ~/ 2) return _maxServerProbeInterval;
+    return Duration(milliseconds: currentMs * 2);
   }
 
   static Future<LocalInstallInfo> inspect() async {
