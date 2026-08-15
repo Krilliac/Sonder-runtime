@@ -359,6 +359,74 @@ def discovered_model_records():
     return sorted(records, key=lambda row: row[0].casefold())
 
 
+def _inventory_rows(payload, endpoint):
+    """Return the dict rows of an Ollama inventory payload, or raise.
+
+    A wrong-shape payload (non-dict body, non-list ``models``) is a protocol
+    failure that must surface as an explicit error: rendering it as an empty
+    catalog would tell an operator nothing is installed or resident when the
+    endpoint actually misbehaved. Individual malformed rows inside a valid
+    list are skipped instead -- partial inventory is real data.
+    """
+    if isinstance(payload, dict):
+        rows = payload.get("models")
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    raise ModelCallError("protocol", "invalid Ollama %s response" % endpoint)
+
+
+def _inventory_model_name(row) -> str:
+    return str(row.get("name") or row.get("model") or "").strip()
+
+
+def _inventory_model_names(rows) -> list:
+    """Canonical, casefold-deduplicated model names from inventory rows."""
+    names, seen = [], set()
+    for row in rows:
+        name = _inventory_model_name(row)
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+    names.sort(key=str.casefold)
+    return names
+
+
+def _residency_display(row) -> str:
+    """Render one resident model with bounded, content-free VRAM indicators.
+
+    ``/api/ps`` reports ``size`` and ``size_vram`` per resident model; the
+    split is the only signal an operator has that a "loaded" model is
+    actually spilled to CPU. Malformed or absent size metadata degrades to
+    the bare model name -- never a guessed number.
+    """
+    name = _inventory_model_name(row)
+    if not name:
+        return ""
+
+    def _byte_count(value, minimum):
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= minimum
+        )
+
+    size = row.get("size")
+    vram = row.get("size_vram")
+    if not _byte_count(size, 1) or not _byte_count(vram, 0):
+        return name
+    # A provider claiming more VRAM than the model's own size is nonsense;
+    # clamp rather than advertising >100% GPU.
+    vram = min(float(vram), float(size))
+    gib = float(size) / float(2**30)
+    if vram == 0:
+        return "%s (%.1f GiB, CPU only)" % (name, gib)
+    return "%s (%.1f GiB, %d%% GPU)" % (
+        name, gib, int(round(100.0 * vram / float(size))),
+    )
+
+
 _KNOWN_VISION_ONLY_MODEL_FAMILIES = frozenset({
     # Ollama's normal /api/tags response often omits capabilities altogether.
     # These upstream model families are image-conditioned interfaces, not
@@ -22911,8 +22979,7 @@ def diagnostics() -> str:
     except Exception:
         lines.append("  npu accelerator: unknown (status unavailable)")
     try:
-        tags = _get("/api/tags").get("models", [])
-        names = sorted(m.get("name", "?") for m in tags)
+        names = _inventory_model_names(_inventory_rows(_get("/api/tags"), "/api/tags"))
         # Show the count AND an enumeration consistent with it: truncating the
         # list to 8 while printing "11 models" silently hid three models
         # (including sonder:latest, the active tier). Cap the enumeration but
@@ -22935,15 +23002,15 @@ def status() -> str:
     """
     _maybe_live_reload()
     try:
-        tags = _get("/api/tags").get("models", [])
-        ps = _get("/api/ps").get("models", [])
+        tags = _inventory_rows(_get("/api/tags"), "/api/tags")
+        ps = _inventory_rows(_get("/api/ps"), "/api/ps")
     except ModelCallError as error:
         return _format_model_call_error(error)
     except urllib.error.URLError as e:
         return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
 
-    installed = sorted(m.get("name", "?") for m in tags)
-    loaded = [str(m.get("name")) for m in ps if m.get("name")]
+    installed = _inventory_model_names(tags)
+    loaded = [line for line in map(_residency_display, ps) if line]
     tier_lines = [
         f"  {k}={v}" + ("  [CLOUD - leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
         for k, v in available_tiers(include_disabled=cloud_allowed()).items()
