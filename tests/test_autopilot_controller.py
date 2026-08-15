@@ -467,3 +467,56 @@ def test_final_cycle_budget_review_honors_operator_pause():
     assert result["status"] == "paused"
     assert result["cycles"] == 2
     assert result["summary"] == "paused during final review"
+
+
+def test_snapshot_falls_back_for_stale_unscoped_automation_adapter(monkeypatch):
+    class StaleAutomation:
+        def snapshot(self, **_kwargs):
+            raise TypeError("snapshot() got an unexpected keyword argument 'request_owner'")
+
+        def events(self, *_args, **_kwargs):
+            pytest.fail("stale adapter events must not be used after fallback")
+
+    class App:
+        automation = StaleAutomation()
+
+    import sonder_runtime.bootstrap.app as app_module
+
+    monkeypatch.setattr(app_module, "default_app", lambda: App())
+    monkeypatch.setattr(
+        autopilot_store,
+        "snapshot",
+        lambda **_kwargs: {"latest": {"id": "run-1"}, "runs": []},
+    )
+    monkeypatch.setattr(
+        autopilot_store,
+        "events",
+        lambda selector, limit: [{"run_id": selector, "limit": limit}],
+    )
+
+    assert autopilot_controller.snapshot() == {
+        "latest": {"id": "run-1"},
+        "runs": [],
+        "events": [{"run_id": "run-1", "limit": 12}],
+    }
+
+
+def test_snapshot_never_drops_account_owner_for_stale_adapter(monkeypatch):
+    class StaleAutomation:
+        def snapshot(self, **_kwargs):
+            raise TypeError("snapshot() got an unexpected keyword argument 'request_owner'")
+
+    class App:
+        automation = StaleAutomation()
+
+    import sonder_runtime.bootstrap.app as app_module
+
+    monkeypatch.setattr(app_module, "default_app", lambda: App())
+    monkeypatch.setattr(
+        autopilot_store,
+        "snapshot",
+        lambda **_kwargs: pytest.fail("account scope must not fall back to unscoped store"),
+    )
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'request_owner'"):
+        autopilot_controller.snapshot(request_owner="account-a")
