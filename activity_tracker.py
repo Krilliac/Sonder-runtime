@@ -75,8 +75,17 @@ if "_LATEST_REASONING" not in globals():
     _LATEST_REASONING = None
 if "_LATEST_REASONING_OWNER" not in globals():
     _LATEST_REASONING_OWNER = ""
+# Live execution feed ownership. Owner keys are opaque principal hashes (or ""
+# for the single trusted local operator domain) and, like reasoning owners,
+# they live OUTSIDE the response object so no public projection can carry them.
+if "_FEED_OWNERS" not in globals():
+    _FEED_OWNERS = {}
+if "_OWNER_RECENT" not in globals():
+    _OWNER_RECENT = {}
 
 MAX_REASONING_CHARS = 20000
+MAX_FEED_OWNERS = 32
+MAX_OWNER_FEED_ENTRIES = 12
 
 
 def _now():
@@ -428,7 +437,7 @@ def _event(response, kind, **fields):
 @contextlib.contextmanager
 def response_span(
     label, prompt="", *, surface="", model="", session="", project="",
-    reasoning_owner="",
+    reasoning_owner="", feed_owner="",
 ):
     """Track one user-visible response.
 
@@ -469,9 +478,10 @@ def response_span(
     }
     with _LOCK:
         _ACTIVE[response_id] = response
-        # Never add this opaque principal to ``response``: that object is
+        # Never add these opaque principals to ``response``: that object is
         # projected to public activity clients.
         _REASONING_OWNERS[response_id] = str(reasoning_owner or "")
+        _FEED_OWNERS[response_id] = str(feed_owner or "")
         if len(_ACTIVE) > MAX_ACTIVE:
             oldest = sorted(_ACTIVE, key=lambda k: _ACTIVE[k]["started_at"])[:1]
             for key in oldest:
@@ -498,6 +508,7 @@ def response_span(
         with _LOCK:
             global _LATEST, _LATEST_REASONING, _LATEST_REASONING_OWNER
             _ACTIVE.pop(response_id, None)
+            _append_owner_entry(_FEED_OWNERS.pop(response_id, ""), response)
             _LATEST = deepcopy(response)
             # Promote alongside _LATEST so the pair always describes the same
             # turn, then drop the per-span buffer.
@@ -766,13 +777,50 @@ def set_response_status(status, summary=""):
 
 
 @contextlib.contextmanager
-def tool_dispatch_context():
+def tool_dispatch_context(tool_name=""):
+    """Mark one tool dispatch; with a name, expose it as the running operation.
+
+    The name feeds only the owner-scoped live feed's "Running ..." line: it is
+    the tool's catalog name rendered through :func:`action_title`, never the
+    tool's arguments. Restoring the previous marker keeps nested dispatches
+    truthful about which operation is actually on the stack.
+    """
     depth = int(getattr(_LOCAL, "tool_depth", 0) or 0)
     _LOCAL.tool_depth = depth + 1
+    response = _current() if tool_name else None
+    marker = None
+    if response is not None:
+        with _LOCK:
+            marker = {
+                "category": "tool",
+                "name": action_title(tool_name),
+                "started_at": time.time(),
+            }
+            # One response may own several concurrently executing fleet
+            # workers.  A simple previous/current stack is only correct for
+            # nesting in one worker: when worker A exits before worker B it
+            # would clear B, and B would later resurrect A.  Keep the live
+            # markers explicitly and expose the most recently entered active
+            # one instead.  This stays private to the response record; the
+            # feed projects only ``current_operation``.
+            active = response.setdefault("_active_operations", [])
+            active.append(marker)
+            response["current_operation"] = marker
     try:
         yield
     finally:
         _LOCAL.tool_depth = depth
+        if response is not None and marker is not None:
+            with _LOCK:
+                active = response.get("_active_operations") or []
+                response["_active_operations"] = [
+                    item for item in active if item is not marker
+                ]
+                if response["_active_operations"]:
+                    response["current_operation"] = response["_active_operations"][-1]
+                else:
+                    response.pop("_active_operations", None)
+                    response.pop("current_operation", None)
 
 
 def inside_tool_call():
@@ -1216,6 +1264,113 @@ def execution_feed(
     return result
 
 
+# Feed states use the "Running ... / Ran ..." vocabulary: terminal span
+# statuses map onto it, host-established verdicts pass through unchanged.
+_FEED_STATES = {"complete": "completed", "error": "failed"}
+
+
+def _operation_snapshot(response, now=None):
+    """The one operation a live span is doing (running) or last did (ran).
+
+    Deliberately category/name/state/elapsed only: the underlying events carry
+    argument and output previews, and none of that belongs in the feed.
+    """
+    current = response.get("current_operation")
+    if isinstance(current, dict):
+        moment = time.time() if now is None else now
+        elapsed = int((moment - float(current.get("started_at") or moment)) * 1000)
+        return {
+            "category": _short(current.get("category", "tool"), 20),
+            "name": _short(_redact_text(current.get("name", "")), 80),
+            "state": "running",
+            "elapsed_ms": max(0, elapsed),
+        }
+    last = response.get("last_event")
+    if isinstance(last, dict) and last.get("kind") in ("tool_call", "model_call"):
+        name = last.get("title") or last.get("model") or last.get("tool") or ""
+        return {
+            "category": "tool" if last.get("kind") == "tool_call" else "model",
+            "name": _short(_redact_text(name), 80),
+            # Tool and model events overwrite the span-relative elapsed with
+            # the operation's own duration, so this is "how long it ran".
+            "state": "completed" if last.get("ok", True) else "failed",
+            "elapsed_ms": max(0, int(last.get("elapsed_ms") or 0)),
+        }
+    return None
+
+
+def _feed_entry(response, *, live):
+    now = time.time()
+    if live:
+        elapsed = int((now - float(response.get("started_at") or now)) * 1000)
+    else:
+        elapsed = int(response.get("elapsed_ms") or 0)
+    status = str(response.get("status") or "unknown")
+    return {
+        "id": _short(response.get("id", ""), 40),
+        "category": "response",
+        "name": _short(_redact_text(response.get("label", "")), 80),
+        "surface": _short(response.get("surface", ""), 40),
+        "state": _FEED_STATES.get(status, status),
+        "started_ts": _short(response.get("started_ts", ""), 40),
+        "elapsed_ms": max(0, elapsed),
+        "model_calls": max(0, int(response.get("model_calls") or 0)),
+        "tool_calls": max(0, int(response.get("tool_calls") or 0)),
+        "summary": (
+            "" if live
+            else _short(_redact_text(response.get("result_summary", "")), 220)
+        ),
+        "operation": _operation_snapshot(response, now) if live else None,
+    }
+
+
+def _append_owner_entry(owner, response):
+    """Retire a closing span into its owner's bounded recent-work bucket.
+
+    Caller holds ``_LOCK``. Popping and re-inserting the bucket keeps
+    ``_OWNER_RECENT`` ordered by last update, so exceeding ``MAX_FEED_OWNERS``
+    evicts the least recently active principal, never the busiest one.
+    """
+    owner = str(owner or "")
+    entries = _OWNER_RECENT.pop(owner, [])
+    entries.append(_feed_entry(response, live=False))
+    if len(entries) > MAX_OWNER_FEED_ENTRIES:
+        del entries[:-MAX_OWNER_FEED_ENTRIES]
+    _OWNER_RECENT[owner] = entries
+    while len(_OWNER_RECENT) > MAX_FEED_OWNERS:
+        _OWNER_RECENT.pop(next(iter(_OWNER_RECENT)), None)
+
+
+def live_feed_for_owner(owner):
+    """Bounded live execution feed for exactly one opaque owner principal.
+
+    Owner "" is the local unowned domain (REPL, local MCP, and unauthenticated
+    single-operator deployments); an authenticated HTTP caller always arrives
+    with a nonempty principal hash, so the two domains can never observe each
+    other. Entries carry operation category/name, state, elapsed time, and a
+    redacted summary -- never prompts, arguments, paths, outputs, reasoning,
+    or another owner's work.
+    """
+    wanted = str(owner or "")
+    with _LOCK:
+        active = [
+            _feed_entry(response, live=True)
+            for response in sorted(
+                _ACTIVE.values(), key=lambda row: row["started_at"],
+            )
+            if _FEED_OWNERS.get(response["id"], "") == wanted
+        ]
+        recent = [dict(entry) for entry in reversed(_OWNER_RECENT.get(wanted, []))]
+    return {
+        "schema_version": 1,
+        "known": True,
+        "owner_scoped": True,
+        "active": active,
+        "recent": recent,
+        "limits": {"active": MAX_ACTIVE, "recent": MAX_OWNER_FEED_ENTRIES},
+    }
+
+
 _TERMINAL_CONTROL_RE = re.compile(
     r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]"
 )
@@ -1445,6 +1600,8 @@ def reset_for_tests():
         _DROPPED_EVENTS = 0
         _REASONING.clear()
         _REASONING_OWNERS.clear()
+        _FEED_OWNERS.clear()
+        _OWNER_RECENT.clear()
         _LATEST_REASONING = None
         _LATEST_REASONING_OWNER = ""
     _LOCAL.response_id = None

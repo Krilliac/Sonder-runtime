@@ -661,6 +661,18 @@ def _admission_request_owner(context):
     return "ao-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _feed_request_owner(context):
+    """Opaque principal that scopes the live execution feed to one caller.
+
+    Unauthenticated deployments have a single trusted local operator and no
+    second party to protect, so the key collapses to the unowned/local domain.
+    """
+    if not server._deployment_authenticates_callers():
+        return ""
+    material = "live-feed-owner\0" + _state_principal(context)
+    return "lf-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _fanout_request_role(context):
     account = context.get("account") or {}
     role = str(account.get("role") or "").strip()
@@ -3320,6 +3332,21 @@ class Handler(BaseHTTPRequestHandler):
             }
             self._send_json_payload(payload)
             return
+        if path == "/v1/sonder/feed":
+            # Owner-scoped by construction: the tracker only returns spans
+            # recorded under this caller's opaque principal, so unlike
+            # /v1/sonder/status no administrator gate is needed to keep one
+            # account's work invisible to another.
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            self._send_json_payload(
+                server.activity_tracker.live_feed_for_owner(
+                    _feed_request_owner(context)
+                )
+            )
+            return
         if self._handle_commands_get():
             return
         if self._handle_permission_mode_get():
@@ -4014,6 +4041,7 @@ class Handler(BaseHTTPRequestHandler):
                     session=storage_session,
                     project=storage_project,
                     reasoning_owner=_reasoning_request_owner(context),
+                    feed_owner=_feed_request_owner(context),
                 ) as activity_response:
                     if structured_schema is not None:
                         turn = _run_structured_prompt(
