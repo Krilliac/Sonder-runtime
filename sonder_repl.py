@@ -2244,7 +2244,11 @@ def main():
             indicator = _begin_chat_turn("Sonder work")
             try:
                 out = server.workbench_agent(
-                    prompt=line, tier="auto", max_steps=12, project=project,
+                    # Preserve this session's selected model/tier for work as
+                    # well as ordinary chat; only an unpinned session leaves
+                    # the lane to runtime policy.
+                    prompt=line, tier=active_model or active_tier or "auto",
+                    max_steps=12, project=project,
                 )
             except BaseException:
                 if indicator is not None:
