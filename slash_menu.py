@@ -667,6 +667,50 @@ def _terminal_size():
         return 80, 24
 
 
+def _enable_windows_vt_output() -> bool:
+    """Enable ANSI output on a Windows console when the host supports it.
+
+    The composer already uses ANSI cursor controls, but a process launched by
+    an older console host can inherit ``ENABLE_VIRTUAL_TERMINAL_PROCESSING``
+    turned off.  In that state ``CSI 3J`` is printed literally or ignored, so
+    Ctrl+L and ``/clear`` cannot discard scrollback.  Enabling the flag is a
+    best-effort presentation setup: redirected output and non-console handles
+    simply retain their existing behaviour.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        handle = ctypes.windll.kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not handle or not ctypes.windll.kernel32.GetConsoleMode(
+            handle, ctypes.byref(mode),
+        ):
+            return False
+        enabled = int(mode.value) | 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        if enabled != mode.value and not ctypes.windll.kernel32.SetConsoleMode(
+            handle, enabled,
+        ):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def clear_terminal_presentation(stream) -> None:
+    """Discard scrollback and clear the visible terminal without input state.
+
+    ``CSI 3J`` is understood by Windows Terminal and other VT-compatible
+    hosts.  The capability enablement above covers Windows console processes
+    that did not inherit VT output mode, while remaining a harmless no-op on
+    hosts where ANSI is already enabled or unsupported.
+    """
+    _enable_windows_vt_output()
+    stream.write(CSI + "3J" + CSI + "2J" + CSI + "H")
+    stream.flush()
+
+
 # --- availability ---------------------------------------------------------
 
 
@@ -967,8 +1011,7 @@ def _clear_screen(state: MenuState, stream) -> None:
     VT-compatible terminals to discard the scrollback first, then the usual
     screen-and-home sequence repaints the still-typed buffer.
     """
-    stream.write(CSI + "3J" + CSI + "2J" + CSI + "H")
-    stream.flush()
+    clear_terminal_presentation(stream)
     state._drawn_input_rows = 1
     state._drawn_cursor_row = 0
 
