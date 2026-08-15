@@ -61,6 +61,34 @@ def test_a_tool_raising_does_not_escape_the_dispatcher():
     assert "exploded" in output
 
 
+def test_a_natural_phrase_resolution_still_passes_the_permission_gate():
+    """A slash line synthesized from natural language dispatches through the
+    same ``_permission_gate`` choke point as a typed slash command: a rule
+    deny (or a mode refusal) blocks the tool before its handler ever runs.
+    """
+    import command_router
+
+    line = command_router.resolve("git status")
+    assert line == "/repo_status"
+
+    def _never_runs(**_kwargs):
+        raise AssertionError("a refused tool was dispatched anyway")
+
+    original_gate = sonder_repl._permission_gate
+    original_tool = server.repo_status
+    sonder_repl._permission_gate = (
+        lambda tool: (False, "refused /%s: permission rule deny" % tool)
+    )
+    server.repo_status = _never_runs
+    try:
+        output = sonder_repl._run_catalogued(line, line.split()[0])
+    finally:
+        sonder_repl._permission_gate = original_gate
+        server.repo_status = original_tool
+
+    assert "refused" in output
+
+
 def test_help_topics_resolve_to_categories_and_commands():
     overview = command_catalog.help_text("")
     category = command_catalog.help_text("planning")

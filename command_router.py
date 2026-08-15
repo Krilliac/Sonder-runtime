@@ -228,6 +228,41 @@ _RULES = [
     _rule(r"^(?:show|list)\s+(?:my\s+)?(?:todos?|tasks)\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/todo %s" % (m.group("arg") or "")).strip()),
 
+    # --- repository inspection (read-only) ---
+    # These map git-familiar phrasing onto the read-only repo_* tools. The
+    # mutating git commands (/git_commit, /git_checkout, ...) are deliberately
+    # NOT given natural forms here: they stay reachable only by naming them,
+    # under the catalog's adjacency rule for risky commands. Every pattern is
+    # a complete turn (resolve() uses fullmatch), so "git status and then
+    # push" or a quoted "git status" from a web page falls through to the
+    # ordinary chat/work path instead of dispatching.
+    _rule(r"^(?:show\s+(?:me\s+)?(?:the\s+)?|what(?:'s|\s+is)\s+(?:the\s+)?)?"
+          r"(?:git|repo|repository)\s+status\s*[?!.]*$", _fixed("/repo_status")),
+    _rule(r"^is\s+the\s+(?:working\s+)?tree\s+clean\s*[?!.]*$", _fixed("/repo_status")),
+    _rule(r"^(?:git\s+log|(?:show|list)\s+(?:me\s+)?(?:the\s+)?"
+          r"(?:recent|last|latest)\s+commits?|"
+          r"what\s+are\s+the\s+(?:recent|latest)\s+commits?)\s*[?!.]*$",
+          _fixed("/repo_log")),
+    _rule(r"^(?:git\s+diff|show\s+(?:me\s+)?(?:the\s+)?diff|"
+          r"show\s+(?:me\s+)?(?:the\s+)?unstaged\s+changes)\s*[?!.]*$",
+          _fixed("/repo_diff")),
+    # ``repo_diff`` only renders the unstaged patch.  A request for all
+    # uncommitted/pending work must include staged and untracked state too, so
+    # choose the complete, non-executing repository status instead.
+    _rule(r"^show\s+(?:me\s+)?(?:the\s+)?(?:uncommitted|pending)\s+"
+          r"changes\s*[?!.]*$", _fixed("/repo_status")),
+
+    # --- health / diagnostics (read-only) ---
+    # "run a health check on the production database" carries a target and is
+    # real work; only the bare, whole-turn self-check forms resolve.
+    _rule(r"^(?:run\s+)?(?:a\s+)?(?:health[\s-]?check|self[\s-]?check|"
+          r"diagnostics)\s*[?!.]*$", _fixed("/diagnostics")),
+    _rule(r"^are\s+you\s+healthy\s*[?!.]*$", _fixed("/diagnostics")),
+
+    # Test discovery remains explicit.  Its framework probes can import a
+    # checkout's pytest modules/plugins or invoke project tooling, so it is
+    # execution-capable despite a "collect"-style name.
+
     # --- run ---
     _rule(r"^run\s+in\s+(?:a\s+)?(?:new\s+)?(?:window|console)\b", _fixed("/runwindow")),
     _rule(r"^run\s+the\s+project\b", _fixed("/runproject")),
