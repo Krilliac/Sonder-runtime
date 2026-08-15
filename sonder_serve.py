@@ -2124,6 +2124,18 @@ def _model_to_tier(model):
     return None
 
 
+def _uses_default_model_route(model):
+    """Whether a request leaves model selection to Sonder's default router.
+
+    OpenAI-style ``gpt-*`` names deliberately retain the compatibility default
+    unless the live catalog later resolves one as a concrete local model.  This
+    helper is intentionally syntactic: it runs before rate limiting and must
+    not trigger catalog discovery or other I/O.
+    """
+    m = str(model or "").strip()
+    return not m or m in ("sonder", "local") or m.startswith("gpt-")
+
+
 def _request_model_selector(model):
     """Keep OpenAI defaults, but pass explicit non-default selectors to server.
 
@@ -3669,11 +3681,28 @@ class Handler(BaseHTTPRequestHandler):
                     status=error.status,
                 )
                 return
+        model = req.get("model", "sonder")
+        if not isinstance(model, str):
+            record_early_chat_metric("invalid_model")
+            self._send_json_payload(
+                {"error": {
+                    "message": "model must be a string",
+                    "type": "invalid_request",
+                }},
+                status=400,
+            )
+            return
         prompt = _last_user_message(messages)
         # Normalize an explicitly recognized whole-turn model request before
         # policy checks.  Otherwise ``use model x: /run ...`` could evade the
         # initial slash-command gate and execute after the rewrite below.
-        natural_model = server.natural_model_request(prompt)
+        # An explicit API model is a routing contract.  Do not reinterpret its
+        # ordinary text as a fanout, ensemble, or named-model instruction;
+        # direct MCP and the generation path apply the same precedence rule.
+        natural_model = (
+            server.natural_model_request(prompt)
+            if _uses_default_model_route(model) else None
+        )
         if structured_schema is not None and natural_model is not None:
             record_early_chat_metric("structured_control_route")
             self._send_json_payload(
@@ -3763,17 +3792,6 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             include_stream_usage = include_usage
-        model = req.get("model", "sonder")
-        if not isinstance(model, str):
-            record_early_chat_metric("invalid_model")
-            self._send_json_payload(
-                {"error": {
-                    "message": "model must be a string",
-                    "type": "invalid_request",
-                }},
-                status=400,
-            )
-            return
         if natural_model and natural_model["kind"] in ("fanout", "ensemble"):
             # These routes spend several model calls. Local-open keeps its
             # single-user/full-tool behavior; shared deployments require the

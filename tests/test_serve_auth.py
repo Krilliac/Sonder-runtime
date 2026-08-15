@@ -1382,6 +1382,42 @@ def test_http_developer_fanout_uses_authorized_internal_path(monkeypatch):
     assert json.loads(body)["choices"][0]["message"]["content"].startswith('{"models_answered": 1}')
 
 
+def test_http_explicit_model_suppresses_natural_fanout_routing(monkeypatch):
+    """A model field is authoritative over a natural-language fanout wrapper."""
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "_request_model_selector", lambda model: model)
+    monkeypatch.setattr(ts, "_chat_model_selection_error", lambda _selector: None)
+    monkeypatch.setattr(ts.server, "prewarm_model", lambda *_args: None)
+    monkeypatch.setattr(
+        ts.server,
+        "_model_fanout_authorized",
+        lambda *_args, **_kwargs: pytest.fail("fanout routing must not run"),
+    )
+    seen = {}
+
+    def answer(prompt, history, **kwargs):
+        seen.update(prompt=prompt, tier=kwargs["tier"])
+        return "answer"
+
+    monkeypatch.setattr(ts.server, "answer_with_history", answer)
+    request = json.dumps({
+        "model": "fast",
+        "messages": [{"role": "user", "content": "ask all local models: summarize this"}],
+    }).encode("utf-8")
+
+    with _http_server(monkeypatch) as port:
+        status, _, body = _request(
+            port, "POST", "/v1/chat/completions", body=request,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"] == "answer"
+    assert seen == {"prompt": "ask all local models: summarize this", "tier": "fast"}
+
+
 def test_http_developer_natural_ensemble_uses_fixed_local_tiers(monkeypatch):
     """The whole-turn wrapper cannot be reclassified before its own dispatch."""
     api_key = "k" * 32
