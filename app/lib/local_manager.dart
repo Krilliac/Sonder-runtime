@@ -61,6 +61,7 @@ class LocalManager {
   static const _logTailBytes = 64 * 1024;
   static const _managedOutputLineLimit = 60;
   static const _serverReadyTimeout = Duration(seconds: 25);
+  static const _maxServerProbeInterval = Duration(seconds: 2);
   static Process? _managedServer;
   static int? _managedServerPid;
   static final List<String> _managedServerOutput = <String>[];
@@ -232,13 +233,36 @@ class LocalManager {
   static Future<bool> waitForServer({
     Duration timeout = _serverReadyTimeout,
     Duration interval = const Duration(milliseconds: 400),
+    Future<bool> Function()? reachabilityProbe,
+    Future<void> Function(Duration)? delay,
+    DateTime Function()? clock,
   }) async {
-    final deadline = DateTime.now().add(timeout);
+    final now = clock ?? DateTime.now;
+    final deadline = now().add(timeout);
+    final probe = reachabilityProbe ?? defaultServerReachable;
+    final wait = delay ?? Future<void>.delayed;
+    var nextInterval = interval;
+    var firstProbe = true;
     while (true) {
-      if (await defaultServerReachable()) return true;
-      if (!DateTime.now().isBefore(deadline)) return false;
-      await Future<void>.delayed(interval);
+      if (!firstProbe && !now().isBefore(deadline)) return false;
+      firstProbe = false;
+      if (await probe()) return true;
+      final remaining = deadline.difference(now());
+      if (remaining <= Duration.zero) return false;
+      await wait(nextInterval <= remaining ? nextInterval : remaining);
+      nextInterval = _nextServerProbeInterval(nextInterval);
     }
+  }
+
+  /// Keep an unavailable signed-health endpoint from filling the local server
+  /// log during startup, while still discovering a healthy launcher promptly.
+  static Duration _nextServerProbeInterval(Duration current) {
+    if (current <= Duration.zero) return Duration.zero;
+    final currentMs = current.inMilliseconds;
+    final maxMs = _maxServerProbeInterval.inMilliseconds;
+    if (currentMs >= maxMs) return _maxServerProbeInterval;
+    if (currentMs > maxMs ~/ 2) return _maxServerProbeInterval;
+    return Duration(milliseconds: currentMs * 2);
   }
 
   static Future<LocalInstallInfo> inspect() async {
@@ -355,6 +379,8 @@ class LocalManager {
     String contextSize = '8192',
     bool persistOnAppClose = false,
     Duration readyTimeout = _serverReadyTimeout,
+    Future<bool> Function()? managedReachabilityProbe,
+    Future<bool> Function()? portOccupiedProbe,
   }) async {
     if (!canRunLocalTools) {
       return LocalActionResult(
@@ -363,10 +389,21 @@ class LocalManager {
       );
     }
     final system = bundledSystemDirectory();
-    if (await defaultServerReachable()) {
+    final managedReachable =
+        managedReachabilityProbe ?? defaultServerReachable;
+    if (await managedReachable()) {
       return const LocalActionResult(
         true,
         'A server is already reachable on 127.0.0.1:11435.',
+      );
+    }
+    final portOccupied = portOccupiedProbe ?? _defaultServerPortOccupied;
+    if (await portOccupied()) {
+      return const LocalActionResult(
+        false,
+        'A service is already listening on 127.0.0.1:11435, but it is not '
+            'verified as this app-managed Sonder server. Stop that service '
+            'before starting a managed local server.',
       );
     }
     if (!await system.exists()) {
@@ -434,6 +471,25 @@ class LocalManager {
       );
     } catch (e) {
       return _serverStartFailure('Could not start server: $e');
+    }
+  }
+
+  /// Detect a listener only to avoid competing with it. This is deliberately
+  /// separate from [defaultServerReachable], which is the signed proof needed
+  /// before the app trusts or manages the service.
+  static Future<bool> _defaultServerPortOccupied() async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        11435,
+        timeout: const Duration(milliseconds: 350),
+      );
+      return true;
+    } on SocketException {
+      return false;
+    } finally {
+      socket?.destroy();
     }
   }
 
