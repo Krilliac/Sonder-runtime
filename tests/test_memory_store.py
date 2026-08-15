@@ -599,6 +599,22 @@ def test_delete_interaction_removes_lessons_distilled_from_it():
     assert ms.get_lesson_text(conn, "L2") is not None
 
 
+def test_delete_interaction_removes_tombstones_derived_from_it():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    ms.log_interaction(conn, "other", "task", "", "response", "code")
+    text = "Use pathlib.Path.resolve before comparing paths."
+    ms.add_lesson(conn, "L1", text, _e.to_blob([1.0, 0.0]), "job")
+    ms.add_lesson(conn, "L2", "Keep another source lesson.", _e.to_blob([0.0, 1.0]), "other")
+    assert ms.tombstone_lesson(conn, "L1") is True
+    assert ms.lesson_text_tombstoned(conn, text) is True
+
+    ms.delete_interaction(conn, "job")
+
+    assert ms.lesson_text_tombstoned(conn, text) is False
+    assert ms.get_lesson_text(conn, "L2") is not None
+
+
 def test_record_outcome_row():
     c = _conn()
     ms.log_interaction(c, "abc", "t", "", "r", "code")
