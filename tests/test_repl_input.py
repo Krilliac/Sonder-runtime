@@ -869,9 +869,9 @@ def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
     assert calls and calls[0][0] == "web search to find computer repair shops near 67215"
 
 
-def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypatch):
+def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypatch, tmp_path):
     prompt = "search the web for the logo and download it to assets/logo.png"
-    lines = iter((prompt, "/exit"))
+    lines = iter(("/workspace %s" % tmp_path, prompt, "/exit"))
     calls = []
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -893,14 +893,15 @@ def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypat
     sonder_repl.main()
 
     assert calls and calls[0]["prompt"] == prompt
+    assert calls[0]["project"] == str(tmp_path.resolve())
 
 
 @pytest.mark.parametrize("prompt", [
     "search the web for the logo and put it in assets/logo.png",
     "search the web for the logo and import it into assets",
 ])
-def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch, prompt):
-    lines = iter((prompt, "/exit"))
+def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch, prompt, tmp_path):
+    lines = iter(("/workspace %s" % tmp_path, prompt, "/exit"))
     calls = []
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -915,6 +916,7 @@ def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch
     sonder_repl.main()
 
     assert calls and calls[0]["prompt"] == prompt
+    assert calls[0]["project"] == str(tmp_path.resolve())
 
 
 def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
@@ -1061,3 +1063,99 @@ def test_model_bare_tag_argument_does_not_suggest_every_installed_model(monkeypa
     assert "no installed model named" in output
     assert "did you mean" not in output
     assert "run /model with no argument" in output
+
+
+def _drive_workspace_repl(monkeypatch, lines, seen):
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.command_router, "resolve", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "containment_egress_refusal", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda line: "create" in line)
+    monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
+    monkeypatch.setattr(
+        sonder_repl.server, "workbench_agent",
+        lambda **kwargs: seen.update(kwargs) or "verified workspace work",
+    )
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda *_args, **_kwargs: pytest.fail("plain chat must not run"),
+    )
+
+
+def test_work_request_without_workspace_asks_for_directory(monkeypatch, capsys):
+    seen = {}
+    _drive_workspace_repl(monkeypatch, iter(("create a game and run it", "/exit")), seen)
+
+    sonder_repl.main()
+
+    assert seen == {}
+    output = capsys.readouterr().out
+    assert "Where should I create or work on this project?" in output
+    assert "/workspace-create" in output
+
+
+def test_selected_workspace_is_passed_to_workbench_agent(monkeypatch, tmp_path):
+    seen = {}
+    _drive_workspace_repl(
+        monkeypatch,
+        iter(("/workspace %s" % tmp_path, "create a game and run it", "/exit")),
+        seen,
+    )
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(tmp_path.resolve())
+    assert seen["prompt"] == "create a game and run it"
+
+
+def test_workspace_create_resumes_queued_work_in_created_directory(monkeypatch, tmp_path):
+    seen = {}
+    workspace = tmp_path / "text-adventure"
+    _drive_workspace_repl(
+        monkeypatch,
+        iter((
+            "create a game and run it",
+            "/workspace-create %s" % workspace,
+            "/exit",
+        )),
+        seen,
+    )
+
+    def create_directory(path, parents=True):
+        assert path == str(workspace)
+        assert parents is True
+        workspace.mkdir(parents=True)
+        return "directory create: %s" % workspace
+
+    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(workspace.resolve())
+    assert seen["prompt"] == "create a game and run it"
+
+
+def test_pending_workspace_accepts_explicit_create_path_reply(monkeypatch, tmp_path):
+    seen = {}
+    workspace = tmp_path / "text-adventure"
+    _drive_workspace_repl(
+        monkeypatch,
+        iter(("create a game and run it", "create %s" % workspace, "/exit")),
+        seen,
+    )
+
+    def create_directory(path, parents=True):
+        workspace.mkdir(parents=True)
+        return "directory create: %s" % workspace
+
+    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(workspace.resolve())

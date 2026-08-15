@@ -932,6 +932,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /route <request>   suggest the tier best suited to a request, and why
   /refactor <file> <fn> [goal]  propose a guarded improvement to one function
   /scaffold <kind> <name> [root]  write a full project skeleton (cpp-msvc, csharp, rust, ...)
+  /workspace [path]  show/set the directory used for guarded project work
+  /workspace-create <path>  create a guarded directory, select it, and resume queued work
   /env [refresh]     show the host OS, shells, and installed toolchains
   /toolstatus <name> run the fixed local version probe for a discovered tool
   /location [on|off] allow approximate IP location for "my area" weather answers
@@ -1401,6 +1403,12 @@ def main():
     # A fresh conversation thread per REPL launch; /new rerolls it, /resume switches it.
     session_id = memory_store.new_id()
     project = server.DEFAULT_PROJECT
+    # ``project`` is a memory/checklist namespace.  Keep the actual filesystem
+    # workspace separate so a conversational work request never falls back to
+    # Sonder's own checkout merely because the namespace is the default label.
+    workspace_root = ""
+    pending_workspace_work = ""
+    queued_workspace_work = ""
     # None = whatever the runtime resolves by default; /model pins one.
     active_tier = None
     # Exact discovered model selected by /model <tag>.  Keep it separately
@@ -1412,6 +1420,92 @@ def main():
     # durable prompt log.
     input_history = []
     model_argument_completer = _ModelArgumentCompleter()
+
+    def _workspace_path(raw):
+        """Return one canonical existing directory, never a bare project label."""
+        text = str(raw or "").strip().strip('"')
+        if not text:
+            return "", "workspace path is required"
+        try:
+            path = os.path.realpath(os.path.abspath(os.path.expanduser(text)))
+        except (OSError, ValueError) as exc:
+            return "", "invalid workspace path: %s" % exc
+        if not os.path.isdir(path):
+            return "", "workspace directory does not exist: %s" % path
+        return path, ""
+
+    def _queue_pending_workspace_work():
+        nonlocal pending_workspace_work, queued_workspace_work
+        if pending_workspace_work and workspace_root:
+            queued_workspace_work = pending_workspace_work
+            pending_workspace_work = ""
+            print("workspace selected; resuming requested work in %s" % workspace_root)
+
+    def do_workspace_select(raw):
+        nonlocal workspace_root
+        text = str(raw or "").strip()
+        if not text:
+            print("workspace: %s" % (workspace_root or "(not selected)"))
+            return
+        if text.lower() in ("none", "clear", "off"):
+            workspace_root = ""
+            print("workspace cleared; the next work request will ask for a directory")
+            return
+        path, error = _workspace_path(text)
+        if error:
+            print(error + "\nuse /workspace-create <path> to create a new guarded directory")
+            return
+        workspace_root = path
+        print("workspace: %s" % workspace_root)
+        _queue_pending_workspace_work()
+
+    def do_workspace_create(raw):
+        nonlocal workspace_root
+        text = str(raw or "").strip().strip('"')
+        if not text:
+            print("usage: /workspace-create <path>")
+            return
+        output = server.directory_create(path=text, parents=True)
+        print(output)
+        if _is_repl_error(output):
+            return
+        path, error = _workspace_path(text)
+        if error:
+            print(error)
+            return
+        workspace_root = path
+        print("workspace: %s" % workspace_root)
+        _queue_pending_workspace_work()
+
+    def _workspace_reply_command(raw):
+        """Accept only an explicit path-like answer to a pending workspace ask."""
+        text = str(raw or "").strip().strip('"')
+        create = False
+        match = re.match(r"^create(?:\s+(?:it\s+)?(?:at|in))?\s+(.+)$", text, re.I)
+        if match:
+            create = True
+            text = match.group(1).strip().strip('"')
+        if not re.match(r"^(?:[A-Za-z]:[\\/]|~[\\/]|[.]{1,2}[\\/]|[\\/]{1,2})", text):
+            return ""
+        return ("/workspace-create " if create else "/workspace ") + text
+
+    def run_workspace_work(task):
+        nonlocal last_iid, last_response, last_run_source, last_turn_metrics
+        started_at = time.monotonic()
+        indicator = _begin_chat_turn("Sonder work")
+        try:
+            out = server.workbench_agent(
+                prompt=task, tier="auto", max_steps=12, project=workspace_root,
+            )
+        except BaseException:
+            if indicator is not None:
+                indicator.stop()
+            raise
+        last_iid = None
+        last_response = out
+        last_run_source = _answer_only(out)
+        last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
+        _print_chat_result(out, started_at, label="Sonder work", indicator=indicator)
 
     def apply_trace(val):
         nonlocal trace
@@ -1690,6 +1784,15 @@ def main():
     print(_startup_banner(strict, persona, project, active_tier))
 
     while True:
+        # ``/workspace`` may select/create a directory in response to a prior
+        # natural work request.  Run that original request on the next loop
+        # turn so the selection command itself remains separately permission
+        # gated and does not accidentally run the agent in the old cwd.
+        if queued_workspace_work:
+            task = queued_workspace_work
+            queued_workspace_work = ""
+            run_workspace_work(task)
+            continue
         try:
             line = _read_input(_composer_title(
                 active_tier,
@@ -1709,6 +1812,11 @@ def main():
         line = _normalize_input_line(line)
         if not line:
             continue
+        if pending_workspace_work and not line.startswith("/"):
+            workspace_reply = _workspace_reply_command(line)
+            if workspace_reply:
+                print(_paint("(interpreted as: %s)" % workspace_reply, _Ansi.muted))
+                line = workspace_reply
         if _history_safe(line) and (not input_history or input_history[-1] != line):
             input_history.append(line)
             if len(input_history) > REPL_HISTORY_LIMIT:
@@ -1780,6 +1888,10 @@ def main():
                     root = parts[2] if len(parts) > 2 else name
                     print(server.scaffold_project(
                         kind=kind, name=name, root=root, apply=True))
+            elif cmd == "/workspace":
+                do_workspace_select(arg)
+            elif cmd in ("/workspace-create", "/workspacecreate"):
+                do_workspace_create(arg)
             elif cmd == "/location":
                 a = (arg or "").strip().lower()
                 if a in ("on", "off"):
@@ -2240,21 +2352,20 @@ def main():
             continue
 
         if intents.classify_work(line) and not web_intents.explicit_search(line):
-            started_at = time.monotonic()
-            indicator = _begin_chat_turn("Sonder work")
-            try:
-                out = server.workbench_agent(
-                    prompt=line, tier="auto", max_steps=12, project=project,
+            if not workspace_root:
+                pending_workspace_work = line
+                last_iid = None
+                last_response = None
+                last_run_source = None
+                last_turn_metrics = None
+                print(
+                    "Where should I create or work on this project?\n"
+                    "  Existing folder: /workspace C:\\Users\\you\\Projects\\MyProject\n"
+                    "  New folder:      /workspace-create C:\\Users\\you\\Projects\\MyProject\n"
+                    "I will keep all guarded project work and requested runs inside that directory."
                 )
-            except BaseException:
-                if indicator is not None:
-                    indicator.stop()
-                raise
-            last_iid = None
-            last_response = out
-            last_run_source = _answer_only(out)
-            last_turn_metrics = _latest_repl_turn_metrics(surfaces=("agent",))
-            _print_chat_result(out, started_at, label="Sonder work", indicator=indicator)
+                continue
+            run_workspace_work(line)
             continue
 
         started_at = time.monotonic()
