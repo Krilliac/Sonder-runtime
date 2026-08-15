@@ -2708,7 +2708,8 @@ def test_account_catalogued_global_memory_tools_are_refused(monkeypatch):
     tools = (
         "memory_search", "apply_learned", "sonder_sessions", "session_export",
         "memory_export", "learning_health_status", "evaluation_history_status",
-        "sonder_remember_fact", "record_outcome", "learn_from_example",
+        "sonder_remember_fact", "sonder_forget_fact", "record_outcome",
+        "learn_from_example",
     )
     for tool in tools:
         refused = ts._http_tool_refusal((tool,), "/" + tool, context)
