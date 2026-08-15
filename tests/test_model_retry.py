@@ -93,6 +93,75 @@ def test_terminal_http_failures_do_not_retry(monkeypatch, status):
     assert len(calls) == 1
 
 
+def test_local_think_option_rejection_retries_once_without_only_that_option(monkeypatch):
+    calls = []
+
+    def fake_post(_path, payload, timeout=None):
+        calls.append(dict(payload))
+        if len(calls) == 1:
+            raise _http_error(400, b'{"error":"model does not support thinking"}')
+        return {"message": {"content": "compatible"}}
+
+    monkeypatch.setenv("SONDER_LOCAL_RETRIES", "0")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    _, content = server._chat_request(
+        {"model": "heretic", "messages": [], "think": True},
+        model="heretic",
+        timeout=20,
+    )
+
+    assert content == "compatible"
+    assert len(calls) == 2
+    assert calls[0]["think"] is True
+    assert "think" not in calls[1]
+    assert calls[0]["model"] == calls[1]["model"] == "heretic"
+    assert calls[0]["messages"] == calls[1]["messages"] == []
+
+
+def test_local_think_option_rejection_is_remembered_without_hiding_reasoning(monkeypatch):
+    model = "heretic-no-think-cache"
+    server._remember_thinking_model(model)
+    server._remember_unsupported_think_option(model)
+    monkeypatch.setenv("SONDER_EXPOSE_REASONING", "1")
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_post",
+        lambda _path, payload, timeout=None: calls.append(dict(payload)) or {
+            "message": {"content": "ok", "thinking": "internal"},
+        },
+    )
+
+    _, content = server._chat_request(
+        {"model": model, "messages": []}, model=model, timeout=20,
+    )
+
+    assert content == "ok"
+    assert "think" not in calls[0]
+    assert server._known_thinking_model(model) is True
+
+
+def test_cloud_think_rejection_is_not_retried(monkeypatch):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        raise _http_error(400, b'{"error":"model does not support thinking"}')
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "_post", fake_post)
+
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request(
+            {"model": "hosted", "messages": [], "think": True},
+            model="hosted", cloud=True, timeout=20,
+        )
+
+    assert caught.value.status == 400
+    assert len(calls) == 1
+
+
 def test_transient_cloud_failure_is_never_retried(monkeypatch):
     calls = []
 
