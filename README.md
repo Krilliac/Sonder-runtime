@@ -296,6 +296,7 @@ authentication, hosting, and full command details.
 - [Models and gateways](docs/wiki/08-model-tiers-and-gateway.md)
 - [Tools and languages](docs/wiki/10-tools-and-languages.md)
 - [Natural-language tool calling](docs/NATURAL_LANGUAGE_TOOLS.md)
+- [Natural-language capability queries](docs/NATURAL_LANGUAGE_CAPABILITY_QUERIES.md)
 - [Training](TRAINING.md)
 - [Client and private hosting](CLIENT.md)
 - [Unsafe lab model testing](docs/runbooks/unsafe-lab.md)
