@@ -373,6 +373,8 @@ class LocalManager {
     String contextSize = '8192',
     bool persistOnAppClose = false,
     Duration readyTimeout = _serverReadyTimeout,
+    Future<bool> Function()? managedReachabilityProbe,
+    Future<bool> Function()? portOccupiedProbe,
   }) async {
     if (!canRunLocalTools) {
       return LocalActionResult(
@@ -381,10 +383,21 @@ class LocalManager {
       );
     }
     final system = bundledSystemDirectory();
-    if (await defaultServerReachable()) {
+    final managedReachable =
+        managedReachabilityProbe ?? defaultServerReachable;
+    if (await managedReachable()) {
       return const LocalActionResult(
         true,
         'A server is already reachable on 127.0.0.1:11435.',
+      );
+    }
+    final portOccupied = portOccupiedProbe ?? _defaultServerPortOccupied;
+    if (await portOccupied()) {
+      return const LocalActionResult(
+        false,
+        'A service is already listening on 127.0.0.1:11435, but it is not '
+            'verified as this app-managed Sonder server. Stop that service '
+            'before starting a managed local server.',
       );
     }
     if (!await system.exists()) {
@@ -452,6 +465,25 @@ class LocalManager {
       );
     } catch (e) {
       return _serverStartFailure('Could not start server: $e');
+    }
+  }
+
+  /// Detect a listener only to avoid competing with it. This is deliberately
+  /// separate from [defaultServerReachable], which is the signed proof needed
+  /// before the app trusts or manages the service.
+  static Future<bool> _defaultServerPortOccupied() async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        11435,
+        timeout: const Duration(milliseconds: 350),
+      );
+      return true;
+    } on SocketException {
+      return false;
+    } finally {
+      socket?.destroy();
     }
   }
 

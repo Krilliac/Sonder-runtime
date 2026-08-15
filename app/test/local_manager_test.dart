@@ -69,6 +69,17 @@ void main() {
     ]);
   });
 
+  test('startServer refuses an unverified occupied local port', () async {
+    final result = await LocalManager.startServer(
+      managedReachabilityProbe: () async => false,
+      portOccupiedProbe: () async => true,
+    );
+
+    expect(result.ok, isFalse);
+    expect(result.message, contains('already listening'));
+    expect(result.message, contains('not verified'));
+  });
+
   test('readLogTail returns empty for an empty log', () async {
     final file = File(path('empty.log'));
     await file.writeAsString('');
