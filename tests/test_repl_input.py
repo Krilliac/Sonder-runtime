@@ -620,6 +620,42 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     assert seen[0]["model_override"] == "gemma3:12b"
 
 
+def test_resume_clears_previous_sessions_composer_turn_metrics(monkeypatch):
+    """The next composer belongs to the resumed session, not its predecessor."""
+    lines = iter(("hello", "/resume other-session", "/exit"))
+    titles = []
+
+    class _Connection:
+        def close(self):
+            pass
+
+    def _read(title, **_kwargs):
+        titles.append(title)
+        return next(lines)
+
+    monkeypatch.setattr(sonder_repl, "_read_input", _read)
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_composer_context", lambda *_args: None)
+    monkeypatch.setattr(sonder_repl, "_composer_frame_width", lambda: 160)
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sonder_repl, "_latest_repl_turn_metrics",
+        lambda *_args, **_kwargs: {"tokens_in": 123, "tokens_out": 45, "elapsed_ms": 1000,
+                                   "model_calls": 1, "tool_calls": 0},
+    )
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+    monkeypatch.setattr(sonder_repl.server, "_open_db", lambda: _Connection())
+    monkeypatch.setattr(sonder_repl.memory_store, "find_session", lambda *_args: "other-session")
+
+    sonder_repl.main()
+
+    assert "tok 123/45" in titles[1]
+    assert "tok 123/45" not in titles[2]
+
+
 def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monkeypatch, capsys):
     lines = iter(("/model made-up:latest", "hello", "/exit"))
     seen = []
@@ -974,3 +1010,41 @@ def test_model_tag_selection_is_used_by_consult(monkeypatch):
     sonder_repl.main()
 
     assert seen == {"question": "compare this", "tiers": ["gemma3:12b", "reasoning"]}
+
+
+def test_model_near_miss_suggestion_matches_case_insensitively(monkeypatch, capsys):
+    """A capitalized tag typo still earns a suggestion, like resolution itself."""
+    lines = iter(("/model Gemma3:7b", "/exit"))
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "no installed model named" in output
+    assert "did you mean: gemma3:12b" in output
+
+
+def test_model_bare_tag_argument_does_not_suggest_every_installed_model(monkeypatch, capsys):
+    """An empty base like ":latest" must not match the whole catalog."""
+    lines = iter(("/model :latest", "/exit"))
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(
+        sonder_repl, "_installed_models",
+        lambda: [("gemma3:12b", "8 GB"), ("qwen2.5-coder:7b", "4 GB")],
+    )
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "no installed model named" in output
+    assert "did you mean" not in output
+    assert "run /model with no argument" in output
