@@ -553,16 +553,14 @@ def cmd_mcp(args) -> int:
     # Preserve the unsafe-lab startup fence ahead of every configuration read.
     # A hostile/invalid model endpoint must not mask the dedicated safety
     # refusal or let the adapter import far enough to begin initialization.
-    import unsafe_lab
+    import server
 
-    unsafe_lab.require_startup()
+    server.require_mcp_startup_safety()
     try:
         _export_runtime_environment(_load_config(args))
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    import server
-
     server.run_mcp(safety_checked=True)
     return 0
 
