@@ -852,3 +852,67 @@ def test_model_tag_selection_is_used_by_consult(monkeypatch):
     sonder_repl.main()
 
     assert seen == {"question": "compare this", "tiers": ["gemma3:12b", "reasoning"]}
+
+
+def _drive_work_turn(monkeypatch, lines):
+    """Drive `main()` so the given work-classified turn reaches the workbench."""
+    seen = {}
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.command_router, "resolve", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify", lambda _line: None)
+    monkeypatch.setattr(
+        sonder_repl.intents, "containment_egress_refusal", lambda _line: None)
+    monkeypatch.setattr(
+        sonder_repl.intents, "classify_work",
+        lambda line: line.startswith("create "))
+    monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
+    monkeypatch.setattr(
+        sonder_repl.server, "workbench_agent",
+        lambda **kwargs: seen.update(kwargs) or "workbench done",
+    )
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda *_args, **_kwargs: pytest.fail("plain chat must not run"),
+    )
+    sonder_repl.main()
+    return seen
+
+
+def test_pinned_model_is_used_by_the_workbench_work_route(monkeypatch):
+    """A work-classified turn must run on the session's pinned model.
+
+    The serve layer stopped rerouting explicitly targeted turns; the console's
+    work route was the one dispatcher left resolving `tier="auto"` through
+    runtime policy, which silently ignored the `/model` pin for exactly the
+    turns that read and modify the workspace.
+    """
+    lines = iter(("/model gemma3:12b", "create a script and run it", "/exit"))
+
+    seen = _drive_work_turn(monkeypatch, lines)
+
+    assert seen["prompt"] == "create a script and run it"
+    assert seen["tier"] == "gemma3:12b"
+
+
+def test_selected_tier_is_used_by_the_workbench_work_route(monkeypatch):
+    lines = iter(("/model code", "create a script and run it", "/exit"))
+
+    seen = _drive_work_turn(monkeypatch, lines)
+
+    assert seen["tier"] == "code"
+
+
+def test_unpinned_work_route_still_lets_runtime_policy_pick(monkeypatch):
+    lines = iter(("create a script and run it", "/exit"))
+
+    seen = _drive_work_turn(monkeypatch, lines)
+
+    assert seen["tier"] == "auto"

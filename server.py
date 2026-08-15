@@ -1970,6 +1970,21 @@ def _allow_cloud_fallback_for_target(tier_label):
     return not str(tier_label or "").casefold().startswith("model:")
 
 
+def _explicit_serve_selection(tier, model_override):
+    """Whether this call names its own target rather than the default route.
+
+    Mirrors the serve layer's ``_uses_default_model_route``: every spelling of
+    the default local learning route ("", "sonder", "local") keeps its control
+    and web-dispatch ergonomics, while a caller-selected tier, exact catalog
+    model, or session pin is a routing contract whose prompt must reach the
+    selected model unreinterpreted.  Purely syntactic — this runs before any
+    catalog lookup, so it must not trigger discovery or other I/O.
+    """
+    if str(model_override or "").strip():
+        return True
+    return str(tier or "").strip().lower() not in ("", "sonder", "local")
+
+
 def _control_history_messages(history, prompt):
     messages = []
     for msg in history or []:
@@ -5552,15 +5567,24 @@ def _sonder_impl_serialized(
     (None = env SONDER_LOCATION_CONSENT, default off).
     """
     _maybe_live_reload()
-    command = control_command(prompt, session=session, project=project)
-    if command is not None:
-        return _append_activity(command)
+    # The MCP wrapper and the HTTP handler both stop reinterpreting a turn
+    # once the caller names a target, but this layer runs beneath both of
+    # them: an unconditional control or web divert here silently undid that
+    # contract for every REPL/MCP turn with a `/model` pin or explicit tier
+    # (and answered the web route with the default tier, not the selection).
+    # The default route keeps both dispatches, on every spelling of it.
+    explicit_target = _explicit_serve_selection(tier, model_override)
+    if not explicit_target:
+        command = control_command(prompt, session=session, project=project)
+        if command is not None:
+            return _append_activity(command)
     location_consent = (
         _env_location_consent() if location_consent is None else bool(location_consent)
     )
-    web_reply = _route_chat_web(prompt, session, project, location_consent)
-    if web_reply is not None:
-        return _append_activity(web_reply)
+    if not explicit_target:
+        web_reply = _route_chat_web(prompt, session, project, location_consent)
+        if web_reply is not None:
+            return _append_activity(web_reply)
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()

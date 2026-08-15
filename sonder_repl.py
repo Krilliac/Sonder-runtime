@@ -2157,8 +2157,15 @@ def main():
             started_at = time.monotonic()
             indicator = _begin_chat_turn("Sonder work")
             try:
+                # An exact `/model` pin or selected tier is this session's
+                # routing contract; `_serve_target` resolves either with the
+                # same typed unknown/non-chat/cloud-disabled refusals as a chat
+                # turn. Only an unpinned session leaves the lane to runtime
+                # policy — which may otherwise route a pinned-local session's
+                # work turns to a different (even cloud) model.
                 out = server.workbench_agent(
-                    prompt=line, tier="auto", max_steps=12, project=project,
+                    prompt=line, tier=active_model or active_tier or "auto",
+                    max_steps=12, project=project,
                 )
             except BaseException:
                 if indicator is not None:

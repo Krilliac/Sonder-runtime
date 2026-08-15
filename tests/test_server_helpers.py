@@ -3632,3 +3632,100 @@ def test_agent_report_stays_bound_to_its_span_when_latest_changes(monkeypatch):
     assert "own result" in output
     assert "agent:code" in output
     assert "r_other" not in output
+
+
+def _run_sonder_impl_to_answer(monkeypatch, answer="answer"):
+    """Stub everything downstream of routing so the inner impl reaches _answer."""
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_env_location_consent", lambda: False)
+    monkeypatch.setattr(
+        server, "_internal_generate_for_route", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+    monkeypatch.setattr(server, "_resolve_session", lambda _session: None)
+    monkeypatch.setattr(server, "_resolve_project", lambda _project: "default")
+    monkeypatch.setattr(server, "_context_requested", lambda _value=None: 4096)
+    monkeypatch.setattr(server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(
+        server, "_answer", lambda *_args, **_kwargs: (answer, None, None))
+    monkeypatch.setattr(server, "_capture_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_web_denial_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+    monkeypatch.setattr(
+        server, "_apply_code_gate",
+        lambda response, **_kwargs: (response, True, False))
+    monkeypatch.setattr(server, "_append_activity", lambda text, **_kwargs: text)
+
+
+def test_inner_sonder_explicit_tier_bypasses_control_and_web_routing(monkeypatch):
+    """The serialized impl honors the routing contract, not just the wrapper.
+
+    The MCP wrapper and the HTTP handler both stop reinterpreting a turn once
+    the caller has named a target.  This layer runs beneath both of them, so a
+    control or web divert here would silently undo that contract for every
+    REPL/MCP turn with a `/model` pin or explicit tier.
+    """
+    monkeypatch.setattr(
+        server, "control_command",
+        lambda *_args, **_kwargs: pytest.fail("control routing must not run"))
+    monkeypatch.setattr(
+        server, "_route_chat_web",
+        lambda *_args, **_kwargs: pytest.fail("web routing must not run"))
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda _tier, _strict: ("qwen2.5-coder:7b", False, False, "general"))
+    _run_sonder_impl_to_answer(monkeypatch)
+
+    out = server._sonder_impl_serialized(
+        "/hardware", session="none", tier="general")
+
+    assert out == "answer"
+
+
+def test_inner_sonder_model_pin_bypasses_control_and_web_routing(monkeypatch):
+    """A `/model` pin alone (default tier) is an explicit target too."""
+    monkeypatch.setattr(
+        server, "control_command",
+        lambda *_args, **_kwargs: pytest.fail("control routing must not run"))
+    monkeypatch.setattr(
+        server, "_route_chat_web",
+        lambda *_args, **_kwargs: pytest.fail("web routing must not run"))
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda _tier, _strict: ("qwen2.5-coder:7b", False, True, "sonder"))
+    monkeypatch.setattr(
+        server, "resolve_discovered_model_record",
+        lambda selector: ("gemma3:12b", {"name": "gemma3:12b"}))
+    monkeypatch.setattr(server, "_fanout_nonchat_reason", lambda _record: "")
+    monkeypatch.setattr(server, "_is_cloud_model_name", lambda _model: False)
+    _run_sonder_impl_to_answer(monkeypatch)
+
+    out = server._sonder_impl_serialized(
+        "what's the weather in Tokyo?", session="none",
+        model_override="gemma3:12b")
+
+    assert out == "answer"
+
+
+def test_inner_sonder_default_route_keeps_control_and_web_dispatch(monkeypatch):
+    """No selection = the ergonomic default route, on every spelling of it."""
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_env_location_consent", lambda: False)
+    monkeypatch.setattr(server, "_append_activity", lambda text, **_kwargs: text)
+    monkeypatch.setattr(
+        server, "control_command", lambda *_args, **_kwargs: "control reply")
+
+    for default_name in ("", "sonder", "local"):
+        assert server._sonder_impl_serialized(
+            "/stats", session="none", tier=default_name) == "control reply"
+
+    monkeypatch.setattr(server, "control_command", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server, "_route_chat_web", lambda *_args, **_kwargs: "web reply")
+
+    assert server._sonder_impl_serialized(
+        "what's the weather in Tokyo?", session="none") == "web reply"
