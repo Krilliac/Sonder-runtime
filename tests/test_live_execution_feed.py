@@ -79,6 +79,54 @@ def test_current_operation_shows_running_then_ran():
     assert entry["tool_calls"] == 1
 
 
+def test_concurrent_worker_operations_never_clear_or_resurrect_each_other():
+    """Workers bound to one response are concurrent, not a shared stack."""
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    allow_first_exit = threading.Event()
+    first_exited = threading.Event()
+    allow_second_exit = threading.Event()
+
+    with at.response_span("agent:task", "", feed_owner="owner-a"):
+        response_id = at.current_response_id()
+
+        def first_worker():
+            with at.bind_response(response_id):
+                with at.tool_dispatch_context("file_read"):
+                    first_entered.set()
+                    assert second_entered.wait(5)
+                    assert allow_first_exit.wait(5)
+            first_exited.set()
+
+        def second_worker():
+            with at.bind_response(response_id):
+                with at.tool_dispatch_context("workspace_run"):
+                    assert first_entered.wait(5)
+                    second_entered.set()
+                    assert allow_second_exit.wait(5)
+
+        first = threading.Thread(target=first_worker, daemon=True)
+        second = threading.Thread(target=second_worker, daemon=True)
+        first.start()
+        second.start()
+        try:
+            assert second_entered.wait(5)
+            allow_first_exit.set()
+            assert first_exited.wait(5)
+
+            (entry,) = at.live_feed_for_owner("owner-a")["active"]
+            assert entry["operation"]["name"] == "Ran Program"
+            assert entry["operation"]["state"] == "running"
+        finally:
+            allow_first_exit.set()
+            allow_second_exit.set()
+            first.join(5)
+            second.join(5)
+
+        (entry,) = at.live_feed_for_owner("owner-a")["active"]
+        assert entry["operation"] is None
+
+
 def test_failed_operation_reports_failed_state():
     with at.response_span("agent:task", "", feed_owner="owner-a"):
         at.record_tool_result("workspace_run", {}, ok=False, elapsed_ms=3)

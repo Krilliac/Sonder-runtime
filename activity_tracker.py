@@ -788,22 +788,39 @@ def tool_dispatch_context(tool_name=""):
     depth = int(getattr(_LOCAL, "tool_depth", 0) or 0)
     _LOCAL.tool_depth = depth + 1
     response = _current() if tool_name else None
-    previous = None
+    marker = None
     if response is not None:
         with _LOCK:
-            previous = response.get("current_operation")
-            response["current_operation"] = {
+            marker = {
                 "category": "tool",
                 "name": action_title(tool_name),
                 "started_at": time.time(),
             }
+            # One response may own several concurrently executing fleet
+            # workers.  A simple previous/current stack is only correct for
+            # nesting in one worker: when worker A exits before worker B it
+            # would clear B, and B would later resurrect A.  Keep the live
+            # markers explicitly and expose the most recently entered active
+            # one instead.  This stays private to the response record; the
+            # feed projects only ``current_operation``.
+            active = response.setdefault("_active_operations", [])
+            active.append(marker)
+            response["current_operation"] = marker
     try:
         yield
     finally:
         _LOCAL.tool_depth = depth
-        if response is not None:
+        if response is not None and marker is not None:
             with _LOCK:
-                response["current_operation"] = previous
+                active = response.get("_active_operations") or []
+                response["_active_operations"] = [
+                    item for item in active if item is not marker
+                ]
+                if response["_active_operations"]:
+                    response["current_operation"] = response["_active_operations"][-1]
+                else:
+                    response.pop("_active_operations", None)
+                    response.pop("current_operation", None)
 
 
 def inside_tool_call():
