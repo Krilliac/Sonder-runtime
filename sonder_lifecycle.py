@@ -129,10 +129,23 @@ class RuntimeLifecycle:
         # One authenticated principal must never occupy every slot and queue
         # position at once; the default cap always leaves the majority of
         # total admission capacity to other owners.
-        self._owner_max_inflight = owner_max_inflight or _env_int(
+        configured_owner_cap = owner_max_inflight or _env_int(
             "SONDER_OWNER_MAX_INFLIGHT",
             max(1, (self._max_concurrent + self._queue_depth) // 4),
         )
+        # An override at or above total capacity would negate the fairness
+        # bound entirely, so whenever total capacity exceeds one the
+        # effective cap is clamped strictly below it: at least one admission
+        # position always remains for a different owner.  With a total
+        # capacity of one there is no second position to reserve and the cap
+        # floors at one admission.
+        total_capacity = self._max_concurrent + self._queue_depth
+        if total_capacity > 1:
+            self._owner_max_inflight = max(
+                1, min(configured_owner_cap, total_capacity - 1)
+            )
+        else:
+            self._owner_max_inflight = 1
         self._owner_inflight: dict[str, int] = {}
 
         self._auth_buckets: dict[str, _TokenBucket] = {}

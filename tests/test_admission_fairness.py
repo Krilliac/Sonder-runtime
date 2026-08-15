@@ -14,6 +14,7 @@ zero so the map stays bounded by concurrently active owners.
 """
 
 import threading
+import time
 
 import pytest
 
@@ -131,6 +132,115 @@ def test_owner_cap_env_override(monkeypatch):
     monkeypatch.setenv("SONDER_OWNER_MAX_INFLIGHT", "2")
     lifecycle = RuntimeLifecycle(max_concurrent_requests=4, queue_depth=32)
     assert lifecycle._owner_max_inflight == 2
+
+
+class TestOwnerCapClamp:
+    """The effective owner cap must stay strictly below total capacity.
+
+    Defect: ``owner_max_inflight`` / ``SONDER_OWNER_MAX_INFLIGHT`` was taken
+    verbatim, so an override at or above total global capacity
+    (``max_concurrent_requests + queue_depth``) let one owner consume every
+    slot and queue position again -- silently negating the fairness bound the
+    cap exists to provide.  Whenever total capacity is greater than one, the
+    effective cap is clamped to ``total capacity - 1`` so at least one
+    admission position always remains for a different owner.
+    """
+
+    def test_huge_constructor_override_is_clamped_below_total_capacity(self):
+        lifecycle = RuntimeLifecycle(
+            max_concurrent_requests=4, queue_depth=32, owner_max_inflight=10_000
+        )
+        assert lifecycle._owner_max_inflight == 35  # (4 + 32) - 1
+
+    def test_huge_env_override_is_clamped_below_total_capacity(self, monkeypatch):
+        monkeypatch.setenv("SONDER_OWNER_MAX_INFLIGHT", "1000000")
+        lifecycle = RuntimeLifecycle(max_concurrent_requests=2, queue_depth=3)
+        assert lifecycle._owner_max_inflight == 4  # (2 + 3) - 1
+
+    def test_override_equal_to_total_capacity_is_clamped(self):
+        # A cap exactly at total capacity still lets one owner take every
+        # slot and queue position; it must be reduced by one.
+        lifecycle = RuntimeLifecycle(
+            max_concurrent_requests=1, queue_depth=4, owner_max_inflight=5
+        )
+        assert lifecycle._owner_max_inflight == 4
+
+    def test_normal_override_below_capacity_is_preserved(self):
+        lifecycle = RuntimeLifecycle(
+            max_concurrent_requests=4, queue_depth=32, owner_max_inflight=3
+        )
+        assert lifecycle._owner_max_inflight == 3
+
+    def test_default_cap_is_unchanged_by_the_clamp(self):
+        lifecycle = RuntimeLifecycle(max_concurrent_requests=4, queue_depth=32)
+        assert lifecycle._owner_max_inflight == (4 + 32) // 4
+
+    def test_minimum_capacity_deployment_keeps_a_cap_of_one(self):
+        # Smallest reachable configuration (both bounds floor at 1): the
+        # clamp cannot push the cap below one admission.
+        lifecycle = RuntimeLifecycle(
+            max_concurrent_requests=1, queue_depth=1, owner_max_inflight=99
+        )
+        assert lifecycle._owner_max_inflight == 1
+
+    def test_clamped_cap_leaves_an_admission_position_for_another_owner(self):
+        """Behavioral: under a huge override, a saturating owner is stopped
+        one position short of total capacity, so another owner still admits.
+        """
+        lifecycle = RuntimeLifecycle(
+            max_concurrent_requests=1,
+            queue_depth=2,
+            owner_max_inflight=999,
+            admission_timeout_seconds=5.0,
+        )
+        assert lifecycle._owner_max_inflight == 2
+        errors = []
+        admitted = {"a2": threading.Event(), "b": threading.Event()}
+
+        def request(owner, key):
+            try:
+                with lifecycle.acquire_request_slot(mutating=False, owner=owner):
+                    admitted[key].set()
+            except AdmissionRejected as error:
+                errors.append((key, error.code))
+
+        a_slot = lifecycle.acquire_request_slot(mutating=False, owner="ao-alice")
+        a_slot.__enter__()
+        a2 = threading.Thread(target=request, args=("ao-alice", "a2"))
+        b = threading.Thread(target=request, args=("ao-bob", "b"))
+        a2.start()
+        try:
+            # Wait for A's second request to be queued and counted.
+            deadline = time.monotonic() + 2.0
+            while (
+                lifecycle._owner_inflight.get("ao-alice") != 2
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.005)
+            assert lifecycle._owner_inflight.get("ao-alice") == 2
+
+            # A is at its clamped cap: the third request is refused
+            # owner-scoped instead of taking the last queue position.
+            with pytest.raises(AdmissionRejected) as excinfo:
+                with lifecycle.acquire_request_slot(
+                    mutating=False, owner="ao-alice"
+                ):
+                    pass
+            assert excinfo.value.code == "OWNER_CAPACITY_EXHAUSTED"
+
+            # The reserved position lets owner B queue instead of being
+            # refused CAPACITY_EXHAUSTED.
+            b.start()
+            assert not admitted["b"].wait(0.05)
+        finally:
+            a_slot.__exit__(None, None, None)
+            a2.join(timeout=5.0)
+            if b.ident is not None:
+                b.join(timeout=5.0)
+        assert not a2.is_alive() and not b.is_alive()
+        assert errors == []
+        assert admitted["a2"].is_set() and admitted["b"].is_set()
+        assert lifecycle._owner_inflight == {}
 
 
 def test_owner_capacity_envelope_is_a_rate_limit_error():
