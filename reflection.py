@@ -97,9 +97,9 @@ def distill(task, response, signal, offload_fn):
     return text
 
 
-def is_duplicate(
+def _has_semantic_duplicate(
     new_emb,
-    conn,
+    rows,
     threshold=DUP_THRESHOLD,
     *,
     embedding_model=None,
@@ -120,7 +120,7 @@ def is_duplicate(
         or embedding_dim != len(new_emb)
     ):
         return False
-    for les in memory_store.all_lessons(conn):
+    for les in rows:
         if (
             les.get("embedding_model") != embedding_model
             or (les.get("embedding_revision") or None)
@@ -142,6 +142,42 @@ def is_duplicate(
         ):
             return True
     return False
+
+
+def is_duplicate(
+    new_emb,
+    conn,
+    threshold=DUP_THRESHOLD,
+    *,
+    embedding_model=None,
+    embedding_revision=None,
+    embedding_dim=None,
+):
+    """Return whether *new_emb* matches a compatible active lesson vector."""
+    return _has_semantic_duplicate(
+        new_emb, memory_store.all_lessons(conn), threshold,
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
+        embedding_dim=embedding_dim,
+    )
+
+
+def is_tombstoned_duplicate(
+    new_emb,
+    conn,
+    threshold=DUP_THRESHOLD,
+    *,
+    embedding_model=None,
+    embedding_revision=None,
+    embedding_dim=None,
+):
+    """Return whether a pruned value would be semantically reintroduced."""
+    return _has_semantic_duplicate(
+        new_emb, memory_store.all_lesson_tombstones(conn), threshold,
+        embedding_model=embedding_model,
+        embedding_revision=embedding_revision,
+        embedding_dim=embedding_dim,
+    )
 
 
 def _normalize_lesson_text(text):
@@ -426,6 +462,11 @@ def store_prepared_lesson(conn, interaction_id, candidate):
             "terminal_state": memory_store.DISTILLATION_NO_LESSON,
             "result": "exact_duplicate",
         }
+    if memory_store.lesson_text_tombstoned(conn, text):
+        return {
+            "terminal_state": memory_store.DISTILLATION_NO_LESSON,
+            "result": "rejected_value",
+        }
     if is_duplicate(
         candidate.get("embedding"),
         conn,
@@ -436,6 +477,17 @@ def store_prepared_lesson(conn, interaction_id, candidate):
         return {
             "terminal_state": memory_store.DISTILLATION_NO_LESSON,
             "result": "semantic_duplicate",
+        }
+    if is_tombstoned_duplicate(
+        candidate.get("embedding"),
+        conn,
+        embedding_model=candidate.get("embedding_model"),
+        embedding_revision=candidate.get("embedding_revision"),
+        embedding_dim=candidate.get("embedding_dim"),
+    ):
+        return {
+            "terminal_state": memory_store.DISTILLATION_NO_LESSON,
+            "result": "rejected_value",
         }
 
     memory_store.insert_lesson_in_transaction(
@@ -467,7 +519,17 @@ def maybe_add_lesson(conn, interaction_id, task, response, signal, offload_fn,
     text = candidate["text"]
     if exact_text_exists(text, conn):
         return None
+    if memory_store.lesson_text_tombstoned(conn, text):
+        return None
     if is_duplicate(
+        candidate["embedding"],
+        conn,
+        embedding_model=candidate["embedding_model"],
+        embedding_revision=candidate["embedding_revision"],
+        embedding_dim=candidate["embedding_dim"],
+    ):
+        return None
+    if is_tombstoned_duplicate(
         candidate["embedding"],
         conn,
         embedding_model=candidate["embedding_model"],
