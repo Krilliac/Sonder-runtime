@@ -3632,3 +3632,29 @@ def test_agent_report_stays_bound_to_its_span_when_latest_changes(monkeypatch):
     assert "own result" in output
     assert "agent:code" in output
     assert "r_other" not in output
+
+
+def test_explicit_serve_selection_keeps_default_route_spellings_only():
+    assert not server._explicit_serve_selection("", "")
+    assert not server._explicit_serve_selection("sonder", "")
+    assert not server._explicit_serve_selection("local", "")
+    assert server._explicit_serve_selection("code", "")
+    assert server._explicit_serve_selection("", "gemma3:12b")
+
+
+def test_explicit_target_bypasses_inner_control_and_web_routing(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "control_command", lambda *_args, **_kwargs: pytest.fail("control must not run"))
+    monkeypatch.setattr(server, "_route_chat_web", lambda *_args, **_kwargs: pytest.fail("web must not run"))
+    monkeypatch.setattr(server, "_serve_target", lambda *_args: (None, False, False, "cloud-disabled"))
+    monkeypatch.setattr(server, "_cloud_disabled_message", lambda: "selected route reached")
+
+    assert server._sonder_impl_serialized("/hardware", session="none", tier="code") == "selected route reached"
+
+
+def test_default_target_keeps_inner_control_routing(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "control_command", lambda *_args, **_kwargs: "control reply")
+    monkeypatch.setattr(server, "_append_activity", lambda text, **_kwargs: text)
+
+    assert server._sonder_impl_serialized("/stats", session="none", tier="local") == "control reply"

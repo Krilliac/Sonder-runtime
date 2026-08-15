@@ -2101,6 +2101,13 @@ def _allow_cloud_fallback_for_target(tier_label):
     return not str(tier_label or "").casefold().startswith("model:")
 
 
+def _explicit_serve_selection(tier, model_override):
+    """Whether a call names its own target instead of the default route."""
+    if str(model_override or "").strip():
+        return True
+    return str(tier or "").strip().lower() not in ("", "sonder", "local")
+
+
 def _control_history_messages(history, prompt):
     messages = []
     for msg in history or []:
@@ -5695,15 +5702,21 @@ def _sonder_impl_serialized(
     (None = env SONDER_LOCATION_CONSENT, default off).
     """
     _maybe_live_reload()
-    command = control_command(prompt, session=session, project=project)
-    if command is not None:
-        return _append_activity(command)
+    # This layer runs beneath the HTTP/MCP routing guards.  Once the caller
+    # explicitly selects a model or tier, control and web dispatch must not
+    # silently reroute the selected prompt to the default model.
+    explicit_target = _explicit_serve_selection(tier, model_override)
+    if not explicit_target:
+        command = control_command(prompt, session=session, project=project)
+        if command is not None:
+            return _append_activity(command)
     location_consent = (
         _env_location_consent() if location_consent is None else bool(location_consent)
     )
-    web_reply = _route_chat_web(prompt, session, project, location_consent)
-    if web_reply is not None:
-        return _append_activity(web_reply)
+    if not explicit_target:
+        web_reply = _route_chat_web(prompt, session, project, location_consent)
+        if web_reply is not None:
+            return _append_activity(web_reply)
     tgt_model, cloud, augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
