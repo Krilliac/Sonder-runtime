@@ -224,6 +224,7 @@ _LEGACY_CATEGORY = {"inspect": "system", "learning": "memory"}
 # Native console commands that front no MCP tool, so no schema names them.
 _CATEGORY_BY_SLASH = {
     "/help": "basic", "/exit": "basic", "/new": "basic", "/clear": "basic", "/project": "basic",
+    "/workspace": "filesystem", "/workspace-create": "filesystem", "/workspacecreate": "filesystem",
     "/sessions": "basic", "/resume": "basic", "/version": "basic",
     "/model": "chat", "/persona": "persona", "/consult": "chat",
     "/route": "chat", "/refactor": "dev", "/scaffold": "dev",

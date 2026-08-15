@@ -84,6 +84,13 @@ _RULES = [
           r"(?:\s+to)?\s+(?P<arg>.+)$", _with_arg("/project")),
     _rule(r"^(?:current project|what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?project)\b",
           _fixed("/project")),
+    _rule(r"^(?:switch(?:\s+to)?|set|use|change(?:\s+to)?)\s+(?:the\s+)?"
+          r"(?:workspace|working\s+(?:directory|folder))\s*(?:to)?\s+(?P<arg>.+)$",
+          _with_arg("/workspace")),
+    _rule(r"^(?:current|show|what(?:'s| is))\s+(?:the\s+)?(?:current\s+)?"
+          r"(?:workspace|working\s+(?:directory|folder))\b", _fixed("/workspace")),
+    _rule(r"^(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:workspace|project\s+(?:directory|folder))"
+          r"\s+(?:at|in)\s+(?P<arg>.+)$", _with_arg("/workspace-create")),
     _rule(r"^(?:exit|quit|goodbye|bye|leave)\b", _fixed("/exit")),
 
     # --- identity / admin ---
