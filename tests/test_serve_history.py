@@ -623,6 +623,137 @@ def test_http_session_state_is_scoped_and_blank_is_ephemeral():
     assert blank_first is not blank_again
 
 
+def _clean_session_states():
+    with ts._HTTP_SESSION_STATES_LOCK:
+        ts._HTTP_SESSION_STATES.clear()
+
+
+def _account_ctx(username):
+    return {"account": {"username": username}, "api_key": False}
+
+
+def test_hosted_session_churn_cannot_evict_other_accounts_state():
+    """One account cycling session names must not flush another's live state."""
+    _clean_session_states()
+    try:
+        bob = _account_ctx("bob")
+        bob_state = ts._http_conversation_state(bob, "chat")
+        bob_state.trace = True
+
+        alice = _account_ctx("alice")
+        for n in range(ts.HTTP_SESSION_STATE_LIMIT + 8):
+            ts._http_conversation_state(alice, "session-%d" % n)
+
+        assert ts._http_conversation_state(bob, "chat") is bob_state
+        assert bob_state.trace is True
+    finally:
+        _clean_session_states()
+
+
+def test_hosted_session_states_admit_at_most_owner_limit_per_account():
+    _clean_session_states()
+    try:
+        alice = _account_ctx("alice")
+        for n in range(ts.HTTP_SESSION_STATE_OWNER_LIMIT + 8):
+            ts._http_conversation_state(alice, "session-%d" % n)
+        with ts._HTTP_SESSION_STATES_LOCK:
+            owned = sum(
+                1 for key in ts._HTTP_SESSION_STATES
+                if key[0] == "account:alice"
+            )
+        assert owned == ts.HTTP_SESSION_STATE_OWNER_LIMIT
+    finally:
+        _clean_session_states()
+
+
+def test_hosted_session_owner_cap_evicts_that_accounts_oldest_idle_state():
+    _clean_session_states()
+    try:
+        alice = _account_ctx("alice")
+        for n in range(ts.HTTP_SESSION_STATE_OWNER_LIMIT):
+            ts._http_conversation_state(alice, "session-%d" % n)
+
+        newest = ts._http_conversation_state(alice, "session-overflow")
+
+        with ts._HTTP_SESSION_STATES_LOCK:
+            keys = set(ts._HTTP_SESSION_STATES)
+        assert ("account:alice", "session-0") not in keys
+        assert ("account:alice", "session-overflow") in keys
+        assert ts._http_conversation_state(alice, "session-overflow") is newest
+    finally:
+        _clean_session_states()
+
+
+def test_hosted_session_owner_cap_fails_closed_when_all_own_states_are_busy():
+    """With every retained conversation mid-request, admission must go
+    request-local instead of exceeding the cap or evicting another account."""
+    _clean_session_states()
+    try:
+        bob = _account_ctx("bob")
+        bob_state = ts._http_conversation_state(bob, "chat")
+
+        alice = _account_ctx("alice")
+        held = [
+            ts._http_conversation_state(alice, "session-%d" % n)
+            for n in range(ts.HTTP_SESSION_STATE_OWNER_LIMIT)
+        ]
+        # In-flight requests hold each state's RLock from their own worker
+        # thread, so the busy holder must be a different thread than the one
+        # attempting admission.
+        locked = threading.Event()
+        release = threading.Event()
+
+        def hold_locks():
+            for state in held:
+                state.lock.acquire()
+            locked.set()
+            release.wait(timeout=10)
+            for state in held:
+                state.lock.release()
+
+        holder = threading.Thread(target=hold_locks)
+        holder.start()
+        try:
+            assert locked.wait(timeout=5)
+            overflow_first = ts._http_conversation_state(alice, "session-overflow")
+            overflow_again = ts._http_conversation_state(alice, "session-overflow")
+        finally:
+            release.set()
+            holder.join(timeout=5)
+
+        # Request-local fallback: not retained, so a second call is fresh.
+        assert overflow_first is not overflow_again
+        with ts._HTTP_SESSION_STATES_LOCK:
+            keys = set(ts._HTTP_SESSION_STATES)
+        assert ("account:alice", "session-overflow") not in keys
+        assert all(("account:alice", "session-%d" % n) in keys
+                   for n in range(ts.HTTP_SESSION_STATE_OWNER_LIMIT))
+        assert ts._http_conversation_state(bob, "chat") is bob_state
+    finally:
+        _clean_session_states()
+
+
+def test_local_open_session_states_keep_the_global_bound():
+    """The single-principal operator surface is not shrunk by the owner cap."""
+    _clean_session_states()
+    try:
+        local_open = {}
+        wanted = min(
+            ts.HTTP_SESSION_STATE_LIMIT,
+            ts.HTTP_SESSION_STATE_OWNER_LIMIT + 8,
+        )
+        for n in range(wanted):
+            ts._http_conversation_state(local_open, "session-%d" % n)
+        with ts._HTTP_SESSION_STATES_LOCK:
+            owned = sum(
+                1 for key in ts._HTTP_SESSION_STATES
+                if key[0] == "local-open"
+            )
+        assert owned == wanted
+    finally:
+        _clean_session_states()
+
+
 def test_concurrent_turn_results_keep_iids_request_local(monkeypatch):
     barrier = threading.Barrier(2)
     ids = {"alpha": "aaa111", "beta": "bbb222"}
