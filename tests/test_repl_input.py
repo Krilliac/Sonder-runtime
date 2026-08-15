@@ -1213,3 +1213,41 @@ def test_explicit_work_uses_selected_workspace(monkeypatch, tmp_path):
 
     assert seen["project"] == str(tmp_path.resolve())
     assert seen["prompt"] == "inspect it"
+
+
+def _drive_work_turn(monkeypatch, lines):
+    seen = {}
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.command_router, "resolve", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "containment_egress_refusal", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda line: line.startswith("create "))
+    monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
+    monkeypatch.setattr(sonder_repl.server, "workbench_agent", lambda **kwargs: seen.update(kwargs) or "workbench done")
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: pytest.fail("plain chat must not run"))
+    sonder_repl.main()
+    return seen
+
+
+def test_pinned_model_is_used_by_the_workbench_work_route(monkeypatch):
+    seen = _drive_work_turn(monkeypatch, iter(("/workspace .", "/model gemma3:12b", "create a script and run it", "/exit")))
+    assert seen["prompt"] == "create a script and run it"
+    assert seen["tier"] == "gemma3:12b"
+
+
+def test_selected_tier_is_used_by_the_workbench_work_route(monkeypatch):
+    seen = _drive_work_turn(monkeypatch, iter(("/workspace .", "/model code", "create a script and run it", "/exit")))
+    assert seen["tier"] == "code"
+
+
+def test_unpinned_work_route_still_lets_runtime_policy_pick(monkeypatch):
+    seen = _drive_work_turn(monkeypatch, iter(("/workspace .", "create a script and run it", "/exit")))
+    assert seen["tier"] == "auto"

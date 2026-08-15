@@ -1507,7 +1507,8 @@ def main():
         indicator = _begin_chat_turn("Sonder work")
         try:
             out = server.workbench_agent(
-                prompt=task, tier="auto", max_steps=12, project=workspace_root,
+                prompt=task, tier=active_model or active_tier or "auto",
+                max_steps=12, project=workspace_root,
             )
         except BaseException:
             if indicator is not None:
@@ -2065,8 +2066,8 @@ def main():
                     print("usage: /work <task>")
                 else:
                     out = server.workbench_agent(
-                        prompt=arg.strip(), project=workspace_root or project,
-                        max_steps=12,
+                        prompt=arg.strip(), tier=active_model or active_tier or "auto",
+                        project=workspace_root or project, max_steps=12,
                     )
                     last_response = out
                     last_run_source = _answer_only(out)
