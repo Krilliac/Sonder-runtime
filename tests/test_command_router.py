@@ -48,6 +48,10 @@ def test_session_lifecycle_phrasings():
     assert cr.resolve("list sessions") == "/sessions"
     assert cr.resolve("resume session abc123") == "/resume abc123"
     assert cr.resolve("switch project to duetos") == "/project duetos"
+    assert cr.resolve("set workspace to C:\\Projects\\demo") == "/workspace C:\\Projects\\demo"
+    assert cr.resolve("create project directory at C:\\Projects\\demo") == (
+        "/workspace-create C:\\Projects\\demo"
+    )
     assert cr.resolve("quit") == "/exit"
 
 

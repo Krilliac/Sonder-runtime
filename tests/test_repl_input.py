@@ -1,4 +1,5 @@
 import io
+import os
 import re
 
 import pytest
@@ -869,9 +870,9 @@ def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
     assert calls and calls[0][0] == "web search to find computer repair shops near 67215"
 
 
-def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypatch):
+def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypatch, tmp_path):
     prompt = "search the web for the logo and download it to assets/logo.png"
-    lines = iter((prompt, "/exit"))
+    lines = iter(("/workspace %s" % tmp_path, prompt, "/exit"))
     calls = []
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -893,14 +894,15 @@ def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypat
     sonder_repl.main()
 
     assert calls and calls[0]["prompt"] == prompt
+    assert calls[0]["project"] == str(tmp_path.resolve())
 
 
 @pytest.mark.parametrize("prompt", [
     "search the web for the logo and put it in assets/logo.png",
     "search the web for the logo and import it into assets",
 ])
-def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch, prompt):
-    lines = iter((prompt, "/exit"))
+def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch, prompt, tmp_path):
+    lines = iter(("/workspace %s" % tmp_path, prompt, "/exit"))
     calls = []
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -915,6 +917,7 @@ def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch
     sonder_repl.main()
 
     assert calls and calls[0]["prompt"] == prompt
+    assert calls[0]["project"] == str(tmp_path.resolve())
 
 
 def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
@@ -1063,6 +1066,155 @@ def test_model_bare_tag_argument_does_not_suggest_every_installed_model(monkeypa
     assert "run /model with no argument" in output
 
 
+def _drive_workspace_repl(monkeypatch, lines, seen):
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl.command_router, "resolve", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "containment_egress_refusal", lambda _line: None)
+    monkeypatch.setattr(sonder_repl.intents, "classify_work", lambda line: "create" in line)
+    monkeypatch.setattr(sonder_repl.web_intents, "explicit_search", lambda _line: False)
+    monkeypatch.setattr(
+        sonder_repl.server, "workbench_agent",
+        lambda **kwargs: seen.update(kwargs) or "verified workspace work",
+    )
+    monkeypatch.setattr(
+        sonder_repl.server, "sonder",
+        lambda *_args, **_kwargs: pytest.fail("plain chat must not run"),
+    )
+
+
+def test_work_request_without_workspace_asks_for_directory(monkeypatch, capsys):
+    seen = {}
+    _drive_workspace_repl(monkeypatch, iter(("create a game and run it", "/exit")), seen)
+
+    sonder_repl.main()
+
+    assert seen == {}
+    output = capsys.readouterr().out
+    assert "Where should I create or work on this project?" in output
+    assert "/workspace-create" in output
+
+
+def test_selected_workspace_is_passed_to_workbench_agent(monkeypatch, tmp_path):
+    seen = {}
+    _drive_workspace_repl(
+        monkeypatch,
+        iter(("/workspace %s" % tmp_path, "create a game and run it", "/exit")),
+        seen,
+    )
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(tmp_path.resolve())
+    assert seen["prompt"] == "create a game and run it"
+
+
+def test_workspace_create_resumes_queued_work_in_created_directory(monkeypatch, tmp_path):
+    seen = {}
+    workspace = tmp_path / "text-adventure"
+    _drive_workspace_repl(
+        monkeypatch,
+        iter((
+            "create a game and run it",
+            "/workspace-create %s" % workspace,
+            "/exit",
+        )),
+        seen,
+    )
+
+    def create_directory(path, parents=True):
+        assert path == str(workspace)
+        assert parents is True
+        workspace.mkdir(parents=True)
+        return "directory create: %s" % workspace
+
+    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(workspace.resolve())
+    assert seen["prompt"] == "create a game and run it"
+
+
+def test_pending_workspace_accepts_explicit_create_path_reply(monkeypatch, tmp_path):
+    seen = {}
+    workspace = tmp_path / "text-adventure"
+    _drive_workspace_repl(
+        monkeypatch,
+        iter(("create a game and run it", "create %s" % workspace, "/exit")),
+        seen,
+    )
+
+    def create_directory(path, parents=True):
+        workspace.mkdir(parents=True)
+        return "directory create: %s" % workspace
+
+    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(workspace.resolve())
+
+
+def test_workspace_create_obeys_directory_create_permission(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "must-not-exist"
+    calls = []
+    _drive_workspace_repl(
+        monkeypatch, iter(("/workspace-create %s" % workspace, "/exit")), {},
+    )
+    monkeypatch.setattr(
+        sonder_repl, "_named_command_gate",
+        lambda command: (False, "refused /workspace-create")
+        if command == "/workspace-create" else (True, ""),
+    )
+    monkeypatch.setattr(
+        sonder_repl.server, "directory_create", lambda **kwargs: calls.append(kwargs),
+    )
+
+    sonder_repl.main()
+
+    assert not calls
+    assert "refused /workspace-create" in capsys.readouterr().out
+
+
+def test_workspace_create_uses_one_canonical_path(monkeypatch, tmp_path):
+    workspace = tmp_path / "created"
+    seen = {}
+    _drive_workspace_repl(
+        monkeypatch, iter(("/workspace-create ./created", "/exit")), seen,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def create_directory(path, parents=True):
+        seen["created"] = path
+        os.makedirs(path, exist_ok=parents)
+        return "directory create: %s" % path
+
+    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+    sonder_repl.main()
+
+    assert seen["created"] == str(workspace.resolve())
+
+
+def test_explicit_work_uses_selected_workspace(monkeypatch, tmp_path):
+    seen = {}
+    _drive_workspace_repl(
+        monkeypatch, iter(("/workspace %s" % tmp_path, "/work inspect it", "/exit")), seen,
+    )
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(tmp_path.resolve())
+    assert seen["prompt"] == "inspect it"
+
+
 def _drive_work_turn(monkeypatch, lines):
     seen = {}
     monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
@@ -1086,16 +1238,16 @@ def _drive_work_turn(monkeypatch, lines):
 
 
 def test_pinned_model_is_used_by_the_workbench_work_route(monkeypatch):
-    seen = _drive_work_turn(monkeypatch, iter(("/model gemma3:12b", "create a script and run it", "/exit")))
+    seen = _drive_work_turn(monkeypatch, iter(("/workspace .", "/model gemma3:12b", "create a script and run it", "/exit")))
     assert seen["prompt"] == "create a script and run it"
     assert seen["tier"] == "gemma3:12b"
 
 
 def test_selected_tier_is_used_by_the_workbench_work_route(monkeypatch):
-    seen = _drive_work_turn(monkeypatch, iter(("/model code", "create a script and run it", "/exit")))
+    seen = _drive_work_turn(monkeypatch, iter(("/workspace .", "/model code", "create a script and run it", "/exit")))
     assert seen["tier"] == "code"
 
 
 def test_unpinned_work_route_still_lets_runtime_policy_pick(monkeypatch):
-    seen = _drive_work_turn(monkeypatch, iter(("create a script and run it", "/exit")))
+    seen = _drive_work_turn(monkeypatch, iter(("/workspace .", "create a script and run it", "/exit")))
     assert seen["tier"] == "auto"
