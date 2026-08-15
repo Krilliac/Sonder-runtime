@@ -180,6 +180,26 @@ def test_idempotent_serializes_concurrent_requests_for_same_key():
     assert results == [{"call": 1}, {"call": 1}]
 
 
+def test_idempotent_ttl_recomputes_after_process_cache_expiry(monkeypatch):
+    lifecycle = sonder_lifecycle.RuntimeLifecycle()
+    now = [100.0]
+    monkeypatch.setattr(sonder_lifecycle.time, "monotonic", lambda: now[0])
+    calls = []
+
+    assert lifecycle.idempotent(
+        "expiring", lambda: calls.append("first") or "first", cache_ttl_seconds=5,
+    ) == "first"
+    now[0] = 104.0
+    assert lifecycle.idempotent(
+        "expiring", lambda: calls.append("wrong") or "wrong", cache_ttl_seconds=5,
+    ) == "first"
+    now[0] = 106.0
+    assert lifecycle.idempotent(
+        "expiring", lambda: calls.append("second") or "second", cache_ttl_seconds=5,
+    ) == "second"
+    assert calls == ["first", "second"]
+
+
 def test_auth_failure_limiter_and_events(http_server, monkeypatch):
     monkeypatch.setattr(sonder_serve, "API_KEY", "k" * 32)
     saw_429 = False
