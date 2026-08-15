@@ -5,7 +5,9 @@ of the bound identity.  ``eligible`` is therefore a default-deny gate: every
 axis must be asserted by the caller, and any unknown or unproven surface stays
 uncached.  The first slice admits exactly one shape of turn:
 
-- a **local** target (never cloud/remote — a local call also never uses the
+- a **local** target on a **loopback** Ollama endpoint (never cloud, and
+  never a configured remote OLLAMA_HOST — the HTTP layer asserts locality
+  from ``ollama_endpoint.is_loopback``; a local call also never uses the
   cloud availability fallback, so the bound model is the serving model);
 - **greedy decoding** (temperature 0.0) — the only sampling mode where
   replaying a stored response is equivalent to generating again;
@@ -92,18 +94,24 @@ def max_entries() -> int:
 
 
 def eligible(*, scope, cloud, temperature, learning, augmented,
-             streaming=False, structured=False) -> bool:
+             streaming=False, structured=False, remote_endpoint=True) -> bool:
     """Default-deny admission gate for one generation turn.
 
     Callers must assert every axis explicitly; anything unknown, unparseable,
     or unproven is a denial.  Returning False means the turn is generated
     fresh with no cache consultation at all.
+
+    ``remote_endpoint`` covers the serving endpoint's locality: a non-cloud
+    target can still be served by a remote Ollama endpoint (a configured
+    non-loopback OLLAMA_HOST), and the cache is promised to be local-only.
+    The axis defaults to remote, so a caller that has not proven loopback —
+    via the authoritative ollama_endpoint.is_loopback — is denied.
     """
     if not enabled():
         return False
     if not isinstance(scope, str) or not scope:
         return False
-    if cloud or learning or augmented or streaming or structured:
+    if cloud or remote_endpoint or learning or augmented or streaming or structured:
         return False
     try:
         temp = float(temperature)

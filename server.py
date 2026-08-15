@@ -5951,13 +5951,17 @@ def _answer_with_history_impl(
             # model.  That makes it the sole admission point for the
             # deterministic request cache; eligibility stays default-deny
             # (local, greedy decoding, an HTTP-supplied owner scope) and the
-            # identity binds every input of the generate call below.
+            # identity binds every input of the generate call below.  "Local"
+            # is asserted on both axes: not a cloud target, and not a
+            # configured remote Ollama endpoint — a non-loopback OLLAMA_HOST
+            # serves cloud=False turns too, and the cache is local-only.
             response = None
             request_cache_key = None
             request_cache_status = ""
             if request_cache.eligible(
                 scope=cache_scope, cloud=cloud, temperature=temperature,
                 learning=False, augmented=False,
+                remote_endpoint=not ollama_endpoint.is_loopback(BASE),
             ):
                 request_cache_key = request_cache.identity_key(
                     scope=cache_scope, model=model, tier=tier_label,

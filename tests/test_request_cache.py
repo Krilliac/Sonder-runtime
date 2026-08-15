@@ -39,6 +39,7 @@ def _eligible_kwargs(**overrides):
         "temperature": 0.0,
         "learning": False,
         "augmented": False,
+        "remote_endpoint": False,
     }
     kwargs.update(overrides)
     return kwargs
@@ -80,9 +81,19 @@ def test_eligibility_denies_each_axis_independently(monkeypatch):
         {"augmented": True},
         {"streaming": True},
         {"structured": True},
+        {"remote_endpoint": True},
     )
     for overrides in denied:
         assert request_cache.eligible(**_eligible_kwargs(**overrides)) is False, overrides
+
+
+def test_eligibility_default_denies_unasserted_endpoint_locality(monkeypatch):
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "1")
+    kwargs = _eligible_kwargs()
+    del kwargs["remote_endpoint"]
+    # A caller that has not proven the serving endpoint is loopback is denied:
+    # the axis defaults to remote, never to local.
+    assert request_cache.eligible(**kwargs) is False
 
 
 def test_eligibility_allows_deterministic_local_scoped_turn(monkeypatch):
@@ -216,6 +227,9 @@ def _install_generation_fakes(monkeypatch, *, model, cloud, tier_label,
     calls = []
     supplied = list(responses or [])
 
+    # Pin the serving endpoint to loopback so these tests are independent of
+    # the machine's OLLAMA_HOST; the remote-endpoint tests override this.
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server, "control_command", lambda *a, **k: None)
     monkeypatch.setattr(server, "_web_denial_guard", lambda *a, **k: None)
@@ -319,6 +333,74 @@ def test_cloud_target_is_never_cached(monkeypatch):
     assert len(calls) == 2
     assert statuses == []
     assert request_cache.stats()["entries"] == 0
+
+
+def test_remote_ollama_endpoint_is_never_cached(monkeypatch):
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "1")
+    monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0")
+    calls = _install_generation_fakes(
+        monkeypatch, model="local:latest", cloud=False, tier_label="general",
+    )
+    # A configured remote Ollama endpoint: the target is still cloud=False,
+    # but the docs promise local-only replay, so admission must deny.
+    monkeypatch.setattr(server, "BASE", "http://192.168.1.50:11434")
+    statuses = []
+
+    for _ in range(2):
+        server._answer_with_history_impl(
+            "hello", [], tier="general",
+            cache_scope="qc-owner", cache_observer=statuses.append,
+        )
+
+    # Never consulted, never stored: both turns generate fresh.
+    assert len(calls) == 2
+    assert statuses == []
+    stats = request_cache.stats()
+    assert stats["entries"] == 0
+    assert stats["store"] == 0
+    assert stats["hit"] == 0
+    assert stats["miss"] == 0
+
+
+def test_remote_hostname_endpoint_is_never_cached(monkeypatch):
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "1")
+    monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0")
+    calls = _install_generation_fakes(
+        monkeypatch, model="local:latest", cloud=False, tier_label="general",
+    )
+    monkeypatch.setattr(server, "BASE", "http://ollama.lan:11434")
+
+    for _ in range(2):
+        server._answer_with_history_impl(
+            "hello", [], tier="general", cache_scope="qc-owner",
+        )
+
+    assert len(calls) == 2
+    assert request_cache.stats()["entries"] == 0
+
+
+def test_loopback_endpoint_deterministic_turn_still_caches(monkeypatch):
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "1")
+    monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0")
+    calls = _install_generation_fakes(
+        monkeypatch, model="local:latest", cloud=False, tier_label="general",
+    )
+    # Explicit positive control for the endpoint axis: loopback in both its
+    # spellings keeps the deterministic scoped turn cacheable.
+    for origin in ("http://127.0.0.1:11434", "http://localhost:11434"):
+        request_cache.reset_for_tests()
+        del calls[:]
+        monkeypatch.setattr(server, "BASE", origin)
+        statuses = []
+
+        for _ in range(2):
+            server._answer_with_history_impl(
+                "hello", [], tier="general",
+                cache_scope="qc-owner", cache_observer=statuses.append,
+            )
+
+        assert len(calls) == 1, origin
+        assert statuses == ["miss", "hit"], origin
 
 
 def test_learning_route_is_never_cached(monkeypatch):
