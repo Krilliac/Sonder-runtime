@@ -3875,7 +3875,18 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
         result = grounding.run_code_detail(
             code, timeout=_CODE_GATE_TIMEOUT, compile_first=True,
         )
-    except Exception:
+    except Exception as exc:
+        # An unavailable sandbox is intentionally inconclusive: do not label
+        # the reply's code as broken when it never ran.  It must still be
+        # visible to the operator; otherwise a full sandbox outage looks the
+        # same as a reply with no runnable code at all.
+        with contextlib.suppress(Exception):
+            activity_tracker.record_event(
+                "code_gate_unavailable",
+                summary="initial code verification unavailable: %s" % (
+                    type(exc).__name__,
+                ),
+            )
         return reply, None, False
     if result.get("ok"):
         return reply, True, False
