@@ -1424,7 +1424,7 @@ def near_misses(text: str, limit: int = 5) -> list:
     # an explicit request for no suggestions.
     try:
         limit = int(limit)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return []
     if limit <= 0:
         return []
