@@ -82,6 +82,12 @@ class MetricsRegistry:
                 "In-flight HTTP requests",
                 registry=self._registry,
             )
+            self.request_cache_total = Counter(
+                "sonder_request_cache_total",
+                "Deterministic request cache consultations by result",
+                ["result"],
+                registry=self._registry,
+            )
             self.model_calls_total = Counter(
                 "sonder_model_calls_total",
                 "Model calls by tier and result",
@@ -168,6 +174,7 @@ class MetricsRegistry:
                 "requests_total",
                 "request_duration_seconds",
                 "active_requests",
+                "request_cache_total",
                 "model_calls_total",
                 "model_call_duration_seconds",
                 "model_backend_phase_duration_seconds",
@@ -233,6 +240,16 @@ class MetricsRegistry:
             elapsed = 0.0
         self.model_calls_total.labels(tier=route, result=outcome).inc()
         self.model_call_duration_seconds.labels(tier=route).observe(elapsed)
+
+    def observe_request_cache(self, result: str) -> None:
+        """Record one deterministic-cache consultation.
+
+        The label set is closed ("hit"/"miss", anything else coerced to
+        "other") and carries no request identity: cache keys, prompts, and
+        principals must never become metric labels.
+        """
+        outcome = result if result in {"hit", "miss"} else "other"
+        self.request_cache_total.labels(result=outcome).inc()
 
     def set_build_info(self, version: str, commit: str) -> None:
         self.build_info.labels(version=version, commit=commit).set(1)
