@@ -214,6 +214,10 @@ class ConversationState:
     account: dict | None = None
     events: list = field(default_factory=list)
     lock: threading.RLock = field(default_factory=threading.RLock)
+    # A request pins its selected retained state before lifecycle admission.
+    # The state lock itself is acquired only after admission, so it is not a
+    # sufficient indication that a queued request still owns this entry.
+    session_pins: int = 0
 
 
 @dataclass(frozen=True)
@@ -306,8 +310,18 @@ class _LegacyConversationState:
 
 
 _LEGACY_STATE = _LegacyConversationState()
-HTTP_SESSION_STATE_LIMIT = max(1, min(
+HTTP_SESSION_STATE_LIMIT = max(2, min(
     1024, _env_int("SONDER_HTTP_SESSION_STATE_LIMIT", 128)
+))
+# Admission cap for one hosted account inside the shared state map.  The map's
+# global LRU alone lets a single account cycling fresh session names evict
+# every other account's live conversation state (trace/strict toggles, /run
+# source, debug events); at this cap an account recycles its own oldest idle
+# entry instead.  Single-principal surfaces (local-open, api-key) keep the
+# global bound: there is no other tenant to protect there.
+HTTP_SESSION_STATE_OWNER_LIMIT = max(1, min(
+    HTTP_SESSION_STATE_LIMIT - 1,
+    _env_int("SONDER_HTTP_SESSION_STATE_OWNER_LIMIT", 32),
 ))
 _HTTP_SESSION_STATES = OrderedDict()
 _HTTP_SESSION_STATES_LOCK = threading.RLock()
@@ -662,30 +676,68 @@ def _prune_http_session_states(max_size=HTTP_SESSION_STATE_LIMIT):
     for key, candidate in list(_HTTP_SESSION_STATES.items()):
         if len(_HTTP_SESSION_STATES) <= max_size:
             break
-        if candidate.lock.acquire(blocking=False):
+        if candidate.session_pins == 0 and candidate.lock.acquire(blocking=False):
             try:
                 _HTTP_SESSION_STATES.pop(key, None)
             finally:
                 candidate.lock.release()
 
 
-def _http_conversation_state(context, session, token=""):
-    """Return bounded per-principal state; a blank HTTP session is ephemeral."""
+def _evict_owner_lru_session_state(principal):
+    """Drop `principal`'s least-recent idle state; False if all are in-flight."""
+    for key, candidate in list(_HTTP_SESSION_STATES.items()):
+        if key[0] != principal:
+            continue
+        if candidate.session_pins == 0 and candidate.lock.acquire(blocking=False):
+            try:
+                _HTTP_SESSION_STATES.pop(key, None)
+            finally:
+                candidate.lock.release()
+            return True
+    return False
+
+
+def _acquire_http_conversation_state(context, session, token="", *, pin=False):
+    """Atomically select a bounded state and optionally pin it for a request.
+
+    Retention is bounded twice: globally by HTTP_SESSION_STATE_LIMIT, and per
+    hosted account by HTTP_SESSION_STATE_OWNER_LIMIT so one account's session
+    churn recycles its own oldest idle entry rather than evicting another
+    account's live conversation.  When no entry can be recycled without
+    touching an in-flight lock or another principal, admission fails closed to
+    request-local state.
+    """
 
     session = (session or "").strip()
     if not session:
-        return ConversationState(token=token or "", account=context.get("account"))
-    key = (_state_principal(context), session)
+        return ConversationState(token=token or "", account=context.get("account")), False
+    principal = _state_principal(context)
+    key = (principal, session)
     with _HTTP_SESSION_STATES_LOCK:
         state = _HTTP_SESSION_STATES.get(key)
         if state is None:
+            if context.get("account"):
+                owned = sum(
+                    1 for existing in _HTTP_SESSION_STATES
+                    if existing[0] == principal
+                )
+                while owned >= HTTP_SESSION_STATE_OWNER_LIMIT:
+                    if not _evict_owner_lru_session_state(principal):
+                        # Every retained conversation for this account is
+                        # mid-request.  Stay at the cap and use request-local
+                        # state rather than growing or evicting another
+                        # account's entry.
+                        return ConversationState(
+                            token=token or "", account=context.get("account")
+                        ), False
+                    owned -= 1
             _prune_http_session_states(HTTP_SESSION_STATE_LIMIT - 1)
             if len(_HTTP_SESSION_STATES) >= HTTP_SESSION_STATE_LIMIT:
                 # All retained conversations are active. Stay bounded and use
                 # request-local state rather than evicting an in-flight lock.
                 return ConversationState(
                     token=token or "", account=context.get("account")
-                )
+                ), False
             state = ConversationState()
             _HTTP_SESSION_STATES[key] = state
         _HTTP_SESSION_STATES.move_to_end(key)
@@ -693,7 +745,22 @@ def _http_conversation_state(context, session, token=""):
             state.token = token
         if context.get("account"):
             state.account = context["account"]
-        return state
+        if pin:
+            state.session_pins += 1
+        return state, bool(pin)
+
+
+def _http_conversation_state(context, session, token=""):
+    """Return bounded per-principal state without retaining a request pin."""
+    return _acquire_http_conversation_state(context, session, token)[0]
+
+
+def _release_http_conversation_state(state, pinned):
+    """Release a request's eviction pin after its state-dependent work ends."""
+    if not pinned:
+        return
+    with _HTTP_SESSION_STATES_LOCK:
+        state.session_pins = max(0, int(state.session_pins or 0) - 1)
 
 
 def _request_account_token(context, auth_header="", account_header=""):
@@ -3911,10 +3978,11 @@ class Handler(BaseHTTPRequestHandler):
             history = _server_side_history(storage_session)
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
-        state = _http_conversation_state(
+        state, state_pinned = _acquire_http_conversation_state(
             context,
             session,
             token=_request_account_token(context, auth_header, account_header),
+            pin=True,
         )
 
         reply = None
@@ -4122,6 +4190,8 @@ class Handler(BaseHTTPRequestHandler):
                 status=500,
             )
             return
+        finally:
+            _release_http_conversation_state(state, state_pinned)
 
         # The handler timer starts before body parsing, authentication, and
         # routing.  It is the public HTTP contract, unlike the inner request
