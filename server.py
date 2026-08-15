@@ -18829,7 +18829,7 @@ def _agent_dispatch_observed(
         dispatch_args = dict(args)
         dispatch_args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
     try:
-        with activity_tracker.tool_dispatch_context():
+        with activity_tracker.tool_dispatch_context(tool_name):
             dispatch_options = {"allow_web": allow_web}
             if allow_location:
                 dispatch_options["allow_location"] = True
