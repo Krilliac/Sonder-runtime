@@ -441,6 +441,19 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
                 }
             payload = json.loads(response.read(1_048_576).decode("utf-8"))
             models = len(payload.get("models") or [])
+            if not models:
+                # Reachable is not ready: with an empty catalog there is no
+                # model to serve, so the next chat turn fails at the provider.
+                # Report that rather than a bare "ok" the operator would read
+                # as "models are fine".  Warn, not fail — the runtime does
+                # start, and a warn keeps `sonder doctor` at exit code 0.
+                return {
+                    "status": STATUS_WARN,
+                    "detail": (
+                        "%s: reachable, no models installed "
+                        "(run setup_alias.py)" % host
+                    ),
+                }
             return {
                 "status": STATUS_OK,
                 "detail": "%s: %d models" % (host, models),
