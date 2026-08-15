@@ -2089,6 +2089,9 @@ def _handle_intent(content, messages=None, state=None):
 def _handle_work_intent(content, project="", authorized=False, context=None,
                         idempotency_key=""):
     """Route developer work through the bounded execution-mode chooser."""
+    refusal = intents.containment_egress_refusal(content)
+    if refusal:
+        return refusal
     if not authorized:
         return None
     # Do not let ordinary keyed chat occupy the bounded replay cache.  The

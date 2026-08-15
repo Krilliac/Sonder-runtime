@@ -2149,6 +2149,15 @@ def main():
         # the REPL used to intercept it first and send it to the general
         # workbench loop.  That wasted tool calls and could produce a
         # checklist-backed "complete" response with no relevant sources.
+        work_refusal = intents.containment_egress_refusal(line)
+        if work_refusal:
+            started_at = time.monotonic()
+            last_response = work_refusal
+            last_run_source = work_refusal
+            last_turn_metrics = None
+            _print_chat_result(work_refusal, started_at, label="Sonder")
+            continue
+
         if intents.classify_work(line) and not web_intents.explicit_search(line):
             started_at = time.monotonic()
             indicator = _begin_chat_turn("Sonder work")
