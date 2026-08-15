@@ -294,6 +294,12 @@ def test_arena_builder_still_unwraps_a_complete_method_for_every_slot_shape():
         "public static void Title(string t)",
     ) == "Raylib.DrawText(t, 0, 0, 20, Color.White);"
 
+    # Forward is a property accessor slot: the signature is `get`, without a
+    # parameter list, but a model can still wrap the usable body in `get {}`.
+    assert builder["extract_body"](
+        "get { return Vector3.UnitZ; }", "get",
+    ) == "return Vector3.UnitZ;"
+
 
 def test_arena_builder_reports_a_wrapper_only_when_the_reply_declares_the_method():
     builder = _builder_module()

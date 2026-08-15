@@ -416,6 +416,24 @@ def extract_body(text: str, signature: str) -> str:
     if not text:
         return ""
     name = method_name(signature)
+    # A property accessor slot is represented by its owning `get` line, so it
+    # deliberately has no method name or parameter list. Models still often
+    # return `get { ... }`; recover its statements before inserting them inside
+    # the harness-owned accessor braces.
+    accessor = str(signature or "").strip()
+    if accessor in ("get", "set", "init", "add", "remove"):
+        prefix, marker, tail = text.partition("{")
+        if marker and prefix.strip() == accessor:
+            depth = 1
+            for index, char in enumerate(tail):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        inner = tail[:index].strip()
+                        return inner or text
+            return ""
     # C# permits ``T Method(...) => expression;``.  It is a complete method
     # wrapper just like the brace form, but has no opening brace for the
     # recovery logic below to find.  Normalize it into the statements that
