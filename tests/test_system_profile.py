@@ -42,6 +42,19 @@ def test_system_prompt_initializes_missing_profile_on_first_use(monkeypatch, tmp
     assert (tmp_path / "system_profile.md").is_file()
 
 
+def test_profile_status_does_not_create_a_missing_profile(monkeypatch, tmp_path):
+    import server
+
+    monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.setattr(server.system_profile, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
+
+    out = server.system_profile_text()
+
+    assert "profile has not been created" in out
+    assert not (tmp_path / "system_profile.md").exists()
+
+
 def test_system_prompt_preserves_intentionally_empty_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(system_profile, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)

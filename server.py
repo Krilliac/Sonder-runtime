@@ -15237,8 +15237,12 @@ def system_profile_text() -> str:
     REPL. Empty means no extra standing instructions are injected.
     """
     _maybe_live_reload()
-    text, path = system_profile.ensure_profile()
-    return "profile: %s\n\n%s" % (path, text or "(empty)")
+    # This status tool is catalogued as safe and can be reached by natural
+    # language. Do not bootstrap a missing profile here: creating the default
+    # file is an explicit setup/edit operation, not an observation.
+    path = system_profile._resolve_path()
+    text = system_profile.read_profile(path)
+    return "profile: %s\n\n%s" % (path, text or "(empty; profile has not been created)")
 
 
 @mcp.tool()
