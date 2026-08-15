@@ -5760,9 +5760,14 @@ def sonder(
     token: str = "",
 ) -> str:
     """Ask through Sonder Runtime and show observable activity for the response."""
-    command = control_command(prompt, session=session, project=project)
-    if command is not None:
-        return command
+    # An explicitly selected target is a caller-owned routing contract.  Do
+    # not reinterpret its prompt as a local control command before it reaches
+    # that model; ``_answer_with_history_impl`` applies the same rule for the
+    # OpenAI HTTP surface.  The default route keeps command ergonomics.
+    if not str(tier or model_override or "").strip():
+        command = control_command(prompt, session=session, project=project)
+        if command is not None:
+            return command
     natural = natural_model_request(prompt)
     if natural and natural["kind"] in ("fanout", "ensemble"):
         if natural["prompt"].lstrip().startswith("/"):
