@@ -628,7 +628,20 @@ def execute_run(
             task_index, task = _next_pending(plan)
             if task is None:
                 gate_ok, gate_reason = _completion_gate(run)
-                review = normalize_review(review_fn(run, gate_reason))
+                # There is no next worker task to carry a late steering note.
+                # Deliver it as fenced, untrusted review context before a run
+                # can complete, so a note attached during the final task is
+                # neither silently stranded nor lost after a clarify/resume.
+                review_context = gate_reason
+                steering_notes = autopilot_store.pending_steering(run["id"], owner_id)
+                if steering_notes and autopilot_store.consume_steering(
+                    run["id"], owner_id,
+                    [note["note_id"] for note in steering_notes],
+                ):
+                    review_context = "%s\n\n%s" % (
+                        gate_reason, format_steering(steering_notes),
+                    )
+                review = normalize_review(review_fn(run, review_context))
                 flags = autopilot_store.control_flags(run["id"], owner_id)
                 if flags.get("lost"):
                     raise AutopilotError("autopilot ownership was lost during review")

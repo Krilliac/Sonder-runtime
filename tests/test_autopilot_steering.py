@@ -228,6 +228,35 @@ def test_worker_consumes_steering_as_fenced_untrusted_context():
     )
 
 
+def test_final_task_steering_reaches_completion_review_before_completion():
+    run = autopilot_store.create_run("last task steering", request_owner="account-one")
+    review_contexts = []
+
+    def work(current, task, _prior):
+        assert autopilot_store.attach_steering(
+            current["id"], "include the final audit note", request_owner="account-one",
+        ) is not None
+        return _task_evidence(task)
+
+    def review(_run, context):
+        review_contexts.append(context)
+        return _complete(_run, context)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(), request_owner="account-one",
+        plan_fn=lambda _run: _plan([
+            {"title": "Validate", "kind": "validate", "instruction": "Run checks"},
+        ]),
+        work_fn=work, review_fn=review,
+    )
+
+    assert result["status"] == "completed"
+    assert len(review_contexts) == 1
+    assert "include the final audit note" in review_contexts[0]
+    assert "OPERATOR STEERING" in review_contexts[0]
+    assert autopilot_store.pending_steering(run["id"], "owner") == []
+
+
 def test_clarify_pauses_then_resume_delivers_the_answer():
     run = autopilot_store.create_run("pause for clarity", request_owner="account-one")
     priors = []
