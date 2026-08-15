@@ -452,6 +452,89 @@ def test_automatic_expiry_never_touches_leased_active_runs():
     assert store.get_run(run["id"])["status"] == "running"
 
 
+def test_prune_failure_releases_throttle_so_next_call_retries(monkeypatch):
+    old = store.create_run("expired question", ["m"])
+    stale_ts = time.time() - store.DEFAULT_RETENTION_TTL_SECONDS - 60
+    _force_terminal(old["id"], updated_ts=stale_ts)
+    _clear_retention_throttle()
+
+    real_prune = store.prune
+    calls = {"count": 0}
+
+    def flaky_prune(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_prune(**kwargs)
+
+    monkeypatch.setattr(store, "prune", flaky_prune)
+    now = time.time()
+
+    # The failed pass is swallowed but must not consume the throttle
+    # interval: the very next call retries and expires the stale receipt.
+    assert store.maybe_prune(now) is None
+    assert store.maybe_prune(now + 1) is not None
+    assert calls["count"] == 2
+    conn = store._connect()
+    try:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM fanout_runs WHERE id=?", (old["id"],)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert remaining == 0
+
+    # A successful pass still claims the interval, so pruning stays bounded.
+    assert store.maybe_prune(now + 2) is None
+    assert calls["count"] == 2
+
+
+def test_prune_keeps_events_of_active_runs_even_when_old():
+    queued = store.create_run("queued question", ["m"])
+    running = store.create_run("running question", ["m"])
+    assert store.claim_run(running["id"], "owner", owner_pid=os.getpid())
+    cancelling = store.create_run("cancelling question", ["m"])
+    assert store.claim_run(cancelling["id"], "owner", owner_pid=os.getpid())
+    finished = store.create_run("finished question", ["m"])
+    stale_ts = time.time() - store.DEFAULT_RETENTION_TTL_SECONDS - 60
+    _force_terminal(finished["id"], updated_ts=stale_ts)
+    conn = store._connect()
+    try:
+        # Mark a cancel in flight (non-terminal) and age every event: a
+        # long-queued run's activity trail must survive on status alone.
+        conn.execute(
+            "UPDATE fanout_runs SET cancel_requested=1 WHERE id=?", (cancelling["id"],)
+        )
+        conn.execute("UPDATE fanout_events SET ts=?", (stale_ts,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = store.prune(ttl_seconds=store.DEFAULT_RETENTION_TTL_SECONDS)
+
+    assert store.events(finished["id"]) == []
+    assert store.events(queued["id"])
+    assert store.events(running["id"])
+    assert store.events(cancelling["id"])
+    assert result["runs"] == 1
+
+
+def test_prune_removes_orphaned_events_of_already_deleted_runs():
+    ghost = store.create_run("ghost question", ["m"])
+    stale_ts = time.time() - store.DEFAULT_RETENTION_TTL_SECONDS - 60
+    conn = store._connect()
+    try:
+        conn.execute("DELETE FROM fanout_runs WHERE id=?", (ghost["id"],))
+        conn.execute("UPDATE fanout_events SET ts=? WHERE run_id=?", (stale_ts, ghost["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+
+    store.prune(ttl_seconds=store.DEFAULT_RETENTION_TTL_SECONDS)
+
+    assert store.events(ghost["id"]) == []
+
+
 def test_schema_migration_is_safe_across_two_processes(tmp_path):
     database = tmp_path / "legacy-fanout.db"
     conn = sqlite3.connect(database)

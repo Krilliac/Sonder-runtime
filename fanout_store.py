@@ -314,7 +314,8 @@ def maybe_prune(now: float | None = None) -> dict | None:
     without bound.  This hook runs from run creation and stale-run
     reconciliation; it deletes only terminal runs, old events, and idle
     model-health rows.  Housekeeping must never break starting or reading a
-    fanout, so database contention is swallowed and the next interval retries.
+    fanout, so database contention is swallowed and the claim is released so
+    the next caller retries instead of waiting out the interval.
     """
     ttl = retention_ttl_seconds()
     if not ttl:
@@ -331,6 +332,15 @@ def maybe_prune(now: float | None = None) -> dict | None:
     try:
         return prune(ttl_seconds=ttl, now=current)
     except sqlite3.Error:
+        # A pass that pruned nothing must not consume the interval.  Release
+        # only our own claim: a newer claimant means another caller is already
+        # pruning, so concurrency stays bounded to one attempt at a time.
+        with _PRUNE_THROTTLE_LOCK:
+            if _LAST_PRUNE_TS.get(path) == current:
+                if last is None:
+                    _LAST_PRUNE_TS.pop(path, None)
+                else:
+                    _LAST_PRUNE_TS[path] = last
         return None
 
 
@@ -830,7 +840,13 @@ def get_model_health(model: str) -> dict | None:
 def prune(*, ttl_seconds: int = 7 * 86_400, event_ttl_seconds: int | None = None, now: float | None = None) -> dict:
     current = time.time() if now is None else float(now); cutoff = current - max(60, int(ttl_seconds)); event_cutoff = current - max(60, int(event_ttl_seconds or ttl_seconds))
     with _write_transaction() as conn:
-        events_deleted = conn.execute("DELETE FROM fanout_events WHERE ts<?", (event_cutoff,)).rowcount
+        # An active run's activity trail is operational state, not history: a
+        # long-queued or long-running fanout keeps its events on status alone.
+        # Events whose parent run is gone are orphans and still expire.
+        events_deleted = conn.execute(
+            "DELETE FROM fanout_events WHERE ts<? AND run_id NOT IN "
+            "(SELECT id FROM fanout_runs WHERE status NOT IN ('completed','cancelled','interrupted'))",
+            (event_cutoff,)).rowcount
         runs_deleted = conn.execute("DELETE FROM fanout_runs WHERE status IN ('completed','cancelled','interrupted') AND updated_ts<?", (cutoff,)).rowcount
         health_deleted = conn.execute("DELETE FROM model_health WHERE updated_ts<? AND (disabled_until IS NULL OR disabled_until<?)", (cutoff, current)).rowcount
     return {"runs": runs_deleted, "events": events_deleted, "health": health_deleted}
