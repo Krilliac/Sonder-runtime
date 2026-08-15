@@ -2336,7 +2336,10 @@ def _run_prompt(
         # This is the primary generation selected for an HTTP turn. Keep the
         # exported labels independent of exact models and configured aliases.
         # A control route has no target and must not masquerade as a model call.
-        if metrics is not None and "cloud" in resolved_target:
+        # A replay has no model invocation.  It still reports its bounded cache
+        # result separately, but must not inflate inference counters/latency.
+        if (metrics is not None and "cloud" in resolved_target
+                and cache_state.get("status") != "hit"):
             metrics.observe_model_call(
                 cloud=resolved_target["cloud"], result=outcome,
                 elapsed_seconds=time.monotonic() - started,

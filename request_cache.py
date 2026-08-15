@@ -124,7 +124,7 @@ def eligible(*, scope, cloud, temperature, learning, augmented,
     return True
 
 
-def identity_key(*, scope, model, tier, system, prompt, history, options,
+def identity_key(*, scope, model, model_revision="", tier, system, prompt, history, options,
                  cloud_allowed) -> str:
     """Opaque SHA-256 identity binding every generation-relevant input."""
     normalized_history = [
@@ -139,6 +139,10 @@ def identity_key(*, scope, model, tier, system, prompt, history, options,
             "v": _KEY_DOMAIN,
             "scope": str(scope),
             "model": str(model),
+            # A mutable Ollama tag is not an identity.  The serving layer
+            # supplies the catalog digest and refuses cache admission when it
+            # cannot establish one.
+            "model_revision": str(model_revision),
             "tier": str(tier),
             "system": str(system),
             "prompt": str(prompt),

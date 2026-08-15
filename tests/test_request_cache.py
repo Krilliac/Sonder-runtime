@@ -49,6 +49,7 @@ def _key_kwargs(**overrides):
     kwargs = {
         "scope": "qc-owner",
         "model": "sonder:latest",
+        "model_revision": "sha256:stable-revision",
         "tier": "general",
         "system": "system prompt",
         "prompt": "hello",
@@ -119,6 +120,7 @@ def test_identity_key_binds_every_component():
     variants = (
         {"scope": "qc-other-owner"},
         {"model": "other:latest"},
+        {"model_revision": "sha256:replacement-revision"},
         {"tier": "code"},
         {"system": "different system"},
         {"prompt": "hello there"},
@@ -239,6 +241,9 @@ def _install_generation_fakes(monkeypatch, *, model, cloud, tier_label,
     )
     monkeypatch.setattr(server, "_build_system", lambda *a, **k: "sys")
     monkeypatch.setattr(server, "_should_learn", lambda *_a: learn)
+    monkeypatch.setattr(
+        server, "_cache_model_revision", lambda _model: "sha256:test-revision",
+    )
     monkeypatch.setattr(server, "_open_db", _Connection)
     monkeypatch.setattr(server, "_resolve_project", lambda *_a: None)
     monkeypatch.setattr(server, "_capture_turn", lambda *a, **k: None)
@@ -295,6 +300,55 @@ def test_deterministic_non_learning_turn_is_served_from_cache(monkeypatch):
     assert first == second
     assert "generated answer" in first
     assert statuses == ["miss", "hit"]
+
+
+def test_cache_key_changes_when_the_resolved_tag_revision_changes(monkeypatch):
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "1")
+    monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0")
+    calls = _install_generation_fakes(
+        monkeypatch, model="local:latest", cloud=False, tier_label="general",
+    )
+    revision = {"value": "sha256:before-pull"}
+    monkeypatch.setattr(server, "_cache_model_revision", lambda _model: revision["value"])
+    statuses = []
+
+    server._answer_with_history_impl(
+        "hello", [], tier="general", cache_scope="qc-owner",
+        cache_observer=statuses.append,
+    )
+    revision["value"] = "sha256:after-pull"
+    server._answer_with_history_impl(
+        "hello", [], tier="general", cache_scope="qc-owner",
+        cache_observer=statuses.append,
+    )
+
+    assert len(calls) == 2
+    assert statuses == ["miss", "miss"]
+
+
+def test_missing_model_revision_denies_cache_admission(monkeypatch):
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "1")
+    monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0")
+    calls = _install_generation_fakes(
+        monkeypatch, model="local:latest", cloud=False, tier_label="general",
+    )
+    monkeypatch.setattr(server, "_cache_model_revision", lambda _model: "")
+
+    server._answer_with_history_impl("hello", [], tier="general", cache_scope="qc-owner")
+    server._answer_with_history_impl("hello", [], tier="general", cache_scope="qc-owner")
+
+    assert len(calls) == 2
+    assert request_cache.stats()["entries"] == 0
+
+
+def test_cache_model_revision_reads_the_live_catalog_digest(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "discovered_model_records",
+        lambda: (("local:latest", {"digest": "sha256:catalog-revision"}),),
+    )
+    assert server._cache_model_revision("local") == "sha256:catalog-revision"
+    assert server._cache_model_revision("missing:latest") == ""
 
 
 def test_cache_binds_request_owner_scope(monkeypatch):
@@ -524,10 +578,11 @@ def test_request_cache_scope_is_opaque_and_principal_bound():
 def test_run_prompt_reports_cache_status_and_metric(monkeypatch):
     captured = {}
     observed = []
+    model_calls = []
 
     class _Metrics:
         def observe_model_call(self, **kwargs):
-            return None
+            model_calls.append(kwargs)
 
         def observe_request_cache(self, result):
             observed.append(result)
@@ -546,6 +601,7 @@ def test_run_prompt_reports_cache_status_and_metric(monkeypatch):
     assert captured["cache_scope"] == "qc-owner"
     assert result.cache == "hit"
     assert observed == ["hit"]
+    assert model_calls == []
 
 
 def test_run_prompt_ignores_unknown_cache_status(monkeypatch):
