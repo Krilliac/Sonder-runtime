@@ -1419,7 +1419,13 @@ def near_misses(text: str, limit: int = 5) -> list:
     command they belong to, so a suggestion is never a second spelling of a
     suggestion already in the list.
     """
-    limit = int(limit)
+    # ``difflib.get_close_matches`` raises for n=0 and a negative slice would
+    # silently return suggestions. Treat malformed or non-positive limits as
+    # an explicit request for no suggestions.
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError, OverflowError):
+        return []
     if limit <= 0:
         return []
     wanted = str(text or "").strip().lower().lstrip("/")
