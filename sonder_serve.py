@@ -652,10 +652,13 @@ def _admission_request_owner(context):
     """Opaque principal for per-owner admission fairness accounting.
 
     Only in-memory in the lifecycle's in-flight map, never persisted and never
-    a metric label.  Local-open deployments return "" -- a single operator on
-    loopback has no second party to be fair to, so only global bounds apply.
+    a metric label.  Local-open deployments and pure API-key deployments
+    return "": each has one indistinguishable principal, so only global
+    bounds apply.  Account-bearing modes retain an opaque owner key so one
+    account cannot consume every shared slot.
     """
-    if not server._deployment_authenticates_callers():
+    if (not server._deployment_authenticates_callers()
+            or context.get("mode") == "api-key"):
         return ""
     material = "admission-owner\0" + _state_principal(context)
     return "ao-" + hashlib.sha256(material.encode("utf-8")).hexdigest()

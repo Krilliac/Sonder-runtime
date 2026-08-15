@@ -261,6 +261,16 @@ class TestServeWiring:
             monkeypatch.delenv(name, raising=False)
         assert ts._admission_request_owner({}) == ""
 
+    def test_pure_api_key_deployment_has_no_admission_owner(self, monkeypatch):
+        import sonder_serve as ts
+
+        monkeypatch.setenv("SONDER_AUTH_MODE", "api-key")
+        monkeypatch.setattr(ts.server, "_deployment_authenticates_callers", lambda: True)
+        # All callers with this shared credential are indistinguishable; an
+        # owner cap would waste global admission capacity without protecting a
+        # second principal.
+        assert ts._admission_request_owner({"mode": "api-key", "api_key": True}) == ""
+
     def test_authenticated_owner_is_an_opaque_stable_digest(self, monkeypatch):
         import sonder_serve as ts
 
