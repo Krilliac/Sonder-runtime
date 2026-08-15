@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS fanout_events (
  kind TEXT NOT NULL, message TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES fanout_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_fanout_events_run ON fanout_events(run_id, event_id DESC);
+-- Runtime retention is timestamp-led; the per-run index above cannot serve
+-- ``ts<?`` pruning and turns the hourly request-path cleanup into a table
+-- scan as fanout history grows.
+CREATE INDEX IF NOT EXISTS idx_fanout_events_retention ON fanout_events(ts, run_id);
 CREATE TABLE IF NOT EXISTS model_health (
  model TEXT PRIMARY KEY, model_class TEXT NOT NULL DEFAULT '', failure_count INTEGER NOT NULL DEFAULT 0,
  availability_failure_count INTEGER NOT NULL DEFAULT 0,

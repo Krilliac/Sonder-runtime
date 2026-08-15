@@ -535,6 +535,30 @@ def test_prune_removes_orphaned_events_of_already_deleted_runs():
     assert store.events(ghost["id"]) == []
 
 
+def test_runtime_event_prune_uses_a_timestamp_led_index(isolated):
+    """The hourly request-path prune must not scan all fanout history."""
+    store.create_run("index question", ["m"])
+    conn = store._connect()
+    try:
+        columns = [
+            row[2] for row in conn.execute(
+                "PRAGMA index_info(idx_fanout_events_retention)"
+            ).fetchall()
+        ]
+        assert columns == ["ts", "run_id"]
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN DELETE FROM fanout_events WHERE ts<? AND run_id NOT IN "
+            "(SELECT id FROM fanout_runs WHERE status NOT IN ('completed','cancelled','interrupted'))",
+            (time.time(),),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert any(
+        "idx_fanout_events_retention" in str(row[3]) and "ts<?" in str(row[3])
+        for row in plan
+    )
+
+
 def test_schema_migration_is_safe_across_two_processes(tmp_path):
     database = tmp_path / "legacy-fanout.db"
     conn = sqlite3.connect(database)
