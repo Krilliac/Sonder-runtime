@@ -1501,6 +1501,38 @@ def test_improvement_report_uses_refreshed_learning_health(monkeypatch):
     assert calls == [True]
 
 
+def test_improvement_report_never_reports_unavailable_autopilot_as_zero(monkeypatch):
+    state = {
+        "quality": {}, "interactions": 0, "outcomes": 0, "lessons": 10,
+        "facts": 0, "outcome_coverage_percent": 0.0,
+        "reviewed_outcomes": 0, "reviewed_positive_percent": 0.0,
+    }
+
+    class Automation:
+        def snapshot(self, **_kwargs):
+            raise OSError("database unavailable")
+
+    class Application:
+        automation = Automation()
+
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "context_health_data", lambda **_kwargs: {"status": "healthy"})
+    monkeypatch.setattr(server, "learning_health_data", lambda: state)
+    monkeypatch.setattr(server, "_application", lambda: Application())
+    monkeypatch.setattr(server, "mcp_runtime_data", lambda: {})
+    monkeypatch.setattr(server, "tool_manifest", lambda: "ground_artifact artifact_ground")
+    monkeypatch.setattr(server, "cloud_allowed", lambda: False)
+
+    report = server.improvement_report_data()
+
+    assert report["autopilot"]["available"] is False
+    assert any(
+        issue["title"] == "Autopilot status is unavailable."
+        for issue in report["issues"]
+    )
+    assert "autonomy: unavailable" in server.format_improvement_report(report)
+
+
 def test_session_history_never_crosses_project_or_uses_shared_summary():
     conn = memory_store.connect(":memory:")
     memory_store.touch_session(conn, "default", project="project-a")
