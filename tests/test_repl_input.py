@@ -33,6 +33,19 @@ def test_clear_terminal_discards_scrollback_without_touching_runtime_state():
     assert command_catalog._CATEGORY_BY_SLASH["/clear"] == "basic"
 
 
+def test_native_clear_delegates_to_the_shared_vt_aware_presentation_helper(monkeypatch):
+    stream = io.StringIO()
+    calls = []
+    monkeypatch.setattr(
+        sonder_repl.slash_menu,
+        "clear_terminal_presentation",
+        lambda target: calls.append(target),
+    )
+
+    assert sonder_repl._clear_terminal_scrollback(stream) is True
+    assert calls == [stream]
+
+
 def test_native_clear_command_uses_terminal_clear_without_a_model_turn(monkeypatch):
     lines = iter(("/clear", "/exit"))
     calls = []
@@ -1010,3 +1023,41 @@ def test_model_tag_selection_is_used_by_consult(monkeypatch):
     sonder_repl.main()
 
     assert seen == {"question": "compare this", "tiers": ["gemma3:12b", "reasoning"]}
+
+
+def test_model_near_miss_suggestion_matches_case_insensitively(monkeypatch, capsys):
+    """A capitalized tag typo still earns a suggestion, like resolution itself."""
+    lines = iter(("/model Gemma3:7b", "/exit"))
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "no installed model named" in output
+    assert "did you mean: gemma3:12b" in output
+
+
+def test_model_bare_tag_argument_does_not_suggest_every_installed_model(monkeypatch, capsys):
+    """An empty base like ":latest" must not match the whole catalog."""
+    lines = iter(("/model :latest", "/exit"))
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "qwen2.5-coder:7b"})
+    monkeypatch.setattr(
+        sonder_repl, "_installed_models",
+        lambda: [("gemma3:12b", "8 GB"), ("qwen2.5-coder:7b", "4 GB")],
+    )
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+
+    sonder_repl.main()
+
+    output = capsys.readouterr().out
+    assert "no installed model named" in output
+    assert "did you mean" not in output
+    assert "run /model with no argument" in output

@@ -114,8 +114,12 @@ def _clear_terminal_scrollback(stream=None):
     target = stream or sys.stdout
     csi = getattr(slash_menu, "CSI", "\x1b[")
     try:
-        target.write(csi + "3J" + csi + "2J" + csi + "H")
-        target.flush()
+        clear = getattr(slash_menu, "clear_terminal_presentation", None)
+        if callable(clear):
+            clear(target)
+        else:
+            target.write(csi + "3J" + csi + "2J" + csi + "H")
+            target.flush()
     except (AttributeError, OSError):
         # A piped or closed stdout must not terminate the REPL merely because
         # a presentation-only command was requested.
@@ -1507,8 +1511,11 @@ def main():
         if selected_model is None:
             # Refuse rather than rebind to something that will fail on the next
             # turn with an opaque ollama error. Suggest, because a near miss is
-            # usually a tag typo (":7b" vs ":latest").
-            near = [name for name in names if arg.split(":")[0] in name]
+            # usually a tag typo (":7b" vs ":latest"). Match the command's own
+            # case-insensitive resolution, and never suggest from an empty base
+            # (an arg like ":latest"), which would match every installed tag.
+            base = arg.split(":")[0].casefold()
+            near = [name for name in names if base and base in name.casefold()]
             print(_paint("no installed model named %r" % arg, _Ansi.red))
             if near:
                 print("did you mean: %s" % ", ".join(near[:5]))
