@@ -8515,9 +8515,11 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         gated_positive / 100.0 if gated_positive is not None else None
     )
     issues = []
+    autopilot_available = True
     try:
         autopilot = _application().automation.snapshot(include_finished=False, limit=100)
     except Exception:
+        autopilot_available = False
         autopilot = {
             "active_runs": 0,
             "resumable_runs": 0,
@@ -8624,6 +8626,13 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "%d autonomous run(s) need explicit review or resume."
             % autonomous_attention,
             "Inspect /autopilot status, then deliberately resume, cancel, or revise the goal.",
+        )
+    if not autopilot_available:
+        add(
+            "autonomy",
+            "medium",
+            "Autopilot status is unavailable.",
+            "Run /autopilot status after the store recovers; do not treat missing status as no active work.",
         )
     if mcp_state.get("last_error"):
         provenance = mcp_state.get("provenance") or {}
@@ -8762,6 +8771,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         },
         "learning_health": learning_state,
         "autopilot": {
+            "available": autopilot_available,
             "active": autopilot.get("active_runs", 0),
             "resumable": autopilot.get("resumable_runs", 0),
             "database": autopilot.get("database", ""),
@@ -8809,9 +8819,13 @@ def format_improvement_report(report: dict) -> str:
             report.get("context_status", "unknown"),
             "enabled" if report.get("cloud_allowed") else "disabled",
         ),
-        "  autonomy: %s active | %s resumable" % (
-            report.get("autopilot", {}).get("active", 0),
-            report.get("autopilot", {}).get("resumable", 0),
+        (
+            "  autonomy: unavailable"
+            if not report.get("autopilot", {}).get("available", True)
+            else "  autonomy: %s active | %s resumable" % (
+                report.get("autopilot", {}).get("active", 0),
+                report.get("autopilot", {}).get("resumable", 0),
+            )
         ),
         "  mcp: %s | %s tools | %s atomic refreshes" % (
             report.get("mcp_runtime", {}).get("status", "unknown"),
