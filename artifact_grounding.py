@@ -3565,13 +3565,25 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         # limit, never added to the byte total, and never hashed. The limits
         # were measuring the manifest's honesty about itself.
         actual = []
+        links = []
         for item in path.rglob("*"):
-            if item.is_file() and not item.is_symlink():
+            if item.is_symlink():
+                links.append(item)
+                continue
+            if item.is_file():
                 actual.append(item)
                 if len(actual) > MAX_BUNDLE_FILES:
                     break
         _check(checks, "bundle-file-limit", len(actual) <= MAX_BUNDLE_FILES,
                "%d files on disk (at most %d)" % (len(actual), MAX_BUNDLE_FILES))
+        _check(
+            checks, "bundle-no-symlinks", not links,
+            ("%d symlinks: %s" % (
+                len(links), ", ".join(
+                    item.relative_to(path).as_posix() for item in links[:5]
+                ),
+            )) if links else "none",
+        )
         declared_paths = {candidate.resolve() for _name, candidate in declared}
         manifest_path = (path / "manifest.json").resolve()
         undeclared = sorted(
@@ -3586,13 +3598,25 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         )
     else:
         generic = []
+        links = []
         for item in path.rglob("*"):
-            if item.is_file() and not item.is_symlink():
+            if item.is_symlink():
+                links.append(item)
+                continue
+            if item.is_file():
                 generic.append(item)
                 if len(generic) > MAX_BUNDLE_FILES:
                     break
         generic.sort()
         _check(checks, "bundle-file-limit", len(generic) <= MAX_BUNDLE_FILES, "%d files" % len(generic))
+        _check(
+            checks, "bundle-no-symlinks", not links,
+            ("%d symlinks: %s" % (
+                len(links), ", ".join(
+                    item.relative_to(path).as_posix() for item in links[:5]
+                ),
+            )) if links else "none",
+        )
         declared = [(item.relative_to(path).as_posix(), item) for item in generic[:MAX_BUNDLE_FILES]]
 
     required_files = _string_list(requirements, "required_files")

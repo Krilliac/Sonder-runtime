@@ -601,6 +601,27 @@ def test_manifest_bundle_is_validated_against_the_directory_not_itself(tmp_path)
     assert named.get("bundle-no-undeclared-files") is False
 
 
+@pytest.mark.parametrize("with_manifest", [False, True])
+def test_directory_bundle_rejects_in_tree_symlinks(tmp_path, with_manifest):
+    root = _bundle_with_extras(tmp_path, 0)
+    if not with_manifest:
+        (root / "manifest.json").unlink()
+    target = root / "report.md"
+    link = root / "report-alias.md"
+    try:
+        link.symlink_to(target.name)
+    except OSError as exc:
+        pytest.skip("symlink creation unavailable: %s" % exc)
+
+    result = artifact_grounding._validate_directory(root, "bundle", {})
+
+    assert result["ok"] is False
+    assert any(
+        check.get("name") == "bundle-no-symlinks" and not check.get("ok")
+        for check in result["checks"]
+    )
+
+
 def test_bundle_glb_grounding_propagates_no_external_dependencies(
     monkeypatch, tmp_path
 ):
