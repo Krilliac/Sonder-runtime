@@ -3059,7 +3059,10 @@ def find_session(conn, prefix):
 
 RECALL_CANDIDATE_ROW_LIMIT = 512
 RECALL_CANDIDATE_BYTE_LIMIT = 8 * 1024 * 1024
-RECALL_CANDIDATE_TIME_LIMIT_S = 0.5
+# Recall still has a strict request-local deadline.  A one-second ceiling leaves
+# enough scheduling headroom for the full 512-row in-memory window on contended
+# CI and modest local CPUs; the row and byte caps remain the primary work bound.
+RECALL_CANDIDATE_TIME_LIMIT_S = 1.0
 RECALL_MAX_STORED_TASK_CHARS = 64_000
 RECALL_RESPONSE_PREFIX_CHARS = 401
 RECALL_MAX_EMBEDDING_BYTES = 64 * 1024
