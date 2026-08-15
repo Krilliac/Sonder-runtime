@@ -285,6 +285,62 @@ _RULES = [
     _rule(r"^set\s+(?:the\s+)?(?:persona|voice)\s+to\s+(?P<arg>.+)$", _with_arg("/persona")),
     _rule(r"^set\s+(?:the\s+)?model\s+to\s+(?P<arg>.+)$", _with_arg("/model")),
 
+    # --- capability / self-report discovery (read-only) ---
+    #
+    # "What am I talking to, and how is it doing" -- the questions people
+    # actually open a session with. Each target is catalogued ``safe``: it
+    # reads runtime state and returns text, and none of them writes a file,
+    # runs a command, or reaches the network. Their mutating neighbours are
+    # deliberately absent: ``/update_system_profile`` rewrites the standing
+    # instructions and ``/runtime_policy_update`` rewrites model mappings, so
+    # both stay reachable only by naming them, under the catalog's adjacency
+    # rule for risky commands.
+    #
+    # Every pattern is a complete turn (``resolve`` uses ``fullmatch``) and
+    # captures no prose, so "what tools do you have for editing images and can
+    # you use one on logo.png" is work and falls through untouched, and a
+    # quoted "list your tools" copied out of a page never dispatches.
+    #
+    # This block sits last among the hand-written rules on purpose: an earlier
+    # rule that already claims a phrase keeps it, so nothing above moves. What
+    # does move is the *generic* reading of two turns -- "show me your tools"
+    # and "show me the tools" used to fall through to the catalog and land on
+    # ``/activity`` (recent tool activity) when they are asking for the tool
+    # list. An anchored rule is the right place to settle that.
+    _rule(r"^(?:what|which)\s+tools?\s+do\s+you\s+have\s*[?!.]*$",
+          _fixed("/tool_manifest")),
+    _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?tools\s*[?!.]*$",
+          _fixed("/tool_manifest")),
+
+    # The local-model report, not the model *switch*: "/model <tier>" keeps
+    # its own rules above and stays the way to change anything.
+    _rule(r"^(?:what|which)\s+models?\s+(?:are\s+you\s+|is\s+|are\s+)?"
+          r"(?:running|loaded)\s*[?!.]*$", _fixed("/status")),
+    _rule(r"^model\s+status\s*[?!.]*$", _fixed("/status")),
+
+    _rule(r"^how\s+(?:reliable|accurate|well[\s-]?calibrated)\s+are\s+you"
+          r"\s*[?!.]*$", _fixed("/calibration_status")),
+    _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?calibration"
+          r"(?:\s+status)?\s*[?!.]*$", _fixed("/calibration_status")),
+
+    _rule(r"^(?:(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?)?learning\s+"
+          r"health(?:\s+status)?\s*[?!.]*$", _fixed("/learning_health_status")),
+    _rule(r"^how\s+(?:is|are)\s+(?:your\s+)?learning\s+(?:going|doing)"
+          r"\s*[?!.]*$", _fixed("/learning_health_status")),
+
+    _rule(r"^(?:show\s+(?:me\s+)?(?:the\s+)?)?mcp\s+(?:runtime\s+)?status"
+          r"\s*[?!.]*$", _fixed("/mcp_runtime_status")),
+
+    # Reading the standing instructions. Editing them is /update_system_profile
+    # and is never reached from here -- "update your standing instructions to
+    # prefer tabs" matches nothing below.
+    _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?"
+          r"(?:standing\s+instructions|system\s+profile)\s*[?!.]*$",
+          _fixed("/system_profile_text")),
+    _rule(r"^what(?:'s|\s+is|\s+are)\s+(?:your\s+|the\s+)?"
+          r"(?:standing\s+instructions|system\s+profile)\s*[?!.]*$",
+          _fixed("/system_profile_text")),
+
     # --- help ---
     _rule(r"^(?:help|what\s+can\s+you\s+do|show\s+help)\b", _fixed("/help")),
 ]
