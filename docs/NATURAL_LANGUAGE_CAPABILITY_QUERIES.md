@@ -5,8 +5,10 @@ well calibrated it is, how its learning is doing, whether the MCP registry has
 converged, and what standing instructions it is carrying.
 
 Every command in this guide is catalogued **`safe`**: it reads runtime state
-and returns text. Nothing here writes a file, runs a command, starts a
-workflow, or reaches the network.
+and returns text. Nothing here writes a file, runs a command, or starts a
+workflow. `/status` queries the configured Ollama endpoint; that remains local
+with Sonder's default loopback endpoint, but can reach a remote Ollama host if
+an operator explicitly configures one.
 
 ## Where each form works
 
