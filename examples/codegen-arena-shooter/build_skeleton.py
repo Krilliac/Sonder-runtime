@@ -56,6 +56,7 @@ import specs  # noqa: E402
 import bodynotes  # noqa: E402
 import codegen_loop  # noqa: E402
 import server  # noqa: E402
+import sonder_paths  # noqa: E402
 
 # ``server``/``codegen_loop`` may legitimately import the runtime's own
 # project_scaffold module. Load this example-local manifest helper under a
@@ -69,6 +70,25 @@ if _SCAFFOLD_SPEC is None or _SCAFFOLD_SPEC.loader is None:
 _SCAFFOLD_MODULE = importlib.util.module_from_spec(_SCAFFOLD_SPEC)
 _SCAFFOLD_SPEC.loader.exec_module(_SCAFFOLD_MODULE)
 ensure_project_file = _SCAFFOLD_MODULE.ensure_project_file
+
+
+def default_project_path() -> str:
+    """Return the per-user destination for generated skeleton output.
+
+    Generated game code is runtime/user state, not source checkout content.
+    Keeping it below the configured Sonder home means an update or a normal
+    ``--prepare-only`` build cannot make the installation look dirty.
+    """
+    override = os.environ.get("SONDER_GAME_SKELETON_PROJECT", "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return str(
+        sonder_paths.default_home()
+        / "examples" / "arena-shooter" / "FpsGame_Skeleton"
+    )
+
+
+PROJECT = default_project_path()
 
 FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
@@ -151,6 +171,67 @@ def compiler_error_preview(errors: list[str], *, limit: int = 3) -> str:
     shown = rows[:max(1, int(limit))]
     suffix = "\n      ... and %d more" % (len(rows) - len(shown)) if len(rows) > len(shown) else ""
     return "\n      " + "\n      ".join(row[:240] for row in shown) + suffix
+
+
+def run_verifier(project: str) -> tuple[bool, str]:
+    """Run the held-out assembly verifier against one generated project.
+
+    The verifier is deliberately a separate executable so a broken generated
+    assembly cannot break its own build.  It receives the exact project path
+    instead of relying on a source-tree-relative default.
+    """
+    def bounded_output(stdout, stderr) -> str:
+        output = ((stdout or "") + (stderr or "")).strip()
+        if len(output) > 8_000:
+            output = output[:8_000] + "\n... verifier output truncated"
+        return output
+
+    def target_path(value) -> str:
+        """Keep an explicit Windows absolute target absolute under Linux CI.
+
+        ``os.path.abspath`` intentionally follows the host platform.  The
+        generator and its tests also accept a Windows project path on a
+        non-Windows controller, where treating ``C:/...`` as a repository
+        relative string points MSBuild at the wrong project.
+        """
+        text = os.fspath(value)
+        if (
+            len(text) >= 3
+            and text[0].isalpha()
+            and text[1] == ":"
+            and text[2] in ("/", "\\")
+        ) or text.startswith("\\\\"):
+            return text
+        return os.path.abspath(text)
+
+    verifier = os.path.join(HERE, "Verify")
+    target = "-p:SonderTarget=" + target_path(project)
+    try:
+        # A file reference whose HintPath changes via an MSBuild property is
+        # not reliably recopied by an incremental `dotnet run`: the previous
+        # target can leave a stale/missing FpsGameSonder.dll in Verify/bin.
+        # Build this exact target non-incrementally, then run that artifact.
+        build = subprocess.run(
+            [
+                "dotnet", "build", verifier, "-c", "Release", "--nologo",
+                "--no-incremental", target,
+            ],
+            cwd=HERE, capture_output=True, text=True, timeout=300,
+        )
+    except Exception as exc:
+        return False, "verifier could not run: %s" % exc
+    output = bounded_output(build.stdout, build.stderr)
+    if build.returncode != 0:
+        return False, output or "verifier build failed without output"
+    try:
+        proc = subprocess.run(
+            ["dotnet", "run", "--project", verifier, "-c", "Release", "--no-build", "--nologo"],
+            cwd=HERE, capture_output=True, text=True, timeout=300,
+        )
+    except Exception as exc:
+        return False, "verifier could not run: %s" % exc
+    output = bounded_output(proc.stdout, proc.stderr)
+    return proc.returncode == 0, output or "verifier produced no output"
 
 
 def strip_fences(text: str) -> str:
@@ -317,7 +398,16 @@ def dependency_brief(done: list) -> str:
 
 
 def main():
+    global PROJECT
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--project",
+        default=PROJECT,
+        help=(
+            "output project directory (default: SONDER_GAME_SKELETON_PROJECT "
+            "or the per-user Sonder state directory)"
+        ),
+    )
     parser.add_argument("--only", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--tiers", default="code,reasoning")
@@ -329,6 +419,10 @@ def main():
                         help="rewrite every skeleton before filling")
     parser.add_argument("--prepare-only", action="store_true",
                         help="write the deterministic project/skeleton and verify its baseline build; never call a model")
+    parser.add_argument("--verify", action="store_true",
+                        help="after generation, run Verify/ against this exact project and fail on held-out checks")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="verify an existing generated project without requesting any model bodies")
     parser.add_argument("--model", default="",
                         help="override the ollama model behind --tiers, so two "
                              "models can be compared on identical slots")
@@ -344,6 +438,8 @@ def main():
         print("no such file in skeleton: %s" % args.only)
         print("available files: %s" % ", ".join(sorted(known_files)))
         return 2
+
+    PROJECT = os.path.abspath(os.path.expanduser(args.project))
 
     if args.model:
         # A/B on the SAME slots is the only comparison worth making here: the
@@ -384,6 +480,14 @@ def main():
             return 1
         print("baseline build succeeded; no model bodies were requested.")
         return 0
+    if args.verify_only:
+        if errors:
+            print("ABORT: generated project does not build; held-out verification was not run.")
+            return 1
+        verified, output = run_verifier(PROJECT)
+        print("=== HELD-OUT VERIFIER: %s ===" % ("PASSED" if verified else "FAILED"))
+        print(output)
+        return 0 if verified else 1
 
     slots = []
     for name, skel in skeleton.FILES:
@@ -550,6 +654,14 @@ def main():
     print("elapsed            : %.1f min" % ((time.time() - started) / 60.0))
     print("\nNOTE: a green build is not proof the game works. Every unfilled "
           "body still throws NotImplementedException at runtime.")
+    if not ran or errors:
+        return 1
+    if args.verify:
+        verified, output = run_verifier(PROJECT)
+        print("\n=== HELD-OUT VERIFIER: %s ===" % ("PASSED" if verified else "FAILED"))
+        print(output)
+        if not verified:
+            return 1
     return 0
 
 
