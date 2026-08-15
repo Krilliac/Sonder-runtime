@@ -223,6 +223,104 @@ def test_direct_fanout_resume_and_cancel_retries_do_not_repeat_actions(monkeypat
     sonder_lifecycle.reset_for_tests()
 
 
+def test_expired_completed_receipts_are_evicted_at_claim(monkeypatch, tmp_path):
+    """The durable replay window is the TTL; crash evidence never expires."""
+    _receipt_store(monkeypatch, tmp_path)
+    base = 1_000_000.0
+    ttl = served_action_receipts.completed_ttl_seconds()
+    assert served_action_receipts.claim("act-k1", now=base) == "claimed"
+    served_action_receipts.finish("act-k1", now=base)
+    # act-k2 is deliberately left 'started': an interrupted action.
+    assert served_action_receipts.claim("act-k2", now=base) == "claimed"
+    later = base + ttl + 1
+    # A claim past the window prunes the expired completed receipt ...
+    assert served_action_receipts.claim("act-k3", now=later) == "claimed"
+    # ... so its key is re-admitted rather than refused as a stale replay.
+    assert served_action_receipts.claim("act-k1", now=later) == "claimed"
+    # Interrupted actions stay fail-closed regardless of age.
+    assert served_action_receipts.claim("act-k2", now=later) == "started"
+
+
+def test_receipt_admission_is_capacity_bounded(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_SERVED_RECEIPT_LIMIT", "2")
+    assert served_action_receipts.claim("cap-k1", owner_scope="ow-a") == "claimed"
+    assert served_action_receipts.claim("cap-k2", owner_scope="ow-a") == "claimed"
+    rejected = served_action_receipts.claim("cap-k3", owner_scope="ow-a")
+    assert rejected == served_action_receipts.REJECTED
+    # A rejected key was never inserted, so it stays rejected while full.
+    assert served_action_receipts.claim("cap-k3", owner_scope="ow-a") == (
+        served_action_receipts.REJECTED
+    )
+    # Replays of retained receipts are never capacity-rejected.
+    assert served_action_receipts.claim("cap-k1", owner_scope="ow-a") == "started"
+    served_action_receipts.finish("cap-k1")
+    assert served_action_receipts.claim("cap-k1", owner_scope="ow-a") == "completed"
+
+
+def test_owner_scoped_admission_protects_other_principals(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_SERVED_RECEIPT_OWNER_LIMIT", "1")
+    assert served_action_receipts.claim("own-a1", owner_scope="ow-a") == "claimed"
+    assert served_action_receipts.claim("own-a2", owner_scope="ow-a") == (
+        served_action_receipts.REJECTED
+    )
+    # One principal exhausting its budget must not starve another.
+    assert served_action_receipts.claim("own-b1", owner_scope="ow-b") == "claimed"
+
+
+def test_account_receipt_budget_is_per_principal(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_SERVED_RECEIPT_OWNER_LIMIT", "1")
+    sonder_lifecycle.reset_for_tests()
+    calls = []
+    action = "workbench\0demo\0/work repair"
+
+    assert serve._idempotent_http_action(
+        _account("alice"), "a-key-1", action, lambda: calls.append("a1") or "done-a1"
+    ) == "done-a1"
+    refused = serve._idempotent_http_action(
+        _account("alice"), "a-key-2", action, lambda: calls.append("a2") or "done-a2"
+    )
+    assert refused.startswith("idempotency receipt capacity exhausted")
+    # Rejection is backpressure, not degraded execution: nothing ran.
+    assert serve._idempotent_http_action(
+        _account("bob"), "b-key-1", action, lambda: calls.append("b1") or "done-b1"
+    ) == "done-b1"
+    assert calls == ["a1", "b1"]
+    # The retained receipt still refuses replay after a restart.
+    sonder_lifecycle.reset_for_tests()
+    replay = serve._idempotent_http_action(
+        _account("alice"), "a-key-1", action, lambda: calls.append("bad") or "bad"
+    )
+    assert replay.startswith("idempotent action refused: it already completed")
+    assert calls == ["a1", "b1"]
+    sonder_lifecycle.reset_for_tests()
+
+
+def test_capacity_refusal_is_not_cached_and_can_retry_after_admission(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_SERVED_RECEIPT_LIMIT", "1")
+    sonder_lifecycle.reset_for_tests()
+    calls = []
+    context = _account("alice")
+    action = "workbench\0demo\0/work repair"
+
+    assert serve._idempotent_http_action(
+        context, "first", action, lambda: calls.append("first") or "first"
+    ) == "first"
+    refused = serve._idempotent_http_action(
+        context, "retry", action, lambda: calls.append("bad") or "bad"
+    )
+    assert refused.startswith("idempotency receipt capacity exhausted")
+    monkeypatch.setenv("SONDER_SERVED_RECEIPT_LIMIT", "2")
+    assert serve._idempotent_http_action(
+        context, "retry", action, lambda: calls.append("retry") or "retry"
+    ) == "retry"
+    assert calls == ["first", "retry"]
+    sonder_lifecycle.reset_for_tests()
+
+
 def test_permission_mode_retry_runs_once_and_binds_requested_mode(monkeypatch):
     sonder_lifecycle.reset_for_tests()
     calls = []
