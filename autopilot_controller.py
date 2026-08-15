@@ -441,8 +441,23 @@ def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str 
     # only the published ``snapshot(include_finished, limit)`` contract.
     # Account-backed callers deliberately do *not* fall back: omitting their
     # owner would turn an adapter mismatch into a cross-account disclosure.
+    used_store_fallback = False
     if request_owner is None:
-        data = automation.snapshot(include_finished=include_finished, limit=limit)
+        try:
+            data = automation.snapshot(include_finished=include_finished, limit=limit)
+        except TypeError as exc:
+            # A live-reloaded store can briefly be newer than a cached adapter
+            # instance.  Local-open status is read-only, so it can safely use
+            # the current durable implementation in this one compatibility
+            # case.  Never do this for a scoped account request: dropping its
+            # owner would disclose another account's runs.
+            if "unexpected keyword argument 'request_owner'" not in str(exc):
+                raise
+            data = autopilot_store.snapshot(
+                include_finished=include_finished,
+                limit=limit,
+            )
+            used_store_fallback = True
     else:
         data = automation.snapshot(
             include_finished=include_finished,
@@ -451,7 +466,9 @@ def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str 
         )
     latest = data.get("latest")
     if latest:
-        if request_owner is None:
+        if used_store_fallback:
+            data["events"] = autopilot_store.events(latest["id"], limit=12)
+        elif request_owner is None:
             data["events"] = automation.events(latest["id"], limit=12)
         else:
             data["events"] = automation.events(
