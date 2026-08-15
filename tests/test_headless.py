@@ -476,6 +476,28 @@ def test_main_start_accepts_a_managed_listener_that_binds_after_readiness_window
     assert H.main(["start"]) == 0
 
 
+def test_main_start_rechecks_managed_listener_identity_after_status(monkeypatch):
+    """A just-ready Windows listener must not cause a false failed launch."""
+    monkeypatch.delenv(H.CONTROL_GATE_ENV, raising=False)
+    monkeypatch.setattr(H, "start_ollama", lambda: "ollama: already reachable")
+    monkeypatch.setattr(H, "ensure_sonder_alias", lambda: (True, "engine: alias ready"))
+    monkeypatch.setattr(
+        H, "start_sonder",
+        lambda *args, **kwargs: "sonder: start requested pid=7, not reachable yet",
+    )
+    monkeypatch.setattr(H, "status", lambda *args: "sonder api: listening on http://127.0.0.1:11435")
+    identities = iter((None, 7, 7))
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: next(identities))
+    seen = {}
+    monkeypatch.setattr(
+        H, "wait_until",
+        lambda fn, seconds: seen.setdefault("seconds", seconds) == 2 and fn(),
+    )
+
+    assert H.main(["start"]) == 0
+    assert seen["seconds"] == 2
+
+
 def test_start_sonder_rejects_unmanaged_listener_that_appears_after_spawn(monkeypatch, tmp_path):
     """A live port is not readiness when another process owns it."""
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)

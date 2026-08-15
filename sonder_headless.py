@@ -630,6 +630,13 @@ def main(argv=None) -> int:
     # can verify the listener belongs to our managed Sonder process.  Do not
     # treat an arbitrary unmanaged listener as success.
     managed = _managed_listener_pid(args.host, args.port)
+    if not managed:
+        # A Windows process can accept the readiness probe just before its
+        # listener ownership becomes observable through ``netstat``.  Give
+        # that identity check one small, bounded chance to converge; a bare
+        # open port still never becomes launch success.
+        wait_until(lambda: _managed_listener_pid(args.host, args.port) is not None, 2)
+        managed = _managed_listener_pid(args.host, args.port)
     # ``_managed_listener_pid`` proves both ownership and the listener, so a
     # hung/pre-bind child still returns a failure to launchers and the desktop
     # shell.
