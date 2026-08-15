@@ -308,6 +308,8 @@ def test_bodyless_post_keeps_the_connection_reusable(monkeypatch):
         ({"Content-Length": "12"}, False, 12),
         ({"Content-Length": "12"}, True, 0),
         ({"Content-Length": "not-a-number"}, False, None),
+        ({"Content-Length": "\u00b2"}, False, None),
+        ({"Content-Length": "9" * 5000}, False, None),
         ({"Transfer-Encoding": "chunked"}, False, None),
     ],
 )

@@ -3039,7 +3039,13 @@ class Handler(BaseHTTPRequestHandler):
         raw = lengths[0].strip()
         if not raw.isdigit():
             return None
-        return int(raw)
+        try:
+            return int(raw)
+        except ValueError:
+            # Unicode decimal digits and very long digit strings can pass
+            # isdigit() yet still be rejected by int(). Treat either as
+            # unframed so the caller closes rather than dropping its response.
+            return None
 
     def _settle_unread_request_body(self):
         """Return whether this response must also end the connection.
