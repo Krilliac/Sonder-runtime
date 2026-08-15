@@ -253,6 +253,10 @@ class TurnResult:
     # misleading.
     resolved_model: str = ""
     resolved_tier: str = ""
+    # Deterministic request-cache consultation result: "hit", "miss", or ""
+    # when the turn never consulted the cache.  A closed set by construction,
+    # so it is safe to surface in the bounded HTTP receipt.
+    cache: str = ""
 
 
 class _LegacyConversationState:
@@ -681,6 +685,19 @@ def _admission_request_owner(context):
         return ""
     material = "admission-owner\0" + _state_principal(context)
     return "ao-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _request_cache_scope(context):
+    """Opaque request-owner scope for the deterministic request cache.
+
+    Binds cache entries to one HTTP principal so two accounts can never share
+    a response, even for byte-identical requests.  Domain separated from the
+    fanout/reasoning owner digests so a value from one namespace can never be
+    replayed in another, and hashed so the raw principal is never stored as a
+    cache-key input.
+    """
+    material = "request-cache-owner\0" + _state_principal(context)
+    return "qc-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _feed_request_owner(context):
@@ -2418,11 +2435,22 @@ def _turn_reasoning():
 
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
-    state=None, return_result=False, metrics=None, augment=True,
+    state=None, return_result=False, metrics=None, augment=True, cache_scope="",
 ):
     """Call Sonder Runtime's learning loop with the UI's prior turns; returns UI text."""
     state = _state_or_legacy(state)
     resolved_target = {}
+    cache_state = {}
+
+    def record_cache(status):
+        # Bounded, content-free consultation result.  The closed set is
+        # enforced here as well as at the metric so an unexpected value from
+        # the generation layer can neither reach the receipt nor create a
+        # new metric label.
+        if status in ("hit", "miss"):
+            cache_state["status"] = status
+            if metrics is not None:
+                metrics.observe_request_cache(status)
 
     def record_target(model, tier_label, _cloud):
         # This callback is invoked by the generation path after it has accepted
@@ -2439,13 +2467,17 @@ def _run_prompt(
             prompt, history, trace=state.trace, strict=state.strict, tier=tier,
             context_size=context_size, session=session, project=project,
             raise_model_errors=True, target_observer=record_target, augment=augment,
+            cache_scope=cache_scope, cache_observer=record_cache,
         )
         outcome = "error" if out.startswith("ERROR") else "ok"
     finally:
         # This is the primary generation selected for an HTTP turn. Keep the
         # exported labels independent of exact models and configured aliases.
         # A control route has no target and must not masquerade as a model call.
-        if metrics is not None and "cloud" in resolved_target:
+        # A replay has no model invocation.  It still reports its bounded cache
+        # result separately, but must not inflate inference counters/latency.
+        if (metrics is not None and "cloud" in resolved_target
+                and cache_state.get("status") != "hit"):
             metrics.observe_model_call(
                 cloud=resolved_target["cloud"], result=outcome,
                 elapsed_seconds=time.monotonic() - started,
@@ -2461,6 +2493,7 @@ def _run_prompt(
     result = TurnResult(
         _strip_footer(out), iid, run_source, _turn_reasoning(),
         resolved_target.get("model", ""), resolved_target.get("tier", ""),
+        cache_state.get("status", ""),
     )
     return result if return_result else result.content
 
@@ -4281,6 +4314,15 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project,
                             state=state,
                             return_result=True,
+                            # The deterministic request cache is offered only
+                            # to this plain, non-streaming generation
+                            # fall-through: every control/tool/web/work/agent
+                            # route has already returned above, and streamed
+                            # or structured turns never receive a scope.  An
+                            # empty scope is an unconditional cache denial.
+                            cache_scope=(
+                                "" if stream else _request_cache_scope(context)
+                            ),
                             # Account-backed deployments intentionally do not
                             # inject or train the legacy global lesson store.
                             # Their durable chat/session project IDs remain
@@ -4395,6 +4437,10 @@ class Handler(BaseHTTPRequestHandler):
         if response_model and response_tier:
             receipt["model"] = response_model
             receipt["tier"] = response_tier
+        # Present only when the turn actually consulted the deterministic
+        # request cache; a closed "hit"/"miss" set with no request identity.
+        if turn is not None and getattr(turn, "cache", ""):
+            receipt["cache"] = turn.cache
         if stream:
             streamed = self._send_stream(
                 content, model, iid=response_iid, elapsed_ms=elapsed_ms,
