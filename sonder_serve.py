@@ -449,7 +449,19 @@ def _idempotent_http_action(context, supplied_key, action, factory):
             pass
         return result
 
-    return sonder_lifecycle.get().idempotent(cache_key, durable_factory)
+    return sonder_lifecycle.get().idempotent(
+        cache_key,
+        durable_factory,
+        # The in-process result cannot outlive the durable receipt: otherwise
+        # an expired key remains silently cached until unrelated cache churn.
+        cache_ttl_seconds=served_action_receipts.completed_ttl_seconds(),
+        # Capacity rejection writes no durable receipt and explicitly invites
+        # retry after pressure drops, so never freeze that refusal in memory.
+        cache_result=lambda result: not (
+            isinstance(result, str)
+            and result.startswith("idempotency receipt capacity exhausted:")
+        ),
+    )
 
 
 def _task_account_scope(context):

@@ -298,6 +298,29 @@ def test_account_receipt_budget_is_per_principal(monkeypatch, tmp_path):
     sonder_lifecycle.reset_for_tests()
 
 
+def test_capacity_refusal_is_not_cached_and_can_retry_after_admission(monkeypatch, tmp_path):
+    _receipt_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_SERVED_RECEIPT_LIMIT", "1")
+    sonder_lifecycle.reset_for_tests()
+    calls = []
+    context = _account("alice")
+    action = "workbench\0demo\0/work repair"
+
+    assert serve._idempotent_http_action(
+        context, "first", action, lambda: calls.append("first") or "first"
+    ) == "first"
+    refused = serve._idempotent_http_action(
+        context, "retry", action, lambda: calls.append("bad") or "bad"
+    )
+    assert refused.startswith("idempotency receipt capacity exhausted")
+    monkeypatch.setenv("SONDER_SERVED_RECEIPT_LIMIT", "2")
+    assert serve._idempotent_http_action(
+        context, "retry", action, lambda: calls.append("retry") or "retry"
+    ) == "retry"
+    assert calls == ["first", "retry"]
+    sonder_lifecycle.reset_for_tests()
+
+
 def test_permission_mode_retry_runs_once_and_binds_requested_mode(monkeypatch):
     sonder_lifecycle.reset_for_tests()
     calls = []

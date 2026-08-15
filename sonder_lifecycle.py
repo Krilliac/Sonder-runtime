@@ -379,14 +379,25 @@ class RuntimeLifecycle:
 
     # -- idempotency -------------------------------------------------------
 
-    def idempotent(self, key: str, factory) -> dict:
-        """Return the recorded response for ``key`` or compute and record."""
+    def idempotent(self, key: str, factory, *, cache_ttl_seconds=None,
+                   cache_result=None) -> dict:
+        """Return the recorded response for ``key`` or compute and record.
+
+        ``cache_ttl_seconds`` lets a durable caller keep process-local replay
+        results no longer than its durable receipt. ``cache_result`` can opt a
+        retryable refusal out of the completed-result cache while preserving
+        same-key in-flight coalescing.
+        """
         if not key:
             return factory()
         while True:
             with self._idempotency_lock:
-                if key in self._idempotency:
-                    return self._idempotency[key]
+                cached = self._idempotency.get(key)
+                if cached is not None:
+                    result, expires_at = cached
+                    if expires_at is None or time.monotonic() < expires_at:
+                        return result
+                    self._idempotency.pop(key, None)
                 pending = self._idempotency_inflight.get(key)
                 if pending is None:
                     pending = threading.Event()
@@ -403,7 +414,17 @@ class RuntimeLifecycle:
         with self._idempotency_lock:
             if len(self._idempotency) > 1024:
                 self._idempotency.clear()
-            self._idempotency[key] = result
+            should_cache = cache_result(result) if cache_result else True
+            if should_cache:
+                try:
+                    ttl = None if cache_ttl_seconds is None else max(
+                        0.0, float(cache_ttl_seconds)
+                    )
+                except (TypeError, ValueError):
+                    ttl = None
+                self._idempotency[key] = (
+                    result, None if ttl is None else time.monotonic() + ttl,
+                )
             self._idempotency_inflight.pop(key).set()
             return result
 
