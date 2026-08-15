@@ -313,6 +313,11 @@ def _named_command_gate(cmd):
         tools = command_catalog.console_tools().get(cmd, ())
     except command_catalog.CatalogUnavailable as exc:
         return False, "refused %s: %s" % (cmd, exc)
+    # Workspace creation is implemented by a nested REPL helper, so it is not
+    # visible to the catalog's top-level branch scanner.  Keep its filesystem
+    # mutation in the same single choke-point gate as every other command.
+    if cmd in ("/workspace-create", "/workspacecreate"):
+        tools = tuple(tools) + ("directory_create",)
     return _gate_tools(tools, cmd)
 
 
@@ -1850,10 +1855,7 @@ def main():
             # One choke point for every hand-written branch below, including
             # the ones forwarded to server.control_command. Commands handled by
             # _run_catalogued (the `else`) are gated there instead.
-            if cmd in ("/workspace-create", "/workspacecreate"):
-                may_run, refusal = _permission_gate("directory_create")
-            else:
-                may_run, refusal = _named_command_gate(cmd)
+            may_run, refusal = _named_command_gate(cmd)
             if not may_run:
                 print(refusal)
                 continue

@@ -1170,8 +1170,9 @@ def test_workspace_create_obeys_directory_create_permission(monkeypatch, tmp_pat
         monkeypatch, iter(("/workspace-create %s" % workspace, "/exit")), {},
     )
     monkeypatch.setattr(
-        sonder_repl, "_permission_gate",
-        lambda tool: (False, "refused /workspace-create") if tool == "directory_create" else (True, ""),
+        sonder_repl, "_named_command_gate",
+        lambda command: (False, "refused /workspace-create")
+        if command == "/workspace-create" else (True, ""),
     )
     monkeypatch.setattr(
         sonder_repl.server, "directory_create", lambda **kwargs: calls.append(kwargs),
