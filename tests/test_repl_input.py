@@ -48,6 +48,40 @@ def test_native_clear_command_uses_terminal_clear_without_a_model_turn(monkeypat
     assert calls == ["clear"]
 
 
+def test_refactor_apply_prompt_never_reads_piped_stdin(monkeypatch):
+    lines = iter(("/refactor sample.py improve", "/exit"))
+    writes = []
+
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+    monkeypatch.setattr(
+        sonder_repl.server.file_ops,
+        "read_file",
+        lambda _path: {"text": "def improve():\n    return 1\n"},
+    )
+    monkeypatch.setattr(
+        sonder_repl.code_improve,
+        "improve_function",
+        lambda *_args, **_kwargs: {"ok": True, "diff": "-1\n+2", "edited": "new"},
+    )
+    monkeypatch.setattr(
+        sonder_repl.server.file_ops,
+        "write_file",
+        lambda *args, **kwargs: writes.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *_args, **_kwargs: pytest.fail("piped stdin must not be read"),
+    )
+
+    sonder_repl.main()
+
+    assert writes == []
+
+
 def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkeypatch, capsys):
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
