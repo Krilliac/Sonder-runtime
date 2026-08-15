@@ -11,7 +11,10 @@ production install in detail.
 - [Ollama](https://ollama.com) installed and running.
 - A model. Either pull one online, or import a portable GGUF (see
   [Model Tiers & Gateway](08-model-tiers-and-gateway.md) and the
-  [facts. runbook](../runbooks/use-facts-model.md)).
+  [facts. runbook](../runbooks/use-facts-model.md)). One generative local
+  model is the whole requirement — see
+  [Model Requirements & Onboarding](19-model-requirements-and-onboarding.md)
+  for what is optional and how to verify what you have.
 - RAM: 8 GB minimum for a 4B model; more for 7B+.
 
 ## Workstation quickstart (Linux/macOS)
