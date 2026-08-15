@@ -59,6 +59,63 @@ def test_answer_with_history_augment_opt_out_cannot_be_reenabled_by_tier(monkeyp
     assert captured["augment"] is False
 
 
+def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch):
+    """A caller-selected model must not be diverted into a local control route."""
+    seen = {}
+
+    monkeypatch.setattr(
+        server,
+        "control_command",
+        lambda *_args, **_kwargs: pytest.fail("control routing must not run"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_serve_target",
+        lambda tier, _strict: ("cloud-answer:latest", True, False, tier),
+    )
+    monkeypatch.setattr(server, "_should_learn", lambda *_args: False)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+
+    def fake_generate(model, system, *_args, **kwargs):
+        seen.update(model=model, system=system, cloud=kwargs["cloud"])
+        return lambda prompt, history: "answer"
+
+    monkeypatch.setattr(server, "_make_generate", fake_generate)
+
+    assert server._answer_with_history_impl(
+        "please inspect the project", [], tier="cloud-general"
+    ) == "answer"
+    assert seen == {
+        "model": "cloud-answer:latest",
+        "system": "system",
+        "cloud": True,
+    }
+
+
+def test_sonder_explicit_model_bypasses_control_routing(monkeypatch):
+    """The direct MCP surface has the same explicit-target contract as HTTP."""
+    seen = {}
+
+    monkeypatch.setattr(
+        server,
+        "control_command",
+        lambda *_args, **_kwargs: pytest.fail("control routing must not run"),
+    )
+
+    def fake_impl(prompt, **kwargs):
+        seen.update(prompt=prompt, tier=kwargs["tier"], override=kwargs["model_override"])
+        return "answer"
+
+    monkeypatch.setattr(server, "_sonder_impl", fake_impl)
+
+    assert "answer" in server.sonder("please inspect the project", tier="cloud-general")
+    assert seen == {
+        "prompt": "please inspect the project",
+        "tier": "cloud-general",
+        "override": "",
+    }
+
+
 def test_master_orchestrate_never_forges_a_repo_scoped_task(monkeypatch, tmp_path):
     # Regression for a 2026-07-13 bug: master_orchestrate() called
     # creative_router.classify(task) BEFORE checking
