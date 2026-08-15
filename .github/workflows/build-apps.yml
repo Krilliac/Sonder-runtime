@@ -81,7 +81,27 @@ jobs:
         run: python ../scripts/package_local_system.py --out app/build/local-system --zip app/assets/local-system.zip
       - run: flutter pub get
       - name: Build APK (release, debug-signed so it installs directly)
-        run: flutter build apk --release
+        shell: bash
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            log_file="$(mktemp)"
+            if flutter build apk --release 2>&1 | tee "$log_file"; then
+              rm -f "$log_file"
+              exit 0
+            fi
+            if ! grep -Eq 'Gradle threw an error while downloading artifacts from the network|Received status code (429|502|503|504)' "$log_file"; then
+              exit 1
+            fi
+            rm -f "$log_file"
+            if [ "$attempt" -eq 3 ]; then
+              echo "Transient Gradle artifact download retries exhausted." >&2
+              exit 1
+            fi
+            delay_seconds=$((attempt * 20))
+            echo "::warning::Transient Gradle artifact download failure; retrying in ${delay_seconds}s."
+            sleep "$delay_seconds"
+          done
       - name: Rename APK
         run: cp build/app/outputs/flutter-apk/app-release.apk sonder-runtime-android.apk
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
