@@ -2139,6 +2139,11 @@ def main():
                         last_iid = None
                         last_response = None
                         last_run_source = None
+                        # Per-turn metrics are tied to the previous session's
+                        # activity span.  Leaving them visible after a resume
+                        # makes the composer attribute another conversation's
+                        # token/call/timing data to the newly selected thread.
+                        last_turn_metrics = None
                         print("resumed thread %s" % session_id)
                     else:
                         print("no session matching '%s'" % target)
