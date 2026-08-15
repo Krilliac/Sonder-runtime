@@ -227,3 +227,14 @@ def test_facts_add_list_count():
     assert [f["text"] for f in facts] == ["uses MSVC", "tabs not spaces"]
     assert ms.count_facts(c, "proj") == 2
     assert ms.count_facts(c, "other") == 1
+
+
+def test_delete_fact_is_exact_and_project_scoped():
+    c = _conn()
+    ms.add_fact(c, "f1", "proj", "uses MSVC")
+    ms.add_fact(c, "f2", "other", "uses clang")
+
+    assert ms.delete_fact(c, "f1", "other") is False
+    assert ms.delete_fact(c, "f1", "proj") is True
+    assert ms.facts_for_project(c, "proj") == []
+    assert [row["id"] for row in ms.facts_for_project(c, "other")] == ["f2"]

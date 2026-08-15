@@ -211,6 +211,11 @@ class LegacyMemoryRepository:
 
         memory_store.add_fact(self._conn, fact_id, project, text, embedding)
 
+    def delete_fact(self, fact_id: str, project: str) -> bool:
+        import sonder_runtime.adapters.memory_store as memory_store
+
+        return memory_store.delete_fact(self._conn, fact_id, project)
+
     def facts_for_project(self, project: str) -> list:
         import sonder_runtime.adapters.memory_store as memory_store
 

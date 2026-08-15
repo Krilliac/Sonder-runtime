@@ -3419,6 +3419,20 @@ def facts_for_project(conn, project):
     return [dict(r) for r in rows]
 
 
+def delete_fact(conn, fact_id, project):
+    """Delete one exact fact inside its project scope.
+
+    Facts are directly asserted context, so deletion must never use a text
+    match or an unscoped identifier: either could remove a similarly-worded
+    fact or a fact belonging to another project.
+    """
+    cursor = conn.execute(
+        "DELETE FROM facts WHERE id=? AND project=?", (fact_id, project),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
 def count_facts(conn, project):
     return conn.execute(
         "SELECT COUNT(*) FROM facts WHERE project=?", (project,)

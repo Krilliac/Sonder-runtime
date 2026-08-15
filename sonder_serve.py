@@ -496,6 +496,7 @@ _ACCOUNT_GLOBAL_MEMORY_TOOLS = frozenset((
     "memory_search",
     "recall",
     "record_outcome",
+    "sonder_forget_fact",
     "session_export",
     "sonder_remember_fact",
     "sonder_sessions",

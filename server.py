@@ -13076,6 +13076,34 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
 
 
 @mcp.tool()
+def sonder_forget_fact(fact_id: str, project: str = "", confirm: str = "") -> str:
+    """Forget one asserted project fact after an exact confirmation.
+
+    List fact IDs first with ``/facts`` (or the matching MCP/session surface),
+    then pass that same full ID as ``confirm``.  This never deletes learned
+    lessons, conversations, or facts from another project.
+    """
+    _maybe_live_reload()
+    target = str(fact_id or "").strip()
+    project_id = _resolve_project(project) or DEFAULT_PROJECT
+    if not target:
+        return "fact id is required."
+    if str(confirm or "").strip() != target:
+        return (
+            "confirmation required: inspect /facts, then repeat with "
+            "confirm=%s" % target
+        )
+    with _application().unit_of_work(db_path=_DB_PATH) as uow:
+        removed = uow.memory.delete_fact(target, project_id)
+        remaining = uow.memory.count_facts(project_id)
+    if not removed:
+        return "no fact '%s' in project '%s'." % (target, project_id)
+    return "Forgot fact %s from project '%s' (%d remaining)." % (
+        target, project_id, remaining,
+    )
+
+
+@mcp.tool()
 def run_code(
     code: str,
     language: str = "python",
@@ -15724,7 +15752,7 @@ def tool_manifest() -> str:
         "self_heal_check/self_heal_repair": "Detect and safely repair common local breakage.",
         "context_health/diagnostics/live_reload_status/status/unload": "Observe and manage runtime health.",
         "record_outcome": "Feed grounded outcomes back into learning.",
-        "sonder_stats/sonder_sessions/sonder_remember_fact": "Memory observability and durable facts.",
+        "sonder_stats/sonder_sessions/sonder_remember_fact/sonder_forget_fact": "Memory observability and durable facts.",
     }
     return "\n".join("  %s: %s" % item for item in sorted(tools.items()))
 
