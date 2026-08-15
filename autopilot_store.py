@@ -38,6 +38,9 @@ MAX_REPORT_CHARS = 128_000
 MAX_ERROR_CHARS = 8_000
 MAX_SUMMARY_CHARS = 4_000
 MAX_EVENT_CHARS = 1_000
+MAX_STEERING_CHARS = 4_000
+MAX_PENDING_STEERING = 5
+STEERING_KINDS = ("guidance", "clarify")
 DEFAULT_LEASE_SECONDS = 3600
 
 _SCHEMA_LOCK = threading.RLock()
@@ -95,6 +98,19 @@ CREATE TABLE IF NOT EXISTS autopilot_events (
 );
 CREATE INDEX IF NOT EXISTS idx_autopilot_events_run
     ON autopilot_events(run_id, event_id DESC);
+CREATE TABLE IF NOT EXISTS autopilot_steering (
+    note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    request_owner TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_ts REAL NOT NULL,
+    consumed_ts REAL,
+    consumed_by TEXT DEFAULT '',
+    FOREIGN KEY(run_id) REFERENCES autopilot_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_autopilot_steering_run
+    ON autopilot_steering(run_id, consumed_ts);
 """
 
 _RUN_COLUMN_MIGRATIONS = {
@@ -584,6 +600,136 @@ def control_flags(run_id: str, owner_id: str) -> dict:
     }
 
 
+def attach_steering(
+    selector: str,
+    message: str,
+    *,
+    kind: str = "guidance",
+    request_owner: str | None,
+) -> dict | None:
+    """Attach a bounded owner note to a non-terminal run.
+
+    Strictly owner-scoped and fail-closed: the caller must present a non-empty
+    ``request_owner`` that equals the run's stored owner, so legacy/unowned
+    rows (empty ``request_owner``) can never be steered and a foreign account
+    cannot even learn that the run exists.  ``clarify`` additionally requests
+    a cooperative pause on an active run through the existing pause fence; the
+    note itself is delivered only when the live lease owner asks for it.
+    """
+    if kind not in STEERING_KINDS:
+        raise ValueError("invalid steering kind: %s" % kind)
+    message = _clamp_text(str(message or "").strip(), MAX_STEERING_CHARS)
+    if not message:
+        raise ValueError("steering message is required")
+    owner = str(request_owner or "")
+    if not owner:
+        return None
+    now = time.time()
+    with _write_transaction() as conn:
+        found = _resolve(conn, selector, owner)
+        if found is None:
+            return None
+        row = dict(found)
+        if not row.get("request_owner") or row["request_owner"] != owner:
+            return None
+        if row["status"] in TERMINAL_STATUSES or row.get("cancel_requested"):
+            return None
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM autopilot_steering "
+            "WHERE run_id=? AND consumed_ts IS NULL",
+            (row["id"],),
+        ).fetchone()[0]
+        if int(pending) >= MAX_PENDING_STEERING:
+            return None
+        cursor = conn.execute(
+            "INSERT INTO autopilot_steering(run_id, request_owner, kind, message, created_ts) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (row["id"], owner, kind, message, now),
+        )
+        note_id = cursor.lastrowid
+        if kind == "clarify" and row["status"] in ACTIVE_STATUSES:
+            conn.execute(
+                "UPDATE autopilot_runs SET pause_requested=1, updated_ts=? WHERE id=?",
+                (now, row["id"]),
+            )
+        _event(conn, row["id"], "steer", "%s note attached by run owner" % kind, now)
+    return {
+        "note_id": int(note_id),
+        "run_id": row["id"],
+        "kind": kind,
+        "message": message,
+        "created_ts": now,
+    }
+
+
+def pending_steering(run_id: str, owner_id: str) -> list[dict]:
+    """Return unconsumed owner notes, but only to the live lease owner.
+
+    A worker that lost its lease (or a run that is paused, cancelled, or
+    terminal) reads nothing: steering is delivered exclusively inside an
+    active, owned execution so a stale controller can never act on it.
+    """
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT owner_id, status, cancel_requested FROM autopilot_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if (
+            row is None
+            or not owner_id
+            or row["owner_id"] != owner_id
+            or row["status"] not in ("planning", "running")
+            or row["cancel_requested"]
+        ):
+            return []
+        rows = conn.execute(
+            "SELECT note_id, run_id, kind, message, created_ts FROM autopilot_steering "
+            "WHERE run_id=? AND consumed_ts IS NULL ORDER BY note_id LIMIT ?",
+            (run_id, MAX_PENDING_STEERING),
+        ).fetchall()
+        return [dict(item) for item in rows]
+    finally:
+        conn.close()
+
+
+def consume_steering(run_id: str, owner_id: str, note_ids) -> int:
+    """Durably mark notes as delivered; one-shot, live-owner only.
+
+    Consumption never replays: once marked, a note is not redelivered after a
+    pause, crash, or restart, matching the run ledger's no-auto-replay rule.
+    """
+    ids = [int(value) for value in (note_ids or [])]
+    if not ids or not owner_id:
+        return 0
+    now = time.time()
+    with _write_transaction() as conn:
+        row = conn.execute(
+            "SELECT owner_id, status, cancel_requested FROM autopilot_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row["owner_id"] != owner_id
+            or row["status"] not in ("planning", "running")
+            or row["cancel_requested"]
+        ):
+            return 0
+        marks = ",".join("?" for _ in ids)
+        cursor = conn.execute(
+            "UPDATE autopilot_steering SET consumed_ts=?, consumed_by=? "
+            "WHERE run_id=? AND consumed_ts IS NULL AND note_id IN (%s)" % marks,
+            (now, owner_id, run_id, *ids),
+        )
+        consumed = int(cursor.rowcount)
+        if consumed > 0:
+            _event(
+                conn, run_id, "steer_consumed",
+                "%d steering note(s) delivered to the worker" % consumed, now,
+            )
+    return consumed
+
+
 def heartbeat(
     run_id: str,
     owner_id: str,
@@ -742,6 +888,7 @@ def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str 
 
 def clear_all() -> None:
     with _write_transaction() as conn:
+        conn.execute("DELETE FROM autopilot_steering")
         conn.execute("DELETE FROM autopilot_events")
         conn.execute("DELETE FROM autopilot_runs")
 
