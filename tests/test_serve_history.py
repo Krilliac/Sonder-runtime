@@ -754,6 +754,36 @@ def test_local_open_session_states_keep_the_global_bound():
         _clean_session_states()
 
 
+def test_selected_session_state_is_pinned_before_lifecycle_admission(monkeypatch):
+    """A queued request must not lose its selected state during global churn."""
+    _clean_session_states()
+    monkeypatch.setattr(ts, "HTTP_SESSION_STATE_LIMIT", 3)
+    monkeypatch.setattr(ts, "HTTP_SESSION_STATE_OWNER_LIMIT", 2)
+    try:
+        bob = _account_ctx("bob")
+        queued = ts._http_conversation_state(bob, "queued")
+        assert ts._pin_http_conversation_state(queued) is True
+
+        # Local-open traffic can fill and prune the global LRU while Bob's
+        # request is waiting for a lifecycle slot.  The selected state is not
+        # locked yet, so only the explicit pin protects it.
+        local_open = {}
+        ts._http_conversation_state(local_open, "one")
+        ts._http_conversation_state(local_open, "two")
+        ts._http_conversation_state(local_open, "three")
+
+        assert ts._http_conversation_state(bob, "queued") is queued
+        assert queued.session_pins == 1
+    finally:
+        ts._release_http_conversation_state(queued, True)
+        _clean_session_states()
+
+
+def test_hosted_owner_limit_reserves_one_global_state_for_another_principal():
+    assert ts.HTTP_SESSION_STATE_LIMIT >= 2
+    assert ts.HTTP_SESSION_STATE_OWNER_LIMIT < ts.HTTP_SESSION_STATE_LIMIT
+
+
 def test_concurrent_turn_results_keep_iids_request_local(monkeypatch):
     barrier = threading.Barrier(2)
     ids = {"alpha": "aaa111", "beta": "bbb222"}

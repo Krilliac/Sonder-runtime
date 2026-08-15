@@ -214,6 +214,10 @@ class ConversationState:
     account: dict | None = None
     events: list = field(default_factory=list)
     lock: threading.RLock = field(default_factory=threading.RLock)
+    # A request pins its selected retained state before lifecycle admission.
+    # The state lock itself is acquired only after admission, so it is not a
+    # sufficient indication that a queued request still owns this entry.
+    session_pins: int = 0
 
 
 @dataclass(frozen=True)
@@ -306,7 +310,7 @@ class _LegacyConversationState:
 
 
 _LEGACY_STATE = _LegacyConversationState()
-HTTP_SESSION_STATE_LIMIT = max(1, min(
+HTTP_SESSION_STATE_LIMIT = max(2, min(
     1024, _env_int("SONDER_HTTP_SESSION_STATE_LIMIT", 128)
 ))
 # Admission cap for one hosted account inside the shared state map.  The map's
@@ -316,7 +320,7 @@ HTTP_SESSION_STATE_LIMIT = max(1, min(
 # entry instead.  Single-principal surfaces (local-open, api-key) keep the
 # global bound: there is no other tenant to protect there.
 HTTP_SESSION_STATE_OWNER_LIMIT = max(1, min(
-    HTTP_SESSION_STATE_LIMIT,
+    HTTP_SESSION_STATE_LIMIT - 1,
     _env_int("SONDER_HTTP_SESSION_STATE_OWNER_LIMIT", 32),
 ))
 _HTTP_SESSION_STATES = OrderedDict()
@@ -632,7 +636,7 @@ def _prune_http_session_states(max_size=HTTP_SESSION_STATE_LIMIT):
     for key, candidate in list(_HTTP_SESSION_STATES.items()):
         if len(_HTTP_SESSION_STATES) <= max_size:
             break
-        if candidate.lock.acquire(blocking=False):
+        if candidate.session_pins == 0 and candidate.lock.acquire(blocking=False):
             try:
                 _HTTP_SESSION_STATES.pop(key, None)
             finally:
@@ -644,7 +648,7 @@ def _evict_owner_lru_session_state(principal):
     for key, candidate in list(_HTTP_SESSION_STATES.items()):
         if key[0] != principal:
             continue
-        if candidate.lock.acquire(blocking=False):
+        if candidate.session_pins == 0 and candidate.lock.acquire(blocking=False):
             try:
                 _HTTP_SESSION_STATES.pop(key, None)
             finally:
@@ -702,6 +706,23 @@ def _http_conversation_state(context, session, token=""):
         if context.get("account"):
             state.account = context["account"]
         return state
+
+
+def _pin_http_conversation_state(state):
+    """Keep a selected retained state from eviction before admission starts."""
+    with _HTTP_SESSION_STATES_LOCK:
+        if any(candidate is state for candidate in _HTTP_SESSION_STATES.values()):
+            state.session_pins += 1
+            return True
+    return False
+
+
+def _release_http_conversation_state(state, pinned):
+    """Release a request's eviction pin after its state-dependent work ends."""
+    if not pinned:
+        return
+    with _HTTP_SESSION_STATES_LOCK:
+        state.session_pins = max(0, int(state.session_pins or 0) - 1)
 
 
 def _request_account_token(context, auth_header="", account_header=""):
@@ -3924,6 +3945,7 @@ class Handler(BaseHTTPRequestHandler):
             session,
             token=_request_account_token(context, auth_header, account_header),
         )
+        state_pinned = _pin_http_conversation_state(state)
 
         reply = None
         web_routed = False
@@ -4130,6 +4152,8 @@ class Handler(BaseHTTPRequestHandler):
                 status=500,
             )
             return
+        finally:
+            _release_http_conversation_state(state, state_pinned)
 
         # The handler timer starts before body parsing, authentication, and
         # routing.  It is the public HTTP contract, unlike the inner request
