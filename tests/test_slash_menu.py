@@ -667,6 +667,18 @@ def test_raw_reader_ctrl_l_clears_screen_and_keeps_typed_input(monkeypatch):
     )
 
 
+def test_clear_terminal_presentation_enables_windows_vt_before_scrollback_clear(monkeypatch):
+    out = _FakeStdout()
+    calls = []
+    monkeypatch.setattr(
+        slash_menu, "_enable_windows_vt_output", lambda: calls.append("enable") or True)
+
+    slash_menu.clear_terminal_presentation(out)
+
+    assert calls == ["enable"]
+    assert out.text == slash_menu.CSI + "3J" + slash_menu.CSI + "2J" + slash_menu.CSI + "H"
+
+
 def test_raw_reader_clears_the_menu_before_returning(monkeypatch):
     _, out = _drive(monkeypatch, list("/re") + ["\r"])
     tail = out.text.split("\r")[-1]

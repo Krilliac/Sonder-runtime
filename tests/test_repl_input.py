@@ -33,6 +33,19 @@ def test_clear_terminal_discards_scrollback_without_touching_runtime_state():
     assert command_catalog._CATEGORY_BY_SLASH["/clear"] == "basic"
 
 
+def test_native_clear_delegates_to_the_shared_vt_aware_presentation_helper(monkeypatch):
+    stream = io.StringIO()
+    calls = []
+    monkeypatch.setattr(
+        sonder_repl.slash_menu,
+        "clear_terminal_presentation",
+        lambda target: calls.append(target),
+    )
+
+    assert sonder_repl._clear_terminal_scrollback(stream) is True
+    assert calls == [stream]
+
+
 def test_native_clear_command_uses_terminal_clear_without_a_model_turn(monkeypatch):
     lines = iter(("/clear", "/exit"))
     calls = []

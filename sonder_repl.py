@@ -114,8 +114,12 @@ def _clear_terminal_scrollback(stream=None):
     target = stream or sys.stdout
     csi = getattr(slash_menu, "CSI", "\x1b[")
     try:
-        target.write(csi + "3J" + csi + "2J" + csi + "H")
-        target.flush()
+        clear = getattr(slash_menu, "clear_terminal_presentation", None)
+        if callable(clear):
+            clear(target)
+        else:
+            target.write(csi + "3J" + csi + "2J" + csi + "H")
+            target.flush()
     except (AttributeError, OSError):
         # A piped or closed stdout must not terminate the REPL merely because
         # a presentation-only command was requested.
