@@ -235,15 +235,21 @@ class LocalManager {
     Duration interval = const Duration(milliseconds: 400),
     Future<bool> Function()? reachabilityProbe,
     Future<void> Function(Duration)? delay,
+    DateTime Function()? clock,
   }) async {
-    final deadline = DateTime.now().add(timeout);
+    final now = clock ?? DateTime.now;
+    final deadline = now().add(timeout);
     final probe = reachabilityProbe ?? defaultServerReachable;
     final wait = delay ?? Future<void>.delayed;
     var nextInterval = interval;
+    var firstProbe = true;
     while (true) {
+      if (!firstProbe && !now().isBefore(deadline)) return false;
+      firstProbe = false;
       if (await probe()) return true;
-      if (!DateTime.now().isBefore(deadline)) return false;
-      await wait(nextInterval);
+      final remaining = deadline.difference(now());
+      if (remaining <= Duration.zero) return false;
+      await wait(nextInterval <= remaining ? nextInterval : remaining);
       nextInterval = _nextServerProbeInterval(nextInterval);
     }
   }

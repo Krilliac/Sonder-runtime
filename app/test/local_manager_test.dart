@@ -69,6 +69,33 @@ void main() {
     ]);
   });
 
+  test('waitForServer never probes after its timeout expires', () async {
+    var now = DateTime.utc(2026, 1, 1);
+    var attempts = 0;
+    final waits = <Duration>[];
+
+    final reachable = await LocalManager.waitForServer(
+      timeout: const Duration(milliseconds: 150),
+      interval: const Duration(milliseconds: 100),
+      reachabilityProbe: () async {
+        attempts++;
+        return false;
+      },
+      delay: (duration) async {
+        waits.add(duration);
+        now = now.add(duration);
+      },
+      clock: () => now,
+    );
+
+    expect(reachable, isFalse);
+    expect(attempts, 2);
+    expect(waits, const [
+      Duration(milliseconds: 100),
+      Duration(milliseconds: 50),
+    ]);
+  });
+
   test('startServer refuses an unverified occupied local port', () async {
     final result = await LocalManager.startServer(
       managedReachabilityProbe: () async => false,
