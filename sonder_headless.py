@@ -635,8 +635,15 @@ def main(argv=None) -> int:
         # listener ownership becomes observable through ``netstat``.  Give
         # that identity check one small, bounded chance to converge; a bare
         # open port still never becomes launch success.
-        wait_until(lambda: _managed_listener_pid(args.host, args.port) is not None, 2)
-        managed = _managed_listener_pid(args.host, args.port)
+        observed = None
+
+        def listener_identity_visible():
+            nonlocal observed
+            observed = _managed_listener_pid(args.host, args.port)
+            return observed is not None
+
+        wait_until(listener_identity_visible, 2)
+        managed = observed
     # ``_managed_listener_pid`` proves both ownership and the listener, so a
     # hung/pre-bind child still returns a failure to launchers and the desktop
     # shell.

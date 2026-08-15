@@ -486,7 +486,7 @@ def test_main_start_rechecks_managed_listener_identity_after_status(monkeypatch)
         lambda *args, **kwargs: "sonder: start requested pid=7, not reachable yet",
     )
     monkeypatch.setattr(H, "status", lambda *args: "sonder api: listening on http://127.0.0.1:11435")
-    identities = iter((None, 7, 7))
+    identities = iter((None, 7))
     monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: next(identities))
     seen = {}
     monkeypatch.setattr(
