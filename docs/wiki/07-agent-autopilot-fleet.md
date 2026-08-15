@@ -112,6 +112,12 @@ REPL. Full receipts can include model answers, so `model_fanout_status` is
 owner-scoped and developer-gated on shared deployments; local-open use keeps the
 full local toolset.
 
+Durable fanout receipts are recovery evidence, not an archive: terminal runs,
+their events, and idle model-health rows expire automatically after seven days.
+`SONDER_FANOUT_TTL_SECONDS` overrides the retention (clamped between one hour
+and one year; `0` disables automatic expiry). Active runs, live worker leases,
+and model-health rows with an active cooldown are never expired.
+
 ## Idempotency & recovery
 
 Autopilot/fleet control requests carry durable operation IDs; retrying a

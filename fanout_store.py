@@ -39,6 +39,14 @@ _PROMPT_REDACTED = "sealed-fanout-prompt:redacted"
 # process dies in that narrow handoff window, leave enough time for ordinary
 # scheduling then make the never-started run explicitly recoverable.
 QUEUED_DISPATCH_GRACE_SECONDS = DEFAULT_LEASE_SECONDS
+# Terminal receipts are recovery evidence, not an archive: without automatic
+# expiry every completed answer preview (up to 64k chars per model row) stays
+# in fanout.db forever.  The TTL governs only terminal runs, old events, and
+# idle model-health rows -- active runs and live cooldowns are never expired.
+DEFAULT_RETENTION_TTL_SECONDS = 7 * 86_400
+MIN_RETENTION_TTL_SECONDS = 3_600
+MAX_RETENTION_TTL_SECONDS = 365 * 86_400
+PRUNE_INTERVAL_SECONDS = 3_600
 ACTIVE_RUNS = frozenset(("queued", "running", "cancelling"))
 TERMINAL_RUNS = frozenset(("completed", "cancelled", "interrupted"))
 RESULT_STATUSES = frozenset(("pending", "running", "answered", "failed", "skipped", "unknown"))
@@ -52,6 +60,10 @@ FAILURE_CLASSES = frozenset((
 ))
 _SCHEMA_LOCK = threading.RLock()
 _INITIALIZED_PATHS: set[str] = set()
+_PRUNE_THROTTLE_LOCK = threading.Lock()
+# Keyed by resolved database path: one process may serve several receipt
+# databases (tests, SONDER_FANOUT_DB changes) and each earns its own interval.
+_LAST_PRUNE_TS: dict[str, float] = {}
 
 # Intentionally conservative: the database is a receipt, not a secret store.
 _BEARER = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}")
@@ -92,6 +104,10 @@ CREATE TABLE IF NOT EXISTS fanout_events (
  kind TEXT NOT NULL, message TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES fanout_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_fanout_events_run ON fanout_events(run_id, event_id DESC);
+-- Runtime retention is timestamp-led; the per-run index above cannot serve
+-- ``ts<?`` pruning and turns the hourly request-path cleanup into a table
+-- scan as fanout history grows.
+CREATE INDEX IF NOT EXISTS idx_fanout_events_retention ON fanout_events(ts, run_id);
 CREATE TABLE IF NOT EXISTS model_health (
  model TEXT PRIMARY KEY, model_class TEXT NOT NULL DEFAULT '', failure_count INTEGER NOT NULL DEFAULT 0,
  availability_failure_count INTEGER NOT NULL DEFAULT 0,
@@ -275,6 +291,63 @@ def _lease(seconds: int, max_seconds: int = 3600) -> float:
     return time.time() + max(30, min(int(seconds), max_seconds))
 
 
+def retention_ttl_seconds() -> int:
+    """Operator retention for terminal receipts; ``0`` disables automatic expiry.
+
+    A malformed or negative override falls back to the reviewed default rather
+    than silently keeping receipts forever or deleting fresh crash evidence.
+    """
+    raw = os.environ.get("SONDER_FANOUT_TTL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_RETENTION_TTL_SECONDS
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        return DEFAULT_RETENTION_TTL_SECONDS
+    if value == 0:
+        return 0
+    if value < 0:
+        return DEFAULT_RETENTION_TTL_SECONDS
+    return max(MIN_RETENTION_TTL_SECONDS, min(value, MAX_RETENTION_TTL_SECONDS))
+
+
+def maybe_prune(now: float | None = None) -> dict | None:
+    """Expire old terminal receipts opportunistically, at most once per interval.
+
+    :func:`prune` existed but nothing at runtime called it, so fanout.db grew
+    without bound.  This hook runs from run creation and stale-run
+    reconciliation; it deletes only terminal runs, old events, and idle
+    model-health rows.  Housekeeping must never break starting or reading a
+    fanout, so database contention is swallowed and the claim is released so
+    the next caller retries instead of waiting out the interval.
+    """
+    ttl = retention_ttl_seconds()
+    if not ttl:
+        return None
+    current = time.time() if now is None else float(now)
+    path = str(Path(database_path()).expanduser().resolve())
+    with _PRUNE_THROTTLE_LOCK:
+        last = _LAST_PRUNE_TS.get(path)
+        if last is not None and current - last < PRUNE_INTERVAL_SECONDS:
+            return None
+        # Claim the interval before the write so concurrent callers cannot
+        # stack redundant prune transactions behind one busy database.
+        _LAST_PRUNE_TS[path] = current
+    try:
+        return prune(ttl_seconds=ttl, now=current)
+    except sqlite3.Error:
+        # A pass that pruned nothing must not consume the interval.  Release
+        # only our own claim: a newer claimant means another caller is already
+        # pruning, so concurrency stays bounded to one attempt at a time.
+        with _PRUNE_THROTTLE_LOCK:
+            if _LAST_PRUNE_TS.get(path) == current:
+                if last is None:
+                    _LAST_PRUNE_TS.pop(path, None)
+                else:
+                    _LAST_PRUNE_TS[path] = last
+        return None
+
+
 def create_run(prompt: str, models, *, request_owner: str = "", request_role: str = "",
                scope: str = "local", cloud_opt_in: bool = False, limits=None,
                execution_prompt_ciphertext: str = "") -> dict:
@@ -291,6 +364,7 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
     if len(ciphertext) > 64_000:
         raise ValueError("fanout sealed prompt exceeds 64000 characters")
     now = time.time(); run_id = "fan-%s" % uuid.uuid4().hex[:16]
+    maybe_prune(now)
     with _write_transaction() as conn:
         conn.execute("""INSERT INTO fanout_runs(id,request_owner,request_role,prompt,prompt_sha256,models_json,execution_prompt_ciphertext,scope,cloud_opt_in,limits_json,status,created_ts,updated_ts)
                         VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
@@ -730,6 +804,11 @@ def reconcile_stale_runs(now: float | None = None) -> int:
                 message = "worker lease ended; explicit resume is required"
             conn.execute("UPDATE fanout_runs SET status='interrupted',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? WHERE id=?", (current, current, run["id"]))
             _event(conn, run["id"], "interrupted", message, current); changed += 1
+    # Reconciliation runs on every status/list read, which makes it the one
+    # hook a long-lived read-mostly host reliably reaches.  It must run after
+    # the transaction above: a just-interrupted run gets a fresh updated_ts
+    # and therefore always survives this pass.
+    maybe_prune(current)
     return changed
 
 
@@ -765,7 +844,13 @@ def get_model_health(model: str) -> dict | None:
 def prune(*, ttl_seconds: int = 7 * 86_400, event_ttl_seconds: int | None = None, now: float | None = None) -> dict:
     current = time.time() if now is None else float(now); cutoff = current - max(60, int(ttl_seconds)); event_cutoff = current - max(60, int(event_ttl_seconds or ttl_seconds))
     with _write_transaction() as conn:
-        events_deleted = conn.execute("DELETE FROM fanout_events WHERE ts<?", (event_cutoff,)).rowcount
+        # An active run's activity trail is operational state, not history: a
+        # long-queued or long-running fanout keeps its events on status alone.
+        # Events whose parent run is gone are orphans and still expire.
+        events_deleted = conn.execute(
+            "DELETE FROM fanout_events WHERE ts<? AND run_id NOT IN "
+            "(SELECT id FROM fanout_runs WHERE status NOT IN ('completed','cancelled','interrupted'))",
+            (event_cutoff,)).rowcount
         runs_deleted = conn.execute("DELETE FROM fanout_runs WHERE status IN ('completed','cancelled','interrupted') AND updated_ts<?", (cutoff,)).rowcount
         health_deleted = conn.execute("DELETE FROM model_health WHERE updated_ts<? AND (disabled_until IS NULL OR disabled_until<?)", (cutoff, current)).rowcount
     return {"runs": runs_deleted, "events": events_deleted, "health": health_deleted}
@@ -773,3 +858,4 @@ def prune(*, ttl_seconds: int = 7 * 86_400, event_ttl_seconds: int | None = None
 
 def reset_schema_cache_for_tests() -> None:
     with _SCHEMA_LOCK: _INITIALIZED_PATHS.clear()
+    with _PRUNE_THROTTLE_LOCK: _LAST_PRUNE_TS.clear()
