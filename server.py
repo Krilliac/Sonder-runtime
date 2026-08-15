@@ -5788,11 +5788,13 @@ def _sonder_impl_serialized(
     finally:
         conn.close()
 
-    replacement = _web_denial_guard(
-        prompt, response, history=history,
-        location_consent=location_consent,
-        allow_server_location_lookup=location_consent,
-    )
+    replacement = None
+    if not explicit_target:
+        replacement = _web_denial_guard(
+            prompt, response, history=history,
+            location_consent=location_consent,
+            allow_server_location_lookup=location_consent,
+        )
     if replacement is not None:
         # The refusal turn was already captured by _answer; purge it so it can
         # never distill into lessons or the training export.

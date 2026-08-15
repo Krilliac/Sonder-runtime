@@ -1280,6 +1280,45 @@ def test_exact_model_pin_keeps_the_selected_code_route_augmentation(monkeypatch)
     assert captured == {"model": "gemma3:12b", "augment": True}
 
 
+def test_explicit_target_skips_posthoc_web_reroute(monkeypatch):
+    """An explicit model must keep its response even when it looks web-related."""
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "control_command", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_route_chat_web", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server, "_serve_target",
+        lambda _tier, _strict: ("code-default:7b", False, False, "general"),
+    )
+    monkeypatch.setattr(
+        server, "resolve_discovered_model_record",
+        lambda _selector: ("gemma3:12b", {"capabilities": ["chat"]}),
+    )
+    monkeypatch.setattr(server, "_fanout_nonchat_reason", lambda _record: "")
+    monkeypatch.setattr(server, "_is_cloud_model_name", lambda _model: False)
+    monkeypatch.setattr(server, "_internal_generate_for_route", lambda *_args: None)
+    monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
+    monkeypatch.setattr(server, "_open_db", lambda: _Conn())
+    monkeypatch.setattr(
+        server, "_answer", lambda *_args, **_kwargs: ("selected answer", None, {}),
+    )
+    monkeypatch.setattr(
+        server, "_web_denial_guard",
+        lambda *_args, **_kwargs: pytest.fail("explicit target must not reroute"),
+    )
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+
+    out = server._sonder_impl_serialized(
+        "find current information", session="none", project="none", tier="general",
+        model_override="gemma3:12b",
+    )
+
+    assert out == "selected answer"
+
+
 @pytest.mark.parametrize(
     ("tier_label", "expected"),
     [
