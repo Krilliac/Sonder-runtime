@@ -122,6 +122,8 @@ def test_status_vram_indicator_ignores_malformed_sizes(monkeypatch):
                     {"name": "bool:latest", "size": True, "size_vram": True},
                     {"name": "neg:latest", "size": -5, "size_vram": -1},
                     {"name": "text:latest", "size": "big", "size_vram": "most"},
+                    # Oversized JSON integers must not crash float validation.
+                    {"name": "huge:latest", "size": 10**1000, "size_vram": 10**1000},
                     # size_vram larger than size is provider nonsense; clamp
                     # rather than advertising >100% GPU.
                     {"name": "over:latest", "size": 2**30, "size_vram": 2**31},
@@ -135,6 +137,8 @@ def test_status_vram_indicator_ignores_malformed_sizes(monkeypatch):
     assert "bool:latest (" not in result
     assert "neg:latest (" not in result
     assert "text:latest (" not in result
+    assert "huge:latest (" not in result
+    assert "huge:latest" in result
     assert "over:latest (1.0 GiB, 100% GPU)" in result
 
 

@@ -405,9 +405,14 @@ def _residency_display(row) -> str:
         return ""
 
     def _byte_count(value, minimum):
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            # Do not coerce arbitrary JSON integers to float: a malicious or
+            # malformed provider can send a value too large for IEEE-754.
+            return minimum <= value <= (2**63 - 1)
         return (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
+            isinstance(value, float)
             and math.isfinite(value)
             and value >= minimum
         )
