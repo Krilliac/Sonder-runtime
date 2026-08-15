@@ -3908,11 +3908,11 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
                         )
-                    if (allow_control_routes and reply is None
+                    if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_feedback(prompt, state=state)
-                    if (allow_control_routes and reply is None
+                    if (structured_schema is None and allow_control_routes and reply is None
                             and _developer_authorized(context)
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_intent(
@@ -3935,7 +3935,7 @@ class Handler(BaseHTTPRequestHandler):
                             natural_model["prompt"], tiers=natural_model["tiers"],
                             project=storage_project, require_all_tiers=True,
                         )
-                    if allow_control_routes and reply is None:
+                    if structured_schema is None and allow_control_routes and reply is None:
                         reply = server.chat_web_response(
                             prompt,
                             history=history,
@@ -3950,7 +3950,7 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                         )
                         web_routed = reply is not None
-                    if allow_control_routes and reply is None:
+                    if structured_schema is None and allow_control_routes and reply is None:
                         reply = _handle_work_intent(
                             prompt,
                             project=storage_project,
