@@ -6,8 +6,10 @@ import csv
 import hashlib
 import json
 import math
+import os
 import posixpath
 import re
+import stat
 import struct
 import wave
 import zipfile
@@ -24,6 +26,35 @@ MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_OOXML_ENTRIES = 1000
 MAX_OOXML_BYTES = 128 * 1024 * 1024
 MAX_GLB_ACCESSOR_ITEMS = 2_000_000
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Return whether *path* is a symlink or Windows reparse point.
+
+    ``Path.is_symlink`` does not identify directory junctions on Windows.
+    Bundle validation must treat both as links so a bundle cannot smuggle a
+    reference outside its declared tree.
+    """
+    try:
+        if path.is_symlink():
+            return True
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except (FileNotFoundError, OSError):
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _directory_items(path: Path):
+    """Yield bundle children while pruning reparse-point directories."""
+    for current, directories, files in os.walk(path, followlinks=False):
+        parent = Path(current)
+        for name in list(directories):
+            candidate = parent / name
+            if _is_reparse_point(candidate):
+                directories.remove(name)
+                yield candidate
+        for name in files:
+            yield parent / name
 
 GLB_COMPONENTS = {
     5120: ("b", 1),
@@ -3549,7 +3580,7 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
                 _check(checks, "bundle-safe-path", safe, relative or "(empty)")
                 if not safe:
                     continue
-                exists = candidate.is_file() and not candidate.is_symlink()
+                exists = candidate.is_file() and not _is_reparse_point(candidate)
                 _check(checks, "bundle-file-exists", exists, relative)
                 if not exists:
                     continue
@@ -3565,13 +3596,25 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         # limit, never added to the byte total, and never hashed. The limits
         # were measuring the manifest's honesty about itself.
         actual = []
-        for item in path.rglob("*"):
-            if item.is_file() and not item.is_symlink():
+        links = []
+        for item in _directory_items(path):
+            if _is_reparse_point(item):
+                links.append(item)
+                continue
+            if item.is_file():
                 actual.append(item)
                 if len(actual) > MAX_BUNDLE_FILES:
                     break
         _check(checks, "bundle-file-limit", len(actual) <= MAX_BUNDLE_FILES,
                "%d files on disk (at most %d)" % (len(actual), MAX_BUNDLE_FILES))
+        _check(
+            checks, "bundle-no-symlinks", not links,
+            ("%d symlinks: %s" % (
+                len(links), ", ".join(
+                    item.relative_to(path).as_posix() for item in links[:5]
+                ),
+            )) if links else "none",
+        )
         declared_paths = {candidate.resolve() for _name, candidate in declared}
         manifest_path = (path / "manifest.json").resolve()
         undeclared = sorted(
@@ -3586,13 +3629,25 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         )
     else:
         generic = []
-        for item in path.rglob("*"):
-            if item.is_file() and not item.is_symlink():
+        links = []
+        for item in _directory_items(path):
+            if _is_reparse_point(item):
+                links.append(item)
+                continue
+            if item.is_file():
                 generic.append(item)
                 if len(generic) > MAX_BUNDLE_FILES:
                     break
         generic.sort()
         _check(checks, "bundle-file-limit", len(generic) <= MAX_BUNDLE_FILES, "%d files" % len(generic))
+        _check(
+            checks, "bundle-no-symlinks", not links,
+            ("%d symlinks: %s" % (
+                len(links), ", ".join(
+                    item.relative_to(path).as_posix() for item in links[:5]
+                ),
+            )) if links else "none",
+        )
         declared = [(item.relative_to(path).as_posix(), item) for item in generic[:MAX_BUNDLE_FILES]]
 
     required_files = _string_list(requirements, "required_files")
@@ -3711,7 +3766,7 @@ def validate(path, recipe="auto", requirements=None) -> dict:
             "passed_checks": 0,
             "failed_checks": 1,
         }
-    if requested.is_symlink():
+    if _is_reparse_point(requested):
         return {
             "ok": False,
             "path": str(requested.absolute()),
