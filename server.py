@@ -5850,9 +5850,17 @@ def _answer_with_history_impl(
     (with footer).
     """
     _maybe_live_reload()
-    command = control_command(prompt, history=history, session=session, project=project)
-    if command is not None:
-        return _append_activity(command)
+    # An explicit OpenAI/MCP target is a routing contract, not a hint.  In
+    # particular, never let conversational control routing reinterpret an
+    # explicit cloud or exact-model request as local workbench activity before
+    # the selected model has a chance to run.  The default route (no ``tier``)
+    # intentionally retains its ergonomic slash/control commands.
+    if not str(tier or "").strip():
+        command = control_command(
+            prompt, history=history, session=session, project=project,
+        )
+        if command is not None:
+            return _append_activity(command)
     model, cloud, model_augment, tier_label = _serve_target(tier, strict)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
