@@ -57,6 +57,7 @@ import personas
 import summarizer
 import code_runner
 import compiler_cache
+import request_cache
 import isolated_runner
 import live_reload
 import system_profile
@@ -229,6 +230,31 @@ def _local_model_options(temperature, num_predict, num_ctx):
         if value is not None:
             options[key] = value
     return options
+
+
+_SERVE_TEMPERATURE_DEFAULT = 0.2
+
+
+def _serve_temperature():
+    """Sampling temperature for the serve chat route (default 0.2, unchanged).
+
+    ``SONDER_SERVE_TEMPERATURE=0`` selects greedy decoding, which is what
+    makes a non-learning local turn eligible for the deterministic request
+    cache (see request_cache.eligible).  Values are clamped to Ollama's
+    accepted range and read at call time like the other live performance
+    knobs; an unparseable value keeps the default so a bad env var can never
+    silently change generation behavior.
+    """
+    raw = os.environ.get("SONDER_SERVE_TEMPERATURE", "").strip()
+    if not raw:
+        return _SERVE_TEMPERATURE_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _SERVE_TEMPERATURE_DEFAULT
+    if not math.isfinite(value):
+        return _SERVE_TEMPERATURE_DEFAULT
+    return min(2.0, max(0.0, value))
 
 
 def _local_runtime_summary():
@@ -5835,6 +5861,8 @@ def _answer_with_history_impl(
     raise_model_errors=False,
     target_observer=None,
     augment=True,
+    cache_scope="",
+    cache_observer=None,
 ):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
@@ -5875,6 +5903,7 @@ def _answer_with_history_impl(
     # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
     # cloud from learning and have the app respect it. The local route is gated via 'code'.
     learn = _should_learn(_canonical_learn_tier(tier_label), True)
+    temperature = _serve_temperature()
     req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
     session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
@@ -5889,7 +5918,7 @@ def _answer_with_history_impl(
             # later grounded outcome cannot become an unscoped raw recall.
             capture_project = project_id
             response, iid, trace_ctx = _answer(
-                conn, prompt, model, effective_system, 0.2, 1024, req_ctx,
+                conn, prompt, model, effective_system, temperature, 1024, req_ctx,
                 session_id, capture_project, history or None, trace=trace,
                 # ``augment`` is an HTTP-owned privacy boundary.  A model
                 # route can further opt out (for example cloud teacher mode),
@@ -5903,11 +5932,47 @@ def _answer_with_history_impl(
             if iid is not None:
                 interaction_snapshot = memory_store.get_interaction(conn, iid)
         else:
-            gen = _make_generate(
-                model, effective_system, 0.2, 1024, req_ctx, cloud=cloud,
-                allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
-            )
-            response = gen(prompt, history or None)
+            # The non-learning route is the only pure one: no interaction
+            # capture, no memory augmentation, and (for a local target) no
+            # cloud availability fallback — the bound model is the serving
+            # model.  That makes it the sole admission point for the
+            # deterministic request cache; eligibility stays default-deny
+            # (local, greedy decoding, an HTTP-supplied owner scope) and the
+            # identity binds every input of the generate call below.
+            response = None
+            request_cache_key = None
+            request_cache_status = ""
+            if request_cache.eligible(
+                scope=cache_scope, cloud=cloud, temperature=temperature,
+                learning=False, augmented=False,
+            ):
+                request_cache_key = request_cache.identity_key(
+                    scope=cache_scope, model=model, tier=tier_label,
+                    system=effective_system, prompt=prompt,
+                    history=history or [],
+                    options=_local_model_options(temperature, 1024, req_ctx),
+                    cloud_allowed=cloud_allowed(),
+                )
+                response = request_cache.get(request_cache_key)
+                request_cache_status = "hit" if response is not None else "miss"
+            if response is None:
+                gen = _make_generate(
+                    model, effective_system, temperature, 1024, req_ctx,
+                    cloud=cloud,
+                    allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+                )
+                response = gen(prompt, history or None)
+                # Success-only: a raised ModelCallError never reaches this
+                # store, and request_cache.put refuses in-band error text.
+                if request_cache_key is not None:
+                    request_cache.put(request_cache_key, response)
+            if request_cache_status and cache_observer is not None:
+                try:
+                    cache_observer(request_cache_status)
+                except Exception:
+                    # Like target_observer: an observability hook must never
+                    # fail a valid turn.
+                    pass
             iid, trace_ctx = None, None
     except ModelCallError as error:
         if raise_model_errors:
@@ -5936,7 +6001,7 @@ def _answer_with_history_impl(
 
     def _code_repair(repair_prompt):
         gen = _make_generate(
-            model, effective_system, 0.2, 1024, req_ctx, cloud=cloud,
+            model, effective_system, temperature, 1024, req_ctx, cloud=cloud,
             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
         )
         repair_history = list(history or []) + [
@@ -5958,7 +6023,7 @@ def _answer_with_history_impl(
         footer_iid = None
     if trace and trace_ctx is not None:
         params = {
-            "temperature": 0.2,
+            "temperature": temperature,
             "num_predict": 1024,
             "num_ctx": req_ctx,
             "num_ctx_native": _context_native(req_ctx),
@@ -5986,6 +6051,8 @@ def answer_with_history(
     raise_model_errors=False,
     target_observer=None,
     augment=True,
+    cache_scope="",
+    cache_observer=None,
 ):
     label = "chat:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
@@ -6008,6 +6075,8 @@ def answer_with_history(
             raise_model_errors=raise_model_errors,
             target_observer=target_observer,
             augment=augment,
+            cache_scope=cache_scope,
+            cache_observer=cache_observer,
         )
     return _append_activity(result, response=response, replace=True)
 
