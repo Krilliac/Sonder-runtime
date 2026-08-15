@@ -182,6 +182,25 @@ MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
 # the wait; it does not fire during generation, because a long model call
 # performs no socket operation while it runs.
 REQUEST_TIMEOUT_SECONDS = max(5, _env_int("SONDER_REQUEST_TIMEOUT_SECONDS", 60))
+# Several routes answer before the request body is read: the origin rejection,
+# the framing and media-type errors, the oversized-body refusal, the
+# authentication-failure limiter, and /v1/admin/drain. A response that skips the
+# body must not leave those bytes on a connection that stays open, or the peer's
+# next request is parsed starting inside them. A small, fully framed body is
+# taken off the socket instead so HTTP/1.1 reuse survives; anything larger keeps
+# the 413 bound meaningful and ends the connection (RFC 9112 6.3). The read is
+# given its own short deadline so an error path never inherits the full
+# per-connection wait above.
+MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
+DISCARD_BODY_TIMEOUT_SECONDS = 5
+# Closing a socket whose receive buffer still holds body bytes makes the OS
+# reset the connection, and the reset discards the response already written --
+# the caller would see a dropped connection instead of the 413 that explains
+# the refusal. Soak what is already in flight for a short, bounded window
+# first (RFC 9112 9.6, lingering close). Both bounds are deliberately small:
+# this runs only on connections that are ending anyway.
+LINGERING_CLOSE_SECONDS = 1.0
+LINGERING_CLOSE_BYTES = 256 * 1024
 # Account-secret counterpart to sonder_config.MIN_API_KEY_LENGTH. That side of
 # the same non-loopback bind policy has no constant anywhere, so name it here
 # rather than leave a second bare literal next to the one being removed.
@@ -2750,6 +2769,43 @@ class Handler(BaseHTTPRequestHandler):
     # timed-out read raises in handle_one_request, which closes the connection.
     timeout = REQUEST_TIMEOUT_SECONDS
 
+    def finish(self):
+        """Soak an abandoned request body so the peer still reads the response."""
+        try:
+            self._linger_before_close()
+        finally:
+            super().finish()
+
+    def _linger_before_close(self):
+        """Bounded lingering close for a connection ending on an unread body.
+
+        Only reached when a response deliberately skipped the body and ended
+        the connection (see ``_settle_unread_request_body``). Nothing read here
+        is parsed or retained; the point is purely that the peer's in-flight
+        bytes do not turn the close into a reset that erases the error the
+        caller needs to see.
+        """
+        if not self.close_connection:
+            return
+        if getattr(self, "_request_body_consumed", True):
+            return
+        connection = getattr(self, "connection", None)
+        wfile = getattr(self, "wfile", None)
+        if connection is None or wfile is None:
+            return
+        deadline = time.monotonic() + LINGERING_CLOSE_SECONDS
+        remaining = LINGERING_CLOSE_BYTES
+        try:
+            wfile.flush()
+            connection.settimeout(LINGERING_CLOSE_SECONDS)
+            while remaining > 0 and time.monotonic() < deadline:
+                chunk = connection.recv(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            return
+
     def handle(self):
         """Treat a client reset during HTTP framing as a normal disconnect."""
         try:
@@ -2785,10 +2841,14 @@ class Handler(BaseHTTPRequestHandler):
         # receipt, so discard the prior request's cached value first.
         self._correlation_id = ""
         self._request_started = time.monotonic()
+        self._request_body_consumed = False
         if self._reject_disallowed_origin():
             return
+        must_close = self._close_for_unread_body()
         self.send_response(204)
         self._cors()
+        if must_close:
+            self.send_header("Connection", "close")
         self.send_header("X-Sonder-Elapsed-Ms", "0")
         self.end_headers()
 
@@ -2889,8 +2949,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload(lifecycle.version_payload())
             return True
         body = lifecycle.metrics.render()
+        must_close = self._close_for_unread_body()
         self.send_response(200)
         self._cors()
+        if must_close:
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -2957,11 +3020,89 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return nonce
 
+    def _unread_request_body_bytes(self):
+        """Declared body bytes this handler has not taken off the socket.
+
+        ``None`` means the body boundary cannot be located at all -- a transfer
+        coding, or a missing/duplicated/non-numeric ``Content-Length`` -- so
+        nothing may be assumed about where the next request begins.
+        """
+        if getattr(self, "_request_body_consumed", False):
+            return 0
+        if self.headers.get_all("Transfer-Encoding"):
+            return None
+        lengths = self.headers.get_all("Content-Length") or ()
+        if not lengths:
+            return 0
+        if len(lengths) > 1:
+            return None
+        raw = lengths[0].strip()
+        if not raw.isdigit():
+            return None
+        return int(raw)
+
+    def _settle_unread_request_body(self):
+        """Return whether this response must also end the connection.
+
+        Answering before ``_read_json`` leaves the request body queued on the
+        socket. Under the HTTP/1.1 deployment option the handler stays on that
+        connection, so those bytes would be read as the next request line: the
+        caller's following request silently disappears and a forged one takes
+        its place. Discard a small, fully framed body so ordinary reuse still
+        works; an oversized or unframed body is never read, and its connection
+        is closed instead. See MAX_DISCARDED_BODY_BYTES.
+        """
+        pending = self._unread_request_body_bytes()
+        if pending == 0:
+            self._request_body_consumed = True
+            return False
+        if pending is None or pending > MAX_DISCARDED_BODY_BYTES:
+            return True
+        connection = getattr(self, "connection", None)
+        prior = None
+        restore = False
+        try:
+            if connection is not None:
+                prior = connection.gettimeout()
+                if prior is None or prior > DISCARD_BODY_TIMEOUT_SECONDS:
+                    connection.settimeout(DISCARD_BODY_TIMEOUT_SECONDS)
+                    restore = True
+            discarded = self.rfile.read(pending)
+        except (OSError, ValueError):
+            return True
+        finally:
+            if restore:
+                try:
+                    connection.settimeout(prior)
+                except OSError:
+                    pass
+        if len(discarded) != pending:
+            return True
+        self._request_body_consumed = True
+        return False
+
+    def _close_for_unread_body(self):
+        """Settle the request body and latch the close before writing headers."""
+        must_close = self._settle_unread_request_body()
+        if must_close:
+            # Latch it here as well: a delivery failure below must not leave a
+            # desynchronized connection open just because the header write lost
+            # its race with the peer.
+            self.close_connection = True
+        return must_close
+
     def _send_json_payload(self, payload, status=200, headers=None, elapsed_ms=None):
         body = json.dumps(payload).encode("utf-8")
+        # Keep this low-level delivery helper usable by the focused socket
+        # probes that intentionally provide only the response-writer surface.
+        # Real Handler instances always expose the settlement hook.
+        settle_unread_body = getattr(self, "_close_for_unread_body", None)
+        must_close = settle_unread_body() if callable(settle_unread_body) else False
         try:
             self.send_response(status)
             self._cors()
+            if must_close:
+                self.send_header("Connection", "close")
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             if getattr(self, "_correlation_id", ""):
@@ -3013,7 +3154,12 @@ class Handler(BaseHTTPRequestHandler):
             raise HTTPRequestError(415, "Content-Type must be application/json")
         raw = self.rfile.read(length)
         if len(raw) != length:
+            # The peer stopped mid-body, so the declared span is gone for good.
+            # Leave the request marked unconsumed: the response path then ends
+            # this connection rather than resuming inside a truncated body.
             raise HTTPRequestError(400, "request body is incomplete")
+        # The declared body is off the socket, whatever it decodes to below.
+        self._request_body_consumed = True
         try:
             payload = json.loads(
                 raw.decode("utf-8"),
@@ -3047,6 +3193,7 @@ class Handler(BaseHTTPRequestHandler):
         # reset before every externally visible request.
         self._correlation_id = ""
         self._request_started = time.monotonic()
+        self._request_body_consumed = False
         if self._reject_disallowed_origin():
             return
         path = _request_route(self.path)
@@ -3214,7 +3361,10 @@ class Handler(BaseHTTPRequestHandler):
     def _send_local_log_page(self):
         """Serve the loopback-only browser landing page without auth state."""
         body = _LOCAL_LOG_PAGE.encode("utf-8")
+        must_close = self._close_for_unread_body()
         self.send_response(200)
+        if must_close:
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -3504,8 +3654,10 @@ class Handler(BaseHTTPRequestHandler):
         self._correlation_id = ""
         self._request_started = time.monotonic()
         # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive
-        # requests. The terminal-metric latch is per request, never per socket.
+        # requests. The terminal-metric latch is per request, never per socket,
+        # and so is the record of whether this request's body was read.
         self._chat_completion_metrics_recorded = False
+        self._request_body_consumed = False
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
 
         def record_early_chat_metric(result):

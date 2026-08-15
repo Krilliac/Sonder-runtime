@@ -139,6 +139,17 @@ Codes: `CAPACITY_EXHAUSTED` (429, queue full), `ADMISSION_TIMEOUT` (504),
 `UNAUTHENTICATED` (401). OpenAI-compatible error shapes are preserved
 alongside.
 
+## Request-body framing
+
+Steps 2, 3, and 5 above answer before the request body is read, as does
+`POST /v1/admin/drain`. A body left on the socket cannot be allowed to become
+the next request on a reused connection, so the adapter either takes a small
+framed body off the socket and keeps the connection usable, or answers with
+`Connection: close`. Clients therefore see `Connection: close` on an oversized
+body (413) and on any request whose framing was rejected — a duplicated or
+non-numeric `Content-Length`, or a transfer coding, neither of which is
+supported. Nothing beyond the accepted request-size limit is ever read.
+
 ## Graceful drain
 
 On `SIGTERM`/`SIGINT` or `POST /v1/admin/drain`: state → DRAINING, reject
