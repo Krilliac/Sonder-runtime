@@ -1421,8 +1421,8 @@ def main():
     input_history = []
     model_argument_completer = _ModelArgumentCompleter()
 
-    def _workspace_path(raw):
-        """Return one canonical existing directory, never a bare project label."""
+    def _workspace_create_path(raw):
+        """Return one canonical path suitable for guarded directory creation."""
         text = str(raw or "").strip().strip('"')
         if not text:
             return "", "workspace path is required"
@@ -1430,6 +1430,13 @@ def main():
             path = os.path.realpath(os.path.abspath(os.path.expanduser(text)))
         except (OSError, ValueError) as exc:
             return "", "invalid workspace path: %s" % exc
+        return path, ""
+
+    def _workspace_path(raw):
+        """Return one canonical existing directory, never a bare project label."""
+        path, error = _workspace_create_path(raw)
+        if error:
+            return "", error
         if not os.path.isdir(path):
             return "", "workspace directory does not exist: %s" % path
         return path, ""
@@ -1461,15 +1468,15 @@ def main():
 
     def do_workspace_create(raw):
         nonlocal workspace_root
-        text = str(raw or "").strip().strip('"')
-        if not text:
+        path, error = _workspace_create_path(raw)
+        if error:
             print("usage: /workspace-create <path>")
             return
-        output = server.directory_create(path=text, parents=True)
+        output = server.directory_create(path=path, parents=True)
         print(output)
         if _is_repl_error(output):
             return
-        path, error = _workspace_path(text)
+        path, error = _workspace_path(path)
         if error:
             print(error)
             return
@@ -1843,7 +1850,10 @@ def main():
             # One choke point for every hand-written branch below, including
             # the ones forwarded to server.control_command. Commands handled by
             # _run_catalogued (the `else`) are gated there instead.
-            may_run, refusal = _named_command_gate(cmd)
+            if cmd in ("/workspace-create", "/workspacecreate"):
+                may_run, refusal = _permission_gate("directory_create")
+            else:
+                may_run, refusal = _named_command_gate(cmd)
             if not may_run:
                 print(refusal)
                 continue
@@ -2053,7 +2063,8 @@ def main():
                     print("usage: /work <task>")
                 else:
                     out = server.workbench_agent(
-                        prompt=arg.strip(), project=project, max_steps=12,
+                        prompt=arg.strip(), project=workspace_root or project,
+                        max_steps=12,
                     )
                     last_response = out
                     last_run_source = _answer_only(out)

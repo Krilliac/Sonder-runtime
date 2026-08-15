@@ -1,4 +1,5 @@
 import io
+import os
 import re
 
 import pytest
@@ -1070,6 +1071,7 @@ def _drive_workspace_repl(monkeypatch, lines, seen):
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool: (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -1159,3 +1161,54 @@ def test_pending_workspace_accepts_explicit_create_path_reply(monkeypatch, tmp_p
     sonder_repl.main()
 
     assert seen["project"] == str(workspace.resolve())
+
+
+def test_workspace_create_obeys_directory_create_permission(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "must-not-exist"
+    calls = []
+    _drive_workspace_repl(
+        monkeypatch, iter(("/workspace-create %s" % workspace, "/exit")), {},
+    )
+    monkeypatch.setattr(
+        sonder_repl, "_permission_gate",
+        lambda tool: (False, "refused /workspace-create") if tool == "directory_create" else (True, ""),
+    )
+    monkeypatch.setattr(
+        sonder_repl.server, "directory_create", lambda **kwargs: calls.append(kwargs),
+    )
+
+    sonder_repl.main()
+
+    assert not calls
+    assert "refused /workspace-create" in capsys.readouterr().out
+
+
+def test_workspace_create_uses_one_canonical_path(monkeypatch, tmp_path):
+    workspace = tmp_path / "created"
+    seen = {}
+    _drive_workspace_repl(
+        monkeypatch, iter(("/workspace-create ./created", "/exit")), seen,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def create_directory(path, parents=True):
+        seen["created"] = path
+        os.makedirs(path, exist_ok=parents)
+        return "directory create: %s" % path
+
+    monkeypatch.setattr(sonder_repl.server, "directory_create", create_directory)
+    sonder_repl.main()
+
+    assert seen["created"] == str(workspace.resolve())
+
+
+def test_explicit_work_uses_selected_workspace(monkeypatch, tmp_path):
+    seen = {}
+    _drive_workspace_repl(
+        monkeypatch, iter(("/workspace %s" % tmp_path, "/work inspect it", "/exit")), seen,
+    )
+
+    sonder_repl.main()
+
+    assert seen["project"] == str(tmp_path.resolve())
+    assert seen["prompt"] == "inspect it"
