@@ -2738,6 +2738,16 @@ class Handler(BaseHTTPRequestHandler):
     # timed-out read raises in handle_one_request, which closes the connection.
     timeout = REQUEST_TIMEOUT_SECONDS
 
+    def handle(self):
+        """Treat a client reset during HTTP framing as a normal disconnect."""
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # This can happen before a request reaches do_GET/do_POST, so the
+            # response helpers cannot catch it.  It is a peer disconnect, not
+            # a server exception worth emitting as a socketserver traceback.
+            self.close_connection = True
+
     def _cors(self):
         origin = self.headers.get("Origin")
         if origin is not None and origin in CORS_ORIGINS:

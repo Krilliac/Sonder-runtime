@@ -2085,6 +2085,20 @@ def test_json_payload_swallows_a_client_disconnect_during_headers():
     assert ts.Handler._send_json_payload(JsonProbe(), {"ok": True}) is False
 
 
+def test_handler_swallows_a_client_reset_before_http_request_parsing(monkeypatch):
+    probe = object.__new__(ts.Handler)
+    probe.close_connection = False
+
+    def peer_reset(_self):
+        raise ConnectionResetError("client closed before request parsing")
+
+    monkeypatch.setattr(ts.BaseHTTPRequestHandler, "handle", peer_reset)
+
+    ts.Handler.handle(probe)
+
+    assert probe.close_connection is True
+
+
 def test_stream_preserves_long_normal_assistant_content():
     class StreamProbe:
         def __init__(self):
