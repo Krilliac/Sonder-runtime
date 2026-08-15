@@ -622,6 +622,33 @@ def test_directory_bundle_rejects_in_tree_symlinks(tmp_path, with_manifest):
     )
 
 
+@pytest.mark.parametrize("with_manifest", [False, True])
+def test_directory_bundle_rejects_and_prunes_windows_junctions(
+    monkeypatch, tmp_path, with_manifest,
+):
+    root = _bundle_with_extras(tmp_path, 0)
+    if not with_manifest:
+        (root / "manifest.json").unlink()
+    junction = root / "junction"
+    junction.mkdir()
+    (junction / "outside.md").write_text("must never be enumerated", encoding="utf-8")
+    original = artifact_grounding._is_reparse_point
+    monkeypatch.setattr(
+        artifact_grounding,
+        "_is_reparse_point",
+        lambda path: path == junction or original(path),
+    )
+
+    result = artifact_grounding._validate_directory(root, "bundle", {})
+
+    assert result["ok"] is False
+    assert any(
+        check.get("name") == "bundle-no-symlinks" and not check.get("ok")
+        for check in result["checks"]
+    )
+    assert all("outside.md" not in check.get("detail", "") for check in result["checks"])
+
+
 def test_bundle_glb_grounding_propagates_no_external_dependencies(
     monkeypatch, tmp_path
 ):
