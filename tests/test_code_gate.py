@@ -140,6 +140,31 @@ def test_timeout_is_inconclusive_not_failure(monkeypatch):
     assert reply == GOOD_REPLY
 
 
+def test_gate_infrastructure_failure_is_inconclusive_but_observable(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    events = []
+    monkeypatch.setattr(server.grounding, "run_code_detail", unavailable)
+    monkeypatch.setattr(
+        server.activity_tracker,
+        "record_event",
+        lambda kind, **kwargs: events.append((kind, kwargs)),
+    )
+
+    reply, verified, repaired = server._apply_code_gate(
+        GOOD_REPLY, interaction_id="iid-unavailable",
+    )
+
+    assert (reply, verified, repaired) == (GOOD_REPLY, None, False)
+    assert events == [
+        (
+            "code_gate_unavailable",
+            {"summary": "initial code verification unavailable: OSError"},
+        ),
+    ]
+
+
 def test_env_kill_switch_disables_gate(monkeypatch):
     monkeypatch.setenv("SONDER_CODE_GATE", "0")
 
