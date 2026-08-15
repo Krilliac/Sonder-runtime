@@ -51,9 +51,9 @@ These complete turns each map to a single safe, read-only command:
 |---|---|---|
 | `git status` / `what's the git status?` / `is the working tree clean?` | `/repo_status` | working-tree status |
 | `git log` / `show recent commits` | `/repo_log` | recent commit history |
-| `git diff` / `show the diff` / `show unstaged changes` | `/repo_diff` | uncommitted changes |
+| `git diff` / `show the diff` / `show unstaged changes` | `/repo_diff` | unstaged patch |
+| `show uncommitted changes` / `show pending changes` | `/repo_status` | staged, unstaged, and untracked state |
 | `health check` / `run diagnostics` / `are you healthy?` | `/diagnostics` | local install health |
-| `list tests` / `what tests are there?` | `/test_discover` | discovered test suites |
 | `show me your stats` | `/stats` | runtime statistics |
 | `context health` | `/context` | context budget meters |
 | `show agents` | `/agents` | orchestration status |

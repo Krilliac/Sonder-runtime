@@ -244,8 +244,13 @@ _RULES = [
           r"what\s+are\s+the\s+(?:recent|latest)\s+commits?)\s*[?!.]*$",
           _fixed("/repo_log")),
     _rule(r"^(?:git\s+diff|show\s+(?:me\s+)?(?:the\s+)?diff|"
-          r"show\s+(?:me\s+)?(?:the\s+)?(?:uncommitted|unstaged|pending)\s+"
-          r"changes)\s*[?!.]*$", _fixed("/repo_diff")),
+          r"show\s+(?:me\s+)?(?:the\s+)?unstaged\s+changes)\s*[?!.]*$",
+          _fixed("/repo_diff")),
+    # ``repo_diff`` only renders the unstaged patch.  A request for all
+    # uncommitted/pending work must include staged and untracked state too, so
+    # choose the complete, non-executing repository status instead.
+    _rule(r"^show\s+(?:me\s+)?(?:the\s+)?(?:uncommitted|pending)\s+"
+          r"changes\s*[?!.]*$", _fixed("/repo_status")),
 
     # --- health / diagnostics (read-only) ---
     # "run a health check on the production database" carries a target and is
@@ -254,11 +259,9 @@ _RULES = [
           r"diagnostics)\s*[?!.]*$", _fixed("/diagnostics")),
     _rule(r"^are\s+you\s+healthy\s*[?!.]*$", _fixed("/diagnostics")),
 
-    # --- test discovery (read-only; running tests stays /test_run) ---
-    _rule(r"^(?:list|show|find|discover)\s+(?:me\s+)?(?:the\s+)?"
-          r"(?:available\s+)?tests\s*[?!.]*$", _fixed("/test_discover")),
-    _rule(r"^what\s+tests\s+(?:are\s+there|exist|do\s+we\s+have)\s*[?!.]*$",
-          _fixed("/test_discover")),
+    # Test discovery remains explicit.  Its framework probes can import a
+    # checkout's pytest modules/plugins or invoke project tooling, so it is
+    # execution-capable despite a "collect"-style name.
 
     # --- run ---
     _rule(r"^run\s+in\s+(?:a\s+)?(?:new\s+)?(?:window|console)\b", _fixed("/runwindow")),

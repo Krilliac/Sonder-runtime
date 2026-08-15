@@ -207,10 +207,11 @@ def test_commit_history_phrasings_resolve_to_the_read_only_repo_log():
     assert cr.resolve("what are the recent commits?") == "/repo_log"
 
 
-def test_diff_phrasings_resolve_to_the_read_only_repo_diff():
+def test_diff_phrasings_preserve_the_requested_repository_scope():
     assert cr.resolve("git diff") == "/repo_diff"
     assert cr.resolve("show the diff") == "/repo_diff"
-    assert cr.resolve("show me the uncommitted changes") == "/repo_diff"
+    assert cr.resolve("show me the uncommitted changes") == "/repo_status"
+    assert cr.resolve("show pending changes") == "/repo_status"
     assert cr.resolve("show unstaged changes") == "/repo_diff"
 
 
@@ -222,12 +223,12 @@ def test_health_check_phrasings_resolve_to_diagnostics():
     assert cr.resolve("are you healthy?") == "/diagnostics"
 
 
-def test_test_discovery_phrasings_resolve_to_the_read_only_test_discover():
-    assert cr.resolve("list tests") == "/test_discover"
-    assert cr.resolve("list the tests") == "/test_discover"
-    assert cr.resolve("discover tests") == "/test_discover"
-    assert cr.resolve("what tests are there?") == "/test_discover"
-    assert cr.resolve("what tests do we have") == "/test_discover"
+def test_test_discovery_phrasings_do_not_bypass_execution_confirmation():
+    assert cr.resolve("list tests") is None
+    assert cr.resolve("list the tests") is None
+    assert cr.resolve("discover tests") is None
+    assert cr.resolve("what tests are there?") is None
+    assert cr.resolve("what tests do we have") is None
 
 
 def test_inspection_phrasings_stay_whole_turn_anchored():
@@ -263,7 +264,7 @@ def test_inspection_phrasings_map_to_catalogued_safe_tools():
     import permission_modes
 
     for phrase in ("git status", "git log", "git diff",
-                   "run diagnostics", "list tests"):
+                   "run diagnostics"):
         line = cr.resolve(phrase)
         assert line and line.startswith("/"), phrase
         tool = line.lstrip("/").split()[0]
