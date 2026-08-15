@@ -761,8 +761,8 @@ def test_selected_session_state_is_pinned_before_lifecycle_admission(monkeypatch
     monkeypatch.setattr(ts, "HTTP_SESSION_STATE_OWNER_LIMIT", 2)
     try:
         bob = _account_ctx("bob")
-        queued = ts._http_conversation_state(bob, "queued")
-        assert ts._pin_http_conversation_state(queued) is True
+        queued, pinned = ts._acquire_http_conversation_state(bob, "queued", pin=True)
+        assert pinned is True
 
         # Local-open traffic can fill and prune the global LRU while Bob's
         # request is waiting for a lifecycle slot.  The selected state is not
@@ -775,7 +775,7 @@ def test_selected_session_state_is_pinned_before_lifecycle_admission(monkeypatch
         assert ts._http_conversation_state(bob, "queued") is queued
         assert queued.session_pins == 1
     finally:
-        ts._release_http_conversation_state(queued, True)
+        ts._release_http_conversation_state(queued, pinned)
         _clean_session_states()
 
 

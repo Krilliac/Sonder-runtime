@@ -657,8 +657,8 @@ def _evict_owner_lru_session_state(principal):
     return False
 
 
-def _http_conversation_state(context, session, token=""):
-    """Return bounded per-principal state; a blank HTTP session is ephemeral.
+def _acquire_http_conversation_state(context, session, token="", *, pin=False):
+    """Atomically select a bounded state and optionally pin it for a request.
 
     Retention is bounded twice: globally by HTTP_SESSION_STATE_LIMIT, and per
     hosted account by HTTP_SESSION_STATE_OWNER_LIMIT so one account's session
@@ -670,7 +670,7 @@ def _http_conversation_state(context, session, token=""):
 
     session = (session or "").strip()
     if not session:
-        return ConversationState(token=token or "", account=context.get("account"))
+        return ConversationState(token=token or "", account=context.get("account")), False
     principal = _state_principal(context)
     key = (principal, session)
     with _HTTP_SESSION_STATES_LOCK:
@@ -689,7 +689,7 @@ def _http_conversation_state(context, session, token=""):
                         # account's entry.
                         return ConversationState(
                             token=token or "", account=context.get("account")
-                        )
+                        ), False
                     owned -= 1
             _prune_http_session_states(HTTP_SESSION_STATE_LIMIT - 1)
             if len(_HTTP_SESSION_STATES) >= HTTP_SESSION_STATE_LIMIT:
@@ -697,7 +697,7 @@ def _http_conversation_state(context, session, token=""):
                 # request-local state rather than evicting an in-flight lock.
                 return ConversationState(
                     token=token or "", account=context.get("account")
-                )
+                ), False
             state = ConversationState()
             _HTTP_SESSION_STATES[key] = state
         _HTTP_SESSION_STATES.move_to_end(key)
@@ -705,16 +705,14 @@ def _http_conversation_state(context, session, token=""):
             state.token = token
         if context.get("account"):
             state.account = context["account"]
-        return state
-
-
-def _pin_http_conversation_state(state):
-    """Keep a selected retained state from eviction before admission starts."""
-    with _HTTP_SESSION_STATES_LOCK:
-        if any(candidate is state for candidate in _HTTP_SESSION_STATES.values()):
+        if pin:
             state.session_pins += 1
-            return True
-    return False
+        return state, bool(pin)
+
+
+def _http_conversation_state(context, session, token=""):
+    """Return bounded per-principal state without retaining a request pin."""
+    return _acquire_http_conversation_state(context, session, token)[0]
 
 
 def _release_http_conversation_state(state, pinned):
@@ -3940,12 +3938,12 @@ class Handler(BaseHTTPRequestHandler):
             history = _server_side_history(storage_session)
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
-        state = _http_conversation_state(
+        state, state_pinned = _acquire_http_conversation_state(
             context,
             session,
             token=_request_account_token(context, auth_header, account_header),
+            pin=True,
         )
-        state_pinned = _pin_http_conversation_state(state)
 
         reply = None
         web_routed = False
