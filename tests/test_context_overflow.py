@@ -311,6 +311,35 @@ def test_local_overflow_compacts_and_retries_exactly_once(monkeypatch):
     assert seen[1]["messages"][-1] == {"role": "user", "content": "live request"}
 
 
+def test_compaction_then_unsupported_think_retries_without_think(monkeypatch):
+    """The independent compatibility retry also works after compaction."""
+    calls = []
+
+    def fake_post(_path, payload, timeout=None):
+        calls.append({
+            "messages": list(payload.get("messages") or []),
+            "think": payload.get("think"),
+        })
+        if len(calls) == 1:
+            raise _http_error(400, b'{"error":"context length exceeded"}')
+        if len(calls) == 2:
+            raise _http_error(400, b'{"error":"model does not support thinking"}')
+        return {"message": {"content": "recovered"}}
+
+    monkeypatch.setattr(server, "_post", fake_post)
+    payload = _payload()
+    payload["think"] = True
+
+    _, content = server._chat_request(payload, model="local", timeout=30)
+
+    assert content == "recovered"
+    assert len(calls) == 3
+    assert len(calls[1]["messages"]) < len(calls[0]["messages"])
+    assert calls[0]["think"] is True
+    assert calls[1]["think"] is True
+    assert calls[2]["think"] is None
+
+
 def test_compaction_retry_never_raises_num_ctx(monkeypatch):
     def responder(call):
         if call == 1:
