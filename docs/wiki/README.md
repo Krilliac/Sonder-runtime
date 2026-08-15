@@ -32,6 +32,7 @@ backups, and a signed update path. It is not a foundation model.
 | 16 | [Glossary](16-glossary.md) | Terms, aliases, and identifiers |
 | 17 | [Benchmarking](17-benchmarking.md) | Measuring the runtime's lift over a bare model (prove the moat) |
 | 18 | [Model Catalog](18-model-catalog.md) | Recommended models per job + capability routing (per VRAM) |
+| 19 | [Model Requirements & Onboarding](19-model-requirements-and-onboarding.md) | What you must install, how to verify/select it, what happens when a model is absent |
 
 ## Operational tools
 

@@ -39,7 +39,9 @@ fresh installation, but embedding is not a prerequisite for ordinary chat.
 
 An unbound optional routing tier degrades to a configured local `general` or
 `code` path; it is not a startup failure. A missing embedding model disables
-semantic retrieval rather than core chat.
+semantic retrieval rather than core chat. For the per-surface behavior when a
+configured model is absent, and the read-only commands that show it, see
+[Model Requirements & Onboarding](19-model-requirements-and-onboarding.md).
 
 > **Installed is not integrated.** Seeing a tag in `ollama list` only proves it
 > is available to the provider. Sonder must also expose a matching, bounded

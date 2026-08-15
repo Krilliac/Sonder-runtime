@@ -16,8 +16,11 @@ quality/speed/privacy knobs.
 | `cloud-*` | Ollama-hosted | metered, leaves the machine (consent-gated) |
 
 Set with `SONDER_FAST` / `SONDER_CODE` / `SONDER_GENERAL` /
-`SONDER_REASONING` / `SONDER_VISION`, or point the
-`sonder:latest` alias at your chosen model. The local `code` tier is
+`SONDER_REASONING` / `SONDER_VISION` — which seed the policy file the first
+time it is created — or with `/runtime set` once it exists, or point the
+`sonder:latest` alias at your chosen model.
+([Model Requirements & Onboarding](19-model-requirements-and-onboarding.md)
+covers verification, selection, and absent-model behavior end to end.) The local `code` tier is
 memory-augmented (facts + lessons); cloud tiers answer without
 augmentation but are still captured for learning.
 
