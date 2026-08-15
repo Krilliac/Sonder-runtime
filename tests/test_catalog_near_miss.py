@@ -110,6 +110,11 @@ def test_suggestions_are_bounded_and_deduplicated():
     assert len(set(got)) == len(got), got
 
 
+def test_nonpositive_limit_is_an_empty_bounded_result():
+    assert near_misses("mdoel", limit=0) == []
+    assert near_misses("mdoel", limit=-1) == []
+
+
 # --- the strict path stays strict -----------------------------------------
 
 

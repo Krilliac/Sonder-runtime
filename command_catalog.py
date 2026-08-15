@@ -1419,6 +1419,9 @@ def near_misses(text: str, limit: int = 5) -> list:
     command they belong to, so a suggestion is never a second spelling of a
     suggestion already in the list.
     """
+    limit = int(limit)
+    if limit <= 0:
+        return []
     wanted = str(text or "").strip().lower().lstrip("/")
     if len(wanted) < _NEAR_MISS_MIN_LEN:
         return []
@@ -1439,7 +1442,7 @@ def near_misses(text: str, limit: int = 5) -> list:
 
     ordered: list[str] = []
     for stem in difflib.get_close_matches(
-        wanted, list(canonical), n=max(int(limit), 0) * 3, cutoff=_NEAR_MISS_CUTOFF,
+        wanted, list(canonical), n=limit * 3, cutoff=_NEAR_MISS_CUTOFF,
     ):
         suggestion = canonical[stem]
         if suggestion not in ordered:
