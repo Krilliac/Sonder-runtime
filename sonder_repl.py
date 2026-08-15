@@ -1600,12 +1600,7 @@ def main():
             print(_paint("no change: %s" % res["reason"], _Ansi.amber))
             return
         print(res["diff"] or "(no diff)")
-        print(_paint("apply this change? [y/N] ", _Ansi.amber), end="")
-        try:
-            ans = _normalize_input_line(input()).lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = ""
-        if ans in ("y", "yes"):
+        if _confirm(_paint("apply this change?", _Ansi.amber)):
             server.file_ops.write_file(fpath, res["edited"], mode="overwrite")
             print(_paint("applied to %s" % fpath, _Ansi.green))
         else:
