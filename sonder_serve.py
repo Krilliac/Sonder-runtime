@@ -607,6 +607,19 @@ def _reasoning_request_owner(context):
     return "ro-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _admission_request_owner(context):
+    """Opaque principal for per-owner admission fairness accounting.
+
+    Only in-memory in the lifecycle's in-flight map, never persisted and never
+    a metric label.  Local-open deployments return "" -- a single operator on
+    loopback has no second party to be fair to, so only global bounds apply.
+    """
+    if not server._deployment_authenticates_callers():
+        return ""
+    material = "admission-owner\0" + _state_principal(context)
+    return "ao-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _fanout_request_role(context):
     account = context.get("account") or {}
     role = str(account.get("role") or "").strip()
@@ -3930,8 +3943,11 @@ class Handler(BaseHTTPRequestHandler):
         allow_control_routes = _uses_default_model_route(model)
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
-            # depth, admission deadline, drain and maintenance awareness.
-            with _lifecycle.acquire_request_slot(mutating=True), state.lock:
+            # depth, admission deadline, drain and maintenance awareness,
+            # bounded per-owner so one account cannot starve the rest.
+            with _lifecycle.acquire_request_slot(
+                mutating=True, owner=_admission_request_owner(context)
+            ), state.lock:
                 _record_chat("user", prompt, state=state)
                 with server.activity_tracker.response_span(
                     "chat:%s" % (model or "sonder"),
