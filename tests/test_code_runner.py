@@ -17,6 +17,16 @@ def test_python_run_success():
     assert out["language"] == "python"
 
 
+def test_python_run_supports_unicode_stdout():
+    out = code_runner.run_code("print('\\U0001f3b2')")
+    assert out["ok"] is True
+    assert "\\U0001f3b2" in out["stdout"]
+
+
+def test_child_environment_forces_utf8_output():
+    assert code_runner._child_environment()["PYTHONIOENCODING"] == "utf-8"
+
+
 def test_default_run_uses_ephemeral_cwd_not_runtime_workspace(monkeypatch, tmp_path):
     root = tmp_path / "runtime"
     root.mkdir()
