@@ -130,7 +130,14 @@ def _child_environment():
     # The stripping rule now lives in sonder_logging so this lane and
     # workbench's run_program cannot diverge -- they did, and workbench leaked
     # the whole environment to the same class of model-authored child.
-    return sonder_logging.child_environment()
+    environment = sonder_logging.child_environment()
+    # Windows defaults a redirected Python child to the active ANSI code page
+    # (commonly cp1252).  Generated programs routinely print Unicode, so that
+    # turns a valid snippet such as ``print("🎲")`` into a false execution
+    # failure.  Make the model-code lane consistently UTF-8 while retaining
+    # the shared secret-stripping policy above.
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
 
 
 def _powershell_exe():
