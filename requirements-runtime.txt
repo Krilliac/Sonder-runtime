@@ -4,3 +4,7 @@
 # MCP 2.x removed mcp.server.fastmcp, which Sonder currently imports.
 mcp==1.29.0
 cryptography==50.0.0
+# pydantic-settings 2.15 warns when MCP 1.x resolves FastMCP's generic
+# lifespan setting, although the runtime remains usable. Pin the last
+# warning-free release until the upstream forward reference is resolved.
+pydantic-settings==2.14.0

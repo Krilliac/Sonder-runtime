@@ -499,12 +499,23 @@ def test_attributed_evidence_can_block_a_lesson_but_never_ground_one(tmp_path):
 
 
 _PRODUCTION_SKIP = ("tests", "app", "proposals", ".git", "seed", "datasets")
+# Directories that are not this repository's source wherever they appear.
+# _PRODUCTION_SKIP only matches the first path component, so a nested git
+# worktree under .claude/worktrees/ or a virtualenv under .runtime/ was walked
+# in full -- and the worktree's own tests/ directory then reported as a
+# production offender. These are checkouts of other code, not code to audit.
+_NESTED_SKIP = frozenset({
+    ".claude", ".runtime", ".git", ".venv", "venv", "env",
+    "node_modules", "site-packages", "__pycache__", ".tox", "build", "dist",
+})
 
 
 def _production_python_files():
     for path in sorted(REPO_ROOT.rglob("*.py")):
         rel = path.relative_to(REPO_ROOT)
         if rel.parts[0] in _PRODUCTION_SKIP:
+            continue
+        if _NESTED_SKIP.intersection(rel.parts):
             continue
         yield path
 
@@ -551,3 +562,21 @@ def test_the_guard_would_catch_a_writer_that_omitted_it(tmp_path):
     statements = _outcome_inserts(tree)
     assert statements, "the scanner did not see the planted INSERT at all"
     assert all("source" not in s.lower() for s in statements)
+
+
+def test_production_scanner_still_covers_the_repo_after_the_nested_skip():
+    """The nested-checkout exclusion must not quietly empty the scan.
+
+    An exclusion added to silence a false positive is one edit away from
+    excluding everything, and a guard that walks nothing passes for free -- it
+    reports "no offenders" exactly as loudly when it examined 368 files as when
+    it examined none. Pin both ends: real production modules are still scanned,
+    and nothing from a nested checkout is.
+    """
+    scanned = {
+        path.relative_to(REPO_ROOT).as_posix() for path in _production_python_files()
+    }
+    assert "memory_store.py" in scanned
+    assert "server.py" in scanned
+    assert len(scanned) > 100
+    assert not [name for name in scanned if _NESTED_SKIP.intersection(name.split("/"))]

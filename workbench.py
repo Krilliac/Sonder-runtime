@@ -700,6 +700,32 @@ def _resolve_program(program, *, extra_roots="", bypass=False):
     return resolved
 
 
+def _run_program_environment():
+    """Child environment for the run_program lane: no secrets, utf-8 output.
+
+    Two halves that must agree. The secret stripping is shared with the
+    code_runner lane through sonder_logging. The encoding is not shared,
+    deliberately: this lane reads the child's pipes as raw bytes and decodes
+    them as utf-8 below, so the child has to be told to *emit* utf-8 or the two
+    ends disagree.
+
+    On Windows a redirected Python child otherwise defaults to the active ANSI
+    code page (commonly cp1252), which raises UnicodeEncodeError the moment a
+    program prints a character outside it -- reporting a valid snippet such as
+    ``print("🎲")`` as a failed run. code_runner fixed exactly this for its
+    own lane; the same class of model-authored program reaches this one through
+    script_run and workspace_run.
+
+    Setting it here rather than in sonder_logging.child_environment() is on
+    purpose: most of that helper's other callers decode their children with the
+    parent's locale, so forcing utf-8 on them would swap this bug for mojibake
+    in a dozen places.
+    """
+    environment = sonder_logging.child_environment()
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
 def _drain_pipe(pipe, sink, state, limit):
     try:
         while True:
@@ -884,7 +910,7 @@ def run_program(
         # workspace_run could base64-dump os.environ and read back
         # SONDER_API_KEY and the approval/bypass gates -- exactly what the
         # code_runner lane was hardened against and this lane was not.
-        env=sonder_logging.child_environment(),
+        env=_run_program_environment(),
     )
     stdout_bytes = bytearray()
     stderr_bytes = bytearray()

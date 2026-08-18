@@ -17,6 +17,19 @@ def test_python_run_success():
     assert out["language"] == "python"
 
 
+def test_python_run_supports_unicode_stdout():
+    out = code_runner.run_code("print('\\U0001f3b2')")
+    assert out["ok"] is True
+    # The child runs with PYTHONIOENCODING=utf-8, so the character must survive as
+    # itself. Asserting the escape text instead would pass only while the runner
+    # was failing to decode -- that assertion pinned the bug it should catch.
+    assert "\U0001f3b2" in out["stdout"]
+
+
+def test_child_environment_forces_utf8_output():
+    assert code_runner._child_environment()["PYTHONIOENCODING"] == "utf-8"
+
+
 def test_default_run_uses_ephemeral_cwd_not_runtime_workspace(monkeypatch, tmp_path):
     root = tmp_path / "runtime"
     root.mkdir()
@@ -435,3 +448,49 @@ def test_server_loop_runs_code_action():
     out = server.loop(actions, max_iterations=1)
     assert "loop status: ok" in out
     assert "loop hello" in out
+
+
+def test_decode_child_output_prefers_utf8_but_keeps_legacy_bytes():
+    """Neither codec is right for every child, so the fallback order matters.
+
+    Python children are forced to utf-8 and node emits it regardless, so utf-8
+    has to win when the bytes are valid utf-8. But PHP, Perl and native binaries
+    follow the host code page, and 0xE9 alone is not valid utf-8 -- decoding it
+    as utf-8 with errors="replace" would destroy output the old locale-based
+    decoding preserved. Only bytes invalid in both may be replaced.
+    """
+    import locale
+
+    # Valid utf-8 decodes as utf-8, not as the host code page.
+    assert code_runner._decode_child_output(
+        chr(0x1F3B2).encode("utf-8")) == chr(0x1F3B2)
+    # A lone 0xE9 is not valid utf-8; it must survive via the host encoding
+    # rather than becoming U+FFFD.
+    host = locale.getpreferredencoding(False)
+    recovered = code_runner._decode_child_output(b"caf" + bytes([0xE9]))
+    assert recovered == (b"caf" + bytes([0xE9])).decode(host, errors="replace")
+    if host.lower() in ("cp1252", "latin-1", "iso-8859-1"):
+        assert recovered == "café"
+        assert "�" not in recovered
+    # Degenerate inputs stay harmless.
+    assert code_runner._decode_child_output(b"") == ""
+    assert code_runner._decode_child_output("already text") == "already text"
+
+
+def test_python_run_still_returns_text_not_bytes():
+    """The lane switched to binary pipes; callers must still receive str."""
+    out = code_runner.run_code("print('plain ascii')")
+    assert isinstance(out["stdout"], str)
+    assert isinstance(out["stderr"], str)
+    assert "plain ascii" in out["stdout"]
+
+
+def test_python_run_forwards_stdin_as_utf8():
+    """stdin is encoded on the way in now, so a non-ascii prompt must survive."""
+    out = code_runner.run_code(
+        "import sys; sys.stdout.write(sys.stdin.read().strip())",
+        stdin="café " + chr(0x1F3B2),
+    )
+    assert out["ok"] is True, out["stderr"][:300]
+    assert "café" in out["stdout"]
+    assert chr(0x1F3B2) in out["stdout"]

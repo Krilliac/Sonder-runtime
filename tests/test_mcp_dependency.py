@@ -9,6 +9,7 @@ def test_mcp_runtime_dependency_excludes_breaking_v2():
     runtime = (ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
     assert "mcp==1.29.0" in runtime.splitlines()
     assert "cryptography==50.0.0" in runtime.splitlines()
+    assert "pydantic-settings==2.14.0" in runtime.splitlines()
     assert not any(
         line.startswith(("mcp>=", "mcp<=", "cryptography>=", "cryptography<="))
         for line in runtime.splitlines()
