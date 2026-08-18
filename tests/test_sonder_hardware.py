@@ -535,3 +535,95 @@ def test_probe_gpu_missing_binary_is_not_retried(monkeypatch):
     monkeypatch.setattr(sonder_hardware.subprocess, "run", _missing)
     assert sonder_hardware._probe_gpu() == (False, None)
     assert len(calls) == 1, "a missing binary must not be retried"
+
+
+# --- mixture-of-experts: total params size memory, active params size latency --
+
+def test_params_from_model_tag_reads_moe_and_dense_tags():
+    assert sonder_hardware.params_from_model_tag("qwen3-coder:30b-a3b-q4_K_M") == (30.0, 3.0)
+    assert sonder_hardware.params_from_model_tag("qwen3-coder:480b-a35b-q8_0") == (480.0, 35.0)
+    assert sonder_hardware.params_from_model_tag("qwen3:235b-a22b") == (235.0, 22.0)
+    # A dense tag reports the same count twice, which keeps every caller's
+    # active-vs-total comparison meaningful without a special case.
+    assert sonder_hardware.params_from_model_tag("qwen2.5-coder:14b") == (14.0, 14.0)
+    assert sonder_hardware.params_from_model_tag("qwen2.5-coder:1.5b") == (1.5, 1.5)
+
+
+def test_params_from_model_tag_returns_none_rather_than_guessing():
+    # An alias carries no size; guessing one would silently change the advice.
+    assert sonder_hardware.params_from_model_tag("sonder:latest") is None
+    assert sonder_hardware.params_from_model_tag("nomic-embed-text") is None
+    assert sonder_hardware.params_from_model_tag("") is None
+    assert sonder_hardware.params_from_model_tag(None) is None
+    # Active >= total is a malformed tag, not a very fast model.
+    assert sonder_hardware.params_from_model_tag("bogus:8b-a9b") is None
+
+
+def test_decode_band_reads_active_parameters():
+    assert sonder_hardware.decode_band(3.3) == "3-4B"
+    assert sonder_hardware.decode_band(7.0) == "7B"
+    assert sonder_hardware.decode_band(22.0) == "13-34B"
+    assert sonder_hardware.decode_band(70.0) == "70B+"
+    # Unknown/nonsense leaves the caller on its hardware-derived band.
+    assert sonder_hardware.decode_band(None) is None
+    assert sonder_hardware.decode_band(0) is None
+    assert sonder_hardware.decode_band("huge") is None
+
+
+def test_moe_model_keeps_memory_band_but_decodes_like_its_active_count():
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    rec = sonder_hardware.recommend(
+        hw, workload="coding", model="qwen3-coder:30b-a3b-q4_K_M"
+    )
+    # All experts stay resident, so the memory envelope is unchanged...
+    assert rec["model_band"] == "13-34B"
+    # ...but only ~3B is active per token, so decisions are sub-second.
+    assert rec["decode_band"] == "3-4B"
+    assert rec["total_params_b"] == 30.0
+    assert rec["active_params_b"] == 3.0
+    assert rec["speculation_likely"] is False
+    assert any("is MoE" in line for line in rec["rationale"])
+
+
+def test_dense_model_of_the_same_footprint_still_engages_speculation():
+    # The control for the case above: same host, same memory band, dense model.
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    rec = sonder_hardware.recommend(hw, workload="coding", model="qwen2.5-coder:14b")
+    assert rec["model_band"] == "13-34B"
+    assert rec["decode_band"] == "13-34B"
+    assert rec["speculation_likely"] is True
+    assert not any("is MoE" in line for line in rec["rationale"])
+
+
+def test_recommend_without_a_model_is_unchanged():
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    bare = sonder_hardware.recommend(hw, workload="coding")
+    named = sonder_hardware.recommend(hw, workload="coding", model="sonder:latest")
+    # An unparseable tag must not perturb any pre-existing field.
+    for key in ("model_band", "num_ctx", "keep_alive", "speculation_likely", "rationale"):
+        assert bare[key] == named[key]
+    # With no size to read, decode band falls back to the hardware band.
+    assert bare["decode_band"] == bare["model_band"]
+    assert bare["active_params_b"] is None
+
+
+def test_huge_moe_still_decodes_slowly_enough_to_speculate():
+    # Active count, not total, is the test: 35B active is genuinely slow.
+    rec = sonder_hardware.recommend(
+        _hw(cpu=64, ram=256.0), workload="coding", model="qwen3-coder:480b-a35b-q8_0"
+    )
+    assert rec["decode_band"] == "13-34B"
+    assert rec["speculation_likely"] is True
+
+
+def test_render_shows_decode_band_only_when_it_differs():
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    moe = sonder_hardware.render(
+        hw, sonder_hardware.recommend(hw, model="qwen3-coder:30b-a3b-q4_K_M")
+    )
+    assert "decode band" in moe
+    assert "3B active of 30B" in moe
+    dense = sonder_hardware.render(
+        hw, sonder_hardware.recommend(hw, model="qwen2.5-coder:14b")
+    )
+    assert "decode band" not in dense
