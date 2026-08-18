@@ -20,7 +20,10 @@ def test_python_run_success():
 def test_python_run_supports_unicode_stdout():
     out = code_runner.run_code("print('\\U0001f3b2')")
     assert out["ok"] is True
-    assert "\\U0001f3b2" in out["stdout"]
+    # The child runs with PYTHONIOENCODING=utf-8, so the character must survive as
+    # itself. Asserting the escape text instead would pass only while the runner
+    # was failing to decode -- that assertion pinned the bug it should catch.
+    assert "\U0001f3b2" in out["stdout"]
 
 
 def test_child_environment_forces_utf8_output():
