@@ -535,3 +535,215 @@ def test_probe_gpu_missing_binary_is_not_retried(monkeypatch):
     monkeypatch.setattr(sonder_hardware.subprocess, "run", _missing)
     assert sonder_hardware._probe_gpu() == (False, None)
     assert len(calls) == 1, "a missing binary must not be retried"
+
+
+# --- mixture-of-experts: total params size memory, active params size latency --
+
+def test_params_from_model_tag_reads_moe_and_dense_tags():
+    assert sonder_hardware.params_from_model_tag("qwen3-coder:30b-a3b-q4_K_M") == (30.0, 3.0)
+    assert sonder_hardware.params_from_model_tag("qwen3-coder:480b-a35b-q8_0") == (480.0, 35.0)
+    assert sonder_hardware.params_from_model_tag("qwen3:235b-a22b") == (235.0, 22.0)
+    # A dense tag reports the same count twice, which keeps every caller's
+    # active-vs-total comparison meaningful without a special case.
+    assert sonder_hardware.params_from_model_tag("qwen2.5-coder:14b") == (14.0, 14.0)
+    assert sonder_hardware.params_from_model_tag("qwen2.5-coder:1.5b") == (1.5, 1.5)
+
+
+def test_params_from_model_tag_returns_none_rather_than_guessing():
+    # An alias carries no size; guessing one would silently change the advice.
+    assert sonder_hardware.params_from_model_tag("sonder:latest") is None
+    assert sonder_hardware.params_from_model_tag("nomic-embed-text") is None
+    assert sonder_hardware.params_from_model_tag("") is None
+    assert sonder_hardware.params_from_model_tag(None) is None
+    # Active >= total is a malformed tag, not a very fast model.
+    assert sonder_hardware.params_from_model_tag("bogus:8b-a9b") is None
+
+
+def test_decode_band_reads_active_parameters():
+    assert sonder_hardware.decode_band(3.3) == "3-4B"
+    assert sonder_hardware.decode_band(7.0) == "7B"
+    assert sonder_hardware.decode_band(22.0) == "13-34B"
+    assert sonder_hardware.decode_band(70.0) == "70B+"
+    # Unknown/nonsense leaves the caller on its hardware-derived band.
+    assert sonder_hardware.decode_band(None) is None
+    assert sonder_hardware.decode_band(0) is None
+    assert sonder_hardware.decode_band("huge") is None
+
+
+def test_moe_model_keeps_memory_band_but_decodes_like_its_active_count():
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    rec = sonder_hardware.recommend(
+        hw, workload="coding", model="qwen3-coder:30b-a3b-q4_K_M"
+    )
+    # All experts stay resident, so the memory envelope is unchanged...
+    assert rec["model_band"] == "13-34B"
+    # ...but only ~3B is active per token, so decisions are sub-second.
+    assert rec["decode_band"] == "3-4B"
+    assert rec["total_params_b"] == 30.0
+    assert rec["active_params_b"] == 3.0
+    assert rec["speculation_likely"] is False
+    assert any("is MoE" in line for line in rec["rationale"])
+
+
+def test_dense_model_of_the_same_footprint_still_engages_speculation():
+    # The control for the case above: same host, same memory band, dense model.
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    rec = sonder_hardware.recommend(hw, workload="coding", model="qwen2.5-coder:14b")
+    assert rec["model_band"] == "13-34B"
+    assert rec["decode_band"] == "13-34B"
+    assert rec["speculation_likely"] is True
+    assert not any("is MoE" in line for line in rec["rationale"])
+
+
+def test_recommend_without_a_model_is_unchanged():
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    bare = sonder_hardware.recommend(hw, workload="coding")
+    named = sonder_hardware.recommend(hw, workload="coding", model="sonder:latest")
+    # An unparseable tag must not perturb any pre-existing field.
+    for key in ("model_band", "num_ctx", "keep_alive", "speculation_likely", "rationale"):
+        assert bare[key] == named[key]
+    # With no size to read, decode band falls back to the hardware band.
+    assert bare["decode_band"] == bare["model_band"]
+    assert bare["active_params_b"] is None
+
+
+def test_huge_moe_still_decodes_slowly_enough_to_speculate():
+    # Active count, not total, is the test: 35B active is genuinely slow.
+    rec = sonder_hardware.recommend(
+        _hw(cpu=64, ram=256.0), workload="coding", model="qwen3-coder:480b-a35b-q8_0"
+    )
+    assert rec["decode_band"] == "13-34B"
+    assert rec["speculation_likely"] is True
+
+
+def test_render_shows_decode_band_only_when_it_differs():
+    hw = _hw(cpu=24, ram=32.0, gpu=True, vram=16.0)
+    moe = sonder_hardware.render(
+        hw, sonder_hardware.recommend(hw, model="qwen3-coder:30b-a3b-q4_K_M")
+    )
+    assert "decode band" in moe
+    assert "3B active of 30B" in moe
+    dense = sonder_hardware.render(
+        hw, sonder_hardware.recommend(hw, model="qwen2.5-coder:14b")
+    )
+    assert "decode band" not in dense
+
+
+# --- review follow-up: total params must be computed with, not just printed ---
+
+def test_size_is_read_from_the_tag_not_the_repository_name():
+    """A name that merely contains a size token is not size metadata.
+
+    ``custom-70b-model:latest`` used to parse as 70B and change the decode and
+    speculation advice, even though ``:latest`` says nothing about size. No tag
+    means no size, which falls back to the hardware band.
+    """
+    assert sonder_hardware.params_from_model_tag("custom-70b-model:latest") is None
+    assert sonder_hardware.params_from_model_tag("my-30b-a3b-fork:latest") is None
+    # A size in the tag is still read normally.
+    assert sonder_hardware.params_from_model_tag("custom-70b-model:14b") == (14.0, 14.0)
+    assert sonder_hardware.params_from_model_tag("qwen3-coder:30b-a3b-q4_K_M") == (30.0, 3.0)
+    # A bare name carries no tag at all.
+    assert sonder_hardware.params_from_model_tag("nomic-embed-text") is None
+    # A registry path keeps its last colon as the tag separator.
+    assert sonder_hardware.params_from_model_tag(
+        "registry.ollama.ai/library/qwen3-coder:30b-a3b") == (30.0, 3.0)
+    # Size in the repo name but an unrelated tag: absent beats wrong.
+    assert sonder_hardware.params_from_model_tag(
+        "hf.co/org/Qwen3-27B-GGUF:q4_k_m") is None
+
+
+def test_memory_band_and_fit_are_host_independent():
+    assert sonder_hardware.memory_band(30.0) == "13-34B"
+    assert sonder_hardware.memory_band(3.3) == "3-4B"
+    assert sonder_hardware.memory_band(70.0) == "70B+"
+    assert sonder_hardware.memory_band(None) is None
+    assert sonder_hardware.memory_band(0) is None
+    assert sonder_hardware.band_fits("13-34B", "70B+") is True
+    assert sonder_hardware.band_fits("13-34B", "13-34B") is True
+    assert sonder_hardware.band_fits("13-34B", "7B") is False
+    assert sonder_hardware.band_fits("13-34B", "nonsense") is None
+
+
+def test_moe_memory_class_does_not_follow_the_host():
+    """The model's footprint is a property of the model, not of the card.
+
+    The hardware band reports the largest model that would *fit*, so read alone
+    it agrees with whatever it is pointed at -- the same 30B model would be
+    described as a 7B envelope on a small card and a 70B+ one on a large card,
+    which is exactly what hides a model that cannot fit.
+    """
+    tag = "qwen3-coder:30b-a3b-q4_K_M"
+    small = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=8.0), workload="coding", model=tag)
+    exact = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), workload="coding", model=tag)
+    large = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=48.0), workload="coding", model=tag)
+
+    # Model class is constant; only the host band and the fit verdict move.
+    assert small["model_memory_band"] == "13-34B"
+    assert exact["model_memory_band"] == "13-34B"
+    assert large["model_memory_band"] == "13-34B"
+    assert (small["model_band"], exact["model_band"], large["model_band"]) == (
+        "7B", "13-34B", "70B+")
+    # Measured on this exact pair: qwen3-coder:30b-a3b at Q4_K_M is 18.56 GB and
+    # `ollama ps` served it at a 23%/77% CPU/GPU split on a 16 GB card. So the
+    # 16 GB host must report False -- band equality alone said True, because the
+    # 13-34B band spans roughly 8-20 GB and swallows the difference.
+    assert small["fits_capacity"] is False
+    assert exact["fits_capacity"] is False
+    assert large["fits_capacity"] is True
+    assert exact["estimated_footprint_gb"] == 18.6
+    assert any("will spill past accelerator memory" in line for line in small["rationale"])
+    assert any("will spill past accelerator memory" in line for line in exact["rationale"])
+    assert any("so it fits" in line for line in large["rationale"])
+    # Decode speed is set by the active count, so it never moves with the host.
+    for rec in (small, exact, large):
+        assert rec["decode_band"] == "3-4B"
+        assert rec["speculation_likely"] is False
+
+
+def test_dense_model_too_large_for_the_host_is_called_out():
+    rec = sonder_hardware.recommend(
+        _hw(cpu=8, ram=16.0, gpu=True, vram=8.0), workload="coding",
+        model="qwen2.5-coder:32b")
+    assert rec["model_memory_band"] == "13-34B"
+    assert rec["fits_capacity"] is False
+    rendered = sonder_hardware.render(_hw(cpu=8, ram=16.0, gpu=True, vram=8.0), rec)
+    assert "FIT WARNING" in rendered
+
+
+def test_unsized_model_reports_no_fit_verdict_rather_than_a_guess():
+    rec = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), workload="coding",
+        model="sonder:latest")
+    assert rec["model_memory_band"] is None
+    assert rec["fits_capacity"] is None
+    assert "FIT WARNING" not in sonder_hardware.render(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), rec)
+
+
+def test_fit_is_decided_by_estimated_bytes_not_band_equality():
+    """The regression that band comparison alone could not catch.
+
+    A 30B model and a 16 GB card both land in the 13-34B band, so comparing
+    bands reports a fit. The model is ~18.6 GB at Q4 and measurably does not
+    fit -- Ollama served it at 23%/77% CPU/GPU. Bytes decide, bands describe.
+    """
+    assert sonder_hardware.band_fits("13-34B", "13-34B") is True
+    assert sonder_hardware.estimated_footprint_gb(30.0) == 18.6
+    rec = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), workload="coding",
+        model="qwen3-coder:30b-a3b-q4_K_M")
+    assert rec["model_memory_band"] == sonder_hardware.memory_band(30.0) == "13-34B"
+    assert rec["fits_capacity"] is False
+    # A 14B on the same card genuinely does fit.
+    small = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), workload="coding",
+        model="qwen2.5-coder:14b")
+    assert small["estimated_footprint_gb"] == 8.7
+    assert small["fits_capacity"] is True
+    # Unknown size yields no verdict rather than a guess.
+    assert sonder_hardware.estimated_footprint_gb(None) is None
+    assert sonder_hardware.estimated_footprint_gb(0) is None

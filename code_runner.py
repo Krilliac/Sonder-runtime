@@ -8,6 +8,7 @@ trimmed output.
 import os
 import glob
 import json
+import locale
 import ntpath
 import shutil
 import signal
@@ -130,7 +131,14 @@ def _child_environment():
     # The stripping rule now lives in sonder_logging so this lane and
     # workbench's run_program cannot diverge -- they did, and workbench leaked
     # the whole environment to the same class of model-authored child.
-    return sonder_logging.child_environment()
+    environment = sonder_logging.child_environment()
+    # Windows defaults a redirected Python child to the active ANSI code page
+    # (commonly cp1252).  Generated programs routinely print Unicode, so that
+    # turns a valid snippet such as ``print("🎲")`` into a false execution
+    # failure.  Make the model-code lane consistently UTF-8 while retaining
+    # the shared secret-stripping policy above.
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
 
 
 def _powershell_exe():
@@ -271,6 +279,32 @@ def _terminate_process_tree(proc):
         pass
 
 
+def _decode_child_output(raw):
+    """Decode a child's stdout/stderr without losing output to either encoding.
+
+    Two populations share this lane. Python children are forced to utf-8 by
+    _child_environment(), and node and git-bash emit utf-8 regardless -- decoding
+    those with the host locale produces mojibake that still looks like output, so
+    nothing errors and only a reader notices. But PHP, Perl, native executables
+    and localized compilers follow the host's ANSI/OEM code page, and decoding
+    *those* as utf-8 with errors="replace" would turn a valid cp1252 byte such as
+    0xE9 into U+FFFD -- destroying output the old locale-based decoding kept.
+
+    Neither encoding is right for every child, so try the strict one first: valid
+    utf-8 is decoded as utf-8, and anything that is not valid utf-8 could not have
+    come from a utf-8 child, so it falls back to the host encoding. Only bytes
+    that are invalid in *both* are replaced.
+    """
+    if isinstance(raw, str):
+        return raw
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(locale.getpreferredencoding(False), errors="replace")
+
+
 def _run_process(cmd, cwd, stdin, timeout, language):
     if language == "bash" and not sonder_paths.bash_executable():
         return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES[language]["missing"])
@@ -280,7 +314,10 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             "stdin": subprocess.PIPE,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
-            "text": True,
+            # Binary pipes: this lane runs several languages with different
+            # output encodings, so the decode is done per-payload by
+            # _decode_child_output rather than pinned to one codec here.
+            "text": False,
             "env": _child_environment(),
             # Model-authored code must not inherit ambient server handles.
             "close_fds": True,
@@ -301,19 +338,25 @@ def _run_process(cmd, cwd, stdin, timeout, language):
         )
         return _error_result(language, cwd, timeout, missing)
     try:
-        stdout, stderr = proc.communicate(input=stdin or "", timeout=timeout)
+        stdout, stderr = proc.communicate(
+            input=(stdin or "").encode("utf-8"), timeout=timeout,
+        )
     except subprocess.TimeoutExpired as exc:
         _terminate_process_tree(proc)
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            stdout = exc.output if isinstance(exc.output, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            stdout, stderr = exc.output, exc.stderr
         timeout_exc = subprocess.TimeoutExpired(
-            cmd, timeout, output=stdout, stderr=stderr,
+            cmd, timeout,
+            output=_decode_child_output(stdout),
+            stderr=_decode_child_output(stderr),
         )
         return _timeout_result(language, cwd, timeout, timeout_exc)
-    completed = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    completed = subprocess.CompletedProcess(
+        cmd, proc.returncode,
+        _decode_child_output(stdout), _decode_child_output(stderr),
+    )
     return _completed_result(completed, language, cwd, timeout)
 
 
@@ -419,6 +462,10 @@ def _find_visual_studio_vcvars():
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                # Same forced-utf-8 child as the model-code lane above; an
+                # install path outside cp1252 must not be silently mangled.
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 env=_child_environment(),
             )

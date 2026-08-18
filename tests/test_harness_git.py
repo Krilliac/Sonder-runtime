@@ -28,9 +28,20 @@ def _authorize_pytest_tmp_roots(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path_factory.getbasetemp()))
 
 
+# The branch ``_init_repo`` creates. Tests that switch branches use this name
+# rather than assuming what ``git init`` would have picked.
+_DEFAULT_BRANCH = "master"
+
+
 def _init_repo(tmp_path):
     """Create a git repo with one committed file and return root path."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    # Pin the initial branch instead of inheriting the host's
+    # ``init.defaultBranch``. Two tests below check out this branch by name, so
+    # a developer whose git defaults to ``main`` would otherwise see them fail
+    # for a reason that has nothing to do with the code under test.
+    subprocess.run(
+        ["git", "init", "-q", "-b", _DEFAULT_BRANCH, str(tmp_path)], check=True
+    )
     subprocess.run(
         ["git", "-C", str(tmp_path), "config", "user.email", "test@test.com"],
         check=True,
@@ -262,7 +273,9 @@ def test_git_merge_branch(tmp_path):
         ["git", "-C", str(root), "commit", "-q", "-m", "feat commit"],
         check=True,
     )
-    subprocess.run(["git", "-C", str(root), "checkout", "-q", "master"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "checkout", "-q", _DEFAULT_BRANCH], check=True
+    )
     result = harness_tools.git_merge(
         root=str(root), branch="feat", message="merge feat",
     )
@@ -293,7 +306,9 @@ def test_git_cherry_pick_commit(tmp_path):
         ["git", "-C", str(root), "rev-parse", "HEAD"],
         capture_output=True, text=True,
     ).stdout.strip()
-    subprocess.run(["git", "-C", str(root), "checkout", "-q", "master"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "checkout", "-q", _DEFAULT_BRANCH], check=True
+    )
     result = harness_tools.git_cherry_pick(
         root=str(root), commits_json=json.dumps([sha]),
     )

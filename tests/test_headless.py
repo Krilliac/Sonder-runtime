@@ -458,6 +458,11 @@ def test_main_start_returns_failure_until_managed_server_is_reachable(monkeypatc
         lambda *args, **kwargs: "sonder: start requested pid=7, not reachable yet",
     )
     monkeypatch.setattr(H, "status", lambda *args: "not listening")
+    # "No managed server is reachable" is this test's precondition, so it has to
+    # be stated. Unpatched, main() asks the real host, and a developer running
+    # Sonder on the default port answers it -- main returns 0 and the assertion
+    # below stops testing anything on exactly the machines that run this suite.
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: None)
 
     assert H.main(["start"]) == 1
 
@@ -547,5 +552,8 @@ def test_main_start_rejects_unmanaged_listener(monkeypatch):
         ),
     )
     monkeypatch.setattr(H, "status", lambda *args: "listening")
+    # The listener under test is the unmanaged one described above, so the
+    # managed-PID probe must not reach the real host and find a genuine Sonder.
+    monkeypatch.setattr(H, "_managed_listener_pid", lambda *args: None)
 
     assert H.main(["start"]) == 1
