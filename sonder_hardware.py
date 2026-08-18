@@ -206,6 +206,32 @@ def band_fits(model_band: str, capacity_band: str) -> bool | None:
     return _BAND_ORDER.index(model_band) <= _BAND_ORDER.index(capacity_band)
 
 
+# Measured, not assumed: qwen3-coder:30b-a3b at Q4_K_M reports 18.56 GB of
+# weights and `ollama ps` shows 19 GB resident, i.e. ~0.62 GB per billion
+# parameters. That lines up with the _MODEL_FOOTPRINTS ladder above (32B -> 20
+# GB) and with the module's stated convention of quoting sizes at roughly 4-bit.
+_Q4_GB_PER_BILLION = 0.62
+
+
+def estimated_footprint_gb(total_params_b) -> float | None:
+    """Approximate resident size, in GB, of a Q4-class model of this size.
+
+    A planning estimate, not a promise: the real number moves with quantization,
+    KV cache type, and context length. It exists because comparing *bands* is too
+    coarse to answer "does this fit" -- the ``13-34B`` band spans roughly 8 GB to
+    20 GB, so a 16 GB card and a 30B model land in the same band while the model
+    genuinely does not fit. Confirmed on exactly that pair: 19 GB resident
+    against 16 GB of VRAM, which Ollama served at a 23%/77% CPU/GPU split.
+    """
+    try:
+        total = float(total_params_b)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return round(total * _Q4_GB_PER_BILLION, 1)
+
+
 # --- default host probes ------------------------------------------------------
 #
 # These are the only functions that actually look at the machine. They are never
@@ -962,9 +988,22 @@ def recommend(hw: dict, *, workload: str = "general", model: str = "") -> dict:
     # so on its own it agrees with whatever you point it at; pairing the two is
     # what can say a bound model does *not* fit.
     model_memory_band = memory_band(total_params_b)
-    fits = band_fits(model_memory_band, band) if model_memory_band else None
+    # Bands are too coarse to answer this: 13-34B spans roughly 8-20 GB, so a
+    # 30B model and a 16 GB card share a band while the model does not fit.
+    # Compare estimated bytes against measured capacity instead.
+    footprint_gb = estimated_footprint_gb(total_params_b)
+    fits = None
+    if footprint_gb is not None and capacity_gb > 0:
+        fits = footprint_gb <= capacity_gb
+    elif model_memory_band:
+        fits = band_fits(model_memory_band, band)
     if model_memory_band:
         fit_note = (
+            f"~{footprint_gb:g} GB at Q4 against ~{capacity_gb:g} GB, so it fits"
+            if fits else
+            f"~{footprint_gb:g} GB at Q4 against ~{capacity_gb:g} GB, so it will "
+            f"spill past accelerator memory"
+        ) if footprint_gb is not None else (
             f"the host holds {band}, so it fits" if fits
             else f"the host holds only {band}, so it will spill past accelerator memory"
         )
@@ -1011,6 +1050,7 @@ def recommend(hw: dict, *, workload: str = "general", model: str = "") -> dict:
         "model_band": band,
         "decode_band": speed_band,
         "model_memory_band": model_memory_band,
+        "estimated_footprint_gb": footprint_gb,
         "fits_capacity": fits,
         "model": str(model or ""),
         "total_params_b": total_params_b,
@@ -1063,8 +1103,8 @@ def render(hw: dict, rec: dict) -> str:
     lines.append(f"  model band  : {rec.get('model_band', '?')}")
     if rec.get("fits_capacity") is False:
         lines.append(
-            f"  FIT WARNING: {rec.get('model')} is {rec.get('model_memory_band')}-class "
-            f"but this host holds {rec.get('model_band')}"
+            f"  FIT WARNING: {rec.get('model')} needs ~{rec.get('estimated_footprint_gb')} GB "
+            f"at Q4 but this host has ~{rec.get('capacity_gb')} GB; expect CPU spill"
         )
     if rec.get("decode_band") and rec.get("decode_band") != rec.get("model_band"):
         lines.append(
