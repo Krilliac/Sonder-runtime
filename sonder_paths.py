@@ -20,6 +20,12 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 _LEGACY_DB_MIGRATION_WAIT_SECONDS = 10.0
 _LEGACY_DB_MIGRATION_POLL_SECONDS = 0.02
 _LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS = 30.0
+# How long the migrator retries deleting its own lock. Waiters read the lock to
+# identify its owner, and Windows refuses to unlink a file while any other
+# handle is open on it, so a release that races a waiter's read fails with
+# ERROR_SHARING_VIOLATION. Those reads are microseconds long; this only has to
+# outlast one of them.
+_LEGACY_DB_MIGRATION_LOCK_RELEASE_SECONDS = 5.0
 
 
 def windows_system_drive(env=None) -> str:
@@ -188,6 +194,34 @@ def _migration_owner_alive(pid: int | None) -> bool:
         return False
 
 
+def _release_migration_lock(lock: Path) -> bool:
+    """Delete a migration lock this process owns. True once it is gone.
+
+    A single ``unlink`` is not enough on Windows. Every waiter reads the lock to
+    decide whether its owner is still alive, and Windows refuses to delete a
+    file that any other handle has open, so the owner's release loses a race it
+    is guaranteed to keep re-entering while waiters exist. Swallowing that error
+    orphans the lock: the migration itself still succeeds, but the leftover file
+    then costs the next migration a full ``_LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS``
+    wait before it can be reclaimed. Retrying for a moment costs nothing and
+    keeps the lock's lifetime tied to the work it guards.
+    """
+    deadline = time.time() + _LEGACY_DB_MIGRATION_LOCK_RELEASE_SECONDS
+    while True:
+        try:
+            lock.unlink()
+            return True
+        except FileNotFoundError:
+            # Already gone -- a reclaim or an earlier attempt won. Still success.
+            return True
+        except OSError:
+            if time.time() >= deadline:
+                # Give up rather than block startup: a stale lock is recoverable
+                # through the reclaim path, a hung process is not.
+                return False
+            time.sleep(_LEGACY_DB_MIGRATION_POLL_SECONDS)
+
+
 def _reclaim_abandoned_migration_lock(lock: Path) -> bool:
     """Remove a dead or long-abandoned migration lock, never a live owner."""
     pid, started = _migration_lock_owner(lock)
@@ -266,7 +300,4 @@ def _migrate_legacy_memory_db(legacy: Path, target: Path) -> None:
                 except OSError:
                     pass
             os.close(fd)
-            try:
-                lock.unlink()
-            except OSError:
-                pass
+            _release_migration_lock(lock)
