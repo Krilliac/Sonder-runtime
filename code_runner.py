@@ -288,6 +288,18 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
             "text": True,
+            # _child_environment() forces the child to PYTHONIOENCODING=utf-8,
+            # so the parent must decode utf-8 too. Leaving this to the default
+            # means locale.getpreferredencoding() -- cp1252 on a typical Windows
+            # box -- which turns every non-ASCII byte the child emits into
+            # mojibake that still *looks* like output, so nothing errors and the
+            # corruption is only visible to whoever reads the result.
+            "encoding": "utf-8",
+            # Model-authored programs are not obliged to emit valid utf-8 (a
+            # stray binary write, a hard-coded legacy encoding). Replacing the
+            # undecodable bytes keeps the run reportable instead of raising out
+            # of communicate() and presenting a working program as a crash.
+            "errors": "replace",
             "env": _child_environment(),
             # Model-authored code must not inherit ambient server handles.
             "close_fds": True,
@@ -426,6 +438,10 @@ def _find_visual_studio_vcvars():
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                # Same forced-utf-8 child as the model-code lane above; an
+                # install path outside cp1252 must not be silently mangled.
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 env=_child_environment(),
             )
