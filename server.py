@@ -18071,6 +18071,7 @@ def _agent_dispatch(
         return hardware_profile(
             workload=args.get("workload", "general"),
             refresh=bool(args.get("refresh", False)),
+            model=args.get("model", ""),
         )
     if tool_name == "file_edit":
         return file_edit(
@@ -25483,7 +25484,9 @@ def toolchain_status(name: str, refresh: bool = False) -> str:
 
 
 @mcp.tool()
-def hardware_profile(workload: str = "general", refresh: bool = False) -> str:
+def hardware_profile(
+    workload: str = "general", refresh: bool = False, model: str = ""
+) -> str:
     """Report accelerator inventory and conservative local-model fit.
 
     Enumerates NVIDIA, AMD, Intel, Apple, and unknown display accelerators with
@@ -25491,9 +25494,19 @@ def hardware_profile(workload: str = "general", refresh: bool = False) -> str:
     CUDA, ROCm, Vulkan, Metal, or other backend is usable. Recommendations are
     read-only capacity plans; they never change drivers or runtime settings.
     Set refresh=True after a hardware/driver change to bypass the process cache.
+    Pass model to size the report against a specific tag instead of the bound
+    `code` tier; a Mixture-of-Experts tag (`30b-a3b`) is read as total params
+    for memory fit and active params for decode speed. A tag with no size in it,
+    such as the `sonder:latest` alias, leaves the report hardware-derived.
     """
     _maybe_live_reload()
-    return sonder_hardware.profile_text(workload=workload, refresh=refresh)
+    # Default to whatever `code` is actually bound to, so the report describes
+    # the model this host will really run rather than the largest one that
+    # would fit. Reading TIERS costs nothing and never probes the backend.
+    target = str(model or "").strip() or str(TIERS.get("code") or "")
+    return sonder_hardware.profile_text(
+        workload=workload, refresh=refresh, model=target
+    )
 
 
 @mcp.tool()

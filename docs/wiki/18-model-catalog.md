@@ -81,6 +81,40 @@ paths rather than treating a specialist tag as a substitute.
 
 Everything below is expressed per-band, so pick your row and read across.
 
+### Mixture-of-Experts: read two numbers, not one
+
+Every row above assumes one parameter count answers both "will it fit" and
+"how fast is it". An MoE model splits those. All of its experts must be
+resident, so **memory follows the total count**; a token routes through only a
+fraction of them, so **speed follows the active count**. A tag written
+`30b-a3b` states both: 30B total, 3B active.
+
+The practical effect is that an MoE moves you *one band up in capability
+without moving up in latency*. On a 16 GB card, `qwen3-coder:30b-a3b-q4_K_M`
+occupies the 32B-class memory envelope the table calls "Q3/offload only", yet
+decodes at roughly 3B speed — a far stronger `code` tier than the 7B the 16 GB
+row otherwise recommends. Size it against the memory column, not the speed you
+would expect from "30B".
+
+Two consequences worth planning around:
+
+- **Residency matters more, not less.** A 19 GB Q4 MoE does not fit a 16 GB
+  card outright; the spill is real and `keep_alive` decides whether you pay the
+  reload. See [Residency](#4-residency-you-usually-cannot-hold-them-all).
+- **Speculation stays dormant.** Sonder's adaptive speculation only earns its
+  keep when model decisions are slow enough to hide a tool call behind. An MoE
+  decides too quickly for that, which is a feature, not a regression.
+
+`sonder_hardware` reads the `<total>b-a<active>b` convention directly, so
+`hardware_profile` reports both bands once the tier is bound to a concrete tag
+rather than the `sonder:latest` alias:
+
+```bash
+python sonder_hardware.py coding qwen3-coder:30b-a3b-q4_K_M
+#   model band  : 13-34B
+#   decode band : 3-4B (3B active of 30B)
+```
+
 ## 3. The collection by role
 
 | Tier | Job | 8–12 GB | 16 GB | 24–32 GB | 48 GB+ |

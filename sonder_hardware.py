@@ -89,6 +89,84 @@ _MODEL_FOOTPRINTS = (
 )
 
 
+# --- mixture-of-experts: two parameter counts, two different questions --------
+#
+# Every ladder above reads one parameter count as the answer to both "how much
+# memory does this need" and "how slow will it be". A Mixture-of-Experts model
+# breaks that: all experts must be resident, so *memory* still follows the
+# **total** count, but a single token only routes through a fraction of them, so
+# *decode latency* follows the **active** count. Qwen3-Coder-30B-A3B is 31B
+# total / 3.3B active -- it occupies a 32B-class memory envelope and decodes
+# roughly like a 3B. Sizing it from either number alone is wrong in one
+# direction or the other: from the total, we would predict multi-second
+# decisions it does not have; from the active count, we would claim it fits on
+# a card that cannot hold it.
+#
+# So the two are kept separate below. The hardware ladders keep deciding what
+# *fits* (unchanged), and this ladder decides how fast the bound model actually
+# *decides*, which is the only input the speculation read needs. Bands reuse the
+# hardware vocabulary so the two are directly comparable.
+_DECODE_BANDS = (
+    (5.0, "3-4B"),          # <5B active: sub-second decisions
+    (13.0, "7B"),           # 7-8B active
+    (40.0, "13-34B"),       # 13-34B active: multi-second decisions
+    (float("inf"), "70B+"),
+)
+
+# Ollama/Qwen spell an MoE tag as "<total>b-a<active>b" -- qwen3-coder:30b-a3b,
+# qwen3:235b-a22b, qwen3-coder:480b-a35b. A dense tag carries a single "<n>b".
+# Quantization suffixes (-q4_K_M, -fp16, -instruct) trail the size and are
+# ignored. Anything unrecognised returns None rather than a guess, because a
+# wrong parameter count is worse here than an absent one: absent falls back to
+# today's hardware-derived behavior, wrong silently changes the advice.
+_MOE_TAG_RE = re.compile(r"(?<![0-9a-z])([0-9]+(?:\.[0-9]+)?)b-a([0-9]+(?:\.[0-9]+)?)b(?![0-9a-z])")
+_DENSE_TAG_RE = re.compile(r"(?<![0-9a-z])([0-9]+(?:\.[0-9]+)?)b(?![0-9a-z])")
+
+
+def params_from_model_tag(tag) -> tuple[float, float] | None:
+    """Parse ``(total_params_b, active_params_b)`` out of an Ollama model tag.
+
+    Returns ``None`` when the tag carries no usable size, which is the common
+    case for an alias like ``sonder:latest``. For a dense tag both numbers are
+    the same; for an MoE tag they differ, and that difference is the whole point
+    of this function.
+    """
+    text = str(tag or "").strip().lower()
+    if not text:
+        return None
+    moe = _MOE_TAG_RE.search(text)
+    if moe:
+        total = float(moe.group(1))
+        active = float(moe.group(2))
+        # An "active" count above the total is a malformed tag, not an MoE;
+        # refuse it rather than reporting a model faster than it can be.
+        # active == total is degenerate but harmless -- it simply reads dense.
+        if total > 0 and 0 < active <= total:
+            return total, active
+        return None
+    dense = _DENSE_TAG_RE.search(text)
+    if dense:
+        total = float(dense.group(1))
+        if total > 0:
+            return total, total
+    return None
+
+
+def decode_band(active_params_b) -> str | None:
+    """Return the band whose *decode speed* an ``active_params_b`` model matches.
+
+    ``None`` when the active count is unknown or nonsensical, so callers keep
+    their existing hardware-derived band instead of acting on a bad number.
+    """
+    try:
+        active = float(active_params_b)
+    except (TypeError, ValueError):
+        return None
+    if active <= 0:
+        return None
+    return _band_for(active, _DECODE_BANDS)
+
+
 # --- default host probes ------------------------------------------------------
 #
 # These are the only functions that actually look at the machine. They are never
@@ -617,8 +695,13 @@ def detect_hardware(probes=None) -> dict:
     }
 
 
-def get_profile(*, workload: str = "general", refresh: bool = False) -> dict:
-    """Return cached host inventory plus a fresh workload recommendation."""
+def get_profile(*, workload: str = "general", refresh: bool = False,
+                model: str = "") -> dict:
+    """Return cached host inventory plus a fresh workload recommendation.
+
+    ``model`` is the optional tag bound to the tier being advised; it only
+    sharpens the recommendation for MoE models (see :func:`recommend`).
+    """
     global _PROFILE_CACHE
     with _PROFILE_CACHE_LOCK:
         if refresh or _PROFILE_CACHE is None:
@@ -629,13 +712,14 @@ def get_profile(*, workload: str = "general", refresh: bool = False) -> dict:
         ]
     return {
         "hardware": hardware,
-        "recommendation": recommend(hardware, workload=workload),
+        "recommendation": recommend(hardware, workload=workload, model=model),
     }
 
 
-def profile_text(*, workload: str = "general", refresh: bool = False) -> str:
+def profile_text(*, workload: str = "general", refresh: bool = False,
+                 model: str = "") -> str:
     """Render the cached enriched profile for humans and tool-using agents."""
-    profile = get_profile(workload=workload, refresh=refresh)
+    profile = get_profile(workload=workload, refresh=refresh, model=model)
     return render(profile["hardware"], profile["recommendation"])
 
 
@@ -749,7 +833,7 @@ def _execution_plan(hw: dict) -> dict:
     }
 
 
-def recommend(hw: dict, *, workload: str = "general") -> dict:
+def recommend(hw: dict, *, workload: str = "general", model: str = "") -> dict:
     """Advise how to run a local model on ``hw`` for a given ``workload``.
 
     Returns a dict with ``model_band``, ``num_ctx``, ``keep_alive``,
@@ -758,11 +842,20 @@ def recommend(hw: dict, *, workload: str = "general") -> dict:
 
     ``workload`` is one of ``general`` (default), ``chat``, ``coding``,
     ``agentic``, ``research``; anything else is treated as ``general``.
+
+    ``model`` is the optional tag actually bound to the tier being advised. It
+    is used for one thing: reading the model's *active* parameter count so the
+    speculation call is made on how fast the model decides rather than on how
+    much memory the host could hold. Omit it and every number below is exactly
+    what it was before -- the hardware band stands in for the model, which is
+    correct for a dense model and wrong only for MoE.
     """
     if not isinstance(workload, str) or workload not in _KNOWN_WORKLOADS:
         workload = "general"
 
     capacity_gb, basis = _capacity(hw)
+    params = params_from_model_tag(model)
+    total_params_b, active_params_b = params if params else (None, None)
     ladder = _VRAM_BANDS if basis == "vram" else _RAM_BANDS
     band = _band_for(capacity_gb, ladder)
 
@@ -820,7 +913,19 @@ def recommend(hw: dict, *, workload: str = "general") -> dict:
     # make the tools substantial (worth overlapping). Need both: a fast laptop
     # running a small model has sub-second decisions and the overlap is ~0, so
     # the model stays dormant; pure chat speculates nothing at all.
-    big_model = band in ("13-34B", "70B+")
+    # Which band governs decode speed. With no bound model the hardware band is
+    # the only estimate available and is used exactly as before; with an MoE tag
+    # the active count takes over, because that -- not the resident footprint --
+    # is what sets how long a decision takes.
+    speed_band = decode_band(active_params_b) or band
+    if params and active_params_b < total_params_b:
+        rationale.append(
+            f"{model} is MoE: ~{total_params_b:g}B total sets the {band} memory "
+            f"envelope, but only ~{active_params_b:g}B is active per token, so it "
+            f"decides like a {speed_band} model."
+        )
+
+    big_model = speed_band in ("13-34B", "70B+")
     tool_using = workload != "chat"
     slow_tools = workload in _SLOW_TOOL_WORKLOADS
     speculation_likely = big_model and slow_tools
@@ -830,25 +935,29 @@ def recommend(hw: dict, *, workload: str = "general") -> dict:
         )
     elif speculation_likely:
         rationale.append(
-            f"Speculation likely engages: a {band} model's multi-second "
+            f"Speculation likely engages: a {speed_band} model's multi-second "
             f"decisions can hide this {workload} workload's slow read-only "
             "tools."
         )
     elif big_model:
         rationale.append(
-            f"Speculation borderline: the {band} model's decisions are slow "
+            f"Speculation borderline: the {speed_band} model's decisions are slow "
             "enough, but a general workload's tools are too fast to overlap "
             "much."
         )
     else:
         rationale.append(
-            f"Speculation dormant: a {band} model decides in well under a "
+            f"Speculation dormant: a {speed_band} model decides in well under a "
             "second, so there is almost no latency to hide."
         )
 
     result = {
         "workload": workload,
         "model_band": band,
+        "decode_band": speed_band,
+        "model": str(model or ""),
+        "total_params_b": total_params_b,
+        "active_params_b": active_params_b,
         "num_ctx": num_ctx,
         "keep_alive": keep_alive,
         "speculation_likely": speculation_likely,
@@ -895,6 +1004,12 @@ def render(hw: dict, rec: dict) -> str:
     lines.append("--------------")
     lines.append(f"  workload    : {rec.get('workload', 'general')}")
     lines.append(f"  model band  : {rec.get('model_band', '?')}")
+    if rec.get("decode_band") and rec.get("decode_band") != rec.get("model_band"):
+        lines.append(
+            f"  decode band : {rec.get('decode_band')} "
+            f"({rec.get('active_params_b'):g}B active of "
+            f"{rec.get('total_params_b'):g}B)"
+        )
     lines.append(f"  num_ctx     : {rec.get('num_ctx', '?')}")
     lines.append(f"  keep_alive  : {rec.get('keep_alive', '?')}")
     lines.append(f"  execution   : {rec.get('execution_mode', '?')}")
@@ -922,6 +1037,7 @@ if __name__ == "__main__":  # pragma: no cover - thin CLI wrapper
     import sys
 
     _workload = sys.argv[1] if len(sys.argv) > 1 else "general"
+    _model = sys.argv[2] if len(sys.argv) > 2 else ""
     _hw = detect_profile()
-    _rec = recommend(_hw, workload=_workload)
+    _rec = recommend(_hw, workload=_workload, model=_model)
     print(render(_hw, _rec))
