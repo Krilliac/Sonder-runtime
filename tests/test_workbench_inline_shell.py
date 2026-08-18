@@ -9,11 +9,42 @@ PowerShell/cmd refusals intact.
 """
 
 import shutil
+import subprocess
 
 import file_ops
 import pytest
 import sonder_paths
 import workbench
+
+
+def _runnable(program):
+    """Whether ``program`` is on PATH *and* actually runs.
+
+    ``shutil.which`` alone is not enough on Windows: the Microsoft Store ships
+    an App Execution Alias named ``python3.exe`` that sits on PATH, exits 9009,
+    and prints "Python was not found". A which()-only guard therefore fails to
+    skip on any machine carrying that stub, and the resulting failure reads as
+    a run_program bug rather than a missing interpreter. Running it is the only
+    way to tell a real interpreter from a placeholder.
+    """
+    executable = shutil.which(program)
+    if executable is None:
+        return False
+    try:
+        probe = subprocess.run(
+            [executable, "--version"], capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+def _python_interpreter():
+    """A python command that really runs, or None. Prefers ``python3``."""
+    for candidate in ("python3", "python"):
+        if _runnable(candidate):
+            return candidate
+    return None
 
 
 def _guard_root(monkeypatch, tmp_path):
@@ -74,8 +105,8 @@ def test_run_program_allows_plain_script_invocation(
     _guard_root(monkeypatch, tmp_path)
     if program in {"bash", "sh"} and sonder_paths.bash_executable() is None:
         pytest.skip("compatible bash not installed")
-    if program not in {"bash", "sh"} and shutil.which(program) is None:
-        pytest.skip("%s not installed" % program)
+    if program not in {"bash", "sh"} and not _runnable(program):
+        pytest.skip("%s not installed or not runnable" % program)
     script = tmp_path / filename
     script.write_text(body, encoding="utf-8")
 
@@ -88,11 +119,14 @@ def test_run_program_allows_plain_script_invocation(
 def test_run_program_allows_script_with_positional_args(monkeypatch, tmp_path):
     # "python myscript.py arg" must keep working; only inline-code flags are refused.
     _guard_root(monkeypatch, tmp_path)
+    interpreter = _python_interpreter()
+    if interpreter is None:
+        pytest.skip("no runnable python interpreter on PATH")
     script = tmp_path / "echo_arg.py"
     script.write_text("import sys\nprint(sys.argv[1])\n", encoding="utf-8")
 
     result = workbench.run_program(
-        "python3", args_json=[str(script), "sonder"], cwd=".", timeout=10
+        interpreter, args_json=[str(script), "sonder"], cwd=".", timeout=10
     )
 
     assert result["ok"]
