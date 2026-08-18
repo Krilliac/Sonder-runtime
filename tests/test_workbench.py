@@ -372,3 +372,27 @@ def test_bundle_grounding_fails_on_absent_required_text(tmp_path):
         str(tmp_path), recipe="bundle",
         requirements={"required_text": ["hello world"]})
     assert any(c["name"] == "bundle-required-text" and c["ok"] for c in present["checks"])
+
+
+def test_run_program_returns_non_ascii_output_intact(monkeypatch, tmp_path):
+    """A program printing outside the ANSI code page must run, not fail.
+
+    run_program decodes the child's pipes as utf-8, so the child has to be told
+    to emit utf-8. Without that, Windows hands a redirected Python child the
+    active code page (commonly cp1252), printing a character outside it dies
+    with UnicodeEncodeError, and a perfectly valid program is reported as a
+    failed run with returncode 1. The sibling code_runner lane was fixed for
+    exactly this; pin the same behaviour here so the two cannot drift apart.
+    """
+    _guard_root(monkeypatch, tmp_path)
+    die = chr(0x1F3B2)
+    script = tmp_path / "unicode_out.py"
+    script.write_text("print(" + repr(die) + ")" + chr(10), encoding="utf-8")
+
+    result = workbench.run_program(
+        sys.executable, args_json=[str(script)], cwd=".", timeout=30,
+    )
+
+    assert result["ok"], result["stderr"][:400]
+    assert result["returncode"] == 0
+    assert die in result["stdout"]
