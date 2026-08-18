@@ -106,12 +106,17 @@ _MODEL_FOOTPRINTS = (
 # *fits* (unchanged), and this ladder decides how fast the bound model actually
 # *decides*, which is the only input the speculation read needs. Bands reuse the
 # hardware vocabulary so the two are directly comparable.
-_DECODE_BANDS = (
-    (5.0, "3-4B"),          # <5B active: sub-second decisions
-    (13.0, "7B"),           # 7-8B active
-    (40.0, "13-34B"),       # 13-34B active: multi-second decisions
+# One ladder, deliberately applied to two different counts: the *total* decides
+# which memory class the weights land in, the *active* decides how fast it
+# answers. Same question ("how big is this many parameters"), asked twice.
+_PARAM_BANDS = (
+    (5.0, "3-4B"),
+    (13.0, "7B"),
+    (40.0, "13-34B"),
     (float("inf"), "70B+"),
 )
+# Ascending, so two bands can be compared to answer "does this model fit here".
+_BAND_ORDER = tuple(label for _ceiling, label in _PARAM_BANDS)
 
 # Ollama/Qwen spell an MoE tag as "<total>b-a<active>b" -- qwen3-coder:30b-a3b,
 # qwen3:235b-a22b, qwen3-coder:480b-a35b. A dense tag carries a single "<n>b".
@@ -132,6 +137,15 @@ def params_from_model_tag(tag) -> tuple[float, float] | None:
     of this function.
     """
     text = str(tag or "").strip().lower()
+    # Only the tag carries size metadata. Searching the whole identifier lets a
+    # repository *name* masquerade as one: "custom-70b-model:latest" would parse
+    # as 70B and silently change the advice, even though ":latest" says nothing
+    # about size. No tag means no size, which falls back to the hardware band --
+    # the safe direction, and the same answer an alias already gives.
+    _name, separator, tag_part = text.rpartition(":")
+    if not separator:
+        return None
+    text = tag_part.strip()
     if not text:
         return None
     moe = _MOE_TAG_RE.search(text)
@@ -164,7 +178,32 @@ def decode_band(active_params_b) -> str | None:
         return None
     if active <= 0:
         return None
-    return _band_for(active, _DECODE_BANDS)
+    return _band_for(active, _PARAM_BANDS)
+
+
+def memory_band(total_params_b) -> str | None:
+    """Return the memory class a model's *total* parameter count lands in.
+
+    This is the model's own footprint, independent of the host: every expert has
+    to be resident whether or not the card can hold them. Pairing it with the
+    hardware band is what answers "does this fit here", which a hardware-derived
+    band alone cannot -- that one only ever reports the largest model that would
+    fit, so it silently agrees with whatever you point at it.
+    """
+    try:
+        total = float(total_params_b)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return _band_for(total, _PARAM_BANDS)
+
+
+def band_fits(model_band: str, capacity_band: str) -> bool | None:
+    """Whether ``model_band`` fits inside ``capacity_band``. None if unknown."""
+    if model_band not in _BAND_ORDER or capacity_band not in _BAND_ORDER:
+        return None
+    return _BAND_ORDER.index(model_band) <= _BAND_ORDER.index(capacity_band)
 
 
 # --- default host probes ------------------------------------------------------
@@ -918,12 +957,28 @@ def recommend(hw: dict, *, workload: str = "general", model: str = "") -> dict:
     # the active count takes over, because that -- not the resident footprint --
     # is what sets how long a decision takes.
     speed_band = decode_band(active_params_b) or band
-    if params and active_params_b < total_params_b:
-        rationale.append(
-            f"{model} is MoE: ~{total_params_b:g}B total sets the {band} memory "
-            f"envelope, but only ~{active_params_b:g}B is active per token, so it "
-            f"decides like a {speed_band} model."
+    # The model's own footprint class, which is not the same question as the
+    # hardware band. The hardware band reports the largest model that would fit,
+    # so on its own it agrees with whatever you point it at; pairing the two is
+    # what can say a bound model does *not* fit.
+    model_memory_band = memory_band(total_params_b)
+    fits = band_fits(model_memory_band, band) if model_memory_band else None
+    if model_memory_band:
+        fit_note = (
+            f"the host holds {band}, so it fits" if fits
+            else f"the host holds only {band}, so it will spill past accelerator memory"
         )
+        if params and active_params_b < total_params_b:
+            rationale.append(
+                f"{model} is MoE: ~{total_params_b:g}B total puts it in the "
+                f"{model_memory_band} memory class ({fit_note}), but only "
+                f"~{active_params_b:g}B is active per token, so it decides like a "
+                f"{speed_band} model."
+            )
+        elif not fits:
+            rationale.append(
+                f"{model} is a {model_memory_band}-class model but {fit_note}."
+            )
 
     big_model = speed_band in ("13-34B", "70B+")
     tool_using = workload != "chat"
@@ -955,6 +1010,8 @@ def recommend(hw: dict, *, workload: str = "general", model: str = "") -> dict:
         "workload": workload,
         "model_band": band,
         "decode_band": speed_band,
+        "model_memory_band": model_memory_band,
+        "fits_capacity": fits,
         "model": str(model or ""),
         "total_params_b": total_params_b,
         "active_params_b": active_params_b,
@@ -1004,6 +1061,11 @@ def render(hw: dict, rec: dict) -> str:
     lines.append("--------------")
     lines.append(f"  workload    : {rec.get('workload', 'general')}")
     lines.append(f"  model band  : {rec.get('model_band', '?')}")
+    if rec.get("fits_capacity") is False:
+        lines.append(
+            f"  FIT WARNING: {rec.get('model')} is {rec.get('model_memory_band')}-class "
+            f"but this host holds {rec.get('model_band')}"
+        )
     if rec.get("decode_band") and rec.get("decode_band") != rec.get("model_band"):
         lines.append(
             f"  decode band : {rec.get('decode_band')} "
