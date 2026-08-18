@@ -687,11 +687,17 @@ def test_moe_memory_class_does_not_follow_the_host():
     assert large["model_memory_band"] == "13-34B"
     assert (small["model_band"], exact["model_band"], large["model_band"]) == (
         "7B", "13-34B", "70B+")
+    # Measured on this exact pair: qwen3-coder:30b-a3b at Q4_K_M is 18.56 GB and
+    # `ollama ps` served it at a 23%/77% CPU/GPU split on a 16 GB card. So the
+    # 16 GB host must report False -- band equality alone said True, because the
+    # 13-34B band spans roughly 8-20 GB and swallows the difference.
     assert small["fits_capacity"] is False
-    assert exact["fits_capacity"] is True
+    assert exact["fits_capacity"] is False
     assert large["fits_capacity"] is True
+    assert exact["estimated_footprint_gb"] == 18.6
     assert any("will spill past accelerator memory" in line for line in small["rationale"])
-    assert any("so it fits" in line for line in exact["rationale"])
+    assert any("will spill past accelerator memory" in line for line in exact["rationale"])
+    assert any("so it fits" in line for line in large["rationale"])
     # Decode speed is set by the active count, so it never moves with the host.
     for rec in (small, exact, large):
         assert rec["decode_band"] == "3-4B"
@@ -716,3 +722,28 @@ def test_unsized_model_reports_no_fit_verdict_rather_than_a_guess():
     assert rec["fits_capacity"] is None
     assert "FIT WARNING" not in sonder_hardware.render(
         _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), rec)
+
+
+def test_fit_is_decided_by_estimated_bytes_not_band_equality():
+    """The regression that band comparison alone could not catch.
+
+    A 30B model and a 16 GB card both land in the 13-34B band, so comparing
+    bands reports a fit. The model is ~18.6 GB at Q4 and measurably does not
+    fit -- Ollama served it at 23%/77% CPU/GPU. Bytes decide, bands describe.
+    """
+    assert sonder_hardware.band_fits("13-34B", "13-34B") is True
+    assert sonder_hardware.estimated_footprint_gb(30.0) == 18.6
+    rec = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), workload="coding",
+        model="qwen3-coder:30b-a3b-q4_K_M")
+    assert rec["model_memory_band"] == sonder_hardware.memory_band(30.0) == "13-34B"
+    assert rec["fits_capacity"] is False
+    # A 14B on the same card genuinely does fit.
+    small = sonder_hardware.recommend(
+        _hw(cpu=16, ram=32.0, gpu=True, vram=16.0), workload="coding",
+        model="qwen2.5-coder:14b")
+    assert small["estimated_footprint_gb"] == 8.7
+    assert small["fits_capacity"] is True
+    # Unknown size yields no verdict rather than a guess.
+    assert sonder_hardware.estimated_footprint_gb(None) is None
+    assert sonder_hardware.estimated_footprint_gb(0) is None
