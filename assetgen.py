@@ -125,8 +125,10 @@ def workspace_root() -> str:
     """
     override = os.environ.get("SONDER_ASSET_WORKSPACE", "").strip()
     if override:
+        if not os.path.isabs(override):
+            return os.path.abspath(os.path.dirname(__file__))
         candidate = os.path.abspath(os.path.expanduser(override))
-        if os.path.isabs(candidate) and os.path.isdir(candidate):
+        if os.path.isdir(candidate):
             return candidate
     return os.path.abspath(os.path.dirname(__file__))
 
@@ -766,9 +768,11 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         _write_document(
             os.path.join(root, "brief.md"), request["brief"], dimension, theme, selected,
         )
+    brief_accent = "%02x%02x%02x" % palette[0] if palette else None
     if "docx" in selected:
         ooxml_assets.write_docx(
             os.path.join(root, "document.docx"), title, request["brief"], theme,
+            accent=brief_accent,
         )
     if "data" in selected:
         _write_data(root, seed + 8, request["brief"])
@@ -779,10 +783,12 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
             request["brief"],
             seed + 9,
             theme,
+            accent=brief_accent,
         )
     if "presentation" in selected:
         ooxml_assets.write_pptx(
             os.path.join(root, "presentation.pptx"), title, request["brief"], theme,
+            accent=brief_accent,
         )
     if "web" in selected:
         _write_web_preview(os.path.join(root, "preview.html"), palette, request["brief"])
