@@ -34,6 +34,24 @@ THEMES = {
     "arcane": ((17, 15, 35), (116, 91, 218), (87, 218, 207), (49, 38, 91)),
     "frost": ((13, 24, 38), (69, 147, 203), (194, 235, 255), (39, 73, 103)),
 }
+
+_BRIEF_HEX = re.compile(r"#([0-9a-fA-F]{6})\b")
+
+
+def palette_from_brief(brief: str, fallback):
+    """Build the 4-colour working palette from explicit #RRGGBB codes in the brief."""
+    seen = []
+    for match in _BRIEF_HEX.finditer(brief or ""):
+        value = match.group(1)
+        rgb = (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+        if rgb not in seen:
+            seen.append(rgb)
+    if not seen:
+        return fallback
+    chosen = seen[:4]
+    while len(chosen) < 4:
+        chosen.append(fallback[len(chosen)])
+    return tuple(chosen)
 ARTIFACT_KINDS = {
     "icon", "background", "tileset", "sprite_sheet", "texture", "preview",
     "vector", "diagram", "palette", "document", "data", "web",
@@ -96,6 +114,22 @@ _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
 
 def workspace_root() -> str:
+    """Root that generated asset packs must stay inside.
+
+    Defaults to this file's own directory, which is what it has always been.
+    SONDER_ASSET_WORKSPACE overrides it so a caller can stage packs somewhere
+    else -- e.g. alongside the project the assets are for, rather than inside
+    the runtime checkout. The override must be an existing absolute directory;
+    anything else is ignored and the default stands, so a typo cannot silently
+    widen where packs may be written.
+    """
+    override = os.environ.get("SONDER_ASSET_WORKSPACE", "").strip()
+    if override:
+        if not os.path.isabs(override):
+            return os.path.abspath(os.path.dirname(__file__))
+        candidate = os.path.abspath(os.path.expanduser(override))
+        if os.path.isdir(candidate):
+            return candidate
     return os.path.abspath(os.path.dirname(__file__))
 
 
@@ -701,7 +735,7 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
             if os.path.isdir(stale) and not os.path.islink(stale):
                 raise ValueError("generated file path is unexpectedly a directory: %s" % filename)
             os.remove(stale)
-    palette = THEMES[theme]
+    palette = palette_from_brief(brief, THEMES[theme])
     selected = set(request["kinds"])
     title = _safe_slug(name).replace("-", " ").title()
     if "icon" in selected:
@@ -734,9 +768,11 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         _write_document(
             os.path.join(root, "brief.md"), request["brief"], dimension, theme, selected,
         )
+    brief_accent = "%02x%02x%02x" % palette[0] if palette else None
     if "docx" in selected:
         ooxml_assets.write_docx(
             os.path.join(root, "document.docx"), title, request["brief"], theme,
+            accent=brief_accent,
         )
     if "data" in selected:
         _write_data(root, seed + 8, request["brief"])
@@ -747,10 +783,12 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
             request["brief"],
             seed + 9,
             theme,
+            accent=brief_accent,
         )
     if "presentation" in selected:
         ooxml_assets.write_pptx(
             os.path.join(root, "presentation.pptx"), title, request["brief"], theme,
+            accent=brief_accent,
         )
     if "web" in selected:
         _write_web_preview(os.path.join(root, "preview.html"), palette, request["brief"])
