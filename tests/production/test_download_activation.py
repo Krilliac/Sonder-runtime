@@ -188,7 +188,11 @@ def test_pointer_fallback_refuses_a_stale_symlink_it_cannot_retire(
     old_target.mkdir(parents=True)
     new_target.mkdir(parents=True)
     link = tmp_path / "current"
-    os.symlink(old_target, link, target_is_directory=True)
+    try:
+        os.symlink(old_target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        # The stale link this test refuses to retire has to exist first.
+        pytest.skip("directory symlinks unavailable: %s" % exc)
     hidden_pointer = tmp_path / "releases" / "stale-fallback"
     (tmp_path / "current.pointer").write_text(
         str(hidden_pointer), encoding="utf-8"

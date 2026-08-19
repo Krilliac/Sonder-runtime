@@ -1392,7 +1392,7 @@ def test_model_fanout_rejects_coerced_budget_controls_before_run(monkeypatch, na
     ("sonder", {"prompt": "ask all local models: public question", "num_predict": "512"}),
 ])
 def test_mcp_fanout_rejects_coerced_budget_controls(tool_name, arguments):
-    """FastMCP must reject before Pydantic can turn a value into an integer."""
+    """MCPServer must reject before Pydantic can turn a value into an integer."""
     with pytest.raises(Exception) as raised:
         asyncio.run(server.mcp.call_tool(tool_name, arguments))
 
@@ -1401,7 +1401,7 @@ def test_mcp_fanout_rejects_coerced_budget_controls(tool_name, arguments):
 
 @pytest.mark.parametrize("value", [1, "false"])
 def test_mcp_fanout_resume_rejects_coercible_nonboolean_flags(value):
-    """FastMCP must reject before Pydantic can coerce a replay request."""
+    """MCPServer must reject before Pydantic can coerce a replay request."""
     with pytest.raises(Exception) as raised:
         asyncio.run(server.mcp.call_tool(
             "model_fanout_resume", {"run_id": "fan-test", "retry_unknown": value},

@@ -530,7 +530,7 @@ def test_agent_args_must_be_a_json_object():
 def test_an_unknown_tool_name_dispatches_nothing_anywhere():
     import asyncio
 
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     out = serve._dispatch_catalogued_tool(
         "/definitely_not_a_tool_xyz arg", serve.ConversationState(),

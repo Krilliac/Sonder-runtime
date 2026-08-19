@@ -20,7 +20,12 @@ from pathlib import Path, PurePosixPath
 
 
 MANIFEST_NAME = "ENGINE-BUNDLE.json"
-SCHEMA_VERSION = 1
+# 2 adds the required `runtime_contract` fingerprint. A schema-1 bundle is
+# rejected rather than upgraded in place: it was sealed before anything
+# recorded which dependency set it holds, so there is no way to tell a
+# current one from a stale one, and "silently wrong at startup" is the
+# failure this field exists to prevent.
+SCHEMA_VERSION = 2
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 ENGINE_BUNDLE_ENV = "SONDER_ENGINE_BUNDLE"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -55,10 +60,31 @@ class EngineBundle:
     embedding_model: BundleModel
     files: tuple[BundleFile, ...]
     manifest_sha256: str
+    runtime_contract: str
 
     @property
     def identity(self) -> str:
         return f"{self.platform}-{self.architecture}"
+
+
+def runtime_contract_fingerprint(path: str | os.PathLike[str]) -> str:
+    """A stable digest of the pins in a runtime requirements contract.
+
+    Comments, blank lines, ordering, and line endings are all discarded, so a
+    CRLF checkout and an LF checkout of the same pins fingerprint identically
+    -- otherwise every bundle would look stale on the other platform and the
+    signal would be worthless. What remains is exactly the set of pinned
+    requirements, which is what a sealed runtime either satisfies or does not.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    pins = sorted(
+        pin
+        for pin in (line.split("#", 1)[0].strip() for line in text.splitlines())
+        if pin
+    )
+    if not pins:
+        raise ValueError("runtime requirements contract names no pins")
+    return hashlib.sha256("\n".join(pins).encode("utf-8")).hexdigest()
 
 
 def normalize_platform(value: str | None = None) -> str:
@@ -236,6 +262,13 @@ def load_engine_bundle(
     if raw.get("schema") != SCHEMA_VERSION:
         raise ValueError("engine bundle manifest has an unsupported schema")
 
+    contract = raw.get("runtime_contract")
+    if not isinstance(contract, str) or not _SHA256_RE.fullmatch(contract):
+        raise ValueError(
+            "engine bundle runtime_contract must be a sha256 digest of the "
+            "runtime requirements it was sealed for"
+        )
+
     if not isinstance(raw.get("platform"), str) or not raw["platform"].strip():
         raise ValueError("engine bundle platform must be a string")
     if not isinstance(raw.get("architecture"), str) or not raw["architecture"].strip():
@@ -349,6 +382,7 @@ def load_engine_bundle(
         embedding_model=embedding_model,
         files=tuple(records.values()),
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        runtime_contract=contract,
     )
 
 

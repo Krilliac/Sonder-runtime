@@ -90,9 +90,11 @@ def test_preflight_names_the_existing_operator_control_exemption(policy_sandbox)
 def test_plan_mode_admits_preflight_through_the_direct_mcp_gate(policy_sandbox):
     pm.set_mode(pm.PLAN)
 
-    blocks, _ = asyncio.run(server.mcp.call_tool(
+    # MCP 2.x returns a `CallToolResult`; 1.x returned an
+    # (content_blocks, structured_content) tuple.
+    result = asyncio.run(server.mcp.call_tool(
         "policy_explain", {"tool_name": "file_write"},
     ))
 
-    assert "policy preflight: file_write" in blocks[0].text
-    assert "gate result: deny" in blocks[0].text
+    assert "policy preflight: file_write" in result.content[0].text
+    assert "gate result: deny" in result.content[0].text

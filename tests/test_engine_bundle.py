@@ -77,7 +77,8 @@ def make_bundle(tmp_path: Path) -> Path:
         *embed_blobs,
     }
     manifest = {
-        "schema": 1,
+        "schema": engine_bundle.SCHEMA_VERSION,
+        "runtime_contract": "0" * 64,
         "platform": engine_bundle.normalize_platform(),
         "architecture": engine_bundle.normalize_architecture(),
         "runtime": {"python": python_rel, "ollama": ollama_rel},
@@ -227,3 +228,52 @@ def test_explicit_relative_bundle_path_is_normalized(tmp_path, monkeypatch):
     relative = root.relative_to(tmp_path)
     loaded = engine_bundle.load_engine_bundle(relative)
     assert loaded.root == root.absolute()
+
+
+def test_a_manifest_without_a_runtime_contract_is_rejected(tmp_path):
+    """A bundle that does not say what it was sealed for must not load.
+
+    Nothing used to record which dependency set a sealed runtime held, so a
+    bundle built before a runtime-pin change validated cleanly and then failed
+    at process start with an ImportError -- and, because a present bundle
+    forced `bootstrap_engine` offline, pip could not repair it. Rejecting the
+    manifest is how that becomes a loud, diagnosable failure at load time.
+    """
+    root = make_bundle(tmp_path)
+    manifest_path = root / engine_bundle.MANIFEST_NAME
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del raw["runtime_contract"]
+    manifest_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+
+    with pytest.raises(ValueError, match="runtime_contract"):
+        engine_bundle.load_engine_bundle(root, verify_hashes=False)
+
+
+def test_runtime_contract_fingerprint_ignores_noise_but_not_pins(tmp_path):
+    """Same pins must fingerprint alike; a changed pin must not.
+
+    Line endings matter here in practice: this repo is checked out CRLF on
+    Windows and LF on Linux, so a fingerprint over raw bytes would mark every
+    bundle stale on the other platform and the signal would be ignored.
+    """
+    lf = tmp_path / "lf.txt"
+    lf.write_bytes(b"# a comment\nmcp==2.0.0\n\ncryptography==50.0.0\n")
+    crlf = tmp_path / "crlf.txt"
+    crlf.write_bytes(b"cryptography==50.0.0\r\n# different comment\r\nmcp==2.0.0\r\n")
+    moved = tmp_path / "moved.txt"
+    moved.write_bytes(b"mcp==2.0.1\ncryptography==50.0.0\n")
+
+    assert (
+        engine_bundle.runtime_contract_fingerprint(lf)
+        == engine_bundle.runtime_contract_fingerprint(crlf)
+    )
+    assert (
+        engine_bundle.runtime_contract_fingerprint(moved)
+        != engine_bundle.runtime_contract_fingerprint(lf)
+    )
+
+    empty = tmp_path / "empty.txt"
+    empty.write_text("# only comments\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no pins"):
+        engine_bundle.runtime_contract_fingerprint(empty)

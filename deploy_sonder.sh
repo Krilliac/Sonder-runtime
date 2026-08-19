@@ -135,7 +135,7 @@ fi
 VENV_PY="$CLONE_DIR/venv/bin/python"
 "$VENV_PY" -m pip install --upgrade pip
 "$VENV_PY" -m pip install -r "$CLONE_DIR/requirements-runtime.txt"
-"$VENV_PY" -c "from mcp.server.fastmcp import FastMCP; from mcp.server.fastmcp.tools import ToolManager"
+"$VENV_PY" -c "from mcp.server.mcpserver import MCPServer; from mcp.server.mcpserver.tools import ToolManager"
 
 echo "-- resolving API key --"
 KEY="${SONDER_API_KEY:-$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)}"

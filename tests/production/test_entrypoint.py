@@ -76,7 +76,34 @@ def test_invalid_security_config_fails_before_bind(isolated_home, capsys):
     assert "tls_terminated_by_proxy" in err
 
 
-def test_exported_runtime_posture_includes_proxy_declaration(monkeypatch):
+@pytest.fixture()
+def restored_process_environment():
+    """Snapshot and restore ``os.environ`` around a process-wide export.
+
+    ``_export_runtime_environment`` is deliberately process-wide and writes a
+    family of ``SONDER_*``/``OLLAMA_*`` variables that grows as the config
+    grows. This file used to pin them by hand, one name per line -- and a
+    hand-maintained list leaks every name it forgets. It forgot ``OLLAMA_HOST``:
+    the export replaced the hermetic ``127.0.0.1:1`` from conftest with the
+    real default endpoint, so
+    ``test_lifecycle_http::test_ready_reflects_ollama_outage_without_false_success``
+    probed an Ollama that was actually running, got a healthy 200, and failed
+    its assertion of 503 -- but only when run after this file, which is why it
+    passed in isolation and failed in a full run.
+
+    A snapshot cannot go stale as the exporter grows.
+    """
+    before = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+
+
+def test_exported_runtime_posture_includes_proxy_declaration(
+    restored_process_environment,
+):
     """The final HTTP bind gate must see the typed config's TLS declaration."""
     import sonder_config
     from sonder_runtime.__main__ import _export_runtime_environment
@@ -86,28 +113,13 @@ def test_exported_runtime_posture_includes_proxy_declaration(monkeypatch):
             host="0.0.0.0", tls_terminated_by_proxy=True
         )
     )
-    # _export_runtime_environment is deliberately process-wide.  Register each
-    # output with monkeypatch first so this regression fixture cannot leak its
-    # non-loopback posture into the unrelated CLI tests below.
-    for name in (
-        "SONDER_HOST", "SONDER_PORT", "SONDER_AUTH_MODE",
-        "SONDER_MAX_REQUEST_BYTES", "SONDER_TLS_TERMINATED_BY_PROXY",
-        "OLLAMA_HOST", "SONDER_ALLOW_REMOTE_OLLAMA", "SONDER_WEB_TOOLS",
-        "SONDER_LIVE_RELOAD", "SONDER_MAX_CONCURRENT_REQUESTS",
-        "SONDER_REQUEST_TIMEOUT_SECONDS", "SONDER_STREAM_IDLE_TIMEOUT_SECONDS",
-        "SONDER_CORS_ORIGINS", "SONDER_REQUIRE_ACCOUNT",
-        "SONDER_ALLOW_REGISTRATION", "SONDER_REASONING_AUDIENCE",
-        "SONDER_HTTP_SESSION_STATE_LIMIT", "SONDER_HTTP_SESSION_STATE_OWNER_LIMIT",
-        "SONDER_TRAIN_MAX_N", "SONDER_EXPOSE_REASONING",
-        "SONDER_ALLOW_PRIVATE_COT", "SONDER_LOCATION_CONSENT",
-        "SONDER_QUEUE_DEPTH", "SONDER_METRICS",
-    ):
-        monkeypatch.setenv(name, os.environ.get(name, ""))
     _export_runtime_environment(config)
     assert os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] == "1"
 
 
-def test_require_account_translates_default_api_key_mode(monkeypatch):
+def test_require_account_translates_default_api_key_mode(
+    restored_process_environment,
+):
     import sonder_config
     from sonder_runtime.__main__ import _export_runtime_environment
 
@@ -115,9 +127,35 @@ def test_require_account_translates_default_api_key_mode(monkeypatch):
         server=sonder_config.ServerConfig(require_account=True),
         secrets=sonder_config.Secrets(auth_secret="private-test-secret"),
     )
-    monkeypatch.setenv("SONDER_AUTH_MODE", "")
+    os.environ["SONDER_AUTH_MODE"] = ""
     _export_runtime_environment(config)
     assert os.environ["SONDER_AUTH_MODE"] == "account"
+
+
+def test_the_environment_snapshot_actually_restores_what_the_export_changed():
+    """The guard above must be proven, not assumed.
+
+    If ``restored_process_environment`` silently stopped restoring, the two
+    tests using it would still pass and the leak would come back unnoticed --
+    the failure would resurface as an unrelated readiness test going red in a
+    full run, which is exactly how it was found the first time.
+    """
+    import sonder_config
+    from sonder_runtime.__main__ import _export_runtime_environment
+
+    sentinel = "127.0.0.1:1"
+    os.environ["OLLAMA_HOST"] = sentinel
+    before = dict(os.environ)
+    try:
+        _export_runtime_environment(sonder_config.SonderConfig())
+        assert os.environ["OLLAMA_HOST"] != sentinel, (
+            "the export no longer touches OLLAMA_HOST; this test can no longer "
+            "detect a leak and needs a variable the export does write"
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+    assert os.environ["OLLAMA_HOST"] == sentinel
 
 
 def test_user_global_config_is_discovered_when_present(monkeypatch, tmp_path):

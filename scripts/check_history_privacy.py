@@ -25,6 +25,9 @@ from pathlib import Path
 
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 GIT_TIMEOUT_SECONDS = 30
+# How much of git's own stderr may be quoted back in an error. Bounded so a
+# failing git cannot pump unbounded text into an operator-facing report.
+GIT_STDERR_QUOTE_BYTES = 400
 _RAW_CHANGE = re.compile(
     rb"^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40,64}) "
     rb"([0-9a-f]{40,64}) ([A-Z][0-9]*)$"
@@ -139,8 +142,25 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
     })
     inspection_deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
 
+    def _git_reason(errors) -> str:
+        """A trimmed, single-line quote of git's own complaint, or ''.
+
+        Bounded and newline-free on purpose: this string is surfaced in a JSON
+        report an operator reads, and git can emit multi-paragraph advice.
+        """
+        try:
+            errors.seek(0)
+            raw = errors.read(GIT_STDERR_QUOTE_BYTES)
+        except OSError:
+            return ""
+        text = raw.decode("utf-8", "replace").strip()
+        if not text:
+            return ""
+        first = text.splitlines()[0].strip()
+        return first[:GIT_STDERR_QUOTE_BYTES]
+
     def run_git(*arguments: str) -> bytes:
-        with tempfile.TemporaryFile() as output:
+        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             try:
                 process = subprocess.Popen(
                 [
@@ -151,10 +171,12 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
                 env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=output,
-                stderr=subprocess.DEVNULL,
+                stderr=errors,
             )
             except OSError as exc:
-                raise HistoryPrivacyError("Git history inspection failed") from exc
+                raise HistoryPrivacyError(
+                    "Git history inspection failed: %s" % exc
+                ) from exc
             while process.poll() is None:
                 if time.monotonic() >= inspection_deadline:
                     process.kill()
@@ -168,7 +190,15 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
                     )
                 time.sleep(0.01)
             if process.returncode != 0:
-                raise HistoryPrivacyError("Git history inspection failed")
+                reason = _git_reason(errors)
+                raise HistoryPrivacyError(
+                    "Git history inspection failed (git %s exited %d)%s"
+                    % (
+                        arguments[0],
+                        process.returncode,
+                        ": " + reason if reason else "",
+                    )
+                )
             if time.monotonic() >= inspection_deadline:
                 raise HistoryPrivacyError("Git history inspection timed out")
             size = output.tell()

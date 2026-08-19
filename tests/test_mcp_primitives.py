@@ -37,11 +37,14 @@ def test_workflow_prompts_are_discoverable_and_render_arguments():
         "debug_failure",
     } <= names
 
-    messages = asyncio.run(server.mcp._prompt_manager.render_prompt(
+    # Through the public `get_prompt` rather than the manager: MCP 2.x's
+    # `PromptManager.render_prompt` requires a `Context`, which the server
+    # builds for itself here, and this is the call an actual client makes.
+    rendered = asyncio.run(server.mcp.get_prompt(
         "implement_repository_task",
         {"objective": "fix parser", "project": "D:/repo"},
     ))
-    text = "\n".join(str(message.content) for message in messages)
+    text = "\n".join(str(message.content) for message in rendered.messages)
     assert "fix parser" in text
     assert "D:/repo" in text
     assert "Never claim a build or test that did not run" in text

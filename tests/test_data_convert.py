@@ -294,6 +294,17 @@ def test_input_replacement_race_is_rejected(project, tmp_path, monkeypatch):
     source.write_text('[{"id":1}]', encoding="utf-8")
     outside = tmp_path / "outside.json"
     outside.write_text('[{"id":999}]', encoding="utf-8")
+
+    # The race this test stages IS a symlink swap, so probe the capability up
+    # front: inside the monkeypatched callback below a failure would surface as
+    # an unrelated error from convert_data. Same guard the sibling symlink test
+    # in this file already uses.
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("symlink creation unavailable: %s" % exc)
+    probe.unlink()
     original = data_convert._resolve_input
     replaced = False
 

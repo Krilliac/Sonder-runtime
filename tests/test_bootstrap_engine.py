@@ -47,8 +47,11 @@ def test_offline_without_bundle_never_installs_dependency(monkeypatch):
     monkeypatch.setattr(bootstrap_engine, "total_ram_gb", lambda: 2)
     monkeypatch.setattr(bootstrap_engine, "_load_bundle", lambda args: None)
 
-    def fake_deps(python_executable, *, offline, env):
-        seen.update(python=python_executable, offline=offline, env=env)
+    def fake_deps(python_executable, *, offline, env, contract_mismatch=False):
+        seen.update(
+            python=python_executable, offline=offline, env=env,
+            contract_mismatch=contract_mismatch,
+        )
         return False, "missing"
 
     monkeypatch.setattr(bootstrap_engine, "ensure_python_deps", fake_deps)
@@ -56,21 +59,21 @@ def test_offline_without_bundle_never_installs_dependency(monkeypatch):
     assert seen["offline"] is True
 
 
-def test_python_dependency_probe_requires_fastmcp_compatibility_api(monkeypatch):
+def test_python_dependency_probe_requires_mcpserver_compatibility_api(monkeypatch):
     calls = []
 
     def fake_run(command, **kwargs):
         calls.append(command)
-        return SimpleNamespace(returncode=1, stdout="", stderr="missing FastMCP")
+        return SimpleNamespace(returncode=1, stdout="", stderr="missing MCPServer")
 
     monkeypatch.setattr(bootstrap_engine.subprocess, "run", fake_run)
 
     ok, message = bootstrap_engine.ensure_python_deps("python-test", offline=True)
 
     assert ok is False
-    assert "FastMCP compatibility API is unavailable" in message
+    assert "MCPServer compatibility API is unavailable" in message
     assert calls == [
-        ["python-test", "-c", bootstrap_engine.FASTMCP_IMPORT_PROBE]
+        ["python-test", "-c", bootstrap_engine.MCPSERVER_IMPORT_PROBE]
     ]
 
 
@@ -78,7 +81,7 @@ def test_python_dependency_install_uses_runtime_contract_and_reprobes(
     monkeypatch, tmp_path
 ):
     requirements = tmp_path / bootstrap_engine.RUNTIME_REQUIREMENTS_NAME
-    requirements.write_text("mcp>=1.28.1,<2\n", encoding="utf-8")
+    requirements.write_text("mcp==2.0.0\n", encoding="utf-8")
     monkeypatch.setattr(bootstrap_engine, "ROOT", tmp_path)
     calls = []
     results = iter((1, 0, 0))
@@ -86,7 +89,7 @@ def test_python_dependency_install_uses_runtime_contract_and_reprobes(
     def fake_run(command, **kwargs):
         calls.append(command)
         return SimpleNamespace(
-            returncode=next(results), stdout="FastMCP\n", stderr=""
+            returncode=next(results), stdout="MCPServer\n", stderr=""
         )
 
     monkeypatch.setattr(bootstrap_engine.subprocess, "run", fake_run)
@@ -96,7 +99,7 @@ def test_python_dependency_install_uses_runtime_contract_and_reprobes(
     assert ok is True
     assert requirements.name in message
     assert calls == [
-        ["python-test", "-c", bootstrap_engine.FASTMCP_IMPORT_PROBE],
+        ["python-test", "-c", bootstrap_engine.MCPSERVER_IMPORT_PROBE],
         [
             "python-test",
             "-m",
@@ -106,22 +109,22 @@ def test_python_dependency_install_uses_runtime_contract_and_reprobes(
             "-r",
             str(requirements),
         ],
-        ["python-test", "-c", bootstrap_engine.FASTMCP_IMPORT_PROBE],
+        ["python-test", "-c", bootstrap_engine.MCPSERVER_IMPORT_PROBE],
     ]
 
 
-def test_python_dependency_install_fails_closed_when_fastmcp_still_missing(
+def test_python_dependency_install_fails_closed_when_mcpserver_still_missing(
     monkeypatch, tmp_path
 ):
     requirements = tmp_path / bootstrap_engine.RUNTIME_REQUIREMENTS_NAME
-    requirements.write_text("mcp>=1.28.1,<2\n", encoding="utf-8")
+    requirements.write_text("mcp==2.0.0\n", encoding="utf-8")
     monkeypatch.setattr(bootstrap_engine, "ROOT", tmp_path)
     results = iter((1, 0, 1))
     monkeypatch.setattr(
         bootstrap_engine.subprocess,
         "run",
         lambda command, **kwargs: SimpleNamespace(
-            returncode=next(results), stdout="", stderr="missing FastMCP"
+            returncode=next(results), stdout="", stderr="missing MCPServer"
         ),
     )
 
@@ -239,3 +242,108 @@ def test_bundle_dry_run_is_offline_and_uses_sealed_model(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "selected model: sealed:model" in output
     assert "network policy: offline" in output
+
+
+def test_a_present_bundle_does_not_forbid_dependency_repair(monkeypatch, tmp_path):
+    """A bundle supplies models offline; it must not veto repairing the runtime.
+
+    `offline = args.offline or bundle is not None` was passed straight to
+    `ensure_python_deps`, so a sealed runtime that could no longer import the
+    MCP server API -- exactly what a source update past the runtime pin
+    produces -- could not be repaired by pip. The engine failed at startup and
+    this bootstrap exited 3 naming no remedy. Only an explicit `--offline` may
+    forbid pip now; a healthy bundle never reaches pip anyway, because the
+    compatibility probe short-circuits first.
+    """
+    seen = {}
+    bundle = SimpleNamespace(
+        root=tmp_path,
+        python_executable=tmp_path / "python.exe",
+        ollama_executable=tmp_path / "ollama.exe",
+        model_store=tmp_path / "models",
+        base_models=(
+            SimpleNamespace(
+                name="qwen2.5-coder:1.5b",
+                min_ram_gb=2.0,
+                manifest=tmp_path / "models" / "base.json",
+            ),
+        ),
+        embedding_model=SimpleNamespace(name="nomic-embed-text:latest"),
+        runtime_contract="0" * 64,
+        identity="windows-x86_64",
+    )
+    monkeypatch.setattr(bootstrap_engine, "_load_bundle", lambda args: bundle)
+    monkeypatch.setattr(bootstrap_engine, "total_ram_gb", lambda: 32)
+    monkeypatch.setattr(
+        engine_bundle, "install_model_store",
+        lambda _bundle: (tmp_path / "models", 0, 0),
+    )
+    monkeypatch.setattr(engine_bundle, "runtime_environment", lambda *a, **k: {})
+
+    def fake_deps(python_executable, *, offline, env, contract_mismatch=False):
+        seen["offline"] = offline
+        seen["contract_mismatch"] = contract_mismatch
+        return False, "missing"
+
+    monkeypatch.setattr(bootstrap_engine, "ensure_python_deps", fake_deps)
+
+    assert bootstrap_engine.main([]) == 3
+    assert seen["offline"] is False, (
+        "a present bundle still forbids pip, so a stale sealed runtime has no "
+        "repair path"
+    )
+
+    seen.clear()
+    assert bootstrap_engine.main(["--offline"]) == 3
+    assert seen["offline"] is True, "an explicit --offline must still forbid pip"
+
+
+def test_a_mismatched_contract_forces_a_reinstall(monkeypatch):
+    """Detecting drift and then not acting on it is the same as not detecting it.
+
+    The import probe proves only that `MCPServer` and `ToolManager` resolve. A
+    bundle whose drift is a changed `cryptography` pin passes that probe, so
+    reporting the fingerprint mismatch and returning success left the runtime
+    on a dependency set the checkout explicitly says it does not support.
+    """
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        # The probe succeeds: the MCP API is importable. Only the pinned
+        # versions differ, which this probe cannot see.
+        return SimpleNamespace(returncode=0, stdout="MCPServer\n", stderr="")
+
+    monkeypatch.setattr(bootstrap_engine.subprocess, "run", fake_run)
+
+    ok, message = bootstrap_engine.ensure_python_deps(
+        "python-test", contract_mismatch=False,
+    )
+    assert ok is True and "already available" in message
+    assert len(calls) == 1, "a satisfied contract must not reinstall"
+
+    calls.clear()
+    ok, message = bootstrap_engine.ensure_python_deps(
+        "python-test", contract_mismatch=True,
+    )
+    assert ok is True, message
+    assert any("pip" in part for command in calls for part in command), (
+        "a mismatched contract passed the import probe and was never repaired"
+    )
+
+
+def test_a_mismatched_contract_fails_explicitly_when_offline(monkeypatch):
+    """Offline cannot repair it, so it must say so rather than proceed."""
+    monkeypatch.setattr(
+        bootstrap_engine.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0, stdout="MCPServer\n", stderr=""
+        ),
+    )
+
+    ok, message = bootstrap_engine.ensure_python_deps(
+        "python-test", offline=True, contract_mismatch=True,
+    )
+    assert ok is False
+    assert "different" in message and bootstrap_engine.RUNTIME_REQUIREMENTS_NAME in message
