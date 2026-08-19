@@ -1,5 +1,9 @@
 # Sonder Runtime Architecture Program — implementation status
 
+> **Historical snapshot.** This file is not the current status authority. The active
+> checklist and evidence log are in
+> [`SONDER-MASTER-IMPLEMENTATION-SPEC.md`](SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+
 Tracks the implementation of the approved architecture program
 (SPEC-1 review → SPEC-2 production readiness → SPEC-3 refactoring →
 SPEC-4 signed distribution) in this repository. Updated with each

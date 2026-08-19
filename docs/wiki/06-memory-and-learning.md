@@ -79,6 +79,7 @@ invented an answer.
 
 Scoring, the recall threshold, and MMR selection are pure functions in
 `sonder_runtime/domain/memory/rules.py` (similarity injected, no embedding
-adapter). `reward.py`, `mmr_rerank.py`, and `recall.py` delegate to them —
+adapter). `reward.py`, `sonder_runtime.adapters.memory_rerank`, and `recall.py`
+delegate to them —
 one definition, unchanged behavior. See
 [Package Architecture](14-package-architecture.md).

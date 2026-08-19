@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sonder.local/schemas/requirement-evidence-v1.json",
+  "title": "Sonder requirement evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "requirement_id", "revision", "status", "claim"],
+  "properties": {
+    "schema": {"const": "sonder-requirement-evidence-v1"},
+    "requirement_id": {"pattern": "^[A-Z][A-Z0-9]+-[0-9]{3}$", "type": "string"},
+    "revision": {"minimum": 1, "type": "integer"},
+    "status": {
+      "enum": ["planned", "in_progress", "blocked", "implemented_unverified", "verified", "regressed", "superseded", "rejected"]
+    },
+    "claim": {"minLength": 1, "type": "string"},
+    "baseline_sha": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+    "verified_sha": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+    "pr": {"type": "string"},
+    "evidence": {"items": {"type": "object"}, "minItems": 1, "type": "array"},
+    "platforms": {"items": {"type": "string"}, "type": "array"},
+    "limitations": {"items": {"type": "string"}, "type": "array"},
+    "verified_at": {"format": "date-time", "type": "string"}
+  }
+}

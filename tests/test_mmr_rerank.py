@@ -1,5 +1,5 @@
 import embeddings as e
-import mmr_rerank as m
+from sonder_runtime.adapters import memory_rerank as m
 
 
 def test_empty_candidates_returns_empty():

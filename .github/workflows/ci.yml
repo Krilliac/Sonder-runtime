@@ -25,6 +25,8 @@ jobs:
           from mcp.server.mcpserver.tools import ToolManager"
       - name: Enforce architecture boundaries (SPEC-3)
         run: python scripts/check_architecture.py
+      - name: Validate master-spec evidence ledger
+        run: python scripts/check_requirement_evidence.py
       - name: Enforce legacy error-signal ratchet
         run: python scripts/check_error_signals.py
       - name: Prevent new Git-history privacy debt
