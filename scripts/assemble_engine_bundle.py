@@ -229,9 +229,68 @@ def _remove_python_bytecode(root: Path) -> None:
             pass
 
 
+def _runtime_contract_pins() -> dict[str, str]:
+    """The ``name == version`` pins the runtime contract declares.
+
+    Only exact pins are returned. The contract is required to be exact (a
+    floating range would make the bundle's fingerprint meaningless), so a line
+    this cannot parse as ``name==version`` is an error rather than something to
+    skip quietly.
+    """
+    contract = ROOT / "requirements-runtime.txt"
+    pins: dict[str, str] = {}
+    for line in contract.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name, separator, version = line.partition("==")
+        if not separator or not version.strip():
+            raise ValueError(
+                f"{contract} must pin exactly; cannot verify a sealed runtime "
+                f"against {line!r}"
+            )
+        pins[name.strip()] = version.strip()
+    if not pins:
+        raise ValueError(f"{contract} names no pins")
+    return pins
+
+
+def _contract_probe_source(pins: dict[str, str]) -> str:
+    """Probe source that checks the MCP API *and* every pinned version.
+
+    Importing `MCPServer` proves the API shape and nothing else. A runtime
+    assembled from a stale environment can satisfy that import while carrying a
+    different `cryptography` -- and stamping the checkout's fingerprint onto it
+    would assert a contract it does not meet, which bootstrap then trusts and
+    never repairs. So the same probe that gates assembly also verifies the
+    versions the fingerprint is about to claim.
+    """
+    return (
+        _MCPSERVER_IMPORT_PROBE
+        + "; import importlib.metadata as _md"
+        + "; _pins = %r" % (pins,)
+        + "; _bad = []"
+        + "; _ = [_bad.append((_n, _v, _md.version(_n))) "
+          "for _n, _v in _pins.items() if _md.version(_n) != _v]"
+        + "; _ = [print('contract mismatch: %s pinned %s but runtime has %s' % _b) "
+          "for _b in _bad]"
+        + "; raise SystemExit(1 if _bad else 0)"
+    )
+
+
+def _probe_runtime_contract(python: Path) -> subprocess.CompletedProcess[str]:
+    """Run the API + pinned-version probe inside the supplied runtime."""
+    return _run_probe(python, _contract_probe_source(_runtime_contract_pins()))
+
+
 def _probe_mcpserver(python: Path) -> subprocess.CompletedProcess[str]:
+    """Run the API-shape probe alone (no version verification)."""
+    return _run_probe(python, _MCPSERVER_IMPORT_PROBE)
+
+
+def _run_probe(python: Path, source: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(python), "-I", "-c", _MCPSERVER_IMPORT_PROBE],
+        [str(python), "-I", "-c", source],
         capture_output=True,
         text=True,
         timeout=60,
@@ -277,7 +336,7 @@ def build_windows_python_runtime(destination: Path) -> Path:
     python = destination / "python.exe"
     if not python.is_file():
         raise ValueError("assembled Python runtime has no python.exe")
-    smoke = _probe_mcpserver(python)
+    smoke = _probe_runtime_contract(python)
     if smoke.returncode != 0:
         detail = (smoke.stderr or smoke.stdout).strip()
         raise ValueError(
@@ -410,7 +469,7 @@ def assemble_bundle(
             if python_executable is None:
                 raise ValueError("provided Python runtime has no canonical executable")
             if validate_runtime:
-                smoke = _probe_mcpserver(python_executable)
+                smoke = _probe_runtime_contract(python_executable)
                 if smoke.returncode != 0:
                     detail = (smoke.stderr or smoke.stdout).strip()
                     raise ValueError(

@@ -47,8 +47,11 @@ def test_offline_without_bundle_never_installs_dependency(monkeypatch):
     monkeypatch.setattr(bootstrap_engine, "total_ram_gb", lambda: 2)
     monkeypatch.setattr(bootstrap_engine, "_load_bundle", lambda args: None)
 
-    def fake_deps(python_executable, *, offline, env):
-        seen.update(python=python_executable, offline=offline, env=env)
+    def fake_deps(python_executable, *, offline, env, contract_mismatch=False):
+        seen.update(
+            python=python_executable, offline=offline, env=env,
+            contract_mismatch=contract_mismatch,
+        )
         return False, "missing"
 
     monkeypatch.setattr(bootstrap_engine, "ensure_python_deps", fake_deps)
@@ -277,8 +280,9 @@ def test_a_present_bundle_does_not_forbid_dependency_repair(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(engine_bundle, "runtime_environment", lambda *a, **k: {})
 
-    def fake_deps(python_executable, *, offline, env):
+    def fake_deps(python_executable, *, offline, env, contract_mismatch=False):
         seen["offline"] = offline
+        seen["contract_mismatch"] = contract_mismatch
         return False, "missing"
 
     monkeypatch.setattr(bootstrap_engine, "ensure_python_deps", fake_deps)
@@ -292,3 +296,54 @@ def test_a_present_bundle_does_not_forbid_dependency_repair(monkeypatch, tmp_pat
     seen.clear()
     assert bootstrap_engine.main(["--offline"]) == 3
     assert seen["offline"] is True, "an explicit --offline must still forbid pip"
+
+
+def test_a_mismatched_contract_forces_a_reinstall(monkeypatch):
+    """Detecting drift and then not acting on it is the same as not detecting it.
+
+    The import probe proves only that `MCPServer` and `ToolManager` resolve. A
+    bundle whose drift is a changed `cryptography` pin passes that probe, so
+    reporting the fingerprint mismatch and returning success left the runtime
+    on a dependency set the checkout explicitly says it does not support.
+    """
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        # The probe succeeds: the MCP API is importable. Only the pinned
+        # versions differ, which this probe cannot see.
+        return SimpleNamespace(returncode=0, stdout="MCPServer\n", stderr="")
+
+    monkeypatch.setattr(bootstrap_engine.subprocess, "run", fake_run)
+
+    ok, message = bootstrap_engine.ensure_python_deps(
+        "python-test", contract_mismatch=False,
+    )
+    assert ok is True and "already available" in message
+    assert len(calls) == 1, "a satisfied contract must not reinstall"
+
+    calls.clear()
+    ok, message = bootstrap_engine.ensure_python_deps(
+        "python-test", contract_mismatch=True,
+    )
+    assert ok is True, message
+    assert any("pip" in part for command in calls for part in command), (
+        "a mismatched contract passed the import probe and was never repaired"
+    )
+
+
+def test_a_mismatched_contract_fails_explicitly_when_offline(monkeypatch):
+    """Offline cannot repair it, so it must say so rather than proceed."""
+    monkeypatch.setattr(
+        bootstrap_engine.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0, stdout="MCPServer\n", stderr=""
+        ),
+    )
+
+    ok, message = bootstrap_engine.ensure_python_deps(
+        "python-test", offline=True, contract_mismatch=True,
+    )
+    assert ok is False
+    assert "different" in message and bootstrap_engine.RUNTIME_REQUIREMENTS_NAME in message

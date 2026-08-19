@@ -161,7 +161,17 @@ def ensure_python_deps(
     *,
     offline: bool = False,
     env: dict[str, str] | None = None,
+    contract_mismatch: bool = False,
 ) -> tuple[bool, str]:
+    """Make the runtime satisfy the dependency contract, or say why it cannot.
+
+    ``contract_mismatch`` reports that a sealed bundle was built against a
+    different contract than this checkout declares. That must force an install
+    rather than be reported and ignored: the import probe below only proves the
+    two MCP symbols resolve, so a bundle whose only drift is, say, a changed
+    ``cryptography`` pin passes it and the runtime then carries on with a
+    dependency set the checkout explicitly says it does not support.
+    """
     executable = str(python_executable or sys.executable)
     process_env = env or os.environ.copy()
 
@@ -178,9 +188,16 @@ def ensure_python_deps(
         probe = probe_mcpserver()
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"Could not execute bundled Python: {exc}"
-    if probe.returncode == 0:
+    if probe.returncode == 0 and not contract_mismatch:
         return True, "Python MCP MCPServer compatibility API is already available."
     if offline:
+        if contract_mismatch:
+            return False, (
+                "The sealed runtime was built against a different %s than this "
+                "checkout declares, and --offline forbids pip. Re-run without "
+                "--offline to repair it, or rebuild the engine bundle."
+                % RUNTIME_REQUIREMENTS_NAME
+            )
         return False, (
             "Python MCP MCPServer compatibility API is unavailable and "
             "--offline forbids pip. Re-run without --offline to repair the "
@@ -363,20 +380,23 @@ def main(argv=None):
         print("  ollama endpoint: BLOCKED - %s" % exc, file=sys.stderr)
         return 4
 
+    contract_mismatch = False
     if bundle is not None:
         current_contract = engine_bundle.runtime_contract_fingerprint(
             ROOT / RUNTIME_REQUIREMENTS_NAME
         )
-        if bundle.runtime_contract != current_contract:
+        contract_mismatch = bundle.runtime_contract != current_contract
+        if contract_mismatch:
             print(
                 "  bundle: sealed for a different runtime contract than this "
-                "checkout; dependency repair will run if the compatibility "
-                "probe fails"
+                "checkout declares; reinstalling dependencies from %s"
+                % RUNTIME_REQUIREMENTS_NAME
             )
 
     ok, msg = ensure_python_deps(
         python_executable,
         offline=dependency_offline,
+        contract_mismatch=contract_mismatch,
         env=process_env,
     )
     print("  python: %s" % msg)

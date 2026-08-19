@@ -125,7 +125,7 @@ def test_supplied_runtime_validation_requires_mcpserver_api(monkeypatch, tmp_pat
     assert calls and calls[0][1:] == [
         "-I",
         "-c",
-        assembler._MCPSERVER_IMPORT_PROBE,
+        assembler._contract_probe_source(assembler._runtime_contract_pins()),
     ]
     assert not output.exists()
     assert not list(output.parent.glob(f".{output.name}.stage-*"))
@@ -164,7 +164,7 @@ def test_supplied_runtime_validation_accepts_mcpserver_api(monkeypatch, tmp_path
     assert calls and calls[0][1:] == [
         "-I",
         "-c",
-        assembler._MCPSERVER_IMPORT_PROBE,
+        assembler._contract_probe_source(assembler._runtime_contract_pins()),
     ]
 
 
