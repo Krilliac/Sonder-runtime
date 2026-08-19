@@ -1,10 +1,11 @@
 # Bootstrap is unattended, so runtime dependencies must be the exact releases
-# exercised by CI. Bump these deliberately with the FastMCP compatibility
+# exercised by CI. Bump these deliberately with the MCPServer compatibility
 # probe and the runtime test suite; do not turn this into a floating range.
-# MCP 2.x removed mcp.server.fastmcp, which Sonder currently imports.
-mcp==1.29.0
+# MCP 2.x renamed mcp.server.fastmcp -> mcp.server.mcpserver and FastMCP ->
+# MCPServer. Sonder imports the 2.x names; 1.x will not satisfy this file.
+mcp==2.0.0
 cryptography==50.0.0
-# pydantic-settings 2.15 warns when MCP 1.x resolves FastMCP's generic
-# lifespan setting, although the runtime remains usable. Pin the last
-# warning-free release until the upstream forward reference is resolved.
-pydantic-settings==2.14.0
+# No pydantic-settings pin: MCP 2.x's server Settings is a plain BaseModel, so
+# the generic-lifespan forward reference that made pydantic-settings 2.15 warn
+# under MCP 1.x is gone, and nothing in Sonder imports pydantic_settings
+# directly. Do not re-add it as a runtime dependency without an importer.

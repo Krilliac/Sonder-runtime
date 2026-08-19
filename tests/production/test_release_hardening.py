@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import importlib
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -258,65 +259,101 @@ def test_mcp_handler_classes_exist():
 
 # --- 11. Static architecture mutation tests ---
 
-def test_domain_layer_rejects_adapter_import():
-    violation = PACKAGE_ROOT / "domain" / "common" / "_wp12_violation.py"
+def _isolated_checker(tmp_path):
+    """Stage a throwaway copy of the package and return its checker path.
+
+    These tests prove the architecture checker is not vacuously green, which
+    requires a real violating module on disk. It must not be THIS disk:
+    `check()` walks the package with `rglob`, so a plant in the live tree is
+    seen by anything else reading it -- a concurrent run, a developer's
+    `check_architecture.py`, or `test_architecture_checker_passes` above -- and
+    a crash before the `finally` leaves it there for good.
+
+    `check_architecture.py` derives its package root from its own location, so
+    a copy exercises the identical code path. The copy is `git init`-ed because
+    the checker's production inventory comes from `git ls-files`.
+    """
+    shutil.copytree(PACKAGE_ROOT, tmp_path / "sonder_runtime")
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(REPO_ROOT / "scripts" / "check_architecture.py", checker)
+
+    for command in (["git", "init", "-q"], ["git", "add", "-A"]):
+        staged = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        if staged.returncode != 0:
+            pytest.skip(
+                "git is required to stage the isolated copy: %s"
+                % (staged.stderr.strip() or staged.stdout.strip())
+            )
+
+    clean = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert clean.returncode == 0, (
+        "the copied tree must start clean, or a violation planted in it "
+        "proves nothing:\n" + clean.stdout + clean.stderr
+    )
+    return checker
+
+
+def _run_checker(checker):
+    return subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+
+
+def test_domain_layer_rejects_adapter_import(tmp_path):
+    checker = _isolated_checker(tmp_path)
+    violation = (
+        tmp_path / "sonder_runtime" / "domain" / "common" / "_wp12_violation.py"
+    )
     violation.write_text(
         "from sonder_runtime.adapters.filesystem import atomic_json\n",
         encoding="utf-8",
     )
-    try:
-        result = subprocess.run(
-            [sys.executable,
-             str(REPO_ROOT / "scripts" / "check_architecture.py")],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        assert result.returncode == 1
-        assert "domain may not import" in result.stdout
-    finally:
-        violation.unlink()
+    result = _run_checker(checker)
+    assert result.returncode == 1
+    assert "domain may not import" in result.stdout
 
 
-def test_interface_layer_rejects_direct_adapter_import():
-    violation = PACKAGE_ROOT / "interfaces" / "http" / "_wp12_violation.py"
+def test_interface_layer_rejects_direct_adapter_import(tmp_path):
+    checker = _isolated_checker(tmp_path)
+    violation = (
+        tmp_path / "sonder_runtime" / "interfaces" / "http" / "_wp12_violation.py"
+    )
     violation.write_text(
         "from sonder_runtime.adapters.strangler_services import SystemClock\n",
         encoding="utf-8",
     )
-    try:
-        result = subprocess.run(
-            [sys.executable,
-             str(REPO_ROOT / "scripts" / "check_architecture.py")],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        assert result.returncode == 1
-        assert "interfaces may not import" in result.stdout or result.returncode == 1
-    finally:
-        violation.unlink()
+    result = _run_checker(checker)
+    assert result.returncode == 1
+    # Was `... in result.stdout or result.returncode == 1`. The right disjunct
+    # is the line above, so the message check could never fail and the test
+    # could not tell this violation from any other. Name the layer.
+    assert "interfaces" in result.stdout and "may not import" in result.stdout, (
+        result.stdout
+    )
 
 
-def test_application_layer_rejects_platform_import():
+def test_application_layer_rejects_platform_import(tmp_path):
+    checker = _isolated_checker(tmp_path)
     violation = (
-        PACKAGE_ROOT / "application" / "memory" / "_wp12_violation.py"
+        tmp_path / "sonder_runtime" / "application" / "memory"
+        / "_wp12_violation.py"
     )
     violation.write_text(
         "import sonder_config\n",
         encoding="utf-8",
     )
-    try:
-        result = subprocess.run(
-            [sys.executable,
-             str(REPO_ROOT / "scripts" / "check_architecture.py")],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        assert result.returncode == 1
-    finally:
-        violation.unlink()
+    result = _run_checker(checker)
+    assert result.returncode == 1
+    assert "application" in result.stdout and "may not import" in result.stdout, (
+        result.stdout
+    )
 
 
 # --- 12. Clean installation and bridge upgrade ---

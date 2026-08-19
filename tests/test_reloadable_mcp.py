@@ -4,16 +4,22 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import Client, ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.server.mcpserver.resources import ResourceManager
+from mcp.types import (
+    CallToolRequestParams,
+    LATEST_PROTOCOL_VERSION,
+    ToolListChangedNotification,
+)
 
-from reloadable_mcp import ReloadableFastMCP, _recovery_action
+from reloadable_mcp import ReloadableMCPServer, _recovery_action
 
 # The sample modules below register their own `alpha`/`beta` tools on a private
 # registry, so Sonder's command catalog -- which reads `server.mcp` -- has never
@@ -42,6 +48,25 @@ def allow_sample_tools(monkeypatch):
     )
 
 
+def _request_ctx(session, *, method):
+    """A real ``ServerRequestContext`` wrapped around a stub session.
+
+    MCP 2.x removed ``FastMCP.get_context()``: the request context now reaches
+    the server only as an argument to the ``_handle_*`` protocol entry points.
+    So the notification tests below drive those entry points, which is also
+    where ``ReloadableMCPServer`` now refreshes and notifies -- rather than
+    patching an ambient accessor that no longer exists on either side.
+    """
+    from mcp.server.context import ServerRequestContext
+
+    return ServerRequestContext(
+        session=session,
+        lifespan_context=None,
+        protocol_version=LATEST_PROTOCOL_VERSION,
+        method=method,
+    )
+
+
 def _module_source(version, *, include_beta=False):
     beta = (
         """
@@ -52,14 +77,14 @@ def beta() -> str:
         if include_beta
         else ""
     )
-    return f'''from reloadable_mcp import ReloadableFastMCP
+    return f'''from reloadable_mcp import ReloadableMCPServer
 
 existing = globals().get("_PERSISTENT_MCP")
-if isinstance(existing, ReloadableFastMCP):
+if isinstance(existing, ReloadableMCPServer):
     mcp = existing
     mcp.begin_module_refresh()
 else:
-    mcp = ReloadableFastMCP("sample")
+    mcp = ReloadableMCPServer("sample")
 _PERSISTENT_MCP = mcp
 
 @mcp.tool()
@@ -91,14 +116,14 @@ def extra_prompt() -> str:
         else ""
     )
     failure = 'raise RuntimeError("refresh failed")' if fail else ""
-    return f'''from reloadable_mcp import ReloadableFastMCP
+    return f'''from reloadable_mcp import ReloadableMCPServer
 
 existing = globals().get("_PERSISTENT_MCP")
-if isinstance(existing, ReloadableFastMCP):
+if isinstance(existing, ReloadableMCPServer):
     mcp = existing
     mcp.begin_module_refresh()
 else:
-    mcp = ReloadableFastMCP("sample")
+    mcp = ReloadableMCPServer("sample")
 _PERSISTENT_MCP = mcp
 
 @mcp.tool()
@@ -141,20 +166,27 @@ def test_registry_refresh_adds_updates_and_removes_tools(monkeypatch, tmp_path):
     try:
         module = importlib.import_module(module_name)
         mcp = module.mcp
-        assert isinstance(mcp, ReloadableFastMCP)
+        assert isinstance(mcp, ReloadableMCPServer)
         assert mcp._tool_manager.get_tool("alpha").fn() == "v1"
         assert (
-            mcp._mcp_server.create_initialization_options().capabilities.tools.listChanged
+            mcp._lowlevel_server.create_initialization_options().capabilities.tools.list_changed
             is True
         )
 
-        mcp._mcp_server._tool_cache["alpha"] = object()
+        # MCP 1.x cached output schemas on the low-level server, so this swap
+        # had to clear that cache or a rewritten tool kept a stale schema. 2.x
+        # reads the schema off the Tool object the manager holds, which the
+        # swap replaces wholesale. This assertion is the tripwire: if a later
+        # MCP reintroduces a server-level tool cache, it fails here and the
+        # explicit clear has to come back -- instead of the stale schema
+        # quietly returning with nothing left watching for it.
+        assert not hasattr(mcp._lowlevel_server, "_tool_cache")
+
         _write_new_source(module_path, _module_source("v1-implementation-update"))
         refreshed = mcp.refresh_if_changed()
 
         assert refreshed == {"reloaded": True, "surface_changed": False}
         assert mcp._tool_manager.get_tool("alpha").fn() == "v1-implementation-update"
-        assert mcp._mcp_server._tool_cache == {}
 
         _write_new_source(module_path, _module_source("v2", include_beta=True))
         refreshed = mcp.refresh_if_changed()
@@ -513,9 +545,9 @@ def test_primitive_refresh_advertises_and_sends_list_changed(monkeypatch, tmp_pa
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
         mcp = importlib.import_module(module_name).mcp
-        capabilities = mcp._mcp_server.create_initialization_options().capabilities
-        assert capabilities.resources.listChanged is True
-        assert capabilities.prompts.listChanged is True
+        capabilities = mcp._lowlevel_server.create_initialization_options().capabilities
+        assert capabilities.resources.list_changed is True
+        assert capabilities.prompts.list_changed is True
         notifications = []
 
         class Session:
@@ -528,17 +560,132 @@ def test_primitive_refresh_advertises_and_sends_list_changed(monkeypatch, tmp_pa
             async def send_prompt_list_changed(self):
                 notifications.append("prompts")
 
-        context = SimpleNamespace(
-            request_context=SimpleNamespace(session=Session()),
-        )
-        monkeypatch.setattr(mcp, "get_context", lambda: context)
+        ctx = _request_ctx(Session(), method="resources/list")
         _write_new_source(module_path, _primitive_source("after", include_extra=True))
 
-        asyncio.run(mcp.list_resources())
+        asyncio.run(mcp._handle_list_resources(ctx, None))
 
         assert notifications == ["resources", "prompts"]
     finally:
         sys.modules.pop(module_name, None)
+
+
+def test_a_modern_client_is_told_the_surface_changed(
+    monkeypatch, tmp_path, allow_sample_tools,
+):
+    """A 2026-07-28 client must learn about a hot swap, not just a legacy one.
+
+    The two protocol eras carry change notifications on different channels.
+    ``session.send_tool_list_changed()`` reaches ``<= 2025-11-25`` clients; at
+    2026-07-28 that channel discards it by construction and the event travels
+    only on the ``subscriptions/listen`` stream, fed by the server's
+    ``SubscriptionBus``.
+
+    This is not hypothetical and the rest of this file cannot see it: every
+    other notification test here either drives a stub session or connects with
+    ``ClientSession(...).initialize()``, which is the legacy handshake -- the
+    one era where the connection-channel send survives. So a server that only
+    sent on that channel passed the whole suite while leaving every modern
+    client silently stranded on a stale tool list: still calling tools the
+    reload removed, never seeing the ones it added, with nothing raised and
+    nothing logged above debug.
+
+    Hence a real ``Client`` at the modern era, with a real honored listen
+    stream, across a real registry swap.
+    """
+    monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+    module_name = "reloadable_mcp_modern_notification_sample"
+    module_path = tmp_path / (module_name + ".py")
+    module_path.write_text(_module_source("before"), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    events = []
+
+    try:
+        server = importlib.import_module(module_name).mcp
+
+        async def exercise():
+            async with Client(server, mode="auto") as client:
+                # If the negotiation ever stops landing on the modern era this
+                # test silently becomes a duplicate of the legacy ones, so
+                # assert the era it is here to cover.
+                assert client.protocol_version == "2026-07-28", (
+                    "expected the modern era; got %r" % (client.protocol_version,)
+                )
+
+                async with client.listen(tools_list_changed=True) as subscription:
+                    assert subscription.honored.tools_list_changed is True
+
+                    _write_new_source(
+                        module_path, _module_source("after", include_beta=True)
+                    )
+                    await client.call_tool("alpha", {})
+
+                    async def collect_one():
+                        async for event in subscription:
+                            events.append(type(event).__name__)
+                            return
+
+                    try:
+                        await asyncio.wait_for(collect_one(), timeout=10)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        pass
+
+                listed = await client.list_tools()
+                return sorted(tool.name for tool in listed.tools)
+
+        names = asyncio.run(exercise())
+
+        # The swap must really have happened, or "no event" and "nothing to
+        # announce" would be indistinguishable and this test would pass on a
+        # server that never reloads at all.
+        assert names == ["alpha", "beta"], names
+        assert events == ["ToolsListChanged"], (
+            "the registry swapped but no modern client heard about it: %r" % (events,)
+        )
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_the_staging_redirect_is_scoped_to_the_reloading_thread():
+    """Only the stack performing a refresh may see the staging registry.
+
+    MCP 2.x's `resource()` decorator writes into whatever `_resource_manager`
+    names when it runs, so a staged refresh has to redirect that name. Redirect
+    it on the instance and the half-built staging registry becomes the live one
+    for the duration of every decorator call -- a concurrent `resources/list`
+    could then answer from a registry that is still being assembled, which is
+    the single thing the staged swap exists to prevent.
+
+    Asserted as the scoping property rather than by racing a reader against a
+    live refresh: the leak window is the body of one decorator call, far too
+    narrow to sample reliably, and a probe that usually misses it is a test
+    that usually passes for the wrong reason.
+    """
+    mcp = ReloadableMCPServer("redirect-scoping")
+    active = mcp._resource_manager
+    staging = ResourceManager(warn_on_duplicate_resources=False)
+    assert staging is not active
+
+    mcp._decorating.resources = staging
+    try:
+        assert mcp._resource_manager is staging, (
+            "the reloading stack must reach the staging manager, or the "
+            "decorator would register into the live registry"
+        )
+        seen = []
+        reader = threading.Thread(
+            target=lambda: seen.append(mcp._resource_manager)
+        )
+        reader.start()
+        reader.join(5)
+        assert not reader.is_alive(), "the reader thread never finished"
+        assert seen == [active], (
+            "another thread reached the half-built staging registry: %r" % (seen,)
+        )
+    finally:
+        mcp._decorating.resources = None
+
+    assert mcp._resource_manager is active
 
 
 def test_refresh_tracks_exact_executed_bytes_when_source_changes_during_exec(
@@ -594,16 +741,15 @@ def test_tool_call_refresh_sends_list_changed_notification(
             async def send_tool_list_changed(self):
                 notifications.append("changed")
 
-        context = SimpleNamespace(
-            request_context=SimpleNamespace(session=Session()),
-        )
-        monkeypatch.setattr(mcp, "get_context", lambda: context)
+        ctx = _request_ctx(Session(), method="tools/call")
         _write_new_source(module_path, _module_source("after", include_beta=True))
 
-        result = asyncio.run(mcp.call_tool("alpha", {}))
+        result = asyncio.run(
+            mcp._handle_call_tool(ctx, CallToolRequestParams(name="alpha", arguments={}))
+        )
 
         assert notifications == ["changed"]
-        assert result[0][0].text == "after"
+        assert result.content[0].text == "after"
         assert mcp._tool_manager.get_tool("beta").fn() == "beta"
     finally:
         sys.modules.pop(module_name, None)
@@ -638,14 +784,10 @@ def test_a_registry_swap_drops_the_memoised_command_catalog(monkeypatch, tmp_pat
     try:
         module = importlib.import_module(module_name)
         mcp = module.mcp
-        context = SimpleNamespace(
-            request_context=SimpleNamespace(
-                session=SimpleNamespace(
-                    send_tool_list_changed=_noop_async,
-                ),
-            ),
-        )
-        monkeypatch.setattr(mcp, "get_context", lambda: context)
+        # No stub session is needed here: under MCP 2.x the public `call_tool`
+        # refreshes but does not notify (only the `_handle_*` protocol entry
+        # points have a session to notify on), and it is the refresh -- not the
+        # notification -- that this test is about.
 
         # Warm the cache, and prove it is warm -- otherwise an invalidation
         # would be indistinguishable from nothing ever having been cached.
@@ -686,17 +828,13 @@ def test_a_registry_swap_drops_the_memoised_command_catalog(monkeypatch, tmp_pat
         command_catalog.reset_cache()
 
 
-async def _noop_async():
-    return None
-
-
 def test_server_uses_reloadable_registry_and_reports_current_source(monkeypatch):
     monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
     import server
 
     state = server.mcp_runtime_data()
 
-    assert isinstance(server.mcp, ReloadableFastMCP)
+    assert isinstance(server.mcp, ReloadableMCPServer)
     assert state["status"] == "current"
     assert state["registered_tools"] >= 100
     assert state["protocol_list_changed"] is True
@@ -732,8 +870,13 @@ def test_real_stdio_session_hot_adds_updates_removes_and_fails_closed(
 
     async def exercise():
         async def handle_message(message):
-            root = getattr(message, "root", None)
-            if type(root).__name__ == "ToolListChangedNotification":
+            # MCP 1.x delivered notifications wrapped in a `ServerNotification`
+            # root model; 2.x hands `message_handler` the concrete model. An
+            # `isinstance` against the imported type is deliberate: the old
+            # `type(...).__name__ == "..."` string match kept "matching
+            # nothing" and "nothing was sent" indistinguishable, and would go
+            # on silently collecting zero notifications after any such rename.
+            if isinstance(message, ToolListChangedNotification):
                 notifications.append("tools/list_changed")
 
         params = StdioServerParameters(
@@ -749,7 +892,7 @@ def test_real_stdio_session_hot_adds_updates_removes_and_fails_closed(
                 message_handler=handle_message,
             ) as session:
                 initialized = await session.initialize()
-                assert initialized.capabilities.tools.listChanged is True
+                assert initialized.capabilities.tools.list_changed is True
                 listed = await session.list_tools()
                 assert [tool.name for tool in listed.tools] == ["alpha"]
 

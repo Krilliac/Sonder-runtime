@@ -24,7 +24,7 @@ import os
 import sys
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 import command_catalog
 import permission_modes as pm
@@ -509,11 +509,13 @@ def test_manual_leaves_the_direct_mcp_surface_alone():
     """The default mode must not start refusing MCP clients that always worked."""
     pm.set_mode(pm.MANUAL)
 
-    blocks, _ = asyncio.run(
+    # MCP 2.x returns a `CallToolResult`; 1.x returned an
+    # (content_blocks, structured_content) tuple.
+    result = asyncio.run(
         server.mcp.call_tool("task_create", {"title": "gate probe"}),
     )
 
-    assert "task created" in blocks[0].text
+    assert "task created" in result.content[0].text
 
 
 def test_plan_denies_a_direct_mcp_client_call():
@@ -537,9 +539,9 @@ def test_plan_denies_a_direct_mcp_client_call():
 def test_plan_still_lets_a_client_read():
     pm.set_mode(pm.PLAN)
 
-    blocks, _ = asyncio.run(server.mcp.call_tool("task_list", {}))
+    result = asyncio.run(server.mcp.call_tool("task_list", {}))
 
-    assert blocks
+    assert result.content
 
 
 def test_plan_cannot_trap_a_client_that_selected_it(monkeypatch):
@@ -554,12 +556,12 @@ def test_plan_cannot_trap_a_client_that_selected_it(monkeypatch):
     """
     pm.set_mode(pm.PLAN)
 
-    blocks, _ = asyncio.run(
+    result = asyncio.run(
         server.mcp.call_tool("permission_mode", {"mode": "manual"}),
     )
 
     assert pm.current_mode() == pm.MANUAL
-    assert blocks
+    assert result.content
 
 
 def test_the_gate_control_exemption_has_one_definition():

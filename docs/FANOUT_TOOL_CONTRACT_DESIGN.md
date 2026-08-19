@@ -45,7 +45,7 @@ declarations drift.
 
 | # | Surface | Entry point | Name resolution | Typed input validation | Permission gate | Authority gate |
 |---|---------|-------------|-----------------|------------------------|-----------------|----------------|
-| S1 | Direct MCP (protocol client) | `reloadable_mcp.ReloadableFastMCP.call_tool` | exact registered name | FastMCP schema validation | `_refuse_if_gated` → `decide_for_caller(interactive=False, gate_control_exempt=True)` | none — trusted local operator surface |
+| S1 | Direct MCP (protocol client) | `reloadable_mcp.ReloadableMCPServer.call_tool` | exact registered name | MCPServer schema validation | `_refuse_if_gated` → `decide_for_caller(interactive=False, gate_control_exempt=True)` | none — trusted local operator surface |
 | S2 | Console, named branches | `sonder_repl.main` (+ ~25 names forwarded to `server.control_command`) | `cmd ==` chains | per-branch parsing | `_named_command_gate` → `console_tools()` map → `_gate_tools` (strictest member; `interactive` iff a tty) | in-tool token checks where present |
 | S3 | Console, catalogued `/<tool>` | `sonder_repl._run_catalogued` | `command_catalog.parse_invocation` | `parse_invocation` (unknown key → `ValueError`, typed coercion) | `_permission_gate` | in-tool |
 | S4 | `control_command` fall-through | `server.control_command` | same catalog | same | `_control_tool_refusal` | in-tool |

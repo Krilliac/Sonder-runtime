@@ -14,6 +14,16 @@ from sonder_updates import UpdateRepository, build_bundle
 pytestmark = pytest.mark.integration
 
 
+def _pointer_text(link) -> str:
+    """The active release path, however this platform records it.
+
+    Never returns None: an unresolvable pointer must fail a substring
+    assertion rather than raise, so the failure names the missing release
+    instead of a TypeError.
+    """
+    return sonder_updates._read_pointer(link) or ""
+
+
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     """Isolated state, releases dir, and the unsigned-bundle dev gate."""
@@ -159,9 +169,12 @@ def test_install_happy_path_commits_and_activates(env):
     assert done["status"] == "committed"
     assert done["backup_id"], "pre-install backup must be recorded"
 
-    current = env / "current"
-    assert current.is_symlink()
-    target = Path(os.readlink(current))
+    # Symlink on POSIX, `current.pointer` where a directory symlink cannot be
+    # created (unprivileged Windows). Assert through the accessor the engine
+    # itself reads, not through one platform's representation.
+    current_target = sonder_updates._read_pointer(env / "current")
+    assert current_target, "activation left no resolvable pointer"
+    target = Path(current_target)
     assert target.name.startswith("2.0.0-")
     assert (target / "app.py").exists()
 
@@ -211,7 +224,10 @@ def test_backup_failure_blocks_install_without_disclosing_adapter_detail(
     failed = manager.repository.get_plan(plan["update_id"])
     assert failed["status"] == "failed"
     assert failed["error_code"] == "BACKUP_FAILED"
-    assert not (env / "current").exists()
+    # Nothing was ever activated, so no pointer should resolve -- asserted
+    # through the accessor rather than through `current` existing, which is
+    # only ever the symlink representation.
+    assert sonder_updates._read_pointer(env / "current") is None
 
 
 def test_install_requires_confirmation_nonce(env):
@@ -231,7 +247,8 @@ def test_migration_failure_rolls_back_and_keeps_previous_active(env):
         good["update_id"], confirm=confirm_nonce_for(good),
         allow_unverified=True,
     )
-    before_target = os.readlink(env / "current")
+    before_target = sonder_updates._read_pointer(env / "current")
+    assert before_target, "the good install must have left a resolvable pointer"
 
     bad = _import_ok(manager, env, version="3.1.0", migrate_rc=1)
     result = manager.install(
@@ -241,7 +258,7 @@ def test_migration_failure_rolls_back_and_keeps_previous_active(env):
     assert result["status"] == "rolled_back"
     assert result["error_code"] == "MIGRATION_FAILED"
     # Pointer untouched; previous release still active.
-    assert os.readlink(env / "current") == before_target
+    assert sonder_updates._read_pointer(env / "current") == before_target
     active = manager.repository.release_by_status("active")
     assert active["version"] == "3.0.0"
     # Failed release evidence retained (R: failed evidence kept).
@@ -269,9 +286,15 @@ def test_health_failure_rolls_back(env):
     )
     assert result["status"] == "rolled_back"
     assert result["error_code"] == "HEALTH_FAILED"
-    assert not (env / "current").exists() or "4.0.0" not in os.readlink(
-        env / "current"
-    )
+    # Unconditional: `_pointer_text` reads whichever representation this
+    # platform used and returns "" when there is none, so this asserts the
+    # failed release is not active instead of skipping the check wherever
+    # `current` happens not to be a symlink.
+    assert "4.0.0" not in _pointer_text(env / "current")
+    # And say what SHOULD be true, not only what should not: with no prior
+    # release the rollback must leave nothing active, so "" above means
+    # "rolled back" rather than "this platform records activation elsewhere".
+    assert manager.repository.release_by_status("active") is None
 
 
 def test_http_only_health_checks_journal_a_skip_not_a_pass(env):
@@ -320,7 +343,7 @@ def test_operator_rollback_switches_to_previous(env):
         second["update_id"], confirm=confirm_nonce_for(second),
         allow_unverified=True,
     )
-    assert "5.1.0" in os.readlink(env / "current")
+    assert "5.1.0" in _pointer_text(env / "current")
     previous = manager.repository.release_by_status("previous")
     assert previous["version"] == "5.0.0"
 
@@ -329,7 +352,7 @@ def test_operator_rollback_switches_to_previous(env):
 
     active = manager.rollback(confirm=previous["release_id"][-8:])
     assert active["version"] == "5.0.0"
-    assert "5.0.0" in os.readlink(env / "current")
+    assert "5.0.0" in _pointer_text(env / "current")
     demoted = manager.repository.release_by_status("previous")
     assert demoted["version"] == "5.1.0"
 

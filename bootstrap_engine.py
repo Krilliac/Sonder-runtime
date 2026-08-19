@@ -26,10 +26,10 @@ MODEL_MEDIUM = "qwen2.5-coder:3b"
 MODEL_LARGE = "qwen2.5-coder:7b"
 ROOT = Path(__file__).resolve().parent
 RUNTIME_REQUIREMENTS_NAME = "requirements-runtime.txt"
-FASTMCP_IMPORT_PROBE = (
-    "from mcp.server.fastmcp import FastMCP; "
-    "from mcp.server.fastmcp.tools import ToolManager; "
-    "print(FastMCP.__name__, ToolManager.__name__)"
+MCPSERVER_IMPORT_PROBE = (
+    "from mcp.server.mcpserver import MCPServer; "
+    "from mcp.server.mcpserver.tools import ToolManager; "
+    "print(MCPServer.__name__, ToolManager.__name__)"
 )
 
 
@@ -165,9 +165,9 @@ def ensure_python_deps(
     executable = str(python_executable or sys.executable)
     process_env = env or os.environ.copy()
 
-    def probe_fastmcp():
+    def probe_mcpserver():
         return subprocess.run(
-            [executable, "-c", FASTMCP_IMPORT_PROBE],
+            [executable, "-c", MCPSERVER_IMPORT_PROBE],
             capture_output=True,
             text=True,
             timeout=20,
@@ -175,15 +175,17 @@ def ensure_python_deps(
         )
 
     try:
-        probe = probe_fastmcp()
+        probe = probe_mcpserver()
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"Could not execute bundled Python: {exc}"
     if probe.returncode == 0:
-        return True, "Python MCP FastMCP compatibility API is already available."
+        return True, "Python MCP MCPServer compatibility API is already available."
     if offline:
         return False, (
-            "Python MCP FastMCP compatibility API is unavailable; "
-            "offline mode will not use pip."
+            "Python MCP MCPServer compatibility API is unavailable and "
+            "--offline forbids pip. Re-run without --offline to repair the "
+            "runtime from %s, or rebuild the engine bundle."
+            % RUNTIME_REQUIREMENTS_NAME
         )
     requirements = ROOT / RUNTIME_REQUIREMENTS_NAME
     if not requirements.is_file():
@@ -207,12 +209,12 @@ def ensure_python_deps(
     if result.returncode != 0:
         return False, f"Could not install {requirements.name} with pip."
     try:
-        probe = probe_fastmcp()
+        probe = probe_mcpserver()
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"Could not verify the installed Python runtime: {exc}"
     if probe.returncode != 0:
         return False, (
-            "Installed runtime requirements, but the MCP FastMCP compatibility "
+            "Installed runtime requirements, but the MCP MCPServer compatibility "
             "API is still unavailable."
         )
     return True, f"Installed Python runtime dependencies from {requirements.name}."
@@ -265,6 +267,17 @@ def main(argv=None):
 
     hardware = system_profile.detect_hardware()
     offline = args.offline or bundle is not None
+    # Models come from the bundle, so model work stays offline. Dependency
+    # repair is a different question. A source update can carry the checkout
+    # past the runtime pin while the sealed runtime still holds the old
+    # dependency set; the compatibility probe then fails and pip is the only
+    # thing that can fix it. Treating "a bundle is present" as "never use pip"
+    # turned that into a dead end -- the engine failed at startup and this
+    # bootstrap exited 3 with no remedy but rebuilding the payload. Only an
+    # explicit --offline still forbids pip; the probe short-circuits before pip
+    # is reached whenever the sealed runtime is actually fine, so a healthy
+    # bundle never touches the network.
+    dependency_offline = args.offline
     requested = args.model.strip() or os.environ.get("SONDER_BASE_MODEL", "").strip()
     if requested.lower() == "auto":
         requested = ""
@@ -350,9 +363,20 @@ def main(argv=None):
         print("  ollama endpoint: BLOCKED - %s" % exc, file=sys.stderr)
         return 4
 
+    if bundle is not None:
+        current_contract = engine_bundle.runtime_contract_fingerprint(
+            ROOT / RUNTIME_REQUIREMENTS_NAME
+        )
+        if bundle.runtime_contract != current_contract:
+            print(
+                "  bundle: sealed for a different runtime contract than this "
+                "checkout; dependency repair will run if the compatibility "
+                "probe fails"
+            )
+
     ok, msg = ensure_python_deps(
         python_executable,
-        offline=offline,
+        offline=dependency_offline,
         env=process_env,
     )
     print("  python: %s" % msg)

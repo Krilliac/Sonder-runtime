@@ -63,9 +63,14 @@ def test_linux_partition_inherits_parent_disk_removable_flag(tmp_path):
     partition.mkdir(parents=True)
     (disk / "removable").write_bytes(b"1\n")
     synthetic_device = "8_1"  # Windows cannot create a colon-bearing fixture.
-    (sys_root / synthetic_device).symlink_to(
-        partition, target_is_directory=True
-    )
+    try:
+        (sys_root / synthetic_device).symlink_to(
+            partition, target_is_directory=True
+        )
+    except (OSError, NotImplementedError) as exc:
+        # /sys/dev/block entries are symlinks; without them there is no
+        # fixture. Same guard the sibling symlink test in this file uses.
+        pytest.skip("directory symlinks unavailable: %s" % exc)
     assert sonder_storage._linux_removable(
         synthetic_device, sys_block_root=sys_root
     ) is True

@@ -4087,11 +4087,11 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
 
 
 _existing_mcp = globals().get("_PERSISTENT_MCP")
-if isinstance(_existing_mcp, reloadable_mcp.ReloadableFastMCP):
+if isinstance(_existing_mcp, reloadable_mcp.ReloadableMCPServer):
     mcp = _existing_mcp
     mcp.begin_module_refresh()
 else:
-    mcp = reloadable_mcp.ReloadableFastMCP("sonder-runtime")
+    mcp = reloadable_mcp.ReloadableMCPServer("sonder-runtime")
 _PERSISTENT_MCP = mcp
 
 
@@ -16027,7 +16027,7 @@ def tool_capability_manifest() -> str:
             "name": str(name),
             "description": str(getattr(tool, "description", "")),
             "parameters": getattr(tool, "parameters", {}),
-            # FastMCP validates and publishes this independently from input
+            # MCPServer validates and publishes this independently from input
             # parameters.  It is part of the callable contract too: omit it
             # here and a client retaining ``sha256`` cannot detect a changed
             # result shape after a live reload.

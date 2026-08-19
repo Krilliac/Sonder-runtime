@@ -50,10 +50,10 @@ def test_task_list_mcp_schema_and_dispatch_accept_typed_multi_status(monkeypatch
     status_schema = registered.parameters["properties"]["status"]
     assert {item.get("type") for item in status_schema["anyOf"]} == {"string", "array"}
 
-    blocks, _ = asyncio.run(server.mcp.call_tool(
+    result = asyncio.run(server.mcp.call_tool(
         "task_list", {"status": ["pending", "blocked"]},
     ))
-    output = "\n".join(str(block.text) for block in blocks)
+    output = "\n".join(str(block.text) for block in result.content)
     assert "pending task" in output
     assert "blocked task" in output
     assert "done task" not in output

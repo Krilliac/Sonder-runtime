@@ -1,30 +1,36 @@
-"""Atomic live refresh for a long-running FastMCP tool registry.
+"""Atomic live refresh for a long-running MCPServer tool registry.
 
-FastMCP supports adding tools at runtime, and MCP supports
+``MCPServer`` supports adding tools at runtime, and MCP supports
 ``notifications/tools/list_changed``. This wrapper combines those primitives
 with a fail-closed source reload: a complete replacement registry is staged in
 isolation and swapped only after the updated server module executes cleanly.
+
+MCP 2.x renamed ``mcp.server.fastmcp`` to ``mcp.server.mcpserver`` and
+``FastMCP`` to ``MCPServer``; the ergonomic-server API this module extends is
+otherwise the same. See ``docs/MCP_2_MIGRATION.md`` for the per-symbol map.
 """
 
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import os
-import re
 import sys
 import threading
 import time
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.server.fastmcp.resources import FunctionResource, ResourceManager
-from mcp.server.fastmcp.prompts import PromptManager
-from mcp.server.fastmcp.tools import ToolManager
-from mcp.server.fastmcp.utilities.context_injection import find_context_parameter
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.resources import ResourceManager
+from mcp.server.mcpserver.prompts import PromptManager
+from mcp.server.mcpserver.tools import ToolManager
 from mcp.server.lowlevel.server import NotificationOptions
+from mcp.shared.subscriptions import (
+    PromptsListChanged,
+    ResourcesListChanged,
+    ToolsListChanged,
+)
 
 
 def _refuse_if_gated(name: str) -> None:
@@ -156,11 +162,16 @@ def _prompt_manager_signature(manager: PromptManager) -> str:
     return _model_signature(manager.list_prompts())
 
 
-class ReloadableFastMCP(FastMCP):
-    """FastMCP with atomic in-process source and tool-surface refresh."""
+class ReloadableMCPServer(MCPServer):
+    """MCPServer with atomic in-process source and tool-surface refresh."""
 
     def __init__(self, *args, **kwargs):
         self._reload_lock = threading.RLock()
+        # Set before super().__init__, which assigns _resource_manager through
+        # the property below and would otherwise read an attribute that does
+        # not exist yet.
+        self._decorating = threading.local()
+        self._active_resource_manager: ResourceManager | None = None
         self._staging_manager: ToolManager | None = None
         self._staging_resource_manager: ResourceManager | None = None
         self._staging_prompt_manager: PromptManager | None = None
@@ -184,19 +195,38 @@ class ReloadableFastMCP(FastMCP):
         }
         self._advertise_list_changes()
 
-    def _advertise_list_changes(self) -> None:
-        original = self._mcp_server.create_initialization_options
+    @property
+    def _resource_manager(self) -> ResourceManager:
+        """The manager upstream code writes to and reads from.
 
-        def create_options(notification_options=None, experimental_capabilities=None):
-            current = notification_options or NotificationOptions()
+        During a staged refresh this returns the staging manager, but ONLY on
+        the stack doing the reload. Publishing it instance-wide instead would
+        expose a half-built registry to any concurrent ``resources/list`` --
+        the one thing the staged swap exists to make impossible.
+        """
+        target = getattr(self._decorating, "resources", None)
+        return target if target is not None else self._active_resource_manager
+
+    @_resource_manager.setter
+    def _resource_manager(self, manager: ResourceManager) -> None:
+        self._active_resource_manager = manager
+
+    def _advertise_list_changes(self) -> None:
+        original = self._lowlevel_server.create_initialization_options
+
+        def create_options(
+            notification_options=None,
+            experimental_capabilities=None,
+            extensions=None,
+        ):
             options = NotificationOptions(
                 prompts_changed=True,
                 resources_changed=True,
                 tools_changed=True,
             )
-            return original(options, experimental_capabilities)
+            return original(options, experimental_capabilities, extensions)
 
-        self._mcp_server.create_initialization_options = create_options
+        self._lowlevel_server.create_initialization_options = create_options
 
     def begin_module_refresh(self) -> None:
         """Start collecting decorators into an isolated replacement manager."""
@@ -255,11 +285,14 @@ class ReloadableFastMCP(FastMCP):
                 self._staging_manager = None
                 self._staging_resource_manager = None
                 self._staging_prompt_manager = None
-                # The low-level server separately caches MCP schemas for output
-                # validation. Clear it so changed/removed tools cannot retain a
-                # stale schema after the atomic manager swap.
-                self._mcp_server._tool_cache.clear()
-                # So does the command catalog, and it is the permission gate's
+                # MCP 1.x's low-level server kept a separate ``_tool_cache`` of
+                # output schemas for result validation, and this swap had to
+                # clear it or a changed/removed tool kept a stale schema. MCP
+                # 2.x validates against ``Tool.fn_metadata.output_schema`` on
+                # the tool object itself, so replacing the manager replaces the
+                # schema with it and there is no second cache to invalidate.
+                # The command catalog is a different story, and it is the
+                # permission gate's
                 # only source of truth for a tool's risk class. It is an
                 # ``lru_cache`` over this very registry, and nothing ever
                 # called ``reset_cache()`` -- its docstring said "used after a
@@ -317,29 +350,30 @@ class ReloadableFastMCP(FastMCP):
         super().add_resource(resource)
 
     def resource(self, uri: str, **kwargs):
-        """Register resources against the isolated manager during refresh."""
-        if callable(uri):
-            raise TypeError("Use @resource('uri') instead of @resource")
+        r"""Register resources against the isolated manager during refresh.
+
+        This used to re-implement the upstream decorator so the template branch
+        could target the staging manager. It no longer can: MCP 2.x parses the
+        URI as a full RFC 6570 template and rejects shapes the old
+        ``{(\w+)}`` regex silently accepted (and vice versa). A private copy
+        of that logic would drift from the validation the server actually
+        applies, so the registration is delegated upstream and only the manager
+        it writes into is swapped -- for the duration of the decorator call,
+        under the reload lock, which is the one thing this class needs to
+        change.
+        """
+        inner = super().resource(uri, **kwargs)
 
         def decorator(fn):
-            signature = inspect.signature(fn)
-            has_uri_params = "{" in uri and "}" in uri
-            if has_uri_params or signature.parameters:
-                context_param = find_context_parameter(fn)
-                uri_params = set(re.findall(r"{(\w+)}", uri))
-                func_params = {p for p in signature.parameters if p != context_param}
-                if uri_params != func_params:
-                    raise ValueError(
-                        f"Mismatch between URI parameters {uri_params} "
-                        f"and function parameters {func_params}"
-                    )
-                with self._reload_lock:
-                    manager = self._staging_resource_manager or self._resource_manager
-                    manager.add_template(fn=fn, uri_template=uri, **kwargs)
-            else:
-                resource = FunctionResource.from_function(fn=fn, uri=uri, **kwargs)
-                self.add_resource(resource)
-            return fn
+            with self._reload_lock:
+                staging = self._staging_resource_manager
+                if staging is None:
+                    return inner(fn)
+                self._decorating.resources = staging
+                try:
+                    return inner(fn)
+                finally:
+                    self._decorating.resources = None
 
         return decorator
 
@@ -503,60 +537,130 @@ class ReloadableFastMCP(FastMCP):
                     "error": self._last_error,
                 }
 
+    # The public surface below refreshes but never notifies. MCP 1.x exposed
+    # the in-flight request through ``FastMCP.get_context()``, so any of these
+    # could reach the client session ambiently; 2.x removed that accessor and
+    # passes the request context to the ``_handle_*`` protocol entry points
+    # instead. ``list_tools()`` and friends now take no context at all, and an
+    # in-process caller has no session to notify in the first place. So the
+    # refresh stays here, where every caller reaches it, and the notification
+    # moved to the handlers below, which is the only place a session exists.
+
     async def list_tools(self):
-        refreshed = self.refresh_if_changed()
-        await self._notify_surface_changes(refreshed)
+        self.refresh_if_changed()
         return await super().list_tools()
 
-    async def call_tool(self, name: str, arguments: dict):
-        refreshed = self.refresh_if_changed()
-        await self._notify_surface_changes(refreshed)
+    async def call_tool(self, name: str, arguments: dict, context=None):
+        self.refresh_if_changed()
         _refuse_if_gated(name)
-        return await super().call_tool(name, arguments)
+        return await super().call_tool(name, arguments, context)
 
-    async def _notify_surface_changes(self, refreshed: dict) -> None:
+    async def list_resources(self):
+        self.refresh_if_changed()
+        return await super().list_resources()
+
+    async def list_resource_templates(self):
+        self.refresh_if_changed()
+        return await super().list_resource_templates()
+
+    async def read_resource(self, uri, context=None):
+        self.refresh_if_changed()
+        return await super().read_resource(uri, context)
+
+    async def list_prompts(self):
+        self.refresh_if_changed()
+        return await super().list_prompts()
+
+    async def get_prompt(self, name: str, arguments: dict | None = None, context=None):
+        self.refresh_if_changed()
+        return await super().get_prompt(name, arguments, context)
+
+    async def _notify_surface_changes(self, refreshed: dict, session) -> None:
+        """Announce a swapped surface on every channel a client might be on.
+
+        Two channels, because the client's protocol era decides which one
+        carries the event and one server holds connections from both:
+
+        * ``<= 2025-11-25`` clients receive change notifications on the
+          connection channel -- ``session.send_*_list_changed()``.
+        * ``2026-07-28`` clients do not. That channel drops them by
+          construction (``NotifyOnlyOutbound.notify`` discards every method in
+          ``LISTEN_STREAM_METHODS`` with a debug log, because the era forbids a
+          change notification a subscription did not ask for). They arrive only
+          through the ``subscriptions/listen`` stream the client opened, fed by
+          the server's ``SubscriptionBus``.
+
+        Sending on one channel only strands every client on the other era in
+        the worst possible way: the swap succeeds, the new surface is live, and
+        the client is never told -- so it keeps calling tools that no longer
+        exist and never sees the ones that now do. Nothing raises; the drop is
+        a debug log. This is the failure the migration from MCP 1.x introduced,
+        where the connection channel was the only one that existed.
+
+        Both are sent unconditionally rather than branched on
+        ``ctx.protocol_version``: the redundant copy is discarded by whichever
+        era did not want it, and that costs less than an era assumption that
+        silently rots at the next protocol version.
+        """
         if not refreshed.get("surface_changed"):
             return
         try:
-            context = self.get_context()
-            session = context.request_context.session
             changes = self._last_surface_changes
             if changes["tools"]:
                 await session.send_tool_list_changed()
+                await self._subscriptions.publish(ToolsListChanged())
             if changes["resources"]:
                 await session.send_resource_list_changed()
+                await self._subscriptions.publish(ResourcesListChanged())
             if changes["prompts"]:
                 await session.send_prompt_list_changed()
+                await self._subscriptions.publish(PromptsListChanged())
             self._last_notification_error = ""
         except Exception as exc:  # pragma: no cover - transport/client specific
             self._last_notification_error = (
                 "%s: MCP list-change notification failed" % type(exc).__name__
             )
 
-    async def list_resources(self):
-        refreshed = self.refresh_if_changed()
-        await self._notify_surface_changes(refreshed)
-        return await super().list_resources()
+    async def _refresh_and_notify(self, ctx) -> None:
+        """Refresh at a protocol boundary and tell the client what moved.
 
-    async def list_resource_templates(self):
+        Runs before the handler dispatches, so a client that reacts to
+        ``list_changed`` by re-listing sees the post-swap surface, and the
+        response to the request in flight is already produced from it.
+        """
         refreshed = self.refresh_if_changed()
-        await self._notify_surface_changes(refreshed)
-        return await super().list_resource_templates()
+        session = getattr(ctx, "session", None)
+        if session is None:  # pragma: no cover - transport-specific
+            return
+        await self._notify_surface_changes(refreshed, session)
 
-    async def read_resource(self, uri):
-        refreshed = self.refresh_if_changed()
-        await self._notify_surface_changes(refreshed)
-        return await super().read_resource(uri)
+    async def _handle_list_tools(self, ctx, params):
+        await self._refresh_and_notify(ctx)
+        return await super()._handle_list_tools(ctx, params)
 
-    async def list_prompts(self):
-        refreshed = self.refresh_if_changed()
-        await self._notify_surface_changes(refreshed)
-        return await super().list_prompts()
+    async def _handle_call_tool(self, ctx, params):
+        await self._refresh_and_notify(ctx)
+        return await super()._handle_call_tool(ctx, params)
 
-    async def get_prompt(self, name: str, arguments: dict | None = None):
-        refreshed = self.refresh_if_changed()
-        await self._notify_surface_changes(refreshed)
-        return await super().get_prompt(name, arguments)
+    async def _handle_list_resources(self, ctx, params):
+        await self._refresh_and_notify(ctx)
+        return await super()._handle_list_resources(ctx, params)
+
+    async def _handle_list_resource_templates(self, ctx, params):
+        await self._refresh_and_notify(ctx)
+        return await super()._handle_list_resource_templates(ctx, params)
+
+    async def _handle_read_resource(self, ctx, params):
+        await self._refresh_and_notify(ctx)
+        return await super()._handle_read_resource(ctx, params)
+
+    async def _handle_list_prompts(self, ctx, params):
+        await self._refresh_and_notify(ctx)
+        return await super()._handle_list_prompts(ctx, params)
+
+    async def _handle_get_prompt(self, ctx, params):
+        await self._refresh_and_notify(ctx)
+        return await super()._handle_get_prompt(ctx, params)
 
     def runtime_snapshot(self) -> dict:
         current = self._current_source_state()
@@ -602,3 +706,4 @@ class ReloadableFastMCP(FastMCP):
             "protocol_list_changed": True,
             "provenance": provenance,
         }
+
