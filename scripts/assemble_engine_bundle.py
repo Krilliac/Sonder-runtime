@@ -43,10 +43,10 @@ _ALLOWED_OUTPUT_PARENTS = (
     Path("app/build/engine-bundles"),
     Path("dist/engine-bundles"),
 )
-_FASTMCP_IMPORT_PROBE = (
-    "from mcp.server.fastmcp import FastMCP; "
-    "from mcp.server.fastmcp.tools import ToolManager; "
-    "print(FastMCP.__name__, ToolManager.__name__)"
+_MCPSERVER_IMPORT_PROBE = (
+    "from mcp.server.mcpserver import MCPServer; "
+    "from mcp.server.mcpserver.tools import ToolManager; "
+    "print(MCPServer.__name__, ToolManager.__name__)"
 )
 
 
@@ -108,40 +108,91 @@ def _copy_tree(source: Path, target: Path, *, ignore=None) -> None:
             shutil.copy2(source_file, target_file)
 
 
-def _distribution_closure(root_name: str) -> list[importlib.metadata.Distribution]:
-    pending = [root_name]
-    seen: set[str] = set()
+def _runtime_contract_names() -> list[str]:
+    """Top-level distributions pinned by ``requirements-runtime.txt``.
+
+    The sealed package set used to be derived from ``mcp``'s dependency graph
+    alone, which cannot see anything Sonder imports directly but MCP does not
+    depend on. The runtime contract is the declared truth about what the
+    runtime needs, so it seeds the closure alongside ``mcp``.
+    """
+    contract = ROOT / "requirements-runtime.txt"
+    names: list[str] = []
+    for line in contract.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        match = _REQUIREMENT_NAME.match(line)
+        if match:
+            names.append(match.group(1))
+    if not names:
+        raise ValueError(
+            f"{contract} names no distributions; the sealed runtime would ship "
+            "whatever mcp's dependency graph happens to reach"
+        )
+    return names
+
+
+def _distribution_closure(
+    root_name: str, *extra_roots: str
+) -> list[importlib.metadata.Distribution]:
+    """Every distribution reachable from the given roots, extras included.
+
+    Extras are carried through the walk rather than discarded. ``mcp`` reaches
+    ``cryptography`` only via ``Requires-Dist: pyjwt[crypto]``, and PyJWT gates
+    that edge behind ``extra == "crypto"``. Pushing ``parsed.name`` alone threw
+    the extras away, so the edge was re-entered with no extra selected, the
+    marker evaluated false, and ``cryptography`` never entered the closure --
+    while ``mcp.server.mcpserver`` imports it eagerly at module scope
+    (``mcp/server/request_state.py``). Every sealed Windows runtime built that
+    way fails its own import probe.
+    """
+    roots = (root_name, *extra_roots)
+    pending: list[tuple[str, frozenset[str]]] = [(name, frozenset()) for name in roots]
+    visited: set[tuple[str, frozenset[str]]] = set()
+    emitted: set[str] = set()
     result = []
     while pending:
-        requested = pending.pop()
+        requested, extras = pending.pop()
         key = requested.casefold().replace("_", "-")
-        if key in seen:
+        if (key, extras) in visited:
             continue
+        visited.add((key, extras))
         try:
             distribution = importlib.metadata.distribution(requested)
         except importlib.metadata.PackageNotFoundError:
-            if requested == root_name:
+            if requested in roots:
                 raise ValueError(
-                    f"{root_name} is not installed in {sys.executable}; run the assembler with the repo venv"
+                    f"{requested} is not installed in {sys.executable}; run the assembler with the repo venv"
                 ) from None
             continue
-        seen.add(key)
-        result.append(distribution)
+        if key not in emitted:
+            emitted.add(key)
+            result.append(distribution)
+        # A dependency applies if it is unconditional, or if its marker holds
+        # under any extra this edge asked for.
+        environments = [{"extra": ""}] + [{"extra": name} for name in sorted(extras)]
         for requirement in distribution.requires or ():
             if Requirement is None:
                 dependency, _, marker = requirement.partition(";")
-                if "extra" in marker.casefold():
+                folded = marker.casefold()
+                if "extra" in folded and not any(
+                    f'extra == "{name}"' in folded or f"extra == '{name}'" in folded
+                    for name in extras
+                ):
                     continue
                 match = _REQUIREMENT_NAME.match(dependency)
                 if match:
-                    pending.append(match.group(1))
+                    pending.append((match.group(1), frozenset()))
                 continue
             try:
                 parsed = Requirement(requirement)
             except InvalidRequirement:
                 continue
-            if parsed.marker is None or parsed.marker.evaluate({"extra": ""}):
-                pending.append(parsed.name)
+            if parsed.marker is None or any(
+                parsed.marker.evaluate(environment) for environment in environments
+            ):
+                pending.append((parsed.name, frozenset(parsed.extras)))
     return result
 
 
@@ -178,9 +229,68 @@ def _remove_python_bytecode(root: Path) -> None:
             pass
 
 
-def _probe_fastmcp(python: Path) -> subprocess.CompletedProcess[str]:
+def _runtime_contract_pins() -> dict[str, str]:
+    """The ``name == version`` pins the runtime contract declares.
+
+    Only exact pins are returned. The contract is required to be exact (a
+    floating range would make the bundle's fingerprint meaningless), so a line
+    this cannot parse as ``name==version`` is an error rather than something to
+    skip quietly.
+    """
+    contract = ROOT / "requirements-runtime.txt"
+    pins: dict[str, str] = {}
+    for line in contract.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name, separator, version = line.partition("==")
+        if not separator or not version.strip():
+            raise ValueError(
+                f"{contract} must pin exactly; cannot verify a sealed runtime "
+                f"against {line!r}"
+            )
+        pins[name.strip()] = version.strip()
+    if not pins:
+        raise ValueError(f"{contract} names no pins")
+    return pins
+
+
+def _contract_probe_source(pins: dict[str, str]) -> str:
+    """Probe source that checks the MCP API *and* every pinned version.
+
+    Importing `MCPServer` proves the API shape and nothing else. A runtime
+    assembled from a stale environment can satisfy that import while carrying a
+    different `cryptography` -- and stamping the checkout's fingerprint onto it
+    would assert a contract it does not meet, which bootstrap then trusts and
+    never repairs. So the same probe that gates assembly also verifies the
+    versions the fingerprint is about to claim.
+    """
+    return (
+        _MCPSERVER_IMPORT_PROBE
+        + "; import importlib.metadata as _md"
+        + "; _pins = %r" % (pins,)
+        + "; _bad = []"
+        + "; _ = [_bad.append((_n, _v, _md.version(_n))) "
+          "for _n, _v in _pins.items() if _md.version(_n) != _v]"
+        + "; _ = [print('contract mismatch: %s pinned %s but runtime has %s' % _b) "
+          "for _b in _bad]"
+        + "; raise SystemExit(1 if _bad else 0)"
+    )
+
+
+def _probe_runtime_contract(python: Path) -> subprocess.CompletedProcess[str]:
+    """Run the API + pinned-version probe inside the supplied runtime."""
+    return _run_probe(python, _contract_probe_source(_runtime_contract_pins()))
+
+
+def _probe_mcpserver(python: Path) -> subprocess.CompletedProcess[str]:
+    """Run the API-shape probe alone (no version verification)."""
+    return _run_probe(python, _MCPSERVER_IMPORT_PROBE)
+
+
+def _run_probe(python: Path, source: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(python), "-I", "-c", _FASTMCP_IMPORT_PROBE],
+        [str(python), "-I", "-c", source],
         capture_output=True,
         text=True,
         timeout=60,
@@ -221,16 +331,16 @@ def build_windows_python_runtime(destination: Path) -> Path:
     _copy_tree(source / "Lib", destination / "Lib", ignore=ignore_stdlib)
     site_packages = destination / "Lib" / "site-packages"
     site_packages.mkdir(parents=True, exist_ok=True)
-    for distribution in _distribution_closure("mcp"):
+    for distribution in _distribution_closure("mcp", *_runtime_contract_names()):
         _copy_distribution(distribution, site_packages)
     python = destination / "python.exe"
     if not python.is_file():
         raise ValueError("assembled Python runtime has no python.exe")
-    smoke = _probe_fastmcp(python)
+    smoke = _probe_runtime_contract(python)
     if smoke.returncode != 0:
         detail = (smoke.stderr or smoke.stdout).strip()
         raise ValueError(
-            "assembled Python runtime failed isolated FastMCP compatibility "
+            "assembled Python runtime failed isolated MCPServer compatibility "
             f"import: {detail}"
         )
     return python
@@ -359,11 +469,11 @@ def assemble_bundle(
             if python_executable is None:
                 raise ValueError("provided Python runtime has no canonical executable")
             if validate_runtime:
-                smoke = _probe_fastmcp(python_executable)
+                smoke = _probe_runtime_contract(python_executable)
                 if smoke.returncode != 0:
                     detail = (smoke.stderr or smoke.stdout).strip()
                     raise ValueError(
-                        "provided Python runtime cannot import the MCP FastMCP "
+                        "provided Python runtime cannot import the MCP MCPServer "
                         f"compatibility API in isolated mode: {detail}"
                     )
 
@@ -384,7 +494,13 @@ def assemble_bundle(
         python_relative = python_executable.relative_to(stage)
         ollama_relative = ollama_executable.relative_to(stage)
         manifest = {
-            "schema": 1,
+            # From the constant, not a literal: a hardcoded 1 here silently
+            # produced bundles the loader would reject the moment the schema
+            # moved.
+            "schema": engine_bundle.SCHEMA_VERSION,
+            "runtime_contract": engine_bundle.runtime_contract_fingerprint(
+                ROOT / "requirements-runtime.txt"
+            ),
             "platform": engine_bundle.normalize_platform(),
             "architecture": engine_bundle.normalize_architecture(),
             "runtime": {

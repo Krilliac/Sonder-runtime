@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +95,47 @@ def test_recall_use_case_depends_only_on_its_narrow_port():
     assert imports == {"__future__", "ports.recall"}
 
 
+# Directories `rglob` from the repo root walks that this ratchet does not
+# govern. Without them the scan also reads the virtualenv (`.runtime/`), tool
+# state (`.claude/`, `.superpowers/`), build output, and any git worktree
+# checked out beneath the repo -- and a worktree is a second copy of this very
+# repo, so every file in it is reported as an offender against itself.
+_NOT_REPO_SOURCE = frozenset({
+    "tests", "venv", ".venv", "node_modules", "build", "dist", "site-packages",
+})
+
+
+def _is_repo_source(relative: Path) -> bool:
+    """Whether a repo-relative path is first-party source this ratchet covers."""
+    return not any(
+        part in _NOT_REPO_SOURCE or part.startswith(".")
+        for part in relative.parts[:-1]
+    )
+
+
+def test_the_ratchet_scan_covers_source_and_excludes_vendored_trees():
+    """The exclusion above must not be able to quietly exclude everything.
+
+    An over-broad filter would make the ratchet scan nothing and pass forever,
+    which is the same observable result as "no offenders". So assert both
+    directions: real first-party modules are in, and the trees named above
+    are out.
+    """
+    assert _is_repo_source(Path("server.py"))
+    assert _is_repo_source(Path("sonder_runtime/__init__.py"))
+    assert _is_repo_source(Path("scripts/check_architecture.py"))
+    assert not _is_repo_source(Path("tests/test_x.py"))
+    assert not _is_repo_source(Path(".runtime/Lib/site-packages/mcp/types.py"))
+    assert not _is_repo_source(Path(".claude/worktrees/wt/server.py"))
+    assert not _is_repo_source(Path("app/build/generated.py"))
+
+    scanned = [
+        path for path in _REPO_ROOT.rglob("*.py")
+        if _is_repo_source(path.relative_to(_REPO_ROOT))
+    ]
+    assert len(scanned) > 100, "the exclusion filter swallowed the source tree"
+
+
 def test_backup_root_module_is_compatibility_only_and_ratchet_shrank():
     import importlib.util
 
@@ -107,7 +149,7 @@ def test_backup_root_module_is_compatibility_only_and_ratchet_shrank():
     offenders = []
     for path in _REPO_ROOT.rglob("*.py"):
         relative = path.relative_to(_REPO_ROOT)
-        if relative == Path("sonder_backup.py") or relative.parts[0] == "tests":
+        if relative == Path("sonder_backup.py") or not _is_repo_source(relative):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -164,24 +206,55 @@ def test_applied_memory_baseline_remains_byte_for_byte_immutable():
 def test_checker_detects_a_violation(tmp_path):
     # Prove the checker is not vacuously green: a domain module importing
     # an adapter must fail.
+    #
+    # Run against a copy, never the live tree. `check_architecture.py` derives
+    # its package root from its own location, so a copied `scripts/` +
+    # `sonder_runtime/` under tmp_path exercises the identical code path --
+    # without planting a real violation in real source, where a concurrent
+    # reader (or a crash before the cleanup) turns this proof into someone
+    # else's failing CI gate.
+    shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+
+    # The checker takes its production inventory from `git ls-files`, so the
+    # copy has to be a repository with the sources staged. A fresh `git init`
+    # here is also owned by the current user, which keeps the copy immune to
+    # the ownership refusal that can afflict the real checkout.
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "add", "-A"],
+    ):
+        staged = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        if staged.returncode != 0:
+            pytest.skip(
+                "git is required to stage the isolated copy: %s"
+                % (staged.stderr.strip() or staged.stdout.strip())
+            )
+
+    clean = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert clean.returncode == 0, (
+        "the copied tree must start clean, or the violation below proves "
+        "nothing:\n" + clean.stdout + clean.stderr
+    )
+
     violation = (
-        _REPO_ROOT / "sonder_runtime" / "domain" / "common"
-        / "_test_violation.py"
+        tmp_path / "sonder_runtime" / "domain" / "common" / "_test_violation.py"
     )
     violation.write_text(
         "from sonder_runtime.adapters.filesystem import atomic_json\n",
         encoding="utf-8",
     )
-    try:
-        result = subprocess.run(
-            [sys.executable,
-             str(_REPO_ROOT / "scripts" / "check_architecture.py")],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    finally:
-        violation.unlink()
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
     assert result.returncode == 1
     assert "domain may not import" in result.stdout
 
