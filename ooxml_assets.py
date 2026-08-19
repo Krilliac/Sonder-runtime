@@ -126,9 +126,9 @@ def _word_paragraph(text, style=""):
     )
 
 
-def write_docx(path, title, brief, theme="arcane"):
+def write_docx(path, title, brief, theme="arcane", accent=None):
     """Write a deterministic editable Word document."""
-    accent = _theme_accent(theme)
+    accent = accent or _theme_accent(theme)
     content_types = _xml(
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
@@ -206,10 +206,10 @@ def _xlsx_cell(reference, value, style=0):
     )
 
 
-def write_xlsx(path, title, brief, seed=1337, theme="arcane"):
+def write_xlsx(path, title, brief, seed=1337, theme="arcane", accent=None):
     """Write a deterministic editable Excel workbook with structured sample data."""
     rng = random.Random(int(seed))
-    accent = _theme_accent(theme)
+    accent = accent or _theme_accent(theme)
     clean_title = " ".join(str(title or "").strip().split())[:80]
     rows = [("Index", "Value", "Group", "Description")]
     for index in range(1, 13):
@@ -377,9 +377,9 @@ def _ppt_theme(accent):
     )
 
 
-def write_pptx(path, title, brief, theme="arcane"):
+def write_pptx(path, title, brief, theme="arcane", accent=None):
     """Write a deterministic editable PowerPoint deck with three slides."""
-    accent = _theme_accent(theme)
+    accent = accent or _theme_accent(theme)
     slides = [
         (title, brief),
         (
