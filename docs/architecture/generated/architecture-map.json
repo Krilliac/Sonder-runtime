@@ -189,7 +189,7 @@
       ]
     },
     {
-      "file_count": 178,
+      "file_count": 182,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -200,6 +200,7 @@
         "sonder_runtime/application/agents/durable_lineage.py",
         "sonder_runtime/application/agents/lineage_delegation.py",
         "sonder_runtime/application/agents/presets.py",
+        "sonder_runtime/application/agents/workflow_integration.py",
         "sonder_runtime/application/artifacts/__init__.py",
         "sonder_runtime/application/artifacts/immutable_manifest.py",
         "sonder_runtime/application/automation/__init__.py",
@@ -328,6 +329,7 @@
         "sonder_runtime/application/security/path_archive_safety.py",
         "sonder_runtime/application/security/prompt_provenance.py",
         "sonder_runtime/application/security/race_resistant_paths.py",
+        "sonder_runtime/application/security/recovery_artifacts.py",
         "sonder_runtime/application/security/recovery_boundary.py",
         "sonder_runtime/application/security/secrets_and_fuzz.py",
         "sonder_runtime/application/selfmod/__init__.py",
@@ -364,6 +366,8 @@
         "sonder_runtime/application/training/training_service.py",
         "sonder_runtime/application/updates/__init__.py",
         "sonder_runtime/application/updates/activation.py",
+        "sonder_runtime/application/updates/bounded_state.py",
+        "sonder_runtime/application/updates/publication.py",
         "sonder_runtime/application/updates/release_evidence.py",
         "sonder_runtime/application/updates/update_service.py",
         "sonder_runtime/application/workflows/__init__.py",
