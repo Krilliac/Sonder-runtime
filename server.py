@@ -160,6 +160,9 @@ from sonder_runtime.domain.model_capabilities import (
 from sonder_runtime.domain.master_timeout import (
     master_timeout as _master_timeout_policy,
 )
+from sonder_runtime.domain.distillation_policy import (
+    distillation_timeout_seconds as _distillation_timeout_policy,
+)
 from sonder_runtime.domain.fanout_policy import (
     declares_generative_capability as _fanout_declares_generative_capability,
     nonchat_reason as _fanout_nonchat_reason,
@@ -3138,11 +3141,8 @@ def _defer_lesson_distillation(
 
 
 def _distillation_timeout_seconds():
-    """Return the short, independently configurable learning-call budget."""
-    value = _env_int_option("SONDER_DISTILLATION_TIMEOUT", 20)
-    if value is None:
-        value = 20
-    return max(1, min(int(value), TIMEOUT))
+    """Compatibility wrapper using the live server request-timeout ceiling."""
+    return _distillation_timeout_policy(_env_int_option, TIMEOUT)
 
 
 def _prepare_lesson_candidate_bounded(interaction, signal):

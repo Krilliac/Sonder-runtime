@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import re
 import platform
+import re
+import os
 
 
 def parse_memory_gb(value: object) -> float | None:
@@ -22,3 +23,11 @@ def probe_platform() -> str:
         return platform.system() or "unknown"
     except Exception:
         return "unknown"
+
+
+def probe_cpu_count() -> int | None:
+    """Return the host CPU count without allowing probe failures to escape."""
+    try:
+        return os.cpu_count()
+    except Exception:
+        return None

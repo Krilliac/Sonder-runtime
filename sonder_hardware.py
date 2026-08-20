@@ -35,13 +35,19 @@ from sonder_runtime.domain.model_sizing import (
     params_from_model_tag,
 )
 from sonder_runtime.platform.hardware_identity import looks_integrated
-from sonder_runtime.platform.hardware_probe import parse_memory_gb, probe_platform
+from sonder_runtime.platform.hardware_probe import (
+    parse_memory_gb,
+    probe_cpu_count,
+    probe_platform,
+)
 from sonder_runtime.platform.hardware_identity import vendor_from_text
 
 # Legacy private name retained for callers that exercised the old probe helper.
 _parse_memory_gb = parse_memory_gb
 # Legacy private name retained for callers that exercised the old probe helper.
 _probe_platform = probe_platform
+# Legacy private name retained for callers that exercised the old probe helper.
+_probe_cpu_count = probe_cpu_count
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -129,13 +135,6 @@ _MODEL_FOOTPRINTS = (
 # called at import, and every one is overridable through ``detect_hardware``'s
 # ``probes`` argument so tests can inject fakes. Each swallows its own failures
 # and returns a conservative "unknown" rather than raising.
-
-def _probe_cpu_count() -> int | None:
-    try:
-        return os.cpu_count()
-    except Exception:
-        return None
-
 
 def _probe_total_ram_gb() -> float | None:
     """Total physical RAM in GB, via stdlib only, or ``None`` if unknown."""
