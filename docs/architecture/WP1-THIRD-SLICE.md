@@ -19,6 +19,8 @@ deletes the facade without a compatibility shim.
 - [x] Use explicit `OUTCOME_SOURCE_*` provenance constants.
 - [x] Preserve the existing signal set, thresholds, population, and evidence ranking.
 - [x] Repair the indirect `sonder_serve → server.reward` dependency.
+- [x] Replace the two touched stringly unknown-signal returns with typed
+  `InvalidInput` errors instead of expanding the legacy error-signal baseline.
 - [x] Point nightly self-modification at the authoritative domain module.
 - [x] Delete root `reward.py`.
 - [x] Add `reward.py` to the retired-root architecture ratchet.
@@ -30,6 +32,8 @@ deletes the facade without a compatibility shim.
 
 - [x] Static compilation of every directly changed Python consumer.
 - [x] Architecture checker and requirement-evidence checker pass.
+- [x] Legacy error-signal shrink-only ratchet passes; two focused typed-error
+  regressions pass.
 - [x] Source scan finds no production import of root `reward`.
 - [x] Reward, memory-domain, export, learning-health, grounded-outcome, offload,
   repository, serve, architecture, and packaging selection: 470 passed.

@@ -124,6 +124,7 @@ import fanout_prompt_vault
 from model_transport import ModelCallError
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
+from sonder_runtime.domain.common.errors import InvalidInput
 import ollama_endpoint
 import sonder_speculation
 import consult as consult_flow
@@ -6346,8 +6347,10 @@ def record_outcome(interaction_id: str, signal: str) -> str:
     """
     _maybe_live_reload()
     if signal not in reward_rules.VALID_SIGNALS:
-        return "ERROR: unknown signal '%s'. Valid: %s." % (
-            signal, ", ".join(sorted(reward_rules.VALID_SIGNALS)))
+        raise InvalidInput(
+            "unknown signal %r; valid: %s"
+            % (signal, ", ".join(sorted(reward_rules.VALID_SIGNALS)))
+        )
     result = _record_outcome_and_maybe_distill(
         interaction_id, signal, source=reward_rules.OUTCOME_SOURCE_CALLER,
     )
@@ -15630,8 +15633,10 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
     """
     _maybe_live_reload()
     if signal not in reward_rules.VALID_SIGNALS:
-        return "ERROR: unknown signal '%s'. Valid: %s." % (
-            signal, ", ".join(sorted(reward_rules.VALID_SIGNALS)))
+        raise InvalidInput(
+            "unknown signal %r; valid: %s"
+            % (signal, ", ".join(sorted(reward_rules.VALID_SIGNALS)))
+        )
     if not (task or "").strip() or not (solution or "").strip():
         return "ERROR: task and solution are required."
     interaction_id = memory_store.new_id()
