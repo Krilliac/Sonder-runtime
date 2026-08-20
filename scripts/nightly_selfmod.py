@@ -60,7 +60,7 @@ import selfmod  # noqa: E402
 CANDIDATE_FILES = (
     "reflection.py",
     "memory_quality.py",
-    "reward.py",
+    "sonder_runtime/domain/memory/rules.py",
     "promotion_eval.py",
     "context_policy.py",
     "summarizer.py",

@@ -6,7 +6,7 @@ Answers three questions the raw tables don't answer directly:
      interaction, or a synthetic batch tagged like "seed:curriculum:..." /
      "community")
   2. How do outcome signals break down, and how much of that is "good"
-     (reward.is_good) vs not?
+     (reward_rules.reward_is_good) vs not?
   3. How efficiently does the loop turn activity into lessons — lessons per
      interaction, and lessons per *good-outcome* interaction (the
      "distillation yield": reflection.maybe_add_lesson silently drops vague
@@ -21,7 +21,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import calibration  # noqa: E402  (repo root module, read-only import)
-import reward  # noqa: E402  (repo root module, read-only import)
+from sonder_runtime.domain.memory import rules as reward_rules  # noqa: E402
 
 
 def lesson_source_prefix(source_interaction, is_grounded):
@@ -59,7 +59,7 @@ def lesson_source_breakdown(conn):
 def outcome_signal_distribution(conn):
     """Per-signal {count, avg_reward} plus totals, using stored outcomes.reward.
 
-    'good' classification uses reward.is_good(signal) (the same threshold the
+    'good' classification uses reward_rules.reward_is_good(signal) (the same threshold the
     server applies before triggering distillation), not a re-derived cutoff.
     """
     rows = conn.execute(
@@ -73,7 +73,7 @@ def outcome_signal_distribution(conn):
         sig, n, avg_r = row["signal"], row["n"], row["avg_reward"]
         by_signal[sig] = {"count": n, "avg_reward": avg_r}
         total += n
-        if reward.is_good(sig):
+        if reward_rules.reward_is_good(sig):
             good_total += n
     return {
         "by_signal": by_signal,
@@ -93,7 +93,11 @@ def outcome_signal_distribution(conn):
 
 
 def _good_outcome_interaction_count(conn):
-    good_signals = [s for s in reward.VALID_SIGNALS if reward.is_good(s)]
+    good_signals = [
+        signal
+        for signal in reward_rules.VALID_SIGNALS
+        if reward_rules.reward_is_good(signal)
+    ]
     if not good_signals:
         return 0
     placeholders = ",".join("?" * len(good_signals))

@@ -50,7 +50,7 @@ import sonder_runtime.application.evaluation_history.use_cases as eval_history_u
 import sonder_runtime.adapters.memory_store as memory_store
 import orchestrator
 import retriever
-import reward
+from sonder_runtime.domain.memory import rules as reward_rules
 import reflection
 import embeddings
 import personas
@@ -3608,7 +3608,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal, *, source):
             inter = uow.memory.get_interaction(interaction_id)
             if inter is None:
                 return {"found": False}
-            score = reward.score(signal)
+            score = reward_rules.reward_score(signal)
             claim_may_exist = True
             recorded = uow.memory.record_outcome(
                 interaction_id,
@@ -3729,7 +3729,7 @@ def _stored_outcome_source(interaction_id, signal):
             conn.close()
     except Exception:
         stored = None
-    return stored or reward.SOURCE_UNKNOWN
+    return stored or reward_rules.OUTCOME_SOURCE_UNKNOWN
 
 
 def _drain_deferred_distillations(limit=16):
@@ -3753,7 +3753,7 @@ def _drain_deferred_distillations(limit=16):
         return _EMPTY_DRAIN.copy()
     stored = deferred = failed = skipped = 0
     for interaction_id, signal in pending:
-        if signal not in reward.VALID_SIGNALS:
+        if signal not in reward_rules.VALID_SIGNALS:
             skipped += 1
             continue
         try:
@@ -3948,7 +3948,7 @@ def _record_code_gate_failure(interaction_id):
         # Nobody reviewed anything, so this must not count toward the reviewed
         # rate -- which, before provenance existed, it silently did.
         _record_outcome_and_maybe_distill(
-            interaction_id, "failed", source=reward.SOURCE_MACHINE,
+            interaction_id, "failed", source=reward_rules.OUTCOME_SOURCE_MACHINE,
         )
     except Exception as exc:
         with contextlib.suppress(Exception):
@@ -6345,11 +6345,11 @@ def record_outcome(interaction_id: str, signal: str) -> str:
     caller can choose is provenance a caller can misstate.
     """
     _maybe_live_reload()
-    if signal not in reward.VALID_SIGNALS:
+    if signal not in reward_rules.VALID_SIGNALS:
         return "ERROR: unknown signal '%s'. Valid: %s." % (
-            signal, ", ".join(sorted(reward.VALID_SIGNALS)))
+            signal, ", ".join(sorted(reward_rules.VALID_SIGNALS)))
     result = _record_outcome_and_maybe_distill(
-        interaction_id, signal, source=reward.SOURCE_CALLER,
+        interaction_id, signal, source=reward_rules.OUTCOME_SOURCE_CALLER,
     )
     if not result["found"]:
         return "ERROR: no interaction '%s' (already expired or wrong id)." % interaction_id
@@ -6384,13 +6384,13 @@ def record_self_graded_outcome(interaction_id: str, signal: str) -> str:
     serialize one across, and this repo is actively shrinking that universe
     (``scripts/check_error_signals.py`` is a shrink-only ratchet).
     """
-    if signal not in reward.VALID_SIGNALS:
+    if signal not in reward_rules.VALID_SIGNALS:
         raise ValueError(
             "unknown signal %r; valid: %s"
-            % (signal, ", ".join(sorted(reward.VALID_SIGNALS)))
+            % (signal, ", ".join(sorted(reward_rules.VALID_SIGNALS)))
         )
     result = _record_outcome_and_maybe_distill(
-        interaction_id, signal, source=reward.SOURCE_SELF_CURRICULUM,
+        interaction_id, signal, source=reward_rules.OUTCOME_SOURCE_SELF_CURRICULUM,
     )
     if not result["found"]:
         return "no interaction %r (already expired or wrong id)." % (
@@ -10065,8 +10065,8 @@ def _record_outcome_signal(interaction_id: str, signal: str) -> None:
     conn = _open_db()
     try:
         memory_store.record_outcome_and_claim_lesson_distillation(
-            conn, interaction_id, signal, reward.score(signal),
-            source=reward.SOURCE_ATTRIBUTED,
+            conn, interaction_id, signal, reward_rules.reward_score(signal),
+            source=reward_rules.OUTCOME_SOURCE_ATTRIBUTED,
             claim_distillation=False,
         )
     finally:
@@ -15629,9 +15629,9 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
     signals like accepted, tests_passed, or compiled for best results.
     """
     _maybe_live_reload()
-    if signal not in reward.VALID_SIGNALS:
+    if signal not in reward_rules.VALID_SIGNALS:
         return "ERROR: unknown signal '%s'. Valid: %s." % (
-            signal, ", ".join(sorted(reward.VALID_SIGNALS)))
+            signal, ", ".join(sorted(reward_rules.VALID_SIGNALS)))
     if not (task or "").strip() or not (solution or "").strip():
         return "ERROR: task and solution are required."
     interaction_id = memory_store.new_id()
@@ -15654,7 +15654,7 @@ def learn_from_example(task: str, solution: str, signal: str = "accepted") -> st
     # solution worked". Nothing ran here, so it belongs with judgement, not
     # with execution evidence.
     result = _record_outcome_and_maybe_distill(
-        interaction_id, signal, source=reward.SOURCE_CALLER,
+        interaction_id, signal, source=reward_rules.OUTCOME_SOURCE_CALLER,
     )
     if result["lesson_id"]:
         return "Learned lesson %s from example interaction %s." % (

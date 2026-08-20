@@ -1,39 +1,38 @@
-import reward
 from sonder_runtime.domain.memory import rules
 
 
 def test_known_signals_score():
-    assert reward.score("tests_passed") == 1.0
-    assert reward.score("used") == 0.9
-    assert reward.score("copied") == 0.85
-    assert reward.score("edited") == 0.75
-    assert reward.score("failed") == -1.0
+    assert rules.reward_score("tests_passed") == 1.0
+    assert rules.reward_score("used") == 0.9
+    assert rules.reward_score("copied") == 0.85
+    assert rules.reward_score("edited") == 0.75
+    assert rules.reward_score("failed") == -1.0
 
 
 def test_unknown_signal_is_zero():
-    assert reward.score("banana") == 0.0
+    assert rules.reward_score("banana") == 0.0
 
 
 def test_is_good_threshold():
-    assert reward.is_good("tests_passed") is True
-    assert reward.is_good("edited") is True     # 0.75, above the bar
-    assert reward.is_good("rejected") is False
-    assert reward.is_good("failed") is False
+    assert rules.reward_is_good("tests_passed") is True
+    assert rules.reward_is_good("edited") is True     # 0.75, above the bar
+    assert rules.reward_is_good("rejected") is False
+    assert rules.reward_is_good("failed") is False
 
 
 def test_compiled_is_not_success():
     """Compiling proves the code builds, not that it produced the right
     answer. Crediting it would distill a lesson from - and export as
     fine-tuning data - output that was never run."""
-    assert reward.score("compiled") == 0.7
-    assert reward.GOOD_THRESHOLD > reward.score("compiled")
-    assert reward.is_good("compiled") is False
+    assert rules.reward_score("compiled") == 0.7
+    assert rules.GOOD_THRESHOLD > rules.reward_score("compiled")
+    assert rules.reward_is_good("compiled") is False
 
 
 def test_valid_signals_set():
-    assert "accepted" in reward.VALID_SIGNALS
-    assert "copied" in reward.VALID_SIGNALS
-    assert "banana" not in reward.VALID_SIGNALS
+    assert "accepted" in rules.VALID_SIGNALS
+    assert "copied" in rules.VALID_SIGNALS
+    assert "banana" not in rules.VALID_SIGNALS
 
 
 # --- two populations, ordered, never averaged -------------------------------
