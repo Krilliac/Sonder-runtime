@@ -509,3 +509,9 @@ newer ADR explicitly supersedes them.
   moved system-profile floating-point environment override parsing into the
   packaged configuration-environment boundary while preserving the existing
   system-profile alias.
+- WP1 Two-Hundred-Tenth Slice: `WP1-TWO-HUNDRED-TENTH-SLICE.md` —
+  moved best-effort optional configuration loading into the packaged bootstrap
+  boundary while preserving the doctor compatibility delegate.
+- WP1 Two-Hundred-Ninth Slice: `WP1-TWO-HUNDRED-NINTH-SLICE.md` —
+  moved hosted-model prediction-budget normalization into the packaged domain
+  boundary while preserving the root server compatibility helper.

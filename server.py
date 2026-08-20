@@ -244,6 +244,9 @@ from sonder_runtime.domain.cancellation_policy import (
 from sonder_runtime.domain.code_gate_policy import (
     code_gate_target as _code_gate_target_policy,
 )
+from sonder_runtime.domain.cloud_thinking_budget import (
+    ensure_prediction_budget as _ensure_cloud_prediction_budget_policy,
+)
 from sonder_runtime.domain.request_timeout import (
     bound_request_timeout as _bound_request_timeout,
 )
@@ -592,15 +595,8 @@ def _apply_cloud_thinking_policy(payload, model, *, compact=False):
 
 
 def _ensure_cloud_prediction_budget(payload, minimum=4096):
-    """Leave enough shared output budget for thinking plus final content."""
-    options = payload.get("options")
-    if not isinstance(options, dict):
-        return
-    requested = options.get("num_predict")
-    if isinstance(requested, int) and 0 < requested < minimum:
-        options = dict(options)
-        options["num_predict"] = minimum
-        payload["options"] = options
+    """Compatibility delegate for the packaged thinking-budget policy."""
+    return _ensure_cloud_prediction_budget_policy(payload, minimum)
 
 
 LOCAL_THINKING_MIN_NUM_PREDICT = 2048

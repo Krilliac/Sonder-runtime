@@ -45,6 +45,9 @@ from sonder_runtime.domain.doctor_specs import (
     CheckCallable,
     iter_specs as _iter_specs,
 )
+from sonder_runtime.bootstrap.config_loading import (
+    load_config_or_none as _load_config_or_none_impl,
+)
 
 # Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
 # is simply absent should not make an otherwise-healthy runtime look sick.
@@ -161,15 +164,8 @@ def _skip(reason: str) -> dict:
 
 
 def _load_config_or_none():
-    """Best-effort read-only config load; ``None`` if unavailable."""
-    try:
-        from sonder_runtime.platform import config as sonder_config
-    except Exception:
-        return None
-    try:
-        return sonder_config.load_config()
-    except Exception:
-        return None
+    """Compatibility delegate for the packaged bootstrap config boundary."""
+    return _load_config_or_none_impl()
 
 
 def _check_config() -> dict:
