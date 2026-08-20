@@ -58,10 +58,15 @@ import served_action_receipts
 import tool_contract
 import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
+from sonder_runtime.interfaces.http.facades.model_request import (
+    ModelFacadeError,
+    ModelRequestFacade,
+)
 
 DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
+_MODEL_REQUEST_FACADE = ModelRequestFacade()
 
 
 class _DuplicateJsonObjectKey(ValueError):
@@ -3821,6 +3826,7 @@ class Handler(BaseHTTPRequestHandler):
         self._chat_completion_metrics_recorded = False
         self._request_body_consumed = False
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
+        model_operation = ""
 
         def record_early_chat_metric(result):
             if is_chat_completion:
@@ -3857,6 +3863,61 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        model_route = _MODEL_REQUEST_FACADE.route(path)
+        if model_route is not None:
+            if not context["authorized"]:
+                if model_route.operation == "chat.completions":
+                    record_early_chat_metric("unauthenticated")
+                self._send_auth_error()
+                return
+            # Preserve the lifecycle admission precedence of the legacy
+            # execution path: a draining runtime must answer DRAINING before
+            # protocol normalization can report a client-side 400.
+            lifecycle = sonder_lifecycle.get()
+            if lifecycle.coordinator.draining:
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "DRAINING",
+                        "the runtime is draining for shutdown",
+                        self._correlation(),
+                        retryable=True,
+                    ),
+                    status=503,
+                    headers={"Retry-After": "1"},
+                )
+                return
+            # The facade is deliberately given the already-authenticated
+            # request context as its policy hook.  Existing model-selection,
+            # developer-authority, lifecycle, and control policy checks below
+            # remain in force; this hook prevents a future caller from using
+            # the codec as an unauthenticated generation bypass.
+            facade = ModelRequestFacade(
+                policy_hook=lambda _operation, _payload: bool(
+                    context["authorized"]
+                ),
+            )
+            try:
+                normalized = facade.normalize(path, req)
+            except ModelFacadeError as error:
+                if model_route.operation == "chat.completions":
+                    record_early_chat_metric("invalid_request")
+                self._send_json_payload(
+                    {"error": {"message": str(error), "type": error.error_type}},
+                    status=error.status,
+                )
+                return
+            model_operation = normalized.operation
+            # Keep the established chat execution pipeline as the injected
+            # adapter for both protocol envelopes.  Responses is model-only:
+            # its input is translated to the same canonical chat messages, and
+            # control/admin dispatch is disabled below for that operation.
+            req = dict(req)
+            req["model"] = normalized.model
+            req["messages"] = [dict(message) for message in normalized.messages]
+            req["stream"] = normalized.stream
+            req.pop("input", None)
+            if model_operation == "responses":
+                path = "/v1/chat/completions"
         if self._handle_fanout_post(path, req, context):
             return
         if path == "/v1/permission-mode":
@@ -4015,7 +4076,8 @@ class Handler(BaseHTTPRequestHandler):
         # direct MCP and the generation path apply the same precedence rule.
         natural_model = (
             server.natural_model_request(prompt)
-            if _uses_default_model_route(model) else None
+            if not model_operation == "responses"
+            and _uses_default_model_route(model) else None
         )
         if structured_schema is not None and natural_model is not None:
             record_early_chat_metric("structured_control_route")
@@ -4194,7 +4256,10 @@ class Handler(BaseHTTPRequestHandler):
         # route retains Sonder's slash, feedback, web, and work conveniences;
         # an explicit target receives the caller's text unchanged instead of
         # allowing any of those local dispatchers to consume it.
-        allow_control_routes = _uses_default_model_route(model)
+        allow_control_routes = (
+            model_operation != "responses"
+            and _uses_default_model_route(model)
+        )
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
@@ -4436,13 +4501,22 @@ class Handler(BaseHTTPRequestHandler):
             )
         else:
             try:
-                self._send_json(
-                    _chat_completion_object(
-                        content, model, iid=response_iid,
-                        reasoning=response_reasoning, elapsed_ms=elapsed_ms,
-                        receipt=receipt, activity_response=activity_response,
-                    ), elapsed_ms=elapsed_ms,
-                )
+                if model_operation == "responses":
+                    self._send_json(
+                        facade.render_text(
+                            model_operation,
+                            content,
+                            response_model or model,
+                        ), elapsed_ms=elapsed_ms,
+                    )
+                else:
+                    self._send_json(
+                        _chat_completion_object(
+                            content, model, iid=response_iid,
+                            reasoning=response_reasoning, elapsed_ms=elapsed_ms,
+                            receipt=receipt, activity_response=activity_response,
+                        ), elapsed_ms=elapsed_ms,
+                    )
             finally:
                 # A client can close after generation but before the JSON body
                 # is written. That is still a terminal server-side request and

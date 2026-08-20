@@ -33,6 +33,12 @@ import command_router
 import command_catalog
 import permission_modes
 import project_scaffold
+from sonder_runtime.interfaces.repl.facades import (
+    ContextHealthFacade,
+    ExecutionStatusFacade,
+    InstalledModel,
+    ModelSelectionFacade,
+)
 
 try:
     # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
@@ -522,23 +528,10 @@ def _installed_models():
         payload = server._get("/api/tags")
     except Exception:
         return None
-    models = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(models, list):
-        return None
-    out = []
-    for model in models:
-        if not isinstance(model, dict):
-            continue
-        name = str(model.get("name") or model.get("model") or "").strip()
-        if not name:
-            continue
-        size = model.get("size")
-        try:
-            pretty = "%.1f GB" % (float(size) / (1024 ** 3)) if size else ""
-        except (TypeError, ValueError):
-            pretty = ""
-        out.append((name, pretty))
-    return sorted(out)
+    return [
+        (model.name, model.size)
+        for model in ModelSelectionFacade.installed_models(payload) or ()
+    ]
 
 
 def _selectable_tiers():
@@ -558,12 +551,12 @@ def _selectable_tiers():
     except Exception:
         tiers = None
     if isinstance(tiers, dict):
-        return tiers
+        return ModelSelectionFacade.selectable_tiers(tiers, None)
     # Availability filtering is a courtesy, not a gate: the real refusal still
     # happens in `_serve_target`. A policy read that raises must not be able to
     # empty the tier list and leave `/model` with nothing to offer.
     try:
-        return dict(server.TIERS)
+        return ModelSelectionFacade.selectable_tiers(None, server.TIERS)
     except Exception:
         return {}
 
@@ -576,13 +569,20 @@ def _unselectable_tier_reason(name):
     it still gets the catalog's "did you mean" suggestions.
     """
     try:
-        if not name or name not in server.TIERS or name in _selectable_tiers():
+        available = _selectable_tiers()
+        if not name or name not in server.TIERS or name in available:
             return ""
         if name in getattr(server, "CLOUD_TIERS", ()):
             # One copy of the wording: the console explains a refusal exactly
             # the way the chat turn it prevents would have.
-            return server._cloud_disabled_message().removeprefix("ERROR: ")
-        return "tier %r is configured but not currently available" % name
+            message = server._cloud_disabled_message()
+        else:
+            message = ""
+        return ModelSelectionFacade.withheld_reason(
+            name, configured=server.TIERS, available=available,
+            cloud_tiers=getattr(server, "CLOUD_TIERS", ()),
+            cloud_disabled_message=message,
+        )
     except Exception:
         return ""
 
@@ -614,8 +614,9 @@ class _ModelArgumentCompleter:
         models = [str(name) for name, _size in (installed or []) if str(name)]
         # Tiers win a same-named collision because /model resolves them before
         # exact tags. Keep display order deterministic for keyboard selection.
-        self._choices = sorted(set(tiers), key=str.casefold) + sorted(
-            set(models).difference(tiers), key=str.casefold,
+        self._choices = ModelSelectionFacade.choices(
+            dict((name, True) for name in tiers),
+            tuple(InstalledModel(name) for name in models),
         )
         return self._choices
 
@@ -673,7 +674,7 @@ def _startup_banner(strict, persona, project, tier=None):
     """
     tier = tier or "code"
     try:
-        model = str(server.TIERS.get(tier) or "unknown")
+        model = ModelSelectionFacade.resolved_model(server.TIERS, tier)
     except Exception:
         model = "unknown"
     try:
@@ -744,19 +745,20 @@ def _startup_banner(strict, persona, project, tier=None):
 
 def _execution_prompt(status=None):
     """Prompt suffix refreshed once per user turn, with no polling thread."""
-    if status is None:
+    facade = ExecutionStatusFacade(
+        lambda: server.execution_status_data(),
+    )
+    value = facade.snapshot(status)
+    colour = _Ansi.amber
+    if value is not None:
         try:
-            status = server.execution_status_data()
-        except Exception:
-            status = None
-    if not isinstance(status, dict) or not status.get("known"):
-        return _paint("[lanes ? | agents ?]", _Ansi.amber)
-    lanes = int(status.get("running_lanes") or 0)
-    running = int(status.get("running_agents") or 0)
-    queued = int(status.get("queued_agents") or 0)
-    agents = str(running) if queued == 0 else "%s+%sq" % (running, queued)
-    colour = _Ansi.green if lanes or running or queued else _Ansi.muted
-    return _paint("[lanes %s | agents %s]" % (lanes, agents), colour)
+            colour = _Ansi.green if any(
+                int(value.get(key) or 0) for key in
+                ("running_lanes", "running_agents", "queued_agents")
+            ) else _Ansi.muted
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return _paint(facade.prompt_text(status), colour)
 
 
 def _compact_count(value):
@@ -774,13 +776,9 @@ def _compact_count(value):
 
 def _composer_context(session_id, project):
     """Return the current approximate context budget without failing input."""
-    try:
-        data = server.context_health_data(session=session_id, project=project)
-        used = max(0, int(data.get("estimated_tokens") or 0))
-        limit = max(1, int(data.get("context_limit") or 1))
-        return {"used": used, "limit": limit, "left": max(0, limit - used)}
-    except Exception:
-        return None
+    return ContextHealthFacade(
+        lambda **kwargs: server.context_health_data(**kwargs),
+    ).snapshot(session_id, project)
 
 
 def _turn_metrics(response=None):
@@ -817,14 +815,15 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
     # Resolve the live execution state once. A title that is subsequently
     # compacted must keep this lanes/agents snapshot rather than falling back
     # to compact-mode zero values.
-    if status is None:
-        try:
-            status = server.execution_status_data()
-        except Exception:
-            status = None
+    status_facade = ExecutionStatusFacade(
+        lambda: server.execution_status_data(),
+    )
+    status = status_facade.snapshot(status)
     resolved_tier = str(tier or "code")
     try:
-        model = str(model_override or server.TIERS.get(resolved_tier) or "unknown")
+        model = ModelSelectionFacade.resolved_model(
+            server.TIERS, resolved_tier, model_override,
+        )
     except Exception:
         model = "unknown"
     # This is intentionally the live table rather than a cached launch value:
@@ -837,19 +836,7 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
         # mapping made narrow terminals claim L0/A0 when the status service
         # was unavailable -- an especially misleading place to hide a live
         # fanout or failed status read.
-        if status is None:
-            try:
-                status = server.execution_status_data()
-            except Exception:
-                status = None
-        if not isinstance(status, dict) or not status.get("known"):
-            lanes, agents = "?", "?"
-        else:
-            try:
-                lanes = int(status.get("running_lanes") or 0)
-                agents = int(status.get("running_agents") or 0)
-            except (TypeError, ValueError):
-                lanes, agents = "?", "?"
+        lanes, agents = status_facade.counts(status)
         parts = ["S %s" % resolved_tier, "L%s A%s" % (lanes, agents)]
     else:
         parts = ["Sonder %s (%s)  %s" % (
