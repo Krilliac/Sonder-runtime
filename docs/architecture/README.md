@@ -501,3 +501,11 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Fifth Slice: `WP1-TWO-HUNDRED-FIFTH-SLICE.md` —
   moved in-band model-error extraction into the packaged domain formatting
   boundary while preserving the root server compatibility wrapper.
+- WP1 Two-Hundred-Seventh Slice: `WP1-TWO-HUNDRED-SEVENTH-SLICE.md` —
+  moved model transport error-detail extraction and formatting into the
+  packaged adapter boundary while preserving root server compatibility
+  delegates.
+- WP1 Two-Hundred-Eighth Slice: `WP1-TWO-HUNDRED-EIGHTH-SLICE.md` —
+  moved system-profile floating-point environment override parsing into the
+  packaged configuration-environment boundary while preserving the existing
+  system-profile alias.

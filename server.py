@@ -221,6 +221,10 @@ from sonder_runtime.domain.model_error_formatting import (
     redact_model_error_value as _redact_model_error_value,
     safe_model_error_detail as _safe_model_error_detail,
 )
+from sonder_runtime.adapters.model_error_details import (
+    http_error_detail as _http_error_detail_policy,
+    transport_error_detail as _transport_error_detail_policy,
+)
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
@@ -3695,28 +3699,11 @@ def _local_retry_delay(attempt: int) -> float:
 
 
 def _http_error_detail(error: urllib.error.HTTPError) -> str:
-    detail = getattr(error, "reason", "") or "HTTP %s" % error.code
-    try:
-        raw = error.read(4097)
-        if raw:
-            decoded = raw[:4096].decode("utf-8", errors="replace")
-            try:
-                parsed = json.loads(decoded)
-                if isinstance(parsed, dict) and parsed.get("error"):
-                    decoded = parsed["error"]
-                elif isinstance(parsed, (dict, list)):
-                    decoded = parsed
-            except (TypeError, ValueError):
-                pass
-            detail = decoded
-    except Exception:
-        pass
-    return _safe_model_error_detail(detail)
+    return _http_error_detail_policy(error)
 
 
 def _transport_error_detail(error) -> str:
-    reason = getattr(error, "reason", error)
-    return _safe_model_error_detail(reason)
+    return _transport_error_detail_policy(error)
 
 
 def _ollama_display() -> str:

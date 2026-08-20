@@ -6,6 +6,8 @@ historical ``SONDER_*`` environment variables.
 """
 from __future__ import annotations
 
+import os
+
 
 def env_bool(value: str) -> bool:
     """Interpret the historical truthy environment spellings."""
@@ -24,4 +26,21 @@ def env_int(name: str, env: dict[str, str], current: int, errors: list[str]) -> 
         return current
 
 
-__all__ = ["env_bool", "env_int"]
+def env_float(
+    name: str,
+    default: float | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> float | None:
+    """Read one optional non-negative compatibility float from an environment mapping."""
+    source = environ if environ is not None else os.environ
+    raw = source.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+__all__ = ["env_bool", "env_int", "env_float"]
