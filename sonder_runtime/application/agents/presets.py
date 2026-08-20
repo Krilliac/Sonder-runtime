@@ -2,16 +2,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from sonder_runtime.domain.agents.roles import AgentRole, BudgetLimit, RoleBudget, role_budget
 
 
+PresetName = Literal["general", "code", "plan", "reviewer", "researcher", "build-test", "integrator"]
+AgentCapability = Literal[
+    "inspect", "summarize", "research", "edit", "test", "plan", "review",
+    "build", "report", "integrate", "validate",
+]
+
+
 @dataclass(frozen=True)
 class AgentPreset:
-    name: str
+    name: PresetName
     role: AgentRole
     budget: RoleBudget
-    capabilities: tuple[str, ...]
+    capabilities: tuple[AgentCapability, ...]
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.capabilities:
@@ -25,9 +33,10 @@ def builtin_presets() -> tuple[AgentPreset, ...]:
         ("code", AgentRole.EDITOR, ("inspect", "edit", "test")),
         ("plan", AgentRole.ARCHITECT, ("inspect", "plan")),
         ("reviewer", AgentRole.REVIEWER, ("inspect", "review")),
+        ("researcher", AgentRole.EXPLORER, ("inspect", "research", "summarize")),
         ("build-test", AgentRole.VERIFIER, ("build", "test", "report")),
     )
-    return tuple(AgentPreset(name, role, role_budget(role), caps) for name, role, caps in rows)
+    return tuple(AgentPreset(name, role, role_budget(role), caps) for name, role, caps in rows)  # type: ignore[arg-type]
 
 
 def resolve_preset(name: str, *, max_budget: BudgetLimit | None = None) -> AgentPreset:
@@ -47,4 +56,4 @@ def resolve_preset(name: str, *, max_budget: BudgetLimit | None = None) -> Agent
     return preset
 
 
-__all__ = ["AgentPreset", "builtin_presets", "resolve_preset"]
+__all__ = ["AgentCapability", "AgentPreset", "PresetName", "builtin_presets", "resolve_preset"]
