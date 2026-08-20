@@ -329,3 +329,10 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Fiftieth Slice: `WP1-ONE-HUNDRED-FIFTIETH-SLICE.md` —
   moved integer environment-option parsing into the platform boundary while
   preserving the server compatibility alias.
+- WP1 One-Hundred-Fifty-First Slice: `WP1-ONE-HUNDRED-FIFTY-FIRST-SLICE.md` —
+  moved response interaction-footer parsing into the pure domain boundary while
+  preserving the server compatibility alias.
+- WP1 One-Hundred-Fifty-Second Slice: `WP1-ONE-HUNDRED-FIFTY-SECOND-SLICE.md` —
+  moved task persistence ownership into a canonical packaged adapter while
+  preserving the `task_store` compatibility alias and leaving its event sink
+  boundary unchanged.
