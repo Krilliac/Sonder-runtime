@@ -2,7 +2,7 @@
 
 Date: 2026-08-20  
 Audited branch: `agent/wp1-execution-status`  
-Audit baseline: current worktree at commit `9848ad4`  
+Audit baseline: commit `9848ad4` plus the concurrent uncommitted files observed during this audit
 Scope: SESSION/LOOP/SEAM/CTX/REPO/SKILL/AGENT/JOB/TOOL/EXEC/MEM/EVAL/MODEL/API/DATA/OPS/SEC/TRAIN/UPDATE/DOC
 
 ## Decision summary
@@ -204,14 +204,14 @@ not create ledger records or checkboxes.
 |---|---|---|
 | MODEL-001 | PROVEN-CONTRACT | `WP7-MODEL-001.md`, `WP1-MODEL-ROOT-REMOVAL.md`; gateway contracts, injected adapters, and focused tests. Full caller migration remains open. |
 | MODEL-002 | PROVEN-CONTRACT | `WP7-MODEL-002.md`; pure capability route planner and `tests/test_wp7_capability_routing.py`. |
-| MODEL-003 | MISSING | Logical fast/code/general/reasoning/vision role catalog is not sufficiently evidenced. |
+| MODEL-003 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; `LogicalRole` provides stable logical roles without selecting a transport. |
 | MODEL-004 | PROVEN-CONTRACT | `WP7-MODEL-001.md`; measured calibration profiles and `tests/test_wp7_calibration.py`. |
 | MODEL-005 | PROVEN-CONTRACT | `WP7-MODEL-002.md`; capability profiles and routing tests. |
-| MODEL-006 | MISSING | MoE total-versus-active parameter residency correctness is not evidenced. |
+| MODEL-006 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; `ModelParameters` preserves total and active MoE parameter counts for separate residency/compute truth. |
 | MODEL-007 | MISSING | Controlled escalation after uncertainty/verifier failure is not evidenced. |
-| MODEL-008 | MISSING | Independent planner/editor/reviewer role budgets are not evidenced. |
-| MODEL-009 | PARTIAL | Provider lifecycle health contracts exist, but configured/available/ready/degraded integration is not proven. |
-| MODEL-010 | MISSING | NPU boundary behavior is not evidenced. |
+| MODEL-008 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; `RoleBudgetBook` provides independent immutable-by-snapshot role budgets. Full caller enforcement remains open. |
+| MODEL-009 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; routability requires explicit `ready` or `degraded` provider health. |
+| MODEL-010 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; `NpuBoundary` separates detection, runtime availability, and provider binding. |
 
 ### API
 
@@ -328,4 +328,3 @@ candidate targets, not safe candidates today.
 4. Re-run this audit and the formal evidence checker before changing any
    checkbox. A checked item must be changed in the same reviewed change that
    adds its verified evidence.
-
