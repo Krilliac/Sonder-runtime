@@ -24,7 +24,6 @@ from __future__ import annotations
 import os
 import platform
 import json
-import re
 import subprocess
 import threading
 from pathlib import Path
@@ -36,6 +35,10 @@ from sonder_runtime.domain.model_sizing import (
     memory_band,
     params_from_model_tag,
 )
+from sonder_runtime.platform.hardware_probe import parse_memory_gb
+
+# Legacy private name retained for callers that exercised the old probe helper.
+_parse_memory_gb = parse_memory_gb
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -420,15 +423,6 @@ def _probe_linux_accelerators(
     if nvidia:
         records = [item for item in records if item.get("vendor") != "NVIDIA"] + nvidia
     return _dedupe_accelerators(records)
-
-
-def _parse_memory_gb(value: object) -> float | None:
-    text = str(value or "").strip().lower().replace(",", ".")
-    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(gb|mb)", text)
-    if not match:
-        return None
-    amount = float(match.group(1))
-    return amount if match.group(2) == "gb" else amount / 1024.0
 
 
 def _probe_nvidia_accelerators(runner=None) -> list[dict]:
