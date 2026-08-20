@@ -5,8 +5,15 @@ import re
 import pytest
 
 import sonder_headless
+import server
 import sonder_runtime.interfaces.repl.repl as sonder_repl
 import command_catalog
+
+
+@pytest.fixture(autouse=True)
+def _inject_legacy_runtime(monkeypatch):
+    monkeypatch.setattr(sonder_repl, "_legacy_runtime", None)
+    sonder_repl.configure_legacy_runtime(server)
 
 
 def test_piped_utf8_bom_does_not_hide_slash_command():
