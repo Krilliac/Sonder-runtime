@@ -528,3 +528,10 @@ newer ADR explicitly supersedes them.
   moved leading JSON-object parsing for schema-constrained responses into the
   packaged domain schema-policy boundary while preserving the root protocol
   error contract.
+- WP1 Two-Hundred-Fifteenth Slice: `WP1-TWO-HUNDRED-FIFTEENTH-SLICE.md` —
+  moved live cloud-tier legacy-repair policy into the packaged domain boundary
+  while preserving the root server compatibility wrapper.
+- WP1 Two-Hundred-Sixteenth Slice: `WP1-TWO-HUNDRED-SIXTEENTH-SLICE.md` —
+  moved child-process environment secret/control-name classification into the
+  packaged platform policy boundary while preserving the logging compatibility
+  alias.

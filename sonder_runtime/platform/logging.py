@@ -9,6 +9,10 @@ import sys
 import time
 from typing import Iterable
 
+from sonder_runtime.platform.child_environment_policy import (
+    unsafe_child_secret_name,
+)
+
 REDACTED = "[REDACTED]"
 REDACTION_FAILED = "[REDACTION_FAILED]"
 
@@ -25,26 +29,7 @@ SECRET_ENV_VARS = (
     "SONDER_OPENAI_API_KEY",
 )
 
-_UNSAFE_CHILD_SECRET_MARKERS = (
-    "ACCESS_KEY", "API_KEY", "AUTH", "BEARER", "CONNECTION_STRING",
-    "COOKIE", "CREDENTIAL", "DATABASE_URL", "PASSWORD", "PASSWD",
-    "PRIVATE_KEY", "SECRET", "SESSION", "TOKEN",
-)
-_UNSAFE_CHILD_SECRET_SUFFIXES = ("_KEY", "_KEY_ID")
-_UNSAFE_CHILD_CONTROL_MARKERS = (
-    "APPROVAL", "BYPASS", "CONTROL", "DANGEROUS", "ELEVAT", "GATE",
-    "PERMISSION", "UNSAFE",
-)
-
-
-def _unsafe_child_secret_name(name):
-    upper = str(name or "").upper()
-    return (
-        upper.startswith("SONDER_")
-        or any(marker in upper for marker in _UNSAFE_CHILD_SECRET_MARKERS)
-        or upper.endswith(_UNSAFE_CHILD_SECRET_SUFFIXES)
-        or any(marker in upper for marker in _UNSAFE_CHILD_CONTROL_MARKERS)
-    )
+_unsafe_child_secret_name = unsafe_child_secret_name
 
 
 def child_environment(base=None):
