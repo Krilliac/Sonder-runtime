@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pdf_risk
+from sonder_runtime.domain.artifact_risk_policy import policy_denies
 
 
 DEFAULT_MAX_SCAN_BYTES = 16 * 1024 * 1024
@@ -418,16 +419,6 @@ def effective_policy(requested=""):
     if requested not in _POLICY_ORDER:
         raise ArtifactRiskError("invalid requested execution risk policy")
     return max((configured, requested), key=_POLICY_ORDER.__getitem__)
-
-
-def policy_denies(policy, risk):
-    if policy == "deny-high":
-        return risk == "high"
-    if policy == "deny-medium":
-        return risk in {"high", "medium"}
-    if policy == "deny-unknown":
-        return risk in {"high", "medium", "unknown"}
-    return False
 
 
 def enforce_execution_policy(path, *, requested="", extra_roots=""):
