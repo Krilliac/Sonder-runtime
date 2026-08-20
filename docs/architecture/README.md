@@ -7,6 +7,10 @@
 
 ## Current preparation artifacts
 
+- WP1 One-Hundred-Seventy-Seventh Slice: `WP1-ONE-HUNDRED-SEVENTY-SEVENTH-SLICE.md` —
+  moved pure deployment-authentication policy into the packaged platform
+  boundary while preserving the root server compatibility delegate.
+
 - [`WP0-BASELINE.md`](WP0-BASELINE.md) and
   [`wp0-baseline.json`](wp0-baseline.json) — commit-qualified read-only baseline.
 - [`EVIDENCE-TRACKING-DESIGN.md`](EVIDENCE-TRACKING-DESIGN.md) — proposed requirement
@@ -409,3 +413,6 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Seventy-Fifth Slice: `WP1-ONE-HUNDRED-SEVENTY-FIFTH-SLICE.md` —
   moved the pure context character-count token estimator into the packaged
   domain boundary while preserving the root server compatibility alias.
+- WP1 One-Hundred-Seventy-Eighth Slice: `WP1-ONE-HUNDRED-SEVENTY-EIGHTH-SLICE.md` —
+  moved doctor-check status coercion into the packaged domain boundary while
+  preserving the root doctor compatibility alias.

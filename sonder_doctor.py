@@ -38,6 +38,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from sonder_runtime.adapters.config_validation import (
     validated_config_check as _validated_config_check,
 )
+from sonder_runtime.domain.doctor_status import coerce_status as _coerce_status
 
 # Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
 # is simply absent should not make an otherwise-healthy runtime look sick.
@@ -62,36 +63,6 @@ _SEVERITY_TO_STATUS = {0: STATUS_OK, 1: STATUS_WARN, 2: STATUS_FAIL}
 #   * a mapping with at least "status" and optionally "name"/"detail"
 # or it may raise -- a raised exception is captured as a ``fail`` entry.
 CheckCallable = Callable[[], Any]
-
-
-def _coerce_status(value: Any) -> str:
-    """Map an arbitrary check verdict onto the fixed status vocabulary."""
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in _VALID_STATUSES:
-            return lowered
-        # Accept a few friendly synonyms so callers are not forced to memorise
-        # the exact spelling; anything else is treated as a failure to be safe.
-        synonyms = {
-            "pass": STATUS_OK,
-            "passed": STATUS_OK,
-            "healthy": STATUS_OK,
-            "good": STATUS_OK,
-            "warning": STATUS_WARN,
-            "degraded": STATUS_WARN,
-            "attention": STATUS_WARN,
-            "watch": STATUS_WARN,
-            "error": STATUS_FAIL,
-            "failed": STATUS_FAIL,
-            "critical": STATUS_FAIL,
-            "skip": STATUS_SKIPPED,
-        }
-        return synonyms.get(lowered, STATUS_FAIL)
-    if isinstance(value, bool):
-        return STATUS_OK if value else STATUS_FAIL
-    # Anything unexpected (None, numbers, objects) is a defensive failure rather
-    # than a silent pass -- the doctor should surface, not swallow, weirdness.
-    return STATUS_FAIL
 
 
 def _normalize_result(name: str, raw: Any) -> dict:

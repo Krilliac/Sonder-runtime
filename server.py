@@ -78,6 +78,9 @@ from sonder_runtime.domain.execution import status as execution_status
 from sonder_runtime.domain.model_routing import (
     is_cloud_model_name as _is_cloud_model_name,
 )
+from sonder_runtime.platform.deployment_auth import (
+    authenticates_callers as _deployment_authenticates_callers_policy,
+)
 from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
@@ -1139,22 +1142,8 @@ TRACE_SYSTEM = (
 
 
 def _deployment_authenticates_callers() -> bool:
-    """True when this runtime can serve more than one identity.
-
-    Mirrors sonder_serve's auth-mode resolution without importing it (that
-    would be circular). Any of these means callers are distinguishable, so a
-    tool returning one caller's data to another is a real disclosure:
-    SONDER_AUTH_MODE set at all, an API key configured, or accounts required.
-    Absent all three the deployment is `local-open` -- a single operator on
-    loopback, where there is no second party to protect.
-    """
-    if os.environ.get("SONDER_AUTH_MODE", "").strip():
-        return True
-    if os.environ.get("SONDER_API_KEY", "").strip():
-        return True
-    return str(os.environ.get("SONDER_REQUIRE_ACCOUNT", "")).strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    """Compatibility delegate for the packaged deployment-auth policy."""
+    return _deployment_authenticates_callers_policy()
 
 
 def _developer_gate(tool_name: str, token: str, started):
