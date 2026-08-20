@@ -7,6 +7,7 @@ that enforces output and timeout bounds.
 from __future__ import annotations
 
 import sonder_runtime.platform.environment_probe as environment_probe
+from sonder_runtime.platform.logging import Redactor
 
 
 VERSION_ARGUMENTS = {
@@ -39,6 +40,14 @@ VERSION_ARGUMENTS = {
 }
 
 
+def safe_output(text: str, *, max_chars: int = 2_000) -> str:
+    """Normalize and redact bounded output from a fixed toolchain probe."""
+    value = Redactor().redact((text or "").strip())
+    if len(value) > max_chars:
+        return value[:max_chars] + "\n[output truncated]"
+    return value
+
+
 def normalized_tool_name(name: str) -> str:
     """Normalize a caller-supplied tool name before policy lookup."""
     return (name or "").strip().lower()
@@ -60,4 +69,10 @@ def discovered_path(name: str, *, refresh: bool = False) -> str:
     )
 
 
-__all__ = ["VERSION_ARGUMENTS", "allowed_arguments", "discovered_path", "normalized_tool_name"]
+__all__ = [
+    "VERSION_ARGUMENTS",
+    "allowed_arguments",
+    "discovered_path",
+    "normalized_tool_name",
+    "safe_output",
+]

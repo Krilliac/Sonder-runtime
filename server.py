@@ -147,6 +147,7 @@ import autopilot_controller
 import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
 from sonder_runtime.domain.common.errors import InvalidInput
@@ -413,19 +414,8 @@ def _cache_model_revision(model):
 
 
 def _inventory_rows(payload, endpoint):
-    """Return the dict rows of an Ollama inventory payload, or raise.
-
-    A wrong-shape payload (non-dict body, non-list ``models``) is a protocol
-    failure that must surface as an explicit error: rendering it as an empty
-    catalog would tell an operator nothing is installed or resident when the
-    endpoint actually misbehaved. Individual malformed rows inside a valid
-    list are skipped instead -- partial inventory is real data.
-    """
-    if isinstance(payload, dict):
-        rows = payload.get("models")
-        if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    raise ModelCallError("protocol", "invalid Ollama %s response" % endpoint)
+    """Compatibility delegate for the packaged inventory protocol adapter."""
+    return _inventory_rows_policy(payload, endpoint)
 
 
 def resolve_discovered_model_record(selector):

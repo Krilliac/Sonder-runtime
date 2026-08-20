@@ -447,3 +447,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Eighty-Eighth Slice: `WP1-ONE-HUNDRED-EIGHTY-EIGHTH-SLICE.md` —
   moved skipped doctor-result construction into the packaged domain boundary
   while preserving the root doctor compatibility delegate.
+- WP1 One-Hundred-Ninetieth Slice: `WP1-ONE-HUNDRED-NINETIETH-SLICE.md` —
+  moved bounded toolchain-probe output normalization and redaction into the
+  packaged platform policy while preserving the root compatibility delegate.
+- WP1 One-Hundred-Eighty-Ninth Slice: `WP1-ONE-HUNDRED-EIGHTY-NINTH-SLICE.md` —
+  moved Ollama inventory-envelope validation into the packaged adapter
+  boundary while preserving the root server compatibility delegate.
