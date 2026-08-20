@@ -855,7 +855,10 @@ from sonder_runtime.adapters.inspection_executor import _format_file_result
 from sonder_runtime.adapters.task_formatting import _format_checklist, _format_task
 from sonder_runtime.adapters.context_formatting import format_context_health
 from sonder_runtime.domain.health_formatting import health_bar as _health_bar
-from sonder_runtime.domain.context_formatting import rough_token_count as _rough_token_count
+from sonder_runtime.domain.context_formatting import (
+    rough_token_count as _rough_token_count,
+    rough_token_count_from_chars as _rough_token_count_from_chars,
+)
 from sonder_runtime.domain.campaign_policy import output_matches as _campaign_output_matches
 from sonder_runtime.domain.control_timeout import parse_control_timeout as _parse_control_timeout
 from sonder_runtime.domain.control_history import (
@@ -6783,11 +6786,6 @@ def learning_health_data() -> dict:
 def learning_health_status() -> str:
     """Show outcome coverage, positive signals, lesson provenance, and memory hygiene."""
     return learning_health.format_report(learning_health_data())
-
-
-def _rough_token_count_from_chars(count) -> int:
-    count = max(0, int(count or 0))
-    return max(1, (count + 3) // 4) if count else 0
 
 
 def context_health_data(session: str = "", project: str = "") -> dict:

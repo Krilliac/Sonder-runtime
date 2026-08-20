@@ -403,3 +403,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Seventy-Third Slice: `WP1-ONE-HUNDRED-SEVENTY-THIRD-SLICE.md` —
   moved pure live cloud-model override selection into the packaged domain
   boundary while preserving the root server compatibility alias.
+- WP1 One-Hundred-Seventy-Sixth Slice: `WP1-ONE-HUNDRED-SEVENTY-SIXTH-SLICE.md` —
+  moved pure hardware-probe memory normalization into the packaged platform
+  boundary while preserving the root hardware compatibility alias.
+- WP1 One-Hundred-Seventy-Fifth Slice: `WP1-ONE-HUNDRED-SEVENTY-FIFTH-SLICE.md` —
+  moved the pure context character-count token estimator into the packaged
+  domain boundary while preserving the root server compatibility alias.
