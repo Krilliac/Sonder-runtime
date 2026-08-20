@@ -42,6 +42,33 @@ def test_config_check_preserves_config_error_diagnostic(monkeypatch):
     }
 
 
+def test_memory_quality_check_preserves_root_injection_compatibility(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    monkeypatch.setenv("SONDER_DB", "memory.sqlite")
+    monkeypatch.setattr(
+        sonder_doctor,
+        "_summarize_memory_quality",
+        lambda connect, audit, path: calls.append((connect, audit, path))
+        or {"status": "ok", "detail": "delegated"},
+    )
+    fake_memory_quality = types.SimpleNamespace(audit=lambda _conn: {})
+    monkeypatch.setitem(sys.modules, "memory_quality", fake_memory_quality)
+
+    import sonder_runtime.adapters.memory_store as memory_store
+
+    fake_connect = lambda path: path
+    monkeypatch.setattr(memory_store, "connect", fake_connect)
+
+    assert sonder_doctor._check_memory_quality() == {
+        "status": "ok",
+        "detail": "delegated",
+    }
+    assert calls == [(fake_connect, fake_memory_quality.audit, "memory.sqlite")]
+
+
 def _ok(detail=""):
     return lambda: {"status": "ok", "detail": detail}
 

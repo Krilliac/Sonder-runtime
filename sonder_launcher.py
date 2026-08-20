@@ -39,6 +39,11 @@ from sonder_runtime.adapters.launcher_idempotency import (
     normalize_idempotency_key,
     valid_command_replay,
 )
+from sonder_runtime.adapters.launcher_output import (
+    bounded_seconds,
+    output_text,
+    retention_limit,
+)
 from sonder_runtime.application.lifecycle import (
     MAX_CONTEXT_TOKENS,
     _CONTEXT_SIZE,
@@ -74,6 +79,10 @@ _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 # Compatibility aliases for the historical private policy surface.
 _normalize_idempotency_key = normalize_idempotency_key
 _valid_command_replay = valid_command_replay
+# Compatibility aliases for the historical private policy surface.
+_output_text = output_text
+_bounded_seconds = bounded_seconds
+_retention_limit = retention_limit
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sonder_launcher_operations (
@@ -158,39 +167,6 @@ def _reachable(host="127.0.0.1", port=SERVER_PORT, timeout=0.4):
             return True
     except OSError:
         return False
-
-
-def _output_text(*values):
-    chunks = []
-    for value in values:
-        if not value:
-            continue
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", errors="replace")
-        value = str(value).strip()
-        if value:
-            chunks.append(value)
-    output = "\n".join(chunks)
-    if len(output) <= MAX_OPERATION_OUTPUT:
-        return output
-    marker = "[output truncated]\n"
-    return marker + output[-(MAX_OPERATION_OUTPUT - len(marker)):]
-
-
-def _bounded_seconds(value, default, maximum):
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = float(default)
-    return max(1.0, min(parsed, float(maximum)))
-
-
-def _retention_limit(value):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = DEFAULT_OPERATION_RETENTION
-    return max(1, min(parsed, MAX_OPERATION_RETENTION))
 
 
 def _pid_alive(pid):
