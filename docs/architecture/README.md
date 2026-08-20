@@ -1,5 +1,32 @@
 # Sonder Runtime architecture documents
 
+> Authority note: this page is the human-facing entry point. The complete
+> authority map, document classifications, generated-reference contract, and
+> stale-promise inventory live in
+> [`DOCUMENT-AUTHORITY-INDEX.md`](DOCUMENT-AUTHORITY-INDEX.md). The master
+> specification remains the authoritative list of unfinished requirements;
+> this documentation pass does not alter its checkboxes.
+
+## Read this first
+
+- **Unfinished requirements:**
+  [`SONDER-MASTER-IMPLEMENTATION-SPEC.md`](SONDER-MASTER-IMPLEMENTATION-SPEC.md)
+- **Current focused contracts:** see the map in
+  [`DOCUMENT-AUTHORITY-INDEX.md`](DOCUMENT-AUTHORITY-INDEX.md).
+- **Historical program material:** SPEC-5, its migration runbook, and the
+  program-status snapshot are explicitly historical; they are not current
+  implementation authority.
+- **New ADRs:** use the single canonical namespace under `docs/adr/` with a
+  globally unique date-prefixed filename. The numbered files under
+  `docs/architecture/adr/` are retained as historical records; see
+  [`adr/README.md`](adr/README.md).
+- **Generated references:** tool, command, event, and client projections are
+  generated from typed application/domain sources by
+  `GeneratedCatalogs`; freshness is represented by its deterministic SHA-256
+  digest and covered by the document-authority tests. Configuration references
+  remain a documented source contract until a typed configuration generator is
+  added.
+
 - WP1 Two-Hundred-Forty-Ninth Slice: `WP1-TWO-HUNDRED-FORTY-NINTH-SLICE.md` —
   moved pure launcher output, timeout, and retention policy into a packaged
   adapter while preserving root helper aliases.
@@ -198,15 +225,9 @@ or authorize a competing implementation path:
 
 ## ADRs
 
-Two historical ADR series exist and contain overlapping numbers:
-
-- `docs/adr/` records SPEC-5-era product decisions.
-- `docs/architecture/adr/` records the preceding architecture-program decisions.
-
-New decisions must use a globally unique date-prefixed filename under `docs/adr/`, for
-example `ADR-2026-08-19-event-sourced-sessions.md`. Existing ADRs retain their paths so
-old links remain valid. Their decisions remain authoritative unless the master spec or a
-newer ADR explicitly supersedes them.
+The ADR namespace policy and historical directory inventory are maintained in
+[`adr/README.md`](adr/README.md). New decisions use `docs/adr/ADR-YYYY-MM-DD-<slug>.md`;
+existing numeric ADRs are historical and are not renumbered in place.
 
 ## Status discipline
 
