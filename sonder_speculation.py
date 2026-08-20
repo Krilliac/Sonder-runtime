@@ -34,30 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import sonder_paths
+from sonder_runtime.domain import speculation_policy
 
-# Read-only tools that are safe to run speculatively.  This is intentionally
-# a strict allowlist: a tool is speculatable only if running it before the
-# model commits can never change durable state, spend a cloud budget, or
-# reach the network.  Mutations, execution, web, and model-spawning tools
-# are excluded by omission.
-SPECULATABLE_TOOLS = frozenset({
-    "workspace_inventory",
-    "directory_tree",
-    "file_find",
-    "file_read",
-    "file_read_range",
-    "text_search",
-    "script_search",
-    "program_search",
-    "image_inspect",
-    "data_inspect",
-    "memory_search",
-    "activity_status",
-    "context_health",
-    "status",
-    "command_registry_list",
-    "permission_policy",
-})
+# Compatibility alias for callers that imported the historical allowlist.
+SPECULATABLE_TOOLS = speculation_policy.SPECULATABLE_TOOLS
 
 _PREDICTOR_VERSION = 1
 _MAX_TRANSITIONS = 4000
@@ -308,7 +288,7 @@ class BranchPredictor:
         return tool, confidence
 
     def speculatable(self, tool_name: str) -> bool:
-        return tool_name in SPECULATABLE_TOOLS
+        return speculation_policy.is_speculatable(tool_name)
 
     # -- accounting --------------------------------------------------------
 

@@ -1,0 +1,39 @@
+"""Pure policies shared by application lifecycle entry points.
+
+This module owns validation of the bounded context-size value accepted by
+launcher start, stop, and restart requests. It has no process, transport,
+configuration, or persistence concerns, so application boundaries can use it
+without importing an adapter or the root launcher.
+"""
+from __future__ import annotations
+
+from decimal import Decimal, InvalidOperation
+import re
+
+
+MAX_CONTEXT_TOKENS = 1_000_000
+_CONTEXT_SIZE = re.compile(r"^(\d{1,7})(?:\.(\d{1,3}))?([km]?)$")
+
+
+def normalize_context_size(value):
+    """Validate the bounded context syntax accepted by lifecycle requests."""
+    text = str(value or "8192").strip().lower()
+    match = _CONTEXT_SIZE.fullmatch(text)
+    if not match:
+        raise ValueError("invalid context_size")
+    try:
+        number = Decimal(
+            match.group(1) + ("." + match.group(2) if match.group(2) else "")
+        )
+    except InvalidOperation as exc:  # Defensive: the regular expression is stricter.
+        raise ValueError("invalid context_size") from exc
+    multiplier = {"": 1, "k": 1_000, "m": 1_000_000}[match.group(3)]
+    tokens = number * multiplier
+    if tokens < 1 or tokens > MAX_CONTEXT_TOKENS:
+        raise ValueError(
+            "context_size must resolve to between 1 and %s tokens"
+            % MAX_CONTEXT_TOKENS
+        )
+    if tokens != tokens.to_integral_value():
+        raise ValueError("context_size must resolve to a whole number of tokens")
+    return text

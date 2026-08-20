@@ -60,19 +60,8 @@ class BuildInfo:
 
 
 def _commit_from_git() -> str:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parents[2],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    sha = out.stdout.strip()
-    return sha if out.returncode == 0 and len(sha) == 40 else "unknown"
+    """Compatibility wrapper for the legacy build-info commit probe."""
+    return running_source_commit_at_import() or "unknown"
 
 
 def build_info() -> BuildInfo:

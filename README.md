@@ -412,8 +412,14 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Two-Hundred-Twenty-Sixth Slice: system-profile boolean environment overrides now use the canonical `sonder_runtime.platform.config_environment` policy, preserving the `_env_bool` compatibility alias and hardware override behavior.
 - WP1 Two-Hundred-Twenty-Eighth Slice: launcher-health nonce, identity, and HMAC proof status policy now live in the packaged `sonder_runtime.domain.launcher_health` boundary, preserving the root `sonder_health` compatibility aliases.
 - WP1 Two-Hundred-Thirtieth Slice: the bounded local-observability percentile helper now lives in `sonder_runtime.adapters.observability.latency_formatting`, preserving the `local_observability._percentile` compatibility alias and the root logging identity.
+- WP1 Two-Hundred-Thirty-First Slice: headless argument parsing and command sequencing now live in `sonder_runtime.interfaces.cli.headless`, while `sonder_headless.py` preserves the supervisor implementation and compatibility surface.
+- WP1 Two-Hundred-Thirty-Third Slice: unstamped build identity now reuses the packaged version commit probe, preserving the root `sonder_version` module identity and `_commit_from_git` compatibility helper.
+- WP1 Two-Hundred-Thirty-Fourth Slice: cooperative cancellation now belongs to `sonder_runtime.platform.process`; packaged shutdown and root `sonder_shutdown` keep identity-preserving aliases.
+- WP1 Two-Hundred-Thirty-Fifth Slice: speculative-tool safety policy now lives in the packaged `sonder_runtime.domain.speculation_policy` boundary, preserving the root `sonder_speculation.SPECULATABLE_TOOLS` alias and predictor seam.
+- WP1 Two-Hundred-Thirty-Sixth Slice: the debug-dump export boundary now imports `Redactor` from canonical packaged logging, preserving the `debug_dump.Redactor` and root `sonder_logging` identities.
 - WP1 Two-Hundred-Twenty-Seventh Slice: environment-file parsing now belongs to the packaged `sonder_runtime.platform.config_environment` policy boundary, preserving the root `sonder_config.parse_env_file` and `ConfigError` contract.
 - WP1 Two-Hundred-Twenty-Ninth Slice: packaged HTTP default-home and server-log resolution now use the canonical `sonder_runtime.platform.paths` boundary; the root `sonder_paths` identity alias remains compatible.
+- WP1 Two-Hundred-Thirty-Second Slice: pure launcher lifecycle `context_size` normalization now belongs to `sonder_runtime.application.lifecycle`, preserving the root `sonder_launcher` helper and compatibility constants.
 - WP1 One-Hundred-Second Slice: complete typed configuration ownership now belongs to `sonder_runtime.platform.config`; `sonder_config` remains a thin external-tooling compatibility surface with exact class, loader, exception, precedence, default, and validation semantics preserved.
 # WP1 One-Hundred-Tenth Slice
 

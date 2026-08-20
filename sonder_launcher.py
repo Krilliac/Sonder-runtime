@@ -7,7 +7,6 @@ arbitrary arguments from clients.
 from __future__ import annotations
 
 import argparse
-from decimal import Decimal, InvalidOperation
 import errno
 import hashlib
 import hmac
@@ -33,6 +32,11 @@ from pathlib import Path
 import sonder_health
 import command_recovery
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.application.lifecycle import (
+    MAX_CONTEXT_TOKENS,
+    _CONTEXT_SIZE,
+    normalize_context_size,
+)
 from sonder_paths import state_path
 
 
@@ -42,7 +46,6 @@ DEFAULT_PORT = 11436
 DEFAULT_SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 11435
 MAX_BODY = 16_384
-MAX_CONTEXT_TOKENS = 1_000_000
 START_ACTION_TIMEOUT_SECONDS = 31 * 60.0
 STOP_ACTION_TIMEOUT_SECONDS = 60.0
 # Kept for callers that imported the old single timeout constant. Start and
@@ -60,7 +63,6 @@ CONTROL_KILL_GRACE_SECONDS = 3.0
 FINALIZE_RETRY_DELAYS = (0.0, 0.05, 0.2)
 ACTIVE_PHASES = ("queued", "running")
 TERMINAL_PHASES = ("succeeded", "failed", "cancelled", "interrupted")
-_CONTEXT_SIZE = re.compile(r"^(\d{1,7})(?:\.(\d{1,3}))?([km]?)$")
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 _REPLAY_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
@@ -149,28 +151,6 @@ def _reachable(host="127.0.0.1", port=SERVER_PORT, timeout=0.4):
             return True
     except OSError:
         return False
-
-
-def normalize_context_size(value):
-    """Validate the bounded context syntax accepted by the main server."""
-    text = str(value or "8192").strip().lower()
-    match = _CONTEXT_SIZE.fullmatch(text)
-    if not match:
-        raise ValueError("invalid context_size")
-    try:
-        number = Decimal(match.group(1) + ("." + match.group(2) if match.group(2) else ""))
-    except InvalidOperation as exc:  # Defensive: the regular expression is stricter.
-        raise ValueError("invalid context_size") from exc
-    multiplier = {"": 1, "k": 1_000, "m": 1_000_000}[match.group(3)]
-    tokens = number * multiplier
-    if tokens < 1 or tokens > MAX_CONTEXT_TOKENS:
-        raise ValueError(
-            "context_size must resolve to between 1 and %s tokens"
-            % MAX_CONTEXT_TOKENS
-        )
-    if tokens != tokens.to_integral_value():
-        raise ValueError("context_size must resolve to a whole number of tokens")
-    return text
 
 
 def _output_text(*values):

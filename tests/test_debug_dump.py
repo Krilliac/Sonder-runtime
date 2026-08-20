@@ -2,6 +2,12 @@ import os
 
 import debug_dump
 from sonder_logging import REDACTED, Redactor
+from sonder_runtime.platform import logging as runtime_logging
+
+
+def test_debug_dump_uses_packaged_logging_redactor_identity():
+    assert debug_dump.Redactor is runtime_logging.Redactor
+    assert debug_dump.Redactor is Redactor
 
 
 def test_write_dump_creates_text_file(tmp_path):
