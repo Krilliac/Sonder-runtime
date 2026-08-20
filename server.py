@@ -1028,7 +1028,7 @@ LIVE_RELOAD_MODULES = [
     "process_liveness",
     "orchestrator",
     "retriever",
-    "reward",
+    "sonder_runtime.domain.memory.rules",
     "reflection",
     "embeddings",
     "ollama_endpoint",
@@ -1159,6 +1159,9 @@ def _maybe_live_reload():
             continue
         if name == "sonder_runtime.adapters.memory_store":
             globals()["memory_store"] = module
+            continue
+        if name == "sonder_runtime.domain.memory.rules":
+            globals()["reward_rules"] = module
             continue
         if name == "local_service_probe":
             globals()["local_probe"] = module
