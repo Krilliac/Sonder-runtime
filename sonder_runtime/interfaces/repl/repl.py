@@ -2146,7 +2146,8 @@ def main():
                 else:
                     out = server.admin_login(parts[0], parts[1])
                     marker = "token: "
-                    if marker in out and not out.startswith("ERROR:"):
+                    from ...domain.cloud_access import has_legacy_error_prefix
+                    if marker in out and not has_legacy_error_prefix(out):
                         CURRENT_TOKEN = out.split(marker, 1)[1].strip().splitlines()[0]
                     print(out)
             elif cmd == "/whoami":

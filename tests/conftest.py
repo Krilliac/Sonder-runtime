@@ -61,7 +61,24 @@ def _configure_http_legacy_boundary():
     from sonder_runtime.interfaces.http import serve
 
     serve.configure_legacy_runtime(server)
+    from sonder_runtime.adapters.ollama.gateway import OllamaGateway
+
+    OllamaGateway.configure_default_providers(
+        target_resolver=lambda tier, strict=False: _legacy_model_target(
+            server, tier, strict
+        ),
+        generate_factory=lambda model, system, temperature, num_predict, num_ctx, **kwargs: server._make_generate(
+            model, system, temperature, num_predict, num_ctx, **kwargs
+        ),
+    )
     yield
+
+
+def _legacy_model_target(server, tier, strict):
+    from sonder_runtime.application.ports.model_target import ModelTarget
+
+    model, cloud, augment, tier_label = server._serve_target(tier, strict)
+    return ModelTarget(model, cloud, tier_label, augment)
 
 
 @pytest.fixture
