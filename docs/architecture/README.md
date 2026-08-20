@@ -249,3 +249,8 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Twenty-Fourth Slice: `WP1-ONE-HUNDRED-TWENTY-FOURTH-SLICE.md` —
   moved the pure schema-gap formatting helper into the domain boundary while
   preserving the server compatibility alias.
+- WP1 One-Hundred-Twenty-Fifth Slice: `WP1-ONE-HUNDRED-TWENTY-FIFTH-SLICE.md` —
+  moved the legacy model gateway into its canonical packaged adapter.
+- WP1 One-Hundred-Twenty-Sixth Slice: `WP1-ONE-HUNDRED-TWENTY-SIXTH-SLICE.md` —
+  moved the pure cloud-model-name classifier into the domain boundary while
+  preserving the server compatibility alias.
