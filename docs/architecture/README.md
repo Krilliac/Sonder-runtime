@@ -233,3 +233,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Sixteenth Slice: `WP1-ONE-HUNDRED-SIXTEENTH-SLICE.md` — moved
   the process-probe port adapter out of generic strangler services into its
   named packaged adapter and wired the composition root directly to it.
+- WP1 One-Hundred-Nineteenth Slice: `WP1-ONE-HUNDRED-NINETEENTH-SLICE.md` — moved
+  the pure fanout catalog-target eligibility policy into the domain boundary
+  while preserving the server compatibility alias.
+- WP1 One-Hundred-Twentieth Slice: `WP1-ONE-HUNDRED-TWENTIETH-SLICE.md` — moved
+  the generic tool-executor implementation out of strangler services into its
+  canonical packaged adapter while preserving the legacy import identity.

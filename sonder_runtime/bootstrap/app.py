@@ -15,8 +15,8 @@ import threading
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
+from ..adapters.tool_executor import ToolExecutorAdapter
 from ..adapters.strangler_services import (
-    LegacyToolExecutor,
     LegacyUnitOfWork,
     OperationsEventSink,
 )
@@ -121,7 +121,7 @@ def build_application(
         # A UnitOfWork is per-transaction, so the graph exposes a factory, not
         # a singleton; each call opens and owns its own connection scope.
         unit_of_work=LegacyUnitOfWork,
-        tool_executor=LegacyToolExecutor(),
+        tool_executor=ToolExecutorAdapter(),
         process_probe=ProcessProbeAdapter(),
         # Bounded process-local counters/recent events decorate the durable
         # operations.db sink; they never replace its audit authority.
