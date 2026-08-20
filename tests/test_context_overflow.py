@@ -4,8 +4,9 @@ import urllib.error
 
 import pytest
 
-import context_overflow
 import server
+from sonder_runtime.domain.context import compaction as context_compaction
+from sonder_runtime.domain.context import overflow as context_overflow
 
 
 # --- classifier: bounded normalization --------------------------------------
@@ -190,16 +191,16 @@ def _conversation(turns):
 
 
 def test_compaction_keeps_system_preamble_and_the_live_request():
-    compacted = context_overflow.compact_messages(_conversation(4))
+    compacted = context_compaction.compact_messages(_conversation(4))
 
     assert compacted[0] == {"role": "system", "content": "be terse"}
-    assert compacted[1]["content"] == context_overflow.COMPACTION_NOTE
+    assert compacted[1]["content"] == context_compaction.COMPACTION_NOTE
     assert compacted[-1] == {"role": "user", "content": "live request"}
     assert len(compacted) < len(_conversation(4))
 
 
 def test_compaction_drops_the_oldest_turns_and_keeps_content_verbatim():
-    compacted = context_overflow.compact_messages(_conversation(4))
+    compacted = context_compaction.compact_messages(_conversation(4))
     kept = [m["content"] for m in compacted]
 
     assert "q0" not in kept
@@ -220,7 +221,7 @@ def test_compaction_never_orphans_tool_results_or_assistant_messages():
         {"role": "user", "content": "live request"},
     ]
 
-    compacted = context_overflow.compact_messages(messages)
+    compacted = context_compaction.compact_messages(messages)
 
     assert compacted[2]["role"] == "user"
     assert compacted[2]["content"] == "newer request"
@@ -229,7 +230,7 @@ def test_compaction_never_orphans_tool_results_or_assistant_messages():
 
 @pytest.mark.parametrize("keep_recent", ["bad", object()])
 def test_malformed_keep_recent_is_conservative(keep_recent):
-    assert context_overflow.compact_messages(
+    assert context_compaction.compact_messages(
         _conversation(4), keep_recent=keep_recent,
     ) is None
 
@@ -237,7 +238,7 @@ def test_malformed_keep_recent_is_conservative(keep_recent):
 def test_a_single_oversized_request_is_uncompactable():
     # System + one user turn: there is no history to drop, and truncating the
     # request itself would silently corrupt it.
-    assert context_overflow.compact_messages([
+    assert context_compaction.compact_messages([
         {"role": "system", "content": "be terse"},
         {"role": "user", "content": "x" * 10000},
     ]) is None
@@ -245,14 +246,14 @@ def test_a_single_oversized_request_is_uncompactable():
 
 @pytest.mark.parametrize("messages", [None, "not a list", [], [{"role": "user"}]])
 def test_uncompactable_shapes_return_none(messages):
-    assert context_overflow.compact_messages(messages) is None
+    assert context_compaction.compact_messages(messages) is None
 
 
 def test_compaction_is_not_applied_twice():
-    once = context_overflow.compact_messages(_conversation(6))
+    once = context_compaction.compact_messages(_conversation(6))
 
     assert once is not None
-    assert context_overflow.compact_messages(once) is None
+    assert context_compaction.compact_messages(once) is None
 
 
 # --- gateway: exactly-one compaction retry ----------------------------------

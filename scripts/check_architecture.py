@@ -81,6 +81,14 @@ COMPATIBILITY_ROOT_MODULES = {
     "recall": Path("recall.py"),
 }
 
+# Root modules removed by completed strangler slices must stay removed.  This
+# list is deliberately explicit: each entry is a reviewed migration boundary,
+# not a broad filename convention that could hide legitimate new entrypoints.
+RETIRED_ROOT_MODULES = frozenset({
+    Path("context_overflow.py"),
+    Path("mmr_rerank.py"),
+})
+
 # Applied migrations are immutable historical artifacts. They may retain an
 # import that production code has since moved behind a compatibility adapter;
 # rewriting one would invalidate its recorded checksum on deployed systems.
@@ -187,6 +195,15 @@ def resolve_relative(module: str, node: ast.ImportFrom) -> str:
 
 def check() -> list[str]:
     violations: list[str] = []
+    tracked = {
+        path.relative_to(REPO_ROOT)
+        for path in tracked_production_python_files()
+    }
+    for retired in sorted(RETIRED_ROOT_MODULES, key=Path.as_posix):
+        if retired in tracked:
+            violations.append(
+                f"{retired}: retired root module was reintroduced"
+            )
     unexpected_legacy = ROOT_LEGACY_MODULES - BASELINE_ROOT_LEGACY_MODULES
     if unexpected_legacy:
         violations.append(

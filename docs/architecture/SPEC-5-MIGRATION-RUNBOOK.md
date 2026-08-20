@@ -1,5 +1,10 @@
 # SPEC-5 Migration Runbook
 
+> **Superseded for status and future sequencing.** This file preserves the historical
+> migration record and commands. Use
+> [`SONDER-MASTER-IMPLEMENTATION-SPEC.md`](SONDER-MASTER-IMPLEMENTATION-SPEC.md) for the
+> current implementation checklist and definition of done.
+
 Completed: 2026-08-09
 Branch: `spec5/implementation`
 

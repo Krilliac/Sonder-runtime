@@ -1,0 +1,50 @@
+{
+  "schema": "sonder-wp0-baseline-v1",
+  "captured_date": "2026-08-19",
+  "repository": "Krilliac/Sonder-runtime",
+  "git_revision": "6670eaabe8ddb8a35c0c01e067f54d89c7379aeb",
+  "origin_main_revision": "6670eaabe8ddb8a35c0c01e067f54d89c7379aeb",
+  "working_tree": {
+    "production_files_modified": 0,
+    "documentation_consolidation_present": true,
+    "clean": false
+  },
+  "source": {
+    "tracked_python_files": 752,
+    "production_python_files": 386,
+    "test_python_files": 366,
+    "root_python_files": 173,
+    "sonder_runtime_python_files": 155,
+    "root_legacy_allowance": 16,
+    "compatibility_root_modules": [
+      "eval_history",
+      "memory_store",
+      "recall"
+    ],
+    "root_package_basename_overlaps": [
+      "memory_store",
+      "model_transport",
+      "process_liveness",
+      "recall",
+      "selfmod",
+      "workflow_store"
+    ]
+  },
+  "master_spec": {
+    "path": "docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md",
+    "unique_requirement_ids": 204,
+    "checkboxes": 250,
+    "duplicate_requirement_ids": []
+  },
+  "verification": {
+    "architecture_check": "passed",
+    "pytest_collection": "not_run: pytest unavailable in selected interpreter",
+    "full_tests": "not_run",
+    "ruff": "not_run"
+  },
+  "historical_inventory": {
+    "path": "docs/architecture/migration-inventory.json",
+    "git_revision": "7d5aa62ab476c3307e6ffcda531302da29357557",
+    "status": "historical-not-current-authority"
+  }
+}
