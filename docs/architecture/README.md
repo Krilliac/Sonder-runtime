@@ -272,3 +272,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Thirty-Second Slice: `WP1-ONE-HUNDRED-THIRTY-SECOND-SLICE.md` —
   moved workflow loop-runner ownership into its canonical packaged adapter
   while preserving the legacy identity alias.
+- WP1 One-Hundred-Thirty-Third Slice: `WP1-ONE-HUNDRED-THIRTY-THIRD-SLICE.md` —
+  moved saved-workflow repository ownership into its canonical packaged adapter
+  while preserving the legacy identity alias.
+- WP1 One-Hundred-Thirty-Fourth Slice: `WP1-ONE-HUNDRED-THIRTY-FOURTH-SLICE.md` —
+  moved campaign headline formatting into the domain boundary while
+  preserving the server compatibility alias and durable pitfall visibility.

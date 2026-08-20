@@ -1,9 +1,11 @@
 """Compatibility imports for the former generic workflow adapters."""
 from __future__ import annotations
 
+from .workflow_repository import WorkflowRepositoryAdapter
 from .workflow_loop_runner import LoopRunnerAdapter
 
 
-# Keep the repository boundary in this compatibility module until its own
-# migration slice; the loop-runner implementation has a canonical owner now.
+# Compatibility names for callers that still import the former generic
+# workflow adapters.
+LegacyWorkflowRepository = WorkflowRepositoryAdapter
 LegacyLoopRunner = LoopRunnerAdapter
