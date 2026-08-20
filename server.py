@@ -80,6 +80,9 @@ from sonder_runtime.domain.model_routing import (
     is_cloud_model_name as _is_cloud_model_name,
 )
 from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
+from sonder_runtime.domain.model_usage_formatting import (
+    usage_source as _model_usage_source,
+)
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -4296,20 +4299,6 @@ def _chat_request(
             cloud=cloud,
         )
     return out, content
-
-
-def _model_usage_source(tokens_in, tokens_out):
-    """Describe whether both persisted token counts came from Ollama.
-
-    Some compatible gateways return only one of ``prompt_eval_count`` and
-    ``eval_count``.  Keep the available counter, but do not label the other
-    side's character estimate as an exact provider measurement.
-    """
-    if tokens_in is not None and tokens_out is not None:
-        return "ollama"
-    if tokens_in is None and tokens_out is None:
-        return "estimated"
-    return "mixed"
 
 
 def _empty_model_response_detail(out, message):
