@@ -2,30 +2,18 @@
 
 from pathlib import Path
 
-import sonder_metrics
-
 from sonder_runtime.adapters.web import lifecycle
 from sonder_runtime.platform import metrics as platform_metrics
 
 
-def test_platform_metrics_preserves_root_registry_identity():
-    assert platform_metrics.MetricsRegistry is sonder_metrics.MetricsRegistry
-    assert platform_metrics.default_registry is sonder_metrics.default_registry
-
-
-def test_packaged_module_owns_implementation_and_root_is_only_compatibility():
+def test_packaged_module_is_the_only_metrics_implementation():
     assert Path(platform_metrics.__file__).name == "metrics.py"
-    assert Path(sonder_metrics.__file__).name == "sonder_metrics.py"
     assert platform_metrics.MetricsRegistry.__module__ == platform_metrics.__name__
-    assert sonder_metrics.MetricsRegistry.__module__ == platform_metrics.__name__
     assert platform_metrics.default_registry.__module__ == platform_metrics.__name__
-    if platform_metrics.PROMETHEUS_AVAILABLE:
-        for name in ("CollectorRegistry", "Counter", "Gauge", "Histogram", "generate_latest"):
-            assert getattr(sonder_metrics, name) is getattr(platform_metrics, name)
 
 
-def test_root_and_packaged_imports_share_the_same_default_registry():
-    assert sonder_metrics.default_registry() is platform_metrics.default_registry()
+def test_root_metrics_module_is_retired():
+    assert not (Path(__file__).resolve().parents[1] / "sonder_metrics.py").exists()
 
 
 def test_lifecycle_uses_canonical_metrics_boundary():

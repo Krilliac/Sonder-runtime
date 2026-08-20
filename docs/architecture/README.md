@@ -218,3 +218,7 @@ newer ADR explicitly supersedes them.
 - `server._runtime_identity_block` is now owned by the pure domain module
   `sonder_runtime.domain.runtime_identity`; the server retains only the
   compatibility alias and composition wiring.
+
+- WP1 One-Hundred-Eleventh Slice: `WP1-ONE-HUNDRED-ELEVENTH-SLICE.md` — retired
+  the duplicate `sonder_metrics.py` root delegate after production and
+  regression callers moved to the canonical packaged metrics module.

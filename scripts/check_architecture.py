@@ -146,6 +146,7 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("sonder_serve.py"),
     Path("sonder_repl.py"),
     Path("sonder_migrations.py"),
+    Path("sonder_metrics.py"),
 })
 
 # Applied migrations are immutable historical artifacts. They may retain an

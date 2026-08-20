@@ -1,8 +1,12 @@
-"""Fail-closed activation gate for deliberately unrestricted model testing."""
+"""Stateful unsafe-lab security adapter.
+
+The adapter is the sole owner of host inspection, process-local audit state,
+and audit-file I/O.  The root ``unsafe_lab`` module aliases this object so
+legacy callers and their monkeypatch surfaces retain identity semantics.
+"""
 from __future__ import annotations
 
 import ctypes
-import ipaddress
 import json
 import os
 import threading
@@ -10,19 +14,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sonder_runtime.domain.ollama_policy import policy_error
+from sonder_runtime.platform import unsafe_lab_policy
 
-ACK_ENV = "SONDER_UNSAFE_LAB_ACK"
-ACKNOWLEDGEMENT = (
-    "I UNDERSTAND SONDER UNSAFE LAB MODE GIVES MODELS UNRESTRICTED HOST TOOL "
-    "ACCESS AND I AM RUNNING IN A DISPOSABLE ISOLATED ENVIRONMENT"
-)
+ACK_ENV = unsafe_lab_policy.ACK_ENV
+ACKNOWLEDGEMENT = unsafe_lab_policy.ACKNOWLEDGEMENT
 AUDIT_PATH_ENV = "SONDER_UNSAFE_LAB_AUDIT_PATH"
 WARNING = (
     "DANGER: UNSAFE LAB MODE IS ACTIVE; MODEL AGENT/AUTOPILOT HOST-TOOL "
     "RESTRICTIONS ARE DISABLED. THIS IS NOT OS ISOLATION."
 )
-_TRUE = frozenset({"1", "true", "yes", "on"})
 
 
 class UnsafeLabError(RuntimeError):
@@ -39,16 +39,6 @@ class State:
 
 _audit_lock = threading.Lock()
 _audited_processes: set[int] = set()
-
-
-def _is_loopback(host: str) -> bool:
-    value = str(host or "").strip().strip("[]").lower()
-    if value == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(value).is_loopback
-    except ValueError:
-        return False
 
 
 def _windows_elevated() -> bool:
@@ -81,39 +71,24 @@ def is_privileged() -> bool:
     return True if geteuid is None else geteuid() == 0
 
 
-def _local_ollama_error(env) -> str:
-    """Require the model endpoint itself to stay inside the isolated guest."""
-    value = str(env.get("OLLAMA_HOST", "127.0.0.1:11434")).strip()
-    try:
-        error = policy_error(value, allow_remote=False)
-    except Exception as exc:
-        return "unsafe lab mode could not validate OLLAMA_HOST: %s" % exc
-    if error:
-        return "unsafe lab mode requires a loopback OLLAMA_HOST: %s" % error
-    return ""
-
-
 def inspect(*, env=None, host=None, privilege_probe=None) -> State:
     source = os.environ if env is None else env
     if ACK_ENV not in source:
         return State(requested=False, enabled=False)
-    raw = str(source.get(ACK_ENV, ""))
-    configured_host = str(host if host is not None else source.get("SONDER_HOST", "127.0.0.1")).strip()
-    if raw != ACKNOWLEDGEMENT:
-        return State(requested=True, enabled=False, error=(
-            f"{ACK_ENV} does not exactly match the required acknowledgement; "
-            "boolean, truthy, abbreviated, and whitespace-modified values are refused"
-        ), host=configured_host)
-    if not _is_loopback(configured_host):
-        return State(requested=True, enabled=False, error="unsafe lab mode refuses non-loopback SONDER_HOST exposure", host=configured_host)
-    if str(source.get("SONDER_ALLOW_CLOUD", "")).strip().lower() in _TRUE:
-        return State(requested=True, enabled=False, error="unsafe lab mode refuses hosted/cloud model opt-in", host=configured_host)
-    ollama_error = _local_ollama_error(source)
-    if ollama_error:
-        return State(requested=True, enabled=False, error=ollama_error, host=configured_host)
+    configured_host = str(
+        host if host is not None else source.get("SONDER_HOST", "127.0.0.1")
+    ).strip()
+    error = unsafe_lab_policy.validation_error(source, host=host)
+    if error:
+        return State(requested=True, enabled=False, error=error, host=configured_host)
     probe = is_privileged if privilege_probe is None else privilege_probe
     if probe():
-        return State(requested=True, enabled=False, error="unsafe lab mode refuses root or elevated/administrator execution", host=configured_host)
+        return State(
+            requested=True,
+            enabled=False,
+            error="unsafe lab mode refuses root or elevated/administrator execution",
+            host=configured_host,
+        )
     return State(requested=True, enabled=True, host=configured_host)
 
 

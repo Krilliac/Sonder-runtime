@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
-from sonder_runtime.application.security import unsafe_lab
+from sonder_runtime.platform import unsafe_lab_policy
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -650,9 +650,9 @@ def load_config(
     # Check the final effective listener host, including the highest-precedence
     # CLI overrides. Otherwise an exact unsafe acknowledgement plus
     # --host=0.0.0.0 could evade the lab's stricter loopback-only rule.
-    lab_state = unsafe_lab.inspect(env=merged_env, host=config.server.host)
-    if lab_state.error:
-        errors.append(lab_state.error)
+    lab_error = unsafe_lab_policy.validation_error(merged_env, host=config.server.host)
+    if lab_error:
+        errors.append(lab_error)
 
     if not config.state.home:
         config = replace(
