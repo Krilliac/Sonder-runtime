@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import platform
 
 
 def parse_memory_gb(value: object) -> float | None:
@@ -13,3 +14,11 @@ def parse_memory_gb(value: object) -> float | None:
         return None
     amount = float(match.group(1))
     return amount if match.group(2) == "gb" else amount / 1024.0
+
+
+def probe_platform() -> str:
+    """Return the normalized host platform name without raising."""
+    try:
+        return platform.system() or "unknown"
+    except Exception:
+        return "unknown"

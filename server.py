@@ -196,6 +196,10 @@ from sonder_runtime.platform.model_retry_policy import (
 from sonder_runtime.platform.runtime_summary import (
     local_runtime_summary as _platform_local_runtime_summary,
 )
+from sonder_runtime.platform.context_selection import (
+    native_context as _platform_native_context,
+    requested_context as _platform_requested_context,
+)
 from sonder_runtime.domain.prompt_composition import (
     join_system_parts as _join_system_parts,
 )
@@ -289,11 +293,13 @@ def _local_runtime_summary():
 
 
 def _context_requested(value=None):
-    return context_policy.requested(SESSION_NUM_CTX if value in (None, "") else value)
+    """Compatibility delegate for packaged context-size selection."""
+    return _platform_requested_context(value, default_value=SESSION_NUM_CTX)
 
 
 def _context_native(value=None):
-    return context_policy.native(_context_requested(value))
+    """Compatibility delegate for packaged native-context selection."""
+    return _platform_native_context(value, default_value=SESSION_NUM_CTX)
 
 
 TIERS = _RUNTIME_MODEL_CONFIGURATION.tier_map()

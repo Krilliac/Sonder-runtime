@@ -459,3 +459,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Ninety-First Slice: `WP1-ONE-HUNDRED-NINETY-FIRST-SLICE.md` —
   moved local-runtime summary projection into the packaged platform boundary
   while preserving the root server compatibility delegate.
+- WP1 One-Hundred-Ninety-Third Slice: `WP1-ONE-HUNDRED-NINETY-THIRD-SLICE.md` —
+  moved root server context-size selection into the packaged platform adapter
+  while preserving the server compatibility delegates.
+- WP1 One-Hundred-Ninety-Fourth Slice: `WP1-ONE-HUNDRED-NINETY-FOURTH-SLICE.md` —
+  moved host-platform probing into the packaged hardware platform boundary
+  while preserving the root hardware compatibility delegate.
