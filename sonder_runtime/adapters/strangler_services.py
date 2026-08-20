@@ -12,6 +12,7 @@ import time
 
 from .persistence.autopilot_repository import AutopilotRepository
 from .runtime_policy_repository import RuntimePolicyRepository
+from .memory_repository import MemoryRepositoryAdapter
 from ..application.context import OperationContext
 from ..application.ports.model_gateway import (
     Embedding,
@@ -29,80 +30,6 @@ def _check_context_liveness(context: OperationContext) -> None:
         raise DeadlineExceeded("operation deadline exceeded before adapter call")
     if context.cancellation is not None and context.cancellation.cancelled:
         raise Cancelled("operation cancelled before adapter call")
-
-
-class LegacyMemoryRepository:
-    """MemoryRepository over the migrated memory and recall adapters.
-
-    Bound to a live SQLite connection owned by the UnitOfWork — all methods
-    delegate against that one connection. Constructed by the UnitOfWork, not
-    standalone.
-    """
-
-    def __init__(self, conn) -> None:
-        self._conn = conn
-
-    def add_fact(self, fact_id: str, project: str, text: str, embedding=None) -> None:
-        import sonder_runtime.adapters.memory_store as memory_store
-
-        memory_store.add_fact(self._conn, fact_id, project, text, embedding)
-
-    def delete_fact(self, fact_id: str, project: str) -> bool:
-        import sonder_runtime.adapters.memory_store as memory_store
-
-        return memory_store.delete_fact(self._conn, fact_id, project)
-
-    def facts_for_project(self, project: str) -> list:
-        import sonder_runtime.adapters.memory_store as memory_store
-
-        return memory_store.facts_for_project(self._conn, project)
-
-    def count_facts(self, project: str) -> int:
-        import sonder_runtime.adapters.memory_store as memory_store
-
-        return memory_store.count_facts(self._conn, project)
-
-    def log_interaction(
-        self,
-        interaction_id: str,
-        task: str,
-        retrieved_ctx,
-        response: str,
-        tier: str,
-        **fields,
-    ) -> None:
-        import sonder_runtime.adapters.memory_store as memory_store
-
-        return memory_store.log_interaction(
-            self._conn, interaction_id, task, retrieved_ctx, response, tier, **fields
-        )
-
-    def get_interaction(self, interaction_id: str) -> dict | None:
-        import sonder_runtime.adapters.memory_store as memory_store
-
-        return memory_store.get_interaction(self._conn, interaction_id)
-
-    def recall(self, task: str, *, k: int = 2, project: str | None = None, **options):
-        import sonder_runtime.adapters.recall as recall_module
-
-        return recall_module.recall(self._conn, task, k=k, project=project, **options)
-
-    def record_outcome(
-        self, interaction_id: str, signal: str, reward_value: float, *,
-        source: str, **options
-    ):
-        """Record a verdict. ``source`` is required (#62) and never defaulted.
-
-        Naming it in the signature rather than letting it ride in ``**options``
-        means a caller that omits it fails at this port, with an error naming
-        the boundary, instead of at a SQLite NOT NULL several frames down.
-        """
-        import sonder_runtime.adapters.memory_store as memory_store
-
-        return memory_store.record_outcome_and_claim_lesson_distillation(
-            self._conn, interaction_id, signal, reward_value,
-            source=source, **options
-        )
 
 
 class LegacyUnitOfWork:
@@ -133,7 +60,7 @@ class LegacyUnitOfWork:
 
         path = self._db_path or paths.memory_db_path()
         self._conn = memory_store.connect(path)
-        self.memory = LegacyMemoryRepository(self._conn)
+        self.memory = MemoryRepositoryAdapter(self._conn)
         return self
 
     def commit(self) -> None:
@@ -229,4 +156,5 @@ class OperationsEventSink:
 
 
 # Compatibility name for callers that still import the pre-migration adapter.
+LegacyMemoryRepository = MemoryRepositoryAdapter
 LegacyToolExecutor = ToolExecutorAdapter

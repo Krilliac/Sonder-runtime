@@ -140,6 +140,9 @@ from sonder_runtime.domain.fanout_policy import nonchat_reason as _fanout_noncha
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
 )
+from sonder_runtime.domain.prompt_composition import (
+    join_system_parts as _join_system_parts,
+)
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
@@ -1606,10 +1609,6 @@ def _resolve_project(project):
     if p.lower() == "none":
         return None
     return p
-
-
-def _join_system_parts(*parts):
-    return "\n\n".join(p for p in parts if p)
 
 
 # The mutable, disk-backed parts of the system prompt, pinned for one turn.
