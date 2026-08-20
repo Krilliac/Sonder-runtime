@@ -408,13 +408,12 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
         )
     }
     assert resolved == {
-        "data_query", "dependency_inventory",
-        "sonder_runtime.adapters.filesystem.file_ops", "log_inspect",
-        "workspace_compare",
+        "sonder_runtime.adapters.filesystem.file_ops", "workspace_compare",
     }
     assert not resolved & {
-        "archive_tools", "content_digest", "archive_extract", "archive_create",
-        "data_convert", "json_patch_tool", "project_detect",
+        "archive_tools", "content_digest", "data_query", "dependency_inventory",
+        "archive_extract", "archive_create", "data_convert", "json_patch_tool",
+        "log_inspect", "project_detect",
         "sqlite_mutate", "text_patch", "workbench",
     }
 
@@ -430,7 +429,10 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
             and isinstance(node.args[0].value, str)
         )
     }
-    assert packaged == {"archive_tools", "content_digest", "project_detect"}
+    assert packaged == {
+        "archive_tools", "content_digest", "data_query", "dependency_inventory",
+        "log_inspect", "project_detect",
+    }
 
 
 def test_preference_use_case_depends_only_on_narrow_application_ports():

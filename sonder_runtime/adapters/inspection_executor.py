@@ -105,7 +105,7 @@ class InspectionExecutorAdapter:
             return _failure(exc, args)
 
     def _log_inspect(self, args: dict, context: OperationContext) -> ToolResult:
-        log_inspect = _legacy_module("log_inspect")
+        log_inspect = _packaged_module("log_inspect")
 
         audit_args = {key: args[key] for key in (
             "path", "tail_lines", "context_lines", "max_file_bytes",
@@ -323,7 +323,7 @@ class InspectionExecutorAdapter:
             return _failure(exc, audit_args)
 
     def _data_query(self, args: dict, context: OperationContext) -> ToolResult:
-        data_query = _legacy_module("data_query")
+        data_query = _packaged_module("data_query")
 
         audit_args = {key: args[key] for key in (
             "path", "sql", "projection_json", "filters_json", "max_rows",
@@ -360,7 +360,7 @@ class InspectionExecutorAdapter:
     def _dependency_inventory(
         self, args: dict, context: OperationContext
     ) -> ToolResult:
-        dependency_inventory = _legacy_module("dependency_inventory")
+        dependency_inventory = _packaged_module("dependency_inventory")
 
         audit_args = {key: args[key] for key in (
             "path", "max_depth", "max_files", "max_total_bytes", "max_results",
