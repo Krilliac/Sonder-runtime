@@ -11,6 +11,7 @@ from enum import Enum
 import hashlib
 import json
 from typing import Iterable, Mapping
+from pathlib import Path
 
 from sonder_runtime.application.agents.presets import AgentPreset, builtin_presets
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
@@ -59,7 +60,8 @@ class WorkspaceAssignment:
         writes = _paths(self.write_roots, "write root")
         if not reads and writes:
             raise IntegrationError("write roots require at least one read root")
-        if not set(writes).issubset(reads):
+        read_paths = tuple(Path(root).resolve(strict=False) for root in reads)
+        if not all(any(_path_inside(Path(root).resolve(strict=False), read) for read in read_paths) for root in writes):
             raise IntegrationError("every write root must also be an explicit read root")
         object.__setattr__(self, "read_roots", reads)
         object.__setattr__(self, "write_roots", writes)
@@ -70,6 +72,45 @@ class WorkspaceAssignment:
 
     def permits_write(self, root: str) -> bool:
         return _required(root, "write root", limit=MAX_PATH_CHARS) in self.write_roots
+
+    def guard(self) -> "WorkspaceGuard":
+        """Return the path-boundary guard for this explicit assignment."""
+        return WorkspaceGuard(self)
+
+    def permits(self, path: str | Path, *, write: bool = False) -> bool:
+        """Check a concrete path, including symlink-resolved containment."""
+        return self.guard().permits(path, write=write)
+
+
+class WorkspaceGuard:
+    """Executable read/write enforcement for one child workspace assignment."""
+
+    def __init__(self, assignment: WorkspaceAssignment) -> None:
+        self.assignment = assignment
+        self._reads = tuple(Path(root).resolve(strict=False) for root in assignment.read_roots)
+        self._writes = tuple(Path(root).resolve(strict=False) for root in assignment.write_roots)
+        if not all(any(self._inside(root, parent) for parent in self._reads) for root in self._writes):
+            raise IntegrationError("write workspace must be contained by a read workspace")
+
+    @staticmethod
+    def _inside(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
+
+    def permits(self, path: str | Path, *, write: bool = False) -> bool:
+        candidate = Path(path).resolve(strict=False)
+        roots = self._writes if write else self._reads
+        return any(self._inside(candidate, root) for root in roots)
+
+    def require(self, path: str | Path, *, write: bool = False) -> Path:
+        candidate = Path(path).resolve(strict=False)
+        if not self.permits(candidate, write=write):
+            mode = "write" if write else "read"
+            raise IntegrationError(f"workspace {mode} denied outside explicit assignment: {candidate}")
+        return candidate
 
 
 @dataclass(frozen=True)
@@ -222,12 +263,22 @@ class RoleWorkflowGraph:
 
 def complete_builtin_presets() -> tuple[AgentPreset, ...]:
     """Return every built-in role preset, including the integration role."""
-    existing = {preset.role: preset for preset in builtin_presets()}
+    existing: dict[AgentRole, AgentPreset] = {}
+    for preset in builtin_presets():
+        existing.setdefault(preset.role, preset)
     existing.setdefault(
         AgentRole.INTEGRATOR,
         AgentPreset("integrator", AgentRole.INTEGRATOR, role_budget(AgentRole.INTEGRATOR), ("inspect", "integrate", "validate")),
     )
     return tuple(existing[role] for role in AgentRole)
+
+
+def _path_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def default_role_workflow() -> RoleWorkflowGraph:
@@ -260,6 +311,6 @@ def delegation_digest(request: DelegationRequest) -> str:
 
 __all__ = [
     "DelegationRequest", "DelegationStatus", "IntegrationError", "LineageRecord",
-    "ResultEvidence", "RoleWorkflowGraph", "WorkspaceAssignment",
+    "ResultEvidence", "RoleWorkflowGraph", "WorkspaceAssignment", "WorkspaceGuard",
     "complete_builtin_presets", "default_role_workflow", "delegation_digest",
 ]
