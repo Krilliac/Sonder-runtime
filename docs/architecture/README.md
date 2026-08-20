@@ -385,3 +385,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Sixty-Eighth Slice: `WP1-ONE-HUNDRED-SIXTY-EIGHTH-SLICE.md` —
   moved pure secret-presence redaction into the platform boundary while keeping
   configuration ownership and redacted output compatibility intact.
+- WP1 One-Hundred-Seventieth Slice: `WP1-ONE-HUNDRED-SEVENTIETH-SLICE.md` —
+  moved pure model-tag parameter parsing into the packaged domain boundary
+  while preserving the root hardware compatibility export.
+- WP1 One-Hundred-Sixty-Ninth Slice: `WP1-ONE-HUNDRED-SIXTY-NINTH-SLICE.md` —
+  moved the import-time running-source commit probe into the platform version
+  boundary while preserving the root server compatibility delegate.

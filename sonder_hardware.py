@@ -29,6 +29,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+from sonder_runtime.domain.model_sizing import params_from_model_tag
+
 
 # --- model sizing thresholds --------------------------------------------------
 #
@@ -124,48 +126,6 @@ _BAND_ORDER = tuple(label for _ceiling, label in _PARAM_BANDS)
 # ignored. Anything unrecognised returns None rather than a guess, because a
 # wrong parameter count is worse here than an absent one: absent falls back to
 # today's hardware-derived behavior, wrong silently changes the advice.
-_MOE_TAG_RE = re.compile(r"(?<![0-9a-z])([0-9]+(?:\.[0-9]+)?)b-a([0-9]+(?:\.[0-9]+)?)b(?![0-9a-z])")
-_DENSE_TAG_RE = re.compile(r"(?<![0-9a-z])([0-9]+(?:\.[0-9]+)?)b(?![0-9a-z])")
-
-
-def params_from_model_tag(tag) -> tuple[float, float] | None:
-    """Parse ``(total_params_b, active_params_b)`` out of an Ollama model tag.
-
-    Returns ``None`` when the tag carries no usable size, which is the common
-    case for an alias like ``sonder:latest``. For a dense tag both numbers are
-    the same; for an MoE tag they differ, and that difference is the whole point
-    of this function.
-    """
-    text = str(tag or "").strip().lower()
-    # Only the tag carries size metadata. Searching the whole identifier lets a
-    # repository *name* masquerade as one: "custom-70b-model:latest" would parse
-    # as 70B and silently change the advice, even though ":latest" says nothing
-    # about size. No tag means no size, which falls back to the hardware band --
-    # the safe direction, and the same answer an alias already gives.
-    _name, separator, tag_part = text.rpartition(":")
-    if not separator:
-        return None
-    text = tag_part.strip()
-    if not text:
-        return None
-    moe = _MOE_TAG_RE.search(text)
-    if moe:
-        total = float(moe.group(1))
-        active = float(moe.group(2))
-        # An "active" count above the total is a malformed tag, not an MoE;
-        # refuse it rather than reporting a model faster than it can be.
-        # active == total is degenerate but harmless -- it simply reads dense.
-        if total > 0 and 0 < active <= total:
-            return total, active
-        return None
-    dense = _DENSE_TAG_RE.search(text)
-    if dense:
-        total = float(dense.group(1))
-        if total > 0:
-            return total, total
-    return None
-
-
 def decode_band(active_params_b) -> str | None:
     """Return the band whose *decode speed* an ``active_params_b`` model matches.
 
