@@ -228,7 +228,11 @@ def _legacy_probe(monkeypatch) -> GatewayContractProbe:
     def set_success(text, tokens_in, tokens_out):
         response["text"] = text
 
-    gateway = LegacyModelGateway()
+    gateway = LegacyModelGateway(
+        generate=lambda prompt, *, history=None, tier=None: server.sonder(
+            prompt, history=history, tier=tier
+        )
+    )
     return GatewayContractProbe(
         name="legacy-strangler",
         gateway=gateway,

@@ -4,7 +4,7 @@ import pytest
 
 import server
 import sonder_runtime.adapters.embeddings as embeddings
-from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
+from sonder_runtime.adapters.strangler_services import LegacyModelGateway
 from sonder_runtime.adapters.strangler_services import (
     LegacyModelGateway as CompatibilityGateway,
 )
@@ -25,7 +25,7 @@ def test_generate_preserves_legacy_request_shape_and_response(monkeypatch):
         return "legacy response"
 
     monkeypatch.setattr(server, "sonder", sonder)
-    response = LegacyModelGateway().generate(
+    response = LegacyModelGateway(generate=sonder).generate(
         ModelRequest("hello", "code", history=(("user", "prior"),)),
         local_owner_context(correlation_id="legacy-gateway"),
     )
