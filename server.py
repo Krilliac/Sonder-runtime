@@ -21547,7 +21547,7 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
     else:
         active = []
         with contextlib.suppress(Exception):
-            snapshot = _application().automation.snapshot(include_finished=False, limit=20)
+            snapshot = autopilot_store.snapshot(include_finished=False, limit=20)
             active = [
                 row for row in snapshot.get("runs", [])
                 if row.get("status") in autopilot_store.ACTIVE_STATUSES
