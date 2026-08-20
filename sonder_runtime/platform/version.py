@@ -21,6 +21,30 @@ VERSION = "0.9.0.dev0"
 _BUILD_STAMP = Path(__file__).resolve().parents[2] / "sonder_build.json"
 
 
+def running_source_commit_at_import(root: Path | None = None) -> str:
+    """Return the commit whose source tree was loaded by the process.
+
+    This is a deliberately narrow startup probe: it reads only the current
+    checkout's ``HEAD`` and never consults remotes or changes repository state.
+    Packaged installs and constrained test environments may not have Git
+    metadata, in which case an empty marker keeps the caller useful without
+    claiming a commit it cannot prove.
+    """
+    checkout = Path(root).resolve() if root is not None else _BUILD_STAMP.parent
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and len(commit) == 40 else ""
+
+
 @dataclass(frozen=True)
 class BuildInfo:
     version: str

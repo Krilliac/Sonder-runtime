@@ -86,6 +86,9 @@ from sonder_runtime.platform.environment_options import (
     cpu_thread_default as _cpu_thread_default,
     env_int_option as _env_int_option,
 )
+from sonder_runtime.platform.version import (
+    running_source_commit_at_import as _running_source_commit,
+)
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -219,13 +222,7 @@ import unsafe_lab
 
 def _running_source_commit_at_import():
     """Best-effort immutable marker for the code this process imported."""
-    try:
-        return git_tools.runtime_checkout_commit(Path(__file__).resolve().parent)
-    except Exception:
-        # Packaged installs and constrained test/import environments can lack
-        # Git metadata. Update status remains useful there; it simply cannot
-        # prove whether a process restart would load different source bytes.
-        return ""
+    return _running_source_commit(Path(__file__).resolve().parent)
 
 
 # Keep this separate from the mutable on-disk HEAD used by /updatecheck.
