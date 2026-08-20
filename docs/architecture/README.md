@@ -336,3 +336,10 @@ newer ADR explicitly supersedes them.
   moved task persistence ownership into a canonical packaged adapter while
   preserving the `task_store` compatibility alias and leaving its event sink
   boundary unchanged.
+- WP1 One-Hundred-Fifty-Third Slice: `WP1-ONE-HUNDRED-FIFTY-THIRD-SLICE.md` —
+  moved the pure interactive control-command timeout policy into the domain
+  boundary while preserving the server compatibility alias.
+- WP1 One-Hundred-Fifty-Fourth Slice: `WP1-ONE-HUNDRED-FIFTY-FOURTH-SLICE.md` —
+  moved checklist event-sink implementation ownership into its dedicated
+  packaged task-event adapter while preserving the `task_store` compatibility
+  alias.
