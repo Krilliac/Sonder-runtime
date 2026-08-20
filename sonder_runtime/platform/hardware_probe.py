@@ -5,6 +5,15 @@ from __future__ import annotations
 import platform
 import re
 import os
+from pathlib import Path
+
+
+def read_text(path: Path) -> str:
+    """Read a bounded host-probe text file without leaking filesystem errors."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except (OSError, ValueError):
+        return ""
 
 
 def parse_memory_gb(value: object) -> float | None:
@@ -70,6 +79,7 @@ def probe_total_ram_gb() -> float | None:
 
 __all__ = [
     "parse_memory_gb",
+    "read_text",
     "probe_platform",
     "probe_cpu_count",
     "probe_total_ram_gb",

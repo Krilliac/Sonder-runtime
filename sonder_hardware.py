@@ -39,11 +39,13 @@ from sonder_runtime.platform.hardware_identity import (
     looks_integrated,
 )
 from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
+from sonder_runtime.adapters.accelerators.inventory import dedupe_accelerators
 from sonder_runtime.platform.hardware_probe import (
     parse_memory_gb,
     probe_cpu_count,
     probe_platform,
     probe_total_ram_gb,
+    read_text,
 )
 from sonder_runtime.platform.hardware_identity import vendor_from_text
 
@@ -53,8 +55,10 @@ _parse_memory_gb = parse_memory_gb
 _probe_platform = probe_platform
 # Legacy private name retained for callers that exercised the old probe helper.
 _probe_cpu_count = probe_cpu_count
+_read_text = read_text
 _probe_total_ram_gb = probe_total_ram_gb
 _probe_gpu = probe_nvidia_gpu
+_dedupe_accelerators = dedupe_accelerators
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -237,13 +241,6 @@ def _probe_windows_accelerators(registry=None) -> list[dict]:
     return _dedupe_accelerators(records)
 
 
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace").strip()
-    except (OSError, ValueError):
-        return ""
-
-
 def _probe_linux_accelerators(
     root: Path = Path("/sys/class/drm"), nvidia_probe=None,
 ) -> list[dict]:
@@ -337,25 +334,6 @@ def _probe_nvidia_accelerators(runner=None) -> list[dict]:
             device_id=uuid or ("nvidia-index:%s" % index),
         ))
     return records
-
-
-def _dedupe_accelerators(records: list[dict]) -> list[dict]:
-    """Drop exact/stale duplicates while retaining distinct physical adapters."""
-    result = []
-    seen = set()
-    for item in records:
-        device_id = str(item.get("device_id") or "").lower()
-        key = (str(item.get("probe") or ""), device_id) if device_id else (
-            str(item.get("vendor") or "unknown").lower(),
-            str(item.get("name") or "display adapter").lower(),
-            item.get("memory_gb"),
-            item.get("integrated"),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-    return result
 
 
 def _probe_macos_accelerators(runner=None) -> list[dict]:

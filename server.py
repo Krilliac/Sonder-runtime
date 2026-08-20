@@ -22,6 +22,7 @@ import collections
 import base64
 import contextlib
 import datetime
+import functools
 import hashlib
 import hmac
 import importlib
@@ -192,6 +193,7 @@ from sonder_runtime.domain.learning_tier import (
     canonical_learn_tier as _canonical_learn_tier,
     should_learn as _should_learn_policy,
 )
+from sonder_runtime.domain.retrieval_policy import no_retrieve as _no_retrieve_policy
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
 )
@@ -1372,10 +1374,8 @@ def _make_generate(
 
 
 def _no_retrieve(conn, task):
-    """Retrieve hook that injects nothing — used for 'teacher' (clean) generation so a
-    strong model answers at full strength without local-lesson augmentation, while its
-    output is still captured for grounding + distillation."""
-    return []
+    """Compatibility wrapper for the packaged clean-generation retrieval policy."""
+    return _no_retrieve_policy(conn, task)
 
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
@@ -3683,8 +3683,10 @@ def _transport_error_detail(error) -> str:
     return _transport_error_detail_policy(error)
 
 
-def _ollama_display() -> str:
-    return ollama_endpoint.safe_display(BASE)
+# Compatibility alias: endpoint display formatting is owned by the packaged
+# Ollama endpoint policy, while legacy server callers retain the zero-argument
+# private helper contract.
+_ollama_display = functools.partial(ollama_endpoint.safe_display, BASE)
 
 
 def _require_ollama_endpoint(*, cloud: bool = False) -> None:

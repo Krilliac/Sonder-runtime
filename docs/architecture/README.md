@@ -538,6 +538,24 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Eighteenth Slice: `WP1-TWO-HUNDRED-EIGHTEENTH-SLICE.md` —
   moved normalized accelerator-record construction into the packaged platform
   hardware-identity boundary while preserving the legacy hardware alias.
+- WP1 Two-Hundred-Twentieth Slice: `WP1-TWO-HUNDRED-TWENTIETH-SLICE.md` —
+  moved host-probe filesystem text reading into the packaged platform
+  hardware-probe boundary while preserving the legacy hardware alias.
+- WP1 Two-Hundred-Twenty-First Slice: `WP1-TWO-HUNDRED-TWENTY-FIRST-SLICE.md` —
+  moved Ollama endpoint display ownership into the packaged endpoint policy
+  while preserving the root zero-argument compatibility alias.
+- WP1 Two-Hundred-Twenty-Fourth Slice: `WP1-TWO-HUNDRED-TWENTY-FOURTH-SLICE.md` —
+  moved standalone-client argv and environment configuration resolution into
+  the packaged client adapter while preserving root compatibility delegates.
 - WP1 Two-Hundred-Seventeenth Slice: `WP1-TWO-HUNDRED-SEVENTEENTH-SLICE.md` —
   moved bounded integer-limit normalization into the packaged domain boundary
   while preserving the root server compatibility delegate.
+- WP1 Two-Hundred-Nineteenth Slice: `WP1-TWO-HUNDRED-NINETEENTH-SLICE.md` —
+  moved the clean-generation no-retrieval policy into the packaged domain
+  boundary while preserving the root server compatibility wrapper.
+- WP1 Two-Hundred-Twenty-Third Slice: `WP1-TWO-HUNDRED-TWENTY-THIRD-SLICE.md` —
+  moved self-heal doctor-result classification into the packaged bootstrap
+  doctor boundary while preserving root compatibility wiring.
+- WP1 Two-Hundred-Twenty-Second Slice: `WP1-TWO-HUNDRED-TWENTY-SECOND-SLICE.md` —
+  moved accelerator-inventory de-duplication into the packaged hardware
+  adapter boundary while preserving the legacy hardware compatibility alias.

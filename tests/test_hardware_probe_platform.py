@@ -4,11 +4,24 @@ from sonder_runtime.platform.hardware_probe import (
     probe_cpu_count,
     probe_platform,
     probe_total_ram_gb,
+    read_text,
 )
 
 
 def test_hardware_memory_parser_has_canonical_platform_owner():
     assert sonder_hardware._parse_memory_gb is parse_memory_gb
+
+
+def test_hardware_probe_text_reader_has_canonical_platform_owner(tmp_path):
+    target = tmp_path / "uevent"
+    target.write_text(" DRIVER=amdgpu \n", encoding="utf-8")
+    assert sonder_hardware._read_text is read_text
+    assert read_text(target) == "DRIVER=amdgpu"
+
+
+def test_hardware_probe_text_reader_swallows_unreadable_paths(tmp_path):
+    missing = tmp_path / "missing"
+    assert read_text(missing) == ""
 
 
 def test_hardware_memory_parser_accepts_decimal_units_and_commas():

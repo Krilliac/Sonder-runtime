@@ -48,6 +48,9 @@ from sonder_runtime.domain.doctor_specs import (
 from sonder_runtime.bootstrap.config_loading import (
     load_config_or_none as _load_config_or_none_impl,
 )
+from sonder_runtime.bootstrap.doctor_checks import (
+    summarize_self_heal as _summarize_self_heal,
+)
 
 # Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
 # is simply absent should not make an otherwise-healthy runtime look sick.
@@ -199,18 +202,7 @@ def _check_self_heal() -> dict:
     db_path = os.environ.get("SONDER_DB")
     if not db_path:
         return _skip("SONDER_DB not set")
-    try:
-        issues = self_heal.check(db_path)
-    except Exception as exc:
-        return _skip("self-heal check failed (%s)" % exc)
-    if not issues:
-        return {"status": STATUS_OK, "detail": "no issues"}
-    repairable = sum(1 for i in issues if getattr(i, "repairable", False))
-    status = STATUS_WARN if repairable == len(issues) else STATUS_FAIL
-    return {
-        "status": status,
-        "detail": "%d issue(s), %d repairable" % (len(issues), repairable),
-    }
+    return _summarize_self_heal(self_heal.check, db_path)
 
 
 def _check_memory_quality() -> dict:
