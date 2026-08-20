@@ -6,21 +6,7 @@ import threading
 import time
 
 from sonder_runtime.platform.service_state import ProcessState, ServiceStateTracker
-
-
-class CancellationToken:
-    def __init__(self) -> None:
-        self._event = threading.Event()
-
-    def cancel(self) -> None:
-        self._event.set()
-
-    @property
-    def cancelled(self) -> bool:
-        return self._event.is_set()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        return self._event.wait(timeout)
+from sonder_runtime.platform.process import CancellationToken
 
 
 class ShutdownCoordinator:

@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import secrets
 
-from sonder_logging import Redactor
+from sonder_runtime.platform.logging import Redactor
 
 
 def _safe(value, redactor):

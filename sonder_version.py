@@ -17,6 +17,8 @@ from sonder_runtime.platform import version as _canonical
 
 BuildInfo = _canonical.BuildInfo
 build_info = _canonical.build_info
+running_source_commit_at_import = _canonical.running_source_commit_at_import
+_commit_from_git = _canonical._commit_from_git
 
 # Imports of ``sonder_version`` receive the canonical module object, matching
 # the identity-preserving compatibility pattern used by other migrated root

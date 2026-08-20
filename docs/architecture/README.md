@@ -1,5 +1,9 @@
 # Sonder Runtime architecture documents
 
+- WP1 Two-Hundred-Thirty-Fifth Slice: `WP1-TWO-HUNDRED-THIRTY-FIFTH-SLICE.md` —
+  moved speculative-tool safety policy into the packaged domain boundary while
+  preserving the root allowlist alias.
+
 - WP1 Two-Hundred-Twenty-Seventh Slice: `WP1-TWO-HUNDRED-TWENTY-SEVENTH-SLICE.md` —
   moved environment-file parsing into the packaged configuration policy
   boundary while preserving the root `ConfigError` compatibility contract.
@@ -554,6 +558,9 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Twenty-Fifth Slice: `WP1-TWO-HUNDRED-TWENTY-FIFTH-SLICE.md` —
   moved live-process fingerprint selection into the canonical process-liveness
   adapter while preserving the `ProcessProbeAdapter.identity` port surface.
+- WP1 Two-Hundred-Thirty-Fourth Slice: `WP1-TWO-HUNDRED-THIRTY-FOURTH-SLICE.md` —
+  moved cooperative cancellation ownership into the packaged process boundary
+  while preserving packaged-shutdown and root compatibility aliases.
 - WP1 Two-Hundred-Seventeenth Slice: `WP1-TWO-HUNDRED-SEVENTEENTH-SLICE.md` —
   moved bounded integer-limit normalization into the packaged domain boundary
   while preserving the root server compatibility delegate.
@@ -569,6 +576,12 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Thirtieth Slice: `WP1-TWO-HUNDRED-THIRTIETH-SLICE.md` —
   moved the pure local-observability percentile helper into the packaged
   observability boundary while preserving the `_percentile` compatibility alias.
+- WP1 Two-Hundred-Thirty-Third Slice: `WP1-TWO-HUNDRED-THIRTY-THIRD-SLICE.md` —
+  consolidated the unstamped build-info commit probe onto the packaged version
+  boundary while preserving root and private compatibility aliases.
+- WP1 Two-Hundred-Thirty-Sixth Slice: `WP1-TWO-HUNDRED-THIRTY-SIXTH-SLICE.md` —
+  moved the debug-dump redaction import to the packaged logging boundary while
+  preserving the `debug_dump.Redactor` compatibility alias.
 - WP1 Two-Hundred-Twenty-Eighth Slice: `WP1-TWO-HUNDRED-TWENTY-EIGHTH-SLICE.md` —
   moved launcher-health token status ownership into the packaged health
   status boundary while preserving the root `sonder_health` alias.
