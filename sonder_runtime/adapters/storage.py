@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from sonder_runtime.platform.model_paths import model_roots
+
 PROBE_BYTES = 8 * 1024 * 1024
 PROBE_TIMEOUT_SECONDS = 5.0
 _MOUNTINFO_LIMIT = 1024 * 1024
@@ -27,29 +29,6 @@ _NETWORK_FILESYSTEMS = frozenset({
 })
 _SLOW_FILESYSTEMS = frozenset({"fuseblk", "udf"})
 _PROBE_RESULT = struct.Struct("!QQdd")
-
-
-def model_roots(env: dict[str, str] | None = None) -> tuple[Path, ...]:
-    """Return configured/default Ollama model roots without creating them."""
-    values = os.environ if env is None else env
-    configured = str(values.get("OLLAMA_MODELS", "")).strip()
-    candidates = (
-        [Path(configured).expanduser()]
-        if configured else [Path.home() / ".ollama" / "models"]
-    )
-    return _unique_paths(candidates)
-
-
-def _unique_paths(paths) -> tuple[Path, ...]:
-    result: list[Path] = []
-    seen: set[str] = set()
-    for path in paths:
-        candidate = Path(path).expanduser().resolve(strict=False)
-        key = os.path.normcase(str(candidate))
-        if key not in seen:
-            seen.add(key)
-            result.append(candidate)
-    return tuple(result)
 
 
 def _existing_ancestor(path: Path) -> Path:

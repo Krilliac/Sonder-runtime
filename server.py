@@ -190,6 +190,9 @@ from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
 from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_after_seconds
+from sonder_runtime.domain.cancellation_policy import (
+    cancellation_requested as _cancel_requested,
+)
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -3780,17 +3783,6 @@ def _http_error_detail(error: urllib.error.HTTPError) -> str:
 def _transport_error_detail(error) -> str:
     reason = getattr(error, "reason", error)
     return _safe_model_error_detail(reason)
-
-
-def _cancel_requested(cancel_check) -> bool:
-    if cancel_check is None:
-        return False
-    try:
-        return bool(cancel_check())
-    except Exception:
-        # Cancellation state is a safety gate. If the durable fleet ledger
-        # cannot be read, do not authorize another expensive request.
-        return True
 
 
 def _ollama_display() -> str:
