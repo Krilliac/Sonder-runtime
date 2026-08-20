@@ -219,6 +219,9 @@ from sonder_runtime.domain.runtime_model_configuration import (
 )
 from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
 from sonder_runtime.domain.tier_names import valid_tier_names as _valid_tier_names_policy
+from sonder_runtime.domain.permission_context import (
+    render_permission_mode_context as _render_permission_mode_context,
+)
 from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_after_seconds
 from sonder_runtime.domain.cancellation_policy import (
     cancellation_requested as _cancel_requested,
@@ -7337,19 +7340,13 @@ def context_compaction_plan(session: str = "", project: str = "") -> str:
 
 def _permission_mode_context(mode: str) -> str:
     """The state a rule table cannot show: which mode is in force, and privilege."""
-    return "\n".join([
-        "permission mode: %s -- %s" % (
-            permission_modes.MODE_LABELS.get(mode, mode),
-            permission_modes.MODE_BLURBS.get(mode, ""),
-        ),
-        # Load-bearing, and printed unconditionally on every render: it is
-        # what makes an `ask` row incomplete rather than false for a caller
-        # this surface does not speak for. Defined in permission_modes so the
-        # same sentence reaches /mode and /help too, rather than being a
-        # second copy free to drift.
-        "  %s" % permission_modes.ASK_CAVEAT,
+    return _render_permission_mode_context(
+        mode,
+        permission_modes.MODE_LABELS,
+        permission_modes.MODE_BLURBS,
+        permission_modes.ASK_CAVEAT,
         _elevation_status_text(),
-    ])
+    )
 
 
 def _permission_policy_text(tool_name: str = "") -> str:
