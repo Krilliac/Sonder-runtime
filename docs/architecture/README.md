@@ -41,6 +41,10 @@
   migration and verification record.
 - [`WP1-TWELFTH-SLICE.md`](WP1-TWELFTH-SLICE.md) — embedding cache adapter
   migration and verification record.
+- [`WP1-ONE-HUNDRED-THIRTEENTH-SLICE.md`](WP1-ONE-HUNDRED-THIRTEENTH-SLICE.md) —
+  packaged autopilot repository ownership and compatibility boundary.
+- [`WP1-ONE-HUNDRED-FOURTEENTH-SLICE.md`](WP1-ONE-HUNDRED-FOURTEENTH-SLICE.md) —
+  packaged HTTP serve-temperature policy and compatibility boundary.
 - [`WP1-THIRTEENTH-SLICE.md`](WP1-THIRTEENTH-SLICE.md) — embedding adapter
   migration and remaining NPU boundary.
 - [`WP1-FOURTEENTH-SLICE.md`](WP1-FOURTEENTH-SLICE.md) — NPU contract adapter
