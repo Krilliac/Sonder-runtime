@@ -23,3 +23,17 @@ def test_env_int_preserves_default_and_reports_malformed_values():
     assert config_environment.env_int("N", {"N": " 12 "}, 7, errors) == 12
     assert config_environment.env_int("N", {"N": "oops"}, 7, errors) == 7
     assert errors == ["N is not an integer"]
+
+
+def test_system_profile_float_policy_is_owned_by_configuration_environment():
+    import system_profile
+
+    assert system_profile._env_float is config_environment.env_float
+    assert config_environment.env_float.__module__ == config_environment.__name__
+
+
+def test_env_float_preserves_default_and_clamps_negative_values():
+    assert config_environment.env_float("N", 7.5, environ={}) == 7.5
+    assert config_environment.env_float("N", 7.5, environ={"N": " 12.25 "}) == 12.25
+    assert config_environment.env_float("N", 7.5, environ={"N": "-2"}) == 0.0
+    assert config_environment.env_float("N", 7.5, environ={"N": "oops"}) == 7.5
