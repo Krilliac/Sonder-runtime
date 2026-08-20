@@ -397,3 +397,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Seventy-Second Slice: `WP1-ONE-HUNDRED-SEVENTY-SECOND-SLICE.md` —
   moved pure model parameter-band, fit, and Q4 footprint policy into the
   packaged model-sizing domain boundary while preserving hardware exports.
+- WP1 One-Hundred-Seventy-Fourth Slice: `WP1-ONE-HUNDRED-SEVENTY-FOURTH-SLICE.md` —
+  moved environment-backed native/virtual context sizing into the packaged
+  platform boundary while preserving the legacy root module identity.
+- WP1 One-Hundred-Seventy-Third Slice: `WP1-ONE-HUNDRED-SEVENTY-THIRD-SLICE.md` —
+  moved pure live cloud-model override selection into the packaged domain
+  boundary while preserving the root server compatibility alias.

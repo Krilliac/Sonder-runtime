@@ -198,6 +198,7 @@ import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
+from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
 from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_after_seconds
 from sonder_runtime.domain.cancellation_policy import (
     cancellation_requested as _cancel_requested,
@@ -249,14 +250,6 @@ CLOUD_EXTRA_USAGE_FALLBACK_MODEL = (
     _RUNTIME_MODEL_CONFIGURATION.cloud_extra_usage_fallback_model
 )
 RETIRED_CLOUD_MODELS = _RUNTIME_MODEL_CONFIGURATION.retired_cloud_models
-
-
-def _live_cloud_model(configured, default):
-    """Compatibility alias for the packaged model configuration projection."""
-    lowered = str(configured or "").strip().lower()
-    if not lowered or lowered in RETIRED_CLOUD_MODELS:
-        return default
-    return configured
 
 
 def _local_model_options(temperature, num_predict, num_ctx):
