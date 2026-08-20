@@ -422,3 +422,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Eightieth Slice: `WP1-ONE-HUNDRED-EIGHTIETH-SLICE.md` —
   moved doctor-check result normalization into the packaged domain boundary
   while preserving the root doctor compatibility alias.
+- WP1 One-Hundred-Eighty-Second Slice: `WP1-ONE-HUNDRED-EIGHTY-SECOND-SLICE.md` —
+  moved display-adapter vendor normalization into the packaged platform
+  boundary while preserving the root hardware compatibility alias.
+- WP1 One-Hundred-Eighty-First Slice: `WP1-ONE-HUNDRED-EIGHTY-FIRST-SLICE.md` —
+  moved master-orchestration timeout normalization into the packaged domain
+  boundary while preserving the root server compatibility delegate.

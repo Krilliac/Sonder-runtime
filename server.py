@@ -156,6 +156,9 @@ from sonder_runtime.domain.runtime_identity import (
 from sonder_runtime.domain.model_capabilities import (
     fanout_capabilities as _fanout_capabilities,
 )
+from sonder_runtime.domain.master_timeout import (
+    master_timeout as _master_timeout_policy,
+)
 from sonder_runtime.domain.fanout_policy import (
     declares_generative_capability as _fanout_declares_generative_capability,
     nonchat_reason as _fanout_nonchat_reason,
@@ -8251,11 +8254,13 @@ def system_improvement_report(session: str = "", project: str = "") -> str:
 
 
 def _master_timeout(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        value = default
-    return max(15, min(value, TIMEOUT))
+    """Compatibility delegate for the packaged master-timeout policy."""
+    return _master_timeout_policy(
+        os.environ.get(name, str(default)),
+        default,
+        15,
+        TIMEOUT,
+    )
 
 
 def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
