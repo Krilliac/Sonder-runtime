@@ -17,8 +17,8 @@ import pytest
 
 import request_cache
 import server
-import sonder_metrics
 import sonder_runtime.interfaces.http.serve as ts
+from sonder_runtime.platform import metrics as runtime_metrics
 
 
 @pytest.fixture(autouse=True)
@@ -629,7 +629,7 @@ def test_run_prompt_ignores_unknown_cache_status(monkeypatch):
 
 
 def test_metrics_request_cache_counter_is_noop_safe():
-    metrics = sonder_metrics.MetricsRegistry(enabled=False)
+    metrics = runtime_metrics.MetricsRegistry(enabled=False)
     metrics.observe_request_cache("hit")
     metrics.observe_request_cache("miss")
     metrics.observe_request_cache("not-a-real-result")

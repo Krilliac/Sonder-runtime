@@ -10,7 +10,7 @@ from sonder_runtime.application.ports.model_gateway import (
     InferenceTelemetry,
     ModelResponse,
 )
-from sonder_metrics import MetricsRegistry
+from sonder_runtime.platform.metrics import MetricsRegistry
 
 
 def test_model_response_constructor_remains_backward_compatible():

@@ -54,7 +54,7 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.adapters.secrets as sonder_secrets
 import served_action_receipts
 import tool_contract
-from sonder_runtime.application.security import unsafe_lab
+import unsafe_lab
 
 DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024

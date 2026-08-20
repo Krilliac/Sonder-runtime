@@ -62,6 +62,28 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     assert any("new_accidental_legacy" in row for row in violations)
 
 
+def test_unsafe_lab_stateful_owner_is_security_adapter(monkeypatch):
+    """The compatibility module must preserve identity without app ownership."""
+    import inspect
+    import sys
+
+    import unsafe_lab
+
+    source = Path(inspect.getsourcefile(unsafe_lab)).resolve()
+    assert source == (
+        _REPO_ROOT / "sonder_runtime" / "adapters" / "security" / "unsafe_lab.py"
+    ).resolve()
+    assert not (
+        _REPO_ROOT / "sonder_runtime" / "application" / "security" / "unsafe_lab.py"
+    ).exists()
+    assert sys.modules["unsafe_lab"] is unsafe_lab
+
+    marker = []
+    monkeypatch.setattr(unsafe_lab, "active", lambda: marker.append(True) or True)
+    assert unsafe_lab.active() is True
+    assert marker == [True]
+
+
 def test_version_root_allowance_is_removed_after_packaged_ownership():
     module = _architecture_module()
     assert "sonder_version" not in module.ROOT_PLATFORM_MODULES
@@ -337,6 +359,7 @@ def test_checker_detects_a_violation(tmp_path):
         "sonder_serve.py",
         "sonder_repl.py",
         "sonder_migrations.py",
+        "sonder_metrics.py",
     ],
 )
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
