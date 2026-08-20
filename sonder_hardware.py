@@ -34,7 +34,10 @@ from sonder_runtime.domain.model_sizing import (
     memory_band,
     params_from_model_tag,
 )
-from sonder_runtime.platform.hardware_identity import looks_integrated
+from sonder_runtime.platform.hardware_identity import (
+    accelerator_record,
+    looks_integrated,
+)
 from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
 from sonder_runtime.platform.hardware_probe import (
     parse_memory_gb,
@@ -159,30 +162,7 @@ def _looks_integrated(name: str, vendor: str) -> bool | None:
     return looks_integrated(name, vendor)
 
 
-def _accelerator(
-    *, name: str, vendor: str = "unknown", memory_gb: float | None = None,
-    memory_kind: str = "unknown", integrated: bool | None = None, probe: str,
-    device_id: str = "",
-    presence_verified: bool | None = True,
-) -> dict:
-    if integrated is None:
-        integrated = _looks_integrated(name, vendor)
-    return {
-        "name": str(name or "display adapter"),
-        "vendor": vendor,
-        "memory_gb": round(float(memory_gb), 1) if memory_gb else None,
-        "memory_kind": memory_kind,
-        "integrated": integrated if isinstance(integrated, bool) else None,
-        "probe": probe,
-        "device_id": str(device_id or ""),
-        "presence_verified": (
-            presence_verified if isinstance(presence_verified, bool) else None
-        ),
-        # Detection proves only that the OS enumerates a device. Ollama/backend
-        # readiness requires a separate runtime probe and is intentionally not
-        # inferred from a vendor name or installed display driver.
-        "runtime_ready": None,
-    }
+_accelerator = accelerator_record
 
 
 def _probe_windows_accelerators(registry=None) -> list[dict]:

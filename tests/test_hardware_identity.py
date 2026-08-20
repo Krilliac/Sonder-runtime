@@ -1,33 +1,69 @@
-from sonder_runtime.platform.hardware_identity import looks_integrated, vendor_from_text
+from sonder_runtime.platform import hardware_identity
 import sonder_hardware
 
 
 def test_vendor_policy_is_owned_by_platform_boundary():
-    assert sonder_hardware._vendor_from_text is not vendor_from_text
-    assert sonder_hardware._vendor_from_text("NVIDIA Corporation") == vendor_from_text(
+    assert sonder_hardware._vendor_from_text is not hardware_identity.vendor_from_text
+    assert sonder_hardware._vendor_from_text("NVIDIA Corporation") == hardware_identity.vendor_from_text(
         "NVIDIA Corporation"
     )
 
 
 def test_vendor_policy_recognizes_pci_and_display_names():
-    assert vendor_from_text("VEN_10DE") == "NVIDIA"
-    assert vendor_from_text("Advanced Micro Devices, Inc.") == "AMD"
-    assert vendor_from_text("VEN_8086") == "Intel"
-    assert vendor_from_text("Apple M2") == "Apple"
+    assert hardware_identity.vendor_from_text("VEN_10DE") == "NVIDIA"
+    assert hardware_identity.vendor_from_text("Advanced Micro Devices, Inc.") == "AMD"
+    assert hardware_identity.vendor_from_text("VEN_8086") == "Intel"
+    assert hardware_identity.vendor_from_text("Apple M2") == "Apple"
 
 
 def test_vendor_policy_is_conservative_for_unknown_values():
-    assert vendor_from_text(None, "mystery adapter") == "unknown"
+    assert hardware_identity.vendor_from_text(None, "mystery adapter") == "unknown"
 
 
 def test_integrated_policy_is_owned_by_platform_boundary():
-    assert sonder_hardware._looks_integrated is not looks_integrated
+    assert sonder_hardware._looks_integrated is not hardware_identity.looks_integrated
     assert sonder_hardware._looks_integrated("Intel UHD Graphics 770", "Intel") is True
-    assert looks_integrated("NVIDIA GeForce RTX 5070 Ti", "NVIDIA") is False
+    assert hardware_identity.looks_integrated("NVIDIA GeForce RTX 5070 Ti", "NVIDIA") is False
 
 
 def test_integrated_policy_handles_discrete_and_unknown_families():
-    assert looks_integrated("Intel Arc A770", "Intel") is False
-    assert looks_integrated("AMD Radeon RX 7900", "AMD") is False
-    assert looks_integrated("AMD Radeon 780M", "AMD") is True
-    assert looks_integrated("mystery adapter", "unknown") is None
+    assert hardware_identity.looks_integrated("Intel Arc A770", "Intel") is False
+    assert hardware_identity.looks_integrated("AMD Radeon RX 7900", "AMD") is False
+    assert hardware_identity.looks_integrated("AMD Radeon 780M", "AMD") is True
+    assert hardware_identity.looks_integrated("mystery adapter", "unknown") is None
+
+
+def test_accelerator_record_owns_normalized_record_construction():
+    assert sonder_hardware._accelerator is hardware_identity.accelerator_record
+
+
+def test_accelerator_record_normalizes_defaults_and_memory():
+    record = hardware_identity.accelerator_record(
+        name="NVIDIA RTX", vendor="NVIDIA", memory_gb=15.96,
+        memory_kind="dedicated VRAM", probe="fixture",
+    )
+
+    assert record == {
+        "name": "NVIDIA RTX",
+        "vendor": "NVIDIA",
+        "memory_gb": 16.0,
+        "memory_kind": "dedicated VRAM",
+        "integrated": False,
+        "probe": "fixture",
+        "device_id": "",
+        "presence_verified": True,
+        "runtime_ready": None,
+    }
+
+
+def test_accelerator_record_keeps_explicit_unknown_values_conservative():
+    record = hardware_identity.accelerator_record(
+        name="mystery", vendor="unknown", memory_gb=0,
+        integrated="maybe", probe="fixture", presence_verified="unknown",
+    )
+
+    assert record["name"] == "mystery"
+    assert record["memory_gb"] is None
+    assert record["integrated"] is None
+    assert record["presence_verified"] is None
+    assert record["runtime_ready"] is None

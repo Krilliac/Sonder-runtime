@@ -40,3 +40,30 @@ def looks_integrated(name: str, vendor: str) -> bool | None:
         if any(marker in lowered for marker in ("radeon rx", "radeon pro", "instinct")):
             return False
     return None
+
+
+def accelerator_record(
+    *, name: str, vendor: str = "unknown", memory_gb: float | None = None,
+    memory_kind: str = "unknown", integrated: bool | None = None, probe: str,
+    device_id: str = "",
+    presence_verified: bool | None = True,
+) -> dict:
+    """Build the normalized record emitted by platform accelerator probes."""
+    if integrated is None:
+        integrated = looks_integrated(name, vendor)
+    return {
+        "name": str(name or "display adapter"),
+        "vendor": vendor,
+        "memory_gb": round(float(memory_gb), 1) if memory_gb else None,
+        "memory_kind": memory_kind,
+        "integrated": integrated if isinstance(integrated, bool) else None,
+        "probe": probe,
+        "device_id": str(device_id or ""),
+        "presence_verified": (
+            presence_verified if isinstance(presence_verified, bool) else None
+        ),
+        # Detection proves only that the OS enumerates a device. Ollama/backend
+        # readiness requires a separate runtime probe and is intentionally not
+        # inferred from a vendor name or installed display driver.
+        "runtime_ready": None,
+    }

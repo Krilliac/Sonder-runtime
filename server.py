@@ -857,6 +857,7 @@ from sonder_runtime.domain.context_formatting import (
 )
 from sonder_runtime.domain.campaign_policy import output_matches as _campaign_output_matches
 from sonder_runtime.domain.control_timeout import parse_control_timeout as _parse_control_timeout
+from sonder_runtime.domain.query_limits import safe_limit as _safe_limit_policy
 from sonder_runtime.domain.control_history import (
     control_history_messages as _control_history_messages,
 )
@@ -14575,11 +14576,8 @@ def preference_command(arg: str = "") -> str:
 
 
 def _safe_limit(limit, default=10, max_value=100):
-    try:
-        value = int(limit)
-    except (TypeError, ValueError):
-        value = default
-    return max(1, min(value, max_value))
+    """Compatibility delegate for the packaged bounded-limit policy."""
+    return _safe_limit_policy(limit, default, max_value)
 
 
 @mcp.tool()
