@@ -41,6 +41,16 @@ from sonder_runtime.adapters.config_validation import (
 from sonder_runtime.domain.doctor_result import normalize_result as _normalize_result
 from sonder_runtime.domain.doctor_result import skipped as _skipped_result
 from sonder_runtime.domain.doctor_status import coerce_status as _coerce_status
+from sonder_runtime.bootstrap.doctor_formatting import (
+    STATUS_FAIL,
+    STATUS_OK,
+    STATUS_SKIPPED,
+    STATUS_WARN,
+    _SEVERITY,
+    _SEVERITY_TO_STATUS,
+    render_report,
+    rollup_status,
+)
 from sonder_runtime.domain.doctor_specs import (
     CheckCallable,
     iter_specs as _iter_specs,
@@ -51,22 +61,6 @@ from sonder_runtime.bootstrap.config_loading import (
 from sonder_runtime.bootstrap.doctor_checks import (
     summarize_self_heal as _summarize_self_heal,
 )
-
-# Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
-# is simply absent should not make an otherwise-healthy runtime look sick.
-STATUS_OK = "ok"
-STATUS_WARN = "warn"
-STATUS_FAIL = "fail"
-STATUS_SKIPPED = "skipped"
-
-_VALID_STATUSES = frozenset(
-    {STATUS_OK, STATUS_WARN, STATUS_FAIL, STATUS_SKIPPED}
-)
-
-# Rollup precedence: any fail dominates, then any warn, otherwise ok. Skipped
-# never counts toward warn/fail, so an all-skipped report is still ``ok``.
-_SEVERITY = {STATUS_OK: 0, STATUS_SKIPPED: 0, STATUS_WARN: 1, STATUS_FAIL: 2}
-_SEVERITY_TO_STATUS = {0: STATUS_OK, 1: STATUS_WARN, 2: STATUS_FAIL}
 
 # A check spec is anything ``_iter_specs`` can turn into a ``(name, callable)``
 # pair. A check callable takes no required arguments and returns one of:
@@ -99,7 +93,6 @@ def run_doctor(
     specs = _iter_specs(registry)
 
     entries: list[dict] = []
-    worst = 0
     for name, fn in specs:
         try:
             raw = fn()
@@ -111,44 +104,8 @@ def run_doctor(
                 "detail": "%s: %s" % (exc.__class__.__name__, exc),
             }
         entries.append(entry)
-        worst = max(worst, _SEVERITY[entry["status"]])
 
-    return {"overall": _SEVERITY_TO_STATUS[worst], "checks": entries}
-
-
-def render_report(report: Mapping[str, Any]) -> str:
-    """Render :func:`run_doctor`'s report as a clean terminal summary.
-
-    The layout is a single header line stating the overall verdict followed by
-    one aligned line per check. It is intentionally plain text (no colour codes)
-    so it renders identically in logs, pipes, and terminals.
-    """
-    overall = str(report.get("overall", "unknown")).lower()
-    checks = list(report.get("checks") or [])
-
-    lines = ["sonder doctor: %s" % overall.upper()]
-    if not checks:
-        lines.append("  (no checks run)")
-        return "\n".join(lines)
-
-    # Pad the status column so details line up regardless of status length.
-    marks = {
-        STATUS_OK: "ok",
-        STATUS_WARN: "warn",
-        STATUS_FAIL: "FAIL",
-        STATUS_SKIPPED: "skip",
-    }
-    name_width = max(len(str(c.get("name", ""))) for c in checks)
-    for check in checks:
-        name = str(check.get("name", ""))
-        status = str(check.get("status", "")).lower()
-        mark = marks.get(status, status or "?")
-        detail = str(check.get("detail", "") or "")
-        line = "  [%-4s] %-*s" % (mark, name_width, name)
-        if detail:
-            line = "%s  %s" % (line, detail)
-        lines.append(line.rstrip())
-    return "\n".join(lines)
+    return {"overall": rollup_status(entries), "checks": entries}
 
 
 # ---------------------------------------------------------------------------

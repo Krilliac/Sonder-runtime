@@ -27,6 +27,31 @@ _PARAM_BANDS = (
 )
 _BAND_ORDER = tuple(label for _ceiling, label in _PARAM_BANDS)
 _Q4_GB_PER_BILLION = 0.62
+MODEL_FOOTPRINTS = (
+    (3.0, "3-4B"),
+    (6.0, "7-8B"),
+    (10.0, "14B"),
+    (20.0, "32B"),
+    (40.0, "70B"),
+)
+
+
+def band_for_capacity(value: float, ladder) -> str:
+    """Return the first capacity-band label whose ceiling contains ``value``."""
+    for ceiling, label in ladder:
+        if value < ceiling:
+            return label
+    return ladder[-1][1]
+
+
+def largest_model_class(usable_gb: float, footprints=MODEL_FOOTPRINTS) -> str:
+    """Return the largest planning class whose footprint fits in memory."""
+    chosen = "below 3B"
+    for footprint, label in footprints:
+        if usable_gb + 1e-9 < footprint:
+            break
+        chosen = label
+    return chosen
 
 
 def _band_for_parameter_count(value: float, ladder) -> str:

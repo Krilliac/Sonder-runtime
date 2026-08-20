@@ -28,6 +28,7 @@ import urllib.request
 import uuid
 
 from sonder_runtime.platform import version as sonder_version
+from sonder_runtime.application.lifecycle import process_state_number
 from sonder_runtime.platform.metrics import MetricsRegistry
 from sonder_runtime.platform.service_state import (
     DependencyState,
@@ -536,17 +537,8 @@ class RuntimeLifecycle:
         return self._build.as_dict()
 
 
-def _state_number(tracker: ServiceStateTracker) -> int:
-    order = {
-        ProcessState.STARTING: 0,
-        ProcessState.MIGRATING: 1,
-        ProcessState.READY: 2,
-        ProcessState.DEGRADED: 3,
-        ProcessState.DRAINING: 4,
-        ProcessState.STOPPING: 5,
-        ProcessState.FAILED: 6,
-    }
-    return order[tracker.snapshot().process]
+# Compatibility name retained for lifecycle callers and tests.
+_state_number = process_state_number
 
 
 def _peer_class(peer: str) -> str:

@@ -118,6 +118,10 @@ def cmd_preflight(args) -> int:
 def cmd_doctor(args) -> int:
     """Run the consolidated read-only health report."""
     import sonder_doctor
+    from sonder_runtime.bootstrap.doctor_formatting import (
+        STATUS_FAIL,
+        render_report,
+    )
 
     try:
         config = _load_config(args)
@@ -144,8 +148,8 @@ def cmd_doctor(args) -> int:
     if args.json:
         _emit(report, as_json=True)
     else:
-        print(sonder_doctor.render_report(report))
-    return 1 if report.get("overall") == sonder_doctor.STATUS_FAIL else 0
+        print(render_report(report))
+    return 1 if report.get("overall") == STATUS_FAIL else 0
 
 
 def cmd_status(args) -> int:

@@ -196,6 +196,7 @@ from sonder_runtime.domain.learning_tier import (
 from sonder_runtime.domain.retrieval_policy import no_retrieve as _no_retrieve_policy
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
+    thinking_exhausted_budget as _thinking_exhausted_budget,
 )
 from sonder_runtime.domain.schema_policy import (
     format_schema_gaps as _format_schema_gaps,
@@ -632,21 +633,6 @@ def _think_option_unsupported(detail) -> bool:
     return bool(_THINK_OPTION_UNSUPPORTED_RE.search(str(detail or "")))
 
 
-def _thinking_exhausted_budget(out, message, *, inline_thinking=False) -> bool:
-    """Did the model spend its whole output budget thinking, leaving no answer?
-
-    The signature is exact: thinking present, content absent, and Ollama
-    reporting it stopped on length rather than finishing.
-    """
-    if not isinstance(message, dict):
-        return False
-    thinking = message.get("thinking")
-    if not inline_thinking and (not isinstance(thinking, str) or not thinking.strip()):
-        return False
-    done_reason = out.get("done_reason") if isinstance(out, dict) else None
-    return str(done_reason or "").strip().casefold() == "length"
-
-
 def _with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT):
     """Return ``payload`` with room for a local model's thinking plus its answer.
 
@@ -851,7 +837,9 @@ from sonder_runtime.adapters.memory_lesson_ids import _parse_lesson_ids
 from sonder_runtime.adapters.admin_formatting import _format_account
 from sonder_runtime.adapters.inspection_executor import _format_file_result
 from sonder_runtime.adapters.task_formatting import _format_checklist, _format_task
-from sonder_runtime.adapters.context_formatting import format_context_health
+from sonder_runtime.adapters.observability.health_formatting import (
+    format_context_health,
+)
 from sonder_runtime.domain.health_formatting import health_bar as _health_bar
 from sonder_runtime.domain.context_formatting import (
     rough_token_count as _rough_token_count,
