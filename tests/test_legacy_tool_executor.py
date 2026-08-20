@@ -7,6 +7,7 @@ import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import pytest
 
 from sonder_runtime.adapters.strangler_services import LegacyToolExecutor
+from sonder_runtime.adapters.tool_executor import ToolExecutorAdapter
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.tool_executor import ToolCall
 from sonder_runtime.bootstrap import app as bootstrap_app
@@ -16,12 +17,16 @@ from sonder_runtime.bootstrap import app as bootstrap_app
 def executor(tmp_path, monkeypatch):
     # Root the guarded file tools at the temp workspace.
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
-    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(file_ops.runtime_paths, "default_home", lambda: tmp_path / "home")
     return LegacyToolExecutor()
 
 
 def _ctx():
     return local_owner_context(correlation_id="req_tool")
+
+
+def test_canonical_adapter_owns_legacy_compatibility_identity():
+    assert LegacyToolExecutor is ToolExecutorAdapter
 
 
 class _Cancelled:
@@ -109,5 +114,5 @@ def test_application_exposes_tool_executor(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
     bootstrap_app.reset_for_tests()
     app = bootstrap_app.build_application()
-    assert isinstance(app.tool_executor, LegacyToolExecutor)
+    assert isinstance(app.tool_executor, ToolExecutorAdapter)
     bootstrap_app.reset_for_tests()
