@@ -1,20 +1,12 @@
 """Canonical task/checklist persistence adapter."""
 from __future__ import annotations
 
-import sqlite3
-
-from ..domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
+from .repository_errors import call_repository_operation
 
 
-def _store_call(operation, *args, **kwargs):
-    try:
-        return operation(*args, **kwargs)
-    except ValueError as exc:
-        if str(exc).startswith("no unique task '"):
-            raise NotFound(str(exc)) from exc
-        raise InvalidInput(str(exc)) from exc
-    except (OSError, sqlite3.Error) as exc:
-        raise DependencyUnavailable(str(exc)) from exc
+# Keep the historical private helper available to local compatibility tests
+# while making error-translation ownership explicit in its own adapter.
+_store_call = call_repository_operation
 
 
 class TaskRepositoryAdapter:
@@ -158,4 +150,3 @@ class TaskRepositoryAdapter:
 
 # Compatibility name retained for callers using the pre-canonical adapter.
 LegacyTaskRepository = TaskRepositoryAdapter
-

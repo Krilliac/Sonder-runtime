@@ -364,6 +364,12 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Sixty-Second Slice: `WP1-ONE-HUNDRED-SIXTY-SECOND-SLICE.md` —
   moved Ollama model-root path resolution into the canonical platform boundary
   while preserving the storage adapter compatibility export.
+- WP1 One-Hundred-Sixty-Third Slice: `WP1-ONE-HUNDRED-SIXTY-THIRD-SLICE.md` —
+  moved pure model request-timeout normalization into the canonical domain
+  boundary while preserving the root server wrapper over the live ceiling.
 - WP1 One-Hundred-Sixty-First Slice: `WP1-ONE-HUNDRED-SIXTY-FIRST-SLICE.md` —
   moved cancellation safety policy into the canonical domain boundary while
   preserving the root server compatibility alias.
+- WP1 One-Hundred-Sixty-Fourth Slice: `WP1-ONE-HUNDRED-SIXTY-FOURTH-SLICE.md` —
+  moved repository storage-error translation to a dedicated adapter boundary
+  while preserving the task repository compatibility helper.

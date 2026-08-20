@@ -193,6 +193,9 @@ from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_afte
 from sonder_runtime.domain.cancellation_policy import (
     cancellation_requested as _cancel_requested,
 )
+from sonder_runtime.domain.request_timeout import (
+    bound_request_timeout as _bound_request_timeout,
+)
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -3701,11 +3704,8 @@ _PERSISTENT_MCP = mcp
 
 
 def _bounded_timeout(value) -> int:
-    try:
-        value = TIMEOUT if value is None else int(value)
-    except (TypeError, ValueError):
-        value = TIMEOUT
-    return max(1, min(value, TIMEOUT))
+    """Compatibility wrapper using the live server request-timeout ceiling."""
+    return _bound_request_timeout(value, TIMEOUT)
 
 
 _TRANSIENT_MODEL_HTTP_CODES = frozenset({408, 429, 502, 503, 504})
