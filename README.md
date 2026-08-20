@@ -398,6 +398,7 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 One-Hundred-Fourteenth Slice: HTTP serve-temperature policy now belongs to `sonder_runtime.interfaces.http.serve_policy`, preserving the server compatibility alias.
 - WP1 One-Hundred-Sixteenth Slice: process-probe ownership now belongs to `sonder_runtime.adapters.process_probe.ProcessProbeAdapter`; the generic strangler no longer owns that port adapter.
 - WP1 One-Hundred-Fifteenth Slice: pure model-catalog capability normalization now belongs to `sonder_runtime.domain.model_capabilities`, preserving the server compatibility alias.
+- WP1 One-Hundred-Eighteenth Slice: pure inline-thinking output policy now belongs to `sonder_runtime.domain.thinking_policy`, preserving the server compatibility alias.
 - WP1 One-Hundredth Slice: full shutdown coordination now belongs to `sonder_runtime.platform.shutdown`; `sonder_shutdown` remains an identity-preserving compatibility shim with cancellation, signal, drain, deadline, and concurrent idempotence semantics unchanged.
 - WP1 One-Hundred-Fifth Slice: process and dependency state now belong to `sonder_runtime.platform.service_state`; `sonder_service_state` remains an identity-preserving compatibility shim while lifecycle and shutdown consume the canonical implementation.
 - WP1 One-Hundred-First Slice: build identity implementation now belongs to `sonder_runtime.platform.version`; `sonder_version.py` retains its literal release-tooling `VERSION` and identity-preserving compatibility surface.

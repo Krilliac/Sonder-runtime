@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 
 from .persistence.autopilot_repository import AutopilotRepository
+from .runtime_policy_repository import RuntimePolicyRepository
 from ..application.context import OperationContext
 from ..application.ports.model_gateway import (
     Embedding,
@@ -28,34 +29,6 @@ def _check_context_liveness(context: OperationContext) -> None:
         raise DeadlineExceeded("operation deadline exceeded before adapter call")
     if context.cancellation is not None and context.cancellation.cancelled:
         raise Cancelled("operation cancelled before adapter call")
-
-
-class LegacyPolicyRepository:
-    """PolicyRepository over the root runtime_policy module."""
-
-    def load(self) -> dict:
-        import sonder_runtime.adapters.runtime_policy as runtime_policy
-
-        return runtime_policy.load()
-
-    def update(
-        self,
-        *,
-        local_models: dict | None = None,
-        routing: dict | None = None,
-        npu: dict | None = None,
-        expected_revision: int | None = None,
-        source: str = "application",
-    ) -> dict:
-        import sonder_runtime.adapters.runtime_policy as runtime_policy
-
-        return runtime_policy.update(
-            local_models=local_models,
-            routing=routing,
-            npu=npu,
-            source=source,
-            expected_revision=expected_revision,
-        )
 
 
 class LegacyMemoryRepository:
@@ -151,7 +124,7 @@ class LegacyUnitOfWork:
         self._conn = None
         self.memory = None
         self.automation = AutopilotRepository()
-        self.policy = LegacyPolicyRepository()
+        self.policy = RuntimePolicyRepository()
         self.events = OperationsEventSink()
 
     def __enter__(self) -> "LegacyUnitOfWork":

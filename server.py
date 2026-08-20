@@ -136,6 +136,9 @@ from sonder_runtime.domain.runtime_identity import (
 from sonder_runtime.domain.model_capabilities import (
     fanout_capabilities as _fanout_capabilities,
 )
+from sonder_runtime.domain.thinking_policy import (
+    strip_inline_thinking as _strip_inline_thinking,
+)
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
@@ -582,42 +585,6 @@ _THINK_OPTION_UNSUPPORTED_RE = re.compile(
 # rather than Ollama's separate ``message.thinking`` field.  That field is
 # governed by explicit reasoning exposure policy; a leading closed tag must
 # not become an accidental bypass of the same boundary.
-_INLINE_THINKING_OPEN_RE = re.compile(r"^\s*<(think|thinking)(?:\s+[^>]*)?>", re.IGNORECASE)
-_INLINE_THINKING_TAG_RE = re.compile(r"</?(think|thinking)(?:\s+[^>]*)?>", re.IGNORECASE)
-
-
-def _strip_inline_thinking(content):
-    """Drop closed leading model reasoning tags from public assistant text.
-
-    Only leading, syntactically closed blocks are recognized.  This keeps a
-    legitimate answer that discusses literal tags intact while ensuring that
-    untrusted model deliberation cannot be shown, saved to session history, or
-    fed into a later turn as assistant content.
-    """
-    if not isinstance(content, str):
-        return content
-    value = content
-    while True:
-        opening = _INLINE_THINKING_OPEN_RE.match(value)
-        if not opening:
-            return value
-        depth = 0
-        end = None
-        for tag in _INLINE_THINKING_TAG_RE.finditer(value, opening.start()):
-            if tag.group(0).startswith("</"):
-                depth -= 1
-                if depth == 0:
-                    end = tag.end()
-                    break
-            else:
-                depth += 1
-        # A leading unterminated reasoning block is private by default; never
-        # trade an incomplete delimiter for a reasoning exposure.
-        if end is None:
-            return ""
-        value = value[end:].lstrip()
-
-
 def _apply_cloud_thinking_policy(payload, model, *, compact=False):
     """Apply hosted-model thinking controls without changing custom models.
 

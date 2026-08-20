@@ -47,6 +47,8 @@
   packaged HTTP serve-temperature policy and compatibility boundary.
 - [`WP1-ONE-HUNDRED-FIFTEENTH-SLICE.md`](WP1-ONE-HUNDRED-FIFTEENTH-SLICE.md) —
   packaged model capability normalization and compatibility boundary.
+- [`WP1-ONE-HUNDRED-EIGHTEENTH-SLICE.md`](WP1-ONE-HUNDRED-EIGHTEENTH-SLICE.md) —
+  packaged inline-thinking policy and compatibility boundary.
 - [`WP1-THIRTEENTH-SLICE.md`](WP1-THIRTEENTH-SLICE.md) — embedding adapter
   migration and remaining NPU boundary.
 - [`WP1-FOURTEENTH-SLICE.md`](WP1-FOURTEENTH-SLICE.md) — NPU contract adapter
