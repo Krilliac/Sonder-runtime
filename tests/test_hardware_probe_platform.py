@@ -1,5 +1,9 @@
 import sonder_hardware
-from sonder_runtime.platform.hardware_probe import parse_memory_gb, probe_platform
+from sonder_runtime.platform.hardware_probe import (
+    parse_memory_gb,
+    probe_cpu_count,
+    probe_platform,
+)
 
 
 def test_hardware_memory_parser_has_canonical_platform_owner():
@@ -34,3 +38,24 @@ def test_hardware_platform_probe_degrades_when_platform_lookup_fails(monkeypatch
 
     monkeypatch.setattr(hardware_probe.platform, "system", fail)
     assert probe_platform() == "unknown"
+
+
+def test_hardware_cpu_probe_has_canonical_platform_owner():
+    assert sonder_hardware._probe_cpu_count is probe_cpu_count
+
+
+def test_hardware_cpu_probe_returns_os_value(monkeypatch):
+    import sonder_runtime.platform.hardware_probe as hardware_probe
+
+    monkeypatch.setattr(hardware_probe.os, "cpu_count", lambda: 12)
+    assert probe_cpu_count() == 12
+
+
+def test_hardware_cpu_probe_degrades_when_os_lookup_fails(monkeypatch):
+    import sonder_runtime.platform.hardware_probe as hardware_probe
+
+    def fail():
+        raise RuntimeError("probe unavailable")
+
+    monkeypatch.setattr(hardware_probe.os, "cpu_count", fail)
+    assert probe_cpu_count() is None

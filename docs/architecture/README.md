@@ -465,3 +465,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Ninety-Fourth Slice: `WP1-ONE-HUNDRED-NINETY-FOURTH-SLICE.md` —
   moved host-platform probing into the packaged hardware platform boundary
   while preserving the root hardware compatibility delegate.
+- WP1 One-Hundred-Ninety-Sixth Slice: `WP1-ONE-HUNDRED-NINETY-SIXTH-SLICE.md` —
+  moved CPU-count probing into the packaged hardware platform boundary while
+  preserving the root hardware compatibility alias.
+- WP1 One-Hundred-Ninety-Fifth Slice: `WP1-ONE-HUNDRED-NINETY-FIFTH-SLICE.md` —
+  moved the bounded lesson-distillation timeout policy into the packaged
+  domain boundary while preserving the root server compatibility wrapper.
