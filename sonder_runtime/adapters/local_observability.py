@@ -22,6 +22,9 @@ import threading
 import time
 from collections.abc import Callable
 
+from sonder_runtime.adapters.observability.latency_formatting import (
+    percentile,
+)
 from sonder_runtime.platform.logging import REDACTION_FAILED, Redactor
 
 
@@ -195,12 +198,7 @@ def _sanitize_value(
     return text
 
 
-def _percentile(samples: list[int], percentile: float) -> int:
-    if not samples:
-        return 0
-    ordered = sorted(samples)
-    index = max(0, min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1))
-    return int(ordered[index])
+_percentile = percentile
 
 
 class LocalObservabilitySink:

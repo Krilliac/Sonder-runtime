@@ -3,8 +3,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
 import sonder_config
 from sonder_runtime.platform import config as packaged_config
+from sonder_runtime.platform import config_environment
 
 
 def test_root_configuration_surface_reexports_canonical_objects():
@@ -48,3 +50,26 @@ def test_packaged_configuration_owns_implementation_and_uses_packaged_paths():
 def test_configuration_error_identity_is_preserved():
     assert sonder_config.ConfigError is packaged_config.ConfigError
     assert sonder_config.sonder_paths is packaged_config.sonder_paths
+
+
+def test_environment_file_parser_is_owned_by_packaged_policy_boundary(tmp_path):
+    path = tmp_path / "secrets.env"
+    path.write_text("# comment\nTOKEN = \"value\"\nEMPTY=\n", encoding="utf-8")
+
+    assert config_environment.parse_env_file(path) == {
+        "TOKEN": "value",
+        "EMPTY": "",
+    }
+    assert sonder_config.parse_env_file(path) == config_environment.parse_env_file(path)
+
+
+def test_environment_file_parser_preserves_root_config_error_contract(tmp_path):
+    path = tmp_path / "secrets.env"
+    path.write_text("not-an-assignment\n", encoding="utf-8")
+
+    with pytest.raises(sonder_config.ConfigError) as excinfo:
+        sonder_config.parse_env_file(path)
+
+    assert excinfo.value.errors == (
+        f"{path}:1: expected KEY=VALUE, got 'not-an-assignment'",
+    )
