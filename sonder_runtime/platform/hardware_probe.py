@@ -68,4 +68,9 @@ def probe_total_ram_gb() -> float | None:
     return None
 
 
-__all__ = ["parse_memory_gb", "probe_platform", "probe_cpu_count", "probe_total_ram_gb"]
+__all__ = [
+    "parse_memory_gb",
+    "probe_platform",
+    "probe_cpu_count",
+    "probe_total_ram_gb",
+]

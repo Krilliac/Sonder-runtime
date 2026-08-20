@@ -102,3 +102,21 @@ def compact_messages(messages, *, keep_recent: int = 0):
 
     note = {"role": "system", "content": COMPACTION_NOTE}
     return list(prefix) + [note] + list(body[dropped:]) + list(tail)
+
+
+def compact_overflow_payload(payload, verdict):
+    """Return one compacted model payload for a classified overflow.
+
+    This is the payload-level policy used by the model gateway.  It deliberately
+    carries the original options through unchanged: retrying after compaction
+    must not silently widen the context window or alter generation settings.
+    ``None`` means that the payload is not eligible for a safe retry.
+    """
+    if not getattr(verdict, "overflow", False) or not isinstance(payload, dict):
+        return None
+    compacted = compact_messages(payload.get("messages"))
+    if compacted is None:
+        return None
+    updated = dict(payload)
+    updated["messages"] = compacted
+    return updated

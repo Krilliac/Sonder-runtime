@@ -35,6 +35,7 @@ from sonder_runtime.domain.model_sizing import (
     params_from_model_tag,
 )
 from sonder_runtime.platform.hardware_identity import looks_integrated
+from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
 from sonder_runtime.platform.hardware_probe import (
     parse_memory_gb,
     probe_cpu_count,
@@ -50,6 +51,7 @@ _probe_platform = probe_platform
 # Legacy private name retained for callers that exercised the old probe helper.
 _probe_cpu_count = probe_cpu_count
 _probe_total_ram_gb = probe_total_ram_gb
+_probe_gpu = probe_nvidia_gpu
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -137,61 +139,6 @@ _MODEL_FOOTPRINTS = (
 # called at import, and every one is overridable through ``detect_hardware``'s
 # ``probes`` argument so tests can inject fakes. Each swallows its own failures
 # and returns a conservative "unknown" rather than raising.
-
-def _probe_gpu() -> tuple[bool, float | None]:
-    """Return ``(gpu_present, vram_gb)`` by shelling out to ``nvidia-smi``.
-
-    Kept behind a timeout and a blanket ``except`` so a missing binary, a hung
-    driver, or a machine without an NVIDIA card all resolve to ``(False, None)``
-    instead of raising. Non-NVIDIA accelerators are simply not detected here;
-    callers can inject a probe that knows about them.
-
-    The timeout is generous and one retry follows a timeout. On a laptop with
-    switchable graphics the discrete GPU idles powered down, and the first
-    ``nvidia-smi`` after an idle stretch blocks while the driver wakes it --
-    can take several seconds, with the next call returning quickly. A tight
-    timeout therefore fails exactly when
-    the GPU is cold, which is precisely when nothing else has warmed it: the
-    host then reports "no GPU", sizes the band for CPU inference, and advises
-    a short keep_alive with speculation dormant -- all on a machine with a
-    working CUDA device. Retrying once converts that intermittent miss into a
-    hit, because the timed-out probe is itself the wake-up call.
-    """
-    out = None
-    for timeout_s in (8.0, 8.0):
-        try:
-            out = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=memory.total",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-            )
-            break
-        except subprocess.TimeoutExpired:
-            continue  # cold GPU; the probe that just timed out did the waking
-        except Exception:
-            return (False, None)
-    if out is None:
-        return (False, None)
-    if out.returncode != 0:
-        return (False, None)
-    best_mib = 0.0
-    for line in out.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            best_mib = max(best_mib, float(line))
-        except ValueError:
-            continue
-    if best_mib <= 0:
-        return (False, None)
-    return (True, round(best_mib / 1024.0, 1))
-
 
 _PCI_VENDORS = {
     "0x1002": "AMD",

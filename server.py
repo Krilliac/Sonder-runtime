@@ -3672,21 +3672,8 @@ def _embedded_model_error(result) -> str:
 
 
 def _compacted_overflow_payload(payload, verdict):
-    """One bounded compaction of `payload` for a classified context overflow.
-
-    Returns a new payload, or None when there is nothing safe to drop. Only the
-    message list changes: `options` (and therefore `num_ctx`) is carried through
-    untouched, so recovery never silently widens the context window behind the
-    context policy's back.
-    """
-    if not verdict.overflow or not isinstance(payload, dict):
-        return None
-    compacted = context_compaction.compact_messages(payload.get("messages"))
-    if compacted is None:
-        return None
-    updated = dict(payload)
-    updated["messages"] = compacted
-    return updated
+    """Compatibility wrapper for the packaged context compaction policy."""
+    return context_compaction.compact_overflow_payload(payload, verdict)
 
 
 def _local_retry_delay(attempt: int) -> float:
