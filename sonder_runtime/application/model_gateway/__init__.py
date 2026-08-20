@@ -12,6 +12,16 @@ from .health_and_roles import (
     RoleBinding,
     RoleBudgetBook,
 )
+from .escalation import (
+    ControlledEscalation,
+    ControlledEscalationPolicy,
+    ControlledEscalationService,
+    EscalationDecision,
+    EscalationOutcome,
+    EscalationReason,
+    EscalationRequest,
+    EscalationRoute,
+)
 
 __all__ = [
     "GatewayBudget",
@@ -24,4 +34,12 @@ __all__ = [
     "ProviderState",
     "RoleBinding",
     "RoleBudgetBook",
+    "ControlledEscalation",
+    "ControlledEscalationPolicy",
+    "ControlledEscalationService",
+    "EscalationDecision",
+    "EscalationOutcome",
+    "EscalationReason",
+    "EscalationRequest",
+    "EscalationRoute",
 ]

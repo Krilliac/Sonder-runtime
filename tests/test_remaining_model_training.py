@@ -13,7 +13,7 @@ def routes():
 
 def test_verifier_failure_escalates_only_within_declared_routes_and_is_bounded():
     policy = ControlledEscalation()
-    request = EscalationRequest("r1", routes()[:2], "small", verifier_passed=False, max_escalations=1)
+    request = EscalationRequest("r1", routes()[:2], "small", verifier_passed=False, max_escalations=1, provenance=("verifier:v1",))
     decision = policy.decide(request)
     assert decision.selected_route.route_id == "strong"
     assert decision.trigger == "verifier_failure"
