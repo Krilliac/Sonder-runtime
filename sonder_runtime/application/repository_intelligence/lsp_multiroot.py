@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable, Protocol, Sequence
+from typing import Iterable, Protocol, Sequence
 
 from .navigation import NavigationEvidence
 
@@ -119,6 +119,168 @@ class NavigationProvider(Protocol):
     def query(self, root_id: str, symbol: str, operation: str) -> Sequence[NavigationEvidence]: ...
 
 
+class LspSession(Protocol):
+    """One adapter-owned live language-server session."""
+
+    def query(
+        self, *, root_id: str, symbol: str, operation: str, max_results: int
+    ) -> Sequence[NavigationEvidence]: ...
+
+    def close(self) -> None: ...
+
+
+class LspTransport(Protocol):
+    """Provider-neutral transport for an initialized LSP client."""
+
+    def open(
+        self,
+        *,
+        root_id: str,
+        language: str,
+        operations: frozenset[str],
+        max_results: int,
+    ) -> LspSession: ...
+
+
+class RepositoryNavigationPort(Protocol):
+    """Read-only repository adapter consumed by multi-root navigation."""
+
+    @property
+    def root(self) -> RepositoryRoot: ...
+
+    def language_for(self, symbol: str) -> str: ...
+
+    def indexed_provider(self) -> NavigationProvider | None: ...
+
+    def lexical_provider(self) -> NavigationProvider | None: ...
+
+
+class LiveLspProvider:
+    """Bounded navigation provider backed by one live, injected LSP session."""
+
+    def __init__(self, session: LspSession, *, max_results: int = 100) -> None:
+        if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 10_000:
+            raise ValueError("max_results must be between 1 and 10000")
+        self._session = session
+        self._max_results = max_results
+        self._closed = False
+
+    def query(self, root_id: str, symbol: str, operation: str) -> tuple[NavigationEvidence, ...]:
+        if self._closed:
+            raise RuntimeError("LSP session is closed")
+        rows = tuple(self._session.query(
+            root_id=root_id,
+            symbol=_text(symbol, "symbol"),
+            operation=_text(operation, "operation"),
+            max_results=self._max_results,
+        ))
+        if len(rows) > self._max_results:
+            raise ValueError("LSP adapter exceeded the result bound")
+        if any(not isinstance(row, NavigationEvidence) or row.root_id != root_id for row in rows):
+            raise ValueError("LSP adapter returned invalid or cross-root evidence")
+        return rows
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._session.close()
+
+    def __enter__(self) -> "LiveLspProvider":
+        return self
+
+    def __exit__(self, _type, _value, _traceback) -> None:
+        self.close()
+
+
+def open_live_lsp(
+    context: MultiRootReadContext,
+    transport: LspTransport,
+    *,
+    root_id: str,
+    language: str,
+    operations: Iterable[str],
+    max_results: int = 100,
+) -> LiveLspProvider:
+    """Open a bounded LSP session only for a visible root."""
+    root = context.root(root_id)
+    language = _text(language, "language").casefold()
+    operation_set = frozenset(_text(value, "operation") for value in operations)
+    if not operation_set:
+        raise ValueError("at least one LSP operation is required")
+    if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 10_000:
+        raise ValueError("max_results must be between 1 and 10000")
+    session = transport.open(
+        root_id=root.root_id,
+        language=language,
+        operations=operation_set,
+        max_results=max_results,
+    )
+    if session is None:
+        raise LookupError("LSP transport did not provide a session")
+    return LiveLspProvider(session, max_results=max_results)
+
+
+@dataclass(frozen=True, slots=True)
+class MultiRepositoryNavigationResult:
+    root_id: str
+    backend: NavigationBackend
+    evidence: tuple[NavigationEvidence, ...]
+
+
+class MultiRepositoryNavigator:
+    """Query explicitly selected repository ports with one global result bound."""
+
+    def __init__(self, repositories: Iterable[RepositoryNavigationPort], *, max_results: int = 100) -> None:
+        if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 10_000:
+            raise ValueError("max_results must be between 1 and 10000")
+        self._repositories = tuple(repositories)
+        if not self._repositories:
+            raise ValueError("at least one repository port is required")
+        roots = tuple(repository.root for repository in self._repositories)
+        self._context = MultiRootReadContext(roots)
+        self._max_results = max_results
+
+    @property
+    def context(self) -> MultiRootReadContext:
+        return self._context
+
+    def query(
+        self,
+        *,
+        symbol: str,
+        operation: str,
+        lsp_by_root: dict[str, NavigationProvider] | None = None,
+    ) -> tuple[MultiRepositoryNavigationResult, ...]:
+        symbol = _text(symbol, "symbol")
+        operation = _text(operation, "operation")
+        lsp_by_root = dict(lsp_by_root or {})
+        results: list[MultiRepositoryNavigationResult] = []
+        remaining = self._max_results
+        for repository in self._repositories:
+            if remaining <= 0:
+                break
+            root = repository.root
+            language = repository.language_for(symbol)
+            provider = lsp_by_root.get(root.root_id)
+            if provider is not None:
+                backend = NavigationBackend("lsp", root.root_id, "live provider supplied", root.root_id)
+            else:
+                provider = repository.indexed_provider()
+                if provider is not None:
+                    backend = NavigationBackend("indexed", root.root_id, "live LSP provider not supplied")
+                else:
+                    provider = repository.lexical_provider()
+                    backend = NavigationBackend("lexical", root.root_id, "LSP and indexed capability unavailable")
+            if provider is None:
+                raise LookupError(f"no navigation provider for root {root.root_id}")
+            rows = tuple(provider.query(root.root_id, symbol, operation))[:remaining]
+            if any(row.root_id != root.root_id for row in rows):
+                raise ValueError("navigation provider returned cross-root evidence")
+            results.append(MultiRepositoryNavigationResult(root.root_id, backend, rows))
+            remaining -= len(rows)
+        return tuple(results)
+
+
 class LspNegotiator:
     """Select LSP, indexed, or lexical navigation without guessing availability."""
 
@@ -182,4 +344,3 @@ def query_with_fallback(
     if provider is None:
         raise LookupError(f"no provider supplied for {backend.mode} navigation")
     return tuple(provider.query(backend.root_id, symbol, operation))
-
