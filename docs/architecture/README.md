@@ -1,5 +1,17 @@
 # Sonder Runtime architecture documents
 
+- WP1 Two-Hundred-Forty-Fourth Slice: `WP1-TWO-HUNDRED-FORTY-FOURTH-SLICE.md` —
+  moved launcher idempotency-key and durable replay validation into a packaged
+  adapter while preserving root helper and regex aliases.
+
+- WP1 Two-Hundred-Forty-Eighth Slice: `WP1-TWO-HUNDRED-FORTY-EIGHTH-SLICE.md` —
+  moved standalone-client endpoint and fallback orchestration into packaged
+  adapters while preserving root compatibility aliases.
+
+- WP1 Two-Hundred-Forty-Fifth Slice: `WP1-TWO-HUNDRED-FORTY-FIFTH-SLICE.md` —
+  moved root hardware probe classification to the packaged platform identity
+  boundary while preserving the root compatibility aliases.
+
 - WP1 Two-Hundred-Thirty-Ninth Slice: `WP1-TWO-HUNDRED-THIRTY-NINTH-SLICE.md` —
   moved standalone-client HTTP execution into the packaged transport adapter
   while preserving the root request-builder compatibility seam.
@@ -606,3 +618,8 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Forty-Second Slice: `WP1-TWO-HUNDRED-FORTY-SECOND-SLICE.md` —
   moved the remaining pure hardware sizing helpers into the packaged domain
   boundary and documented the packaged accelerator/platform probe seams.
+- WP1 Two-Hundred-Forty-Sixth Slice: `WP1-TWO-HUNDRED-FORTY-SIXTH-SLICE.md` —
+  moved the remaining root doctor configuration-check policy into the packaged
+  bootstrap/config boundary while preserving the root compatibility delegate.
+- WP1 Two-Hundred-Forty-Third Slice: `WP1-TWO-HUNDRED-FORTY-THIRD-SLICE.md` — moved speculative-execution configuration helpers to the packaged platform boundary while preserving root helper aliases and the packaged domain safety policy.
+- WP1 Two-Hundred-Forty-Seventh Slice: `WP1-TWO-HUNDRED-FORTY-SEVENTH-SLICE.md` — moved pure agent tool-invocation mutation policy to the packaged domain boundary while preserving root mutation tool-set and predicate aliases.

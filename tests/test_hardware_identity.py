@@ -6,7 +6,7 @@ from sonder_runtime.platform.hardware_probe import probe_platform
 
 
 def test_vendor_policy_is_owned_by_platform_boundary():
-    assert sonder_hardware._vendor_from_text is not hardware_identity.vendor_from_text
+    assert sonder_hardware._vendor_from_text is hardware_identity.vendor_from_text
     assert sonder_hardware._vendor_from_text("NVIDIA Corporation") == hardware_identity.vendor_from_text(
         "NVIDIA Corporation"
     )
@@ -24,7 +24,7 @@ def test_vendor_policy_is_conservative_for_unknown_values():
 
 
 def test_integrated_policy_is_owned_by_platform_boundary():
-    assert sonder_hardware._looks_integrated is not hardware_identity.looks_integrated
+    assert sonder_hardware._looks_integrated is hardware_identity.looks_integrated
     assert sonder_hardware._looks_integrated("Intel UHD Graphics 770", "Intel") is True
     assert hardware_identity.looks_integrated("NVIDIA GeForce RTX 5070 Ti", "NVIDIA") is False
 

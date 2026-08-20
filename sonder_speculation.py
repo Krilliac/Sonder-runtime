@@ -33,8 +33,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import sonder_paths
 from sonder_runtime.domain import speculation_policy
+from sonder_runtime.platform import speculation as speculation_config
 
 # Compatibility alias for callers that imported the historical allowlist.
 SPECULATABLE_TOOLS = speculation_policy.SPECULATABLE_TOOLS
@@ -56,7 +56,7 @@ _MIN_CONFIDENCE = 0.34  # below a two-way coin flip's edge -> do not speculate
 # never a guess about the deployment.
 _SPEC_EWMA_ALPHA = 0.25            # weight on the newest latency sample
 _SPEC_WARMUP = 16                  # speculations allowed to measure before gating
-_DEFAULT_MIN_SAVING_MS = 40.0      # expected hidden wall time below this -> skip
+_DEFAULT_MIN_SAVING_MS = speculation_config.DEFAULT_MIN_SAVING_MS
 
 # Reorder buffer sizing.  A CPU commits speculative loads out of a small
 # buffer; the analog here is a handful of read-only tool calls in flight at
@@ -64,41 +64,13 @@ _DEFAULT_MIN_SAVING_MS = 40.0      # expected hidden wall time below this -> ski
 # to the original single-in-flight engine unless the operator opts in, and it
 # is clamped to a small maximum because each slot is a real worker thread and
 # a wasted read-only call on a mispredict.
-_DEFAULT_SLOTS = 1
-_MAX_SLOTS = 4
+_DEFAULT_SLOTS = speculation_config.DEFAULT_SLOTS
+_MAX_SLOTS = speculation_config.MAX_SLOTS
 
 
-def min_saving_seconds() -> float:
-    """Floor on expected hidden wall time for a speculation to be worth it."""
-    raw = os.environ.get("SONDER_SPECULATION_MIN_SAVING_MS", "").strip()
-    try:
-        ms = float(raw) if raw else _DEFAULT_MIN_SAVING_MS
-    except ValueError:
-        ms = _DEFAULT_MIN_SAVING_MS
-    return max(0.0, ms) / 1000.0
-
-
-def speculation_slots() -> int:
-    """How many read-only speculations may be in flight at once.
-
-    Read from ``SONDER_SPECULATION_SLOTS`` at call time (never at import).
-    Defaults to a single slot so the engine preserves its original
-    single-in-flight semantics, and is clamped to ``[1, _MAX_SLOTS]`` so a
-    bad or over-eager value can never spawn an unbounded fan of workers.
-    """
-    raw = os.environ.get("SONDER_SPECULATION_SLOTS", "").strip()
-    try:
-        n = int(raw) if raw else _DEFAULT_SLOTS
-    except ValueError:
-        n = _DEFAULT_SLOTS
-    return max(1, min(_MAX_SLOTS, n))
-
-
-def predictor_path() -> Path:
-    override = os.environ.get("SONDER_BRANCH_PREDICTOR", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path(sonder_paths.state_path("branch_predictor.json"))
+min_saving_seconds = speculation_config.min_saving_seconds
+speculation_slots = speculation_config.speculation_slots
+predictor_path = speculation_config.predictor_path
 
 
 @dataclass
