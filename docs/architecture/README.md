@@ -284,3 +284,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Thirty-Sixth Slice: `WP1-ONE-HUNDRED-THIRTY-SIXTH-SLICE.md` —
   moved evaluation-history reader ownership to the canonical packaged adapter
   while retaining the legacy module and class identity compatibility surface.
+- WP1 One-Hundred-Thirty-Seventh Slice: `WP1-ONE-HUNDRED-THIRTY-SEVENTH-SLICE.md` —
+  moved read-only inspection composition to the canonical packaged adapter
+  while retaining the legacy class identity compatibility surface.
+- WP1 One-Hundred-Thirty-Eighth Slice: `WP1-ONE-HUNDRED-THIRTY-EIGHTH-SLICE.md` —
+  moved campaign environment-failure classification into the pure domain
+  boundary while preserving the server compatibility alias.
