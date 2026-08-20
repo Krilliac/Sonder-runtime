@@ -144,6 +144,9 @@ from sonder_runtime.domain.fanout_policy import nonchat_reason as _fanout_noncha
 from sonder_runtime.domain.campaign_formatting import (
     campaign_headline as _campaign_headline,
 )
+from sonder_runtime.domain.campaign_expectations import (
+    campaign_expected as _campaign_expected,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
 )
@@ -6310,23 +6313,6 @@ _CAMPAIGN_TASKS = [
     ("fib",
      "print the 20th Fibonacci number where fib(1)=1 and fib(2)=1"),
 ]
-
-
-def _campaign_expected(task_name):
-    return {
-        "hello": "sonder-ok",
-        "sum": "42",
-        "loop": "1\n2\n3",
-        "string": "rednos",
-        "branch": "prime",
-        "list": "20",
-        "toposort": "d a b c",
-        "lru": "10 -1 30",
-        "intervals": "1-6 8-12",
-        "balanced": "ok\nbad\nbad",
-        "wordfreq": "the:3",
-        "fib": "6765",
-    }.get(task_name, "")
 
 
 def _campaign_environment_failure(output):
