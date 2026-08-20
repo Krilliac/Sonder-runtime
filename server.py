@@ -150,6 +150,9 @@ from sonder_runtime.domain.campaign_expectations import (
 from sonder_runtime.domain.campaign_environment import (
     environment_failure as _campaign_environment_failure,
 )
+from sonder_runtime.domain.learning_tier import (
+    canonical_learn_tier as _canonical_learn_tier,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
 )
@@ -2879,13 +2882,6 @@ def control_command(prompt: str, history=None, session="", project="",
                     cmd, exc, command_catalog.help_command(cmd),
                 )
     return None
-
-
-def _canonical_learn_tier(tier_label):
-    """Map a recorded tier label to the LEARN_TIERS key that governs it. The local
-    learning route is labeled 'sonder' on interactions but is gated by the same 'code'
-    switch as offload's local coder, so both flip together."""
-    return "code" if tier_label == "sonder" else tier_label
 
 
 _ALL_PROJECTS = object()

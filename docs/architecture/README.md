@@ -290,3 +290,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Thirty-Eighth Slice: `WP1-ONE-HUNDRED-THIRTY-EIGHTH-SLICE.md` —
   moved campaign environment-failure classification into the pure domain
   boundary while preserving the server compatibility alias.
+- WP1 One-Hundred-Thirty-Ninth Slice: `WP1-ONE-HUNDRED-THIRTY-NINTH-SLICE.md` —
+  moved startup capability-policy ownership into the canonical packaged
+  adapter while preserving the bootstrap compatibility surface.
+- WP1 One-Hundred-Fortieth Slice: `WP1-ONE-HUNDRED-FORTIETH-SLICE.md` —
+  moved learning-tier canonicalization into the pure domain boundary while
+  preserving the server compatibility alias.
