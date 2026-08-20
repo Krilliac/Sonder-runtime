@@ -13,6 +13,15 @@ from .checkpoints import (
     checkpoint_projection,
     create_projection_checkpoint,
 )
+from .query_export import (
+    DefaultExportRedactor,
+    QueryExportError,
+    SessionEventRecord,
+    SessionExport,
+    SessionQueryEngine,
+    SessionQueryPage,
+    TranscriptRecord,
+)
 
 __all__ = [
     "SessionProjection",
@@ -28,4 +37,11 @@ __all__ = [
     "ProjectionCheckpoint",
     "checkpoint_projection",
     "create_projection_checkpoint",
+    "DefaultExportRedactor",
+    "QueryExportError",
+    "SessionEventRecord",
+    "SessionExport",
+    "SessionQueryEngine",
+    "SessionQueryPage",
+    "TranscriptRecord",
 ]

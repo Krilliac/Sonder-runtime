@@ -193,8 +193,8 @@ class SessionQueryEngine:
 
     @staticmethod
     def _fingerprint(session_id: str, event_type: str | None, text: str | None,
-                     end_sequence: int | None) -> str:
-        material = json.dumps([session_id, event_type, text, end_sequence],
+                     start_sequence: int, end_sequence: int | None) -> str:
+        material = json.dumps([session_id, event_type, text, start_sequence, end_sequence],
                               separators=(",", ":"), ensure_ascii=False).encode()
         return hashlib.sha256(material).hexdigest()
 
@@ -231,13 +231,18 @@ class SessionQueryEngine:
             raise QueryExportError("start_sequence must be positive")
         if end_sequence is not None and (not isinstance(end_sequence, int) or end_sequence < start_sequence):
             raise QueryExportError("end_sequence must be >= start_sequence")
-        fingerprint = self._fingerprint(session_id, event_type, text, end_sequence)
+        fingerprint = self._fingerprint(session_id, event_type, text, start_sequence, end_sequence)
         next_sequence = self._decode_cursor(cursor, fingerprint)
         if cursor is None:
             next_sequence = start_sequence
         # Scan up to the configured bound so sparse filters can prove that a
         # page is terminal without issuing an unbounded follow-up query.
-        scan_limit = self._max_scan
+        # A port implementation may enforce a lower adapter-side ceiling.  A
+        # service-level bound must never turn into an adapter validation error.
+        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
+        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
+            adapter_limit = self._max_scan
+        scan_limit = min(self._max_scan, adapter_limit)
         raw = self._repository.read_range(session_id, start_sequence=next_sequence,
                                           end_sequence=end_sequence, limit=scan_limit)
         matches = []
@@ -266,8 +271,14 @@ class SessionQueryEngine:
                                              end_sequence=end_sequence, limit=max_events)
         records = tuple(SessionEventRecord.from_event(event, redactor=self._redactor) for event in events)
         transcript = self._transcript(records)
-        integrity = self._repository.inspect_integrity(session_id, start_sequence=start_sequence,
-                                                       end_sequence=end_sequence, limit=max_events) if include_integrity else None
+        # Integrity is a property of the chain, not merely of the selected
+        # slice.  Starting verification at sequence two would necessarily
+        # report a false predecessor mismatch, so verify from the chain root
+        # while retaining the caller's end and event bound.
+        integrity = self._repository.inspect_integrity(
+            session_id, start_sequence=1, end_sequence=end_sequence,
+            limit=max_events,
+        ) if include_integrity else None
         truncated = len(events) == max_events
         return SessionExport(session_id, records, transcript, integrity, truncated)
 
