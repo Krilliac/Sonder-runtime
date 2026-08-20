@@ -9,11 +9,6 @@ from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
 
 
-def _legacy_module(name: str):
-    """Resolve a watched root module lazily without creating package cycles."""
-    return importlib.import_module(name)
-
-
 def _packaged_module(name: str):
     """Resolve an inspection implementation owned by the packaged adapter."""
     return importlib.import_module(
@@ -142,7 +137,7 @@ class InspectionExecutorAdapter:
     def _workspace_compare(
         self, args: dict, context: OperationContext
     ) -> ToolResult:
-        workspace_compare = _legacy_module("workspace_compare")
+        workspace_compare = _packaged_module("workspace_compare")
 
         audit_args = {key: args[key] for key in (
             "left", "right", "max_entries", "max_file_bytes",
@@ -290,7 +285,7 @@ class InspectionExecutorAdapter:
             return _failure(exc, audit_args)
 
     def _data_inspect(self, args: dict, context: OperationContext) -> ToolResult:
-        file_ops = _legacy_module(
+        file_ops = _packaged_module(
             "sonder_runtime.adapters.filesystem.file_ops"
         )
 

@@ -395,7 +395,7 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
         / "inspection_executor.py"
     )
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    resolved = {
+    legacy = {
         node.args[0].value
         for node in ast.walk(tree)
         if (
@@ -407,10 +407,8 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
             and isinstance(node.args[0].value, str)
         )
     }
-    assert resolved == {
-        "sonder_runtime.adapters.filesystem.file_ops", "workspace_compare",
-    }
-    assert not resolved & {
+    assert legacy == set()
+    assert not legacy & {
         "archive_tools", "content_digest", "data_query", "dependency_inventory",
         "archive_extract", "archive_create", "data_convert", "json_patch_tool",
         "log_inspect", "project_detect",
@@ -431,7 +429,8 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
     }
     assert packaged == {
         "archive_tools", "content_digest", "data_query", "dependency_inventory",
-        "log_inspect", "project_detect",
+        "log_inspect", "project_detect", "workspace_compare",
+        "sonder_runtime.adapters.filesystem.file_ops",
     }
 
 
