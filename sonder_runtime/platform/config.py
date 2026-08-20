@@ -29,6 +29,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
+from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform import unsafe_lab_policy
 
 PROFILES = ("workstation-local", "server-private")
@@ -149,8 +150,8 @@ class Secrets:
 
     def as_redacted_dict(self) -> dict:
         return {
-            "api_key": _redact_presence(self.api_key),
-            "auth_secret": _redact_presence(self.auth_secret),
+            "api_key": redact_presence(self.api_key),
+            "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": self.backup_key_file or "[unset]",
         }
 
@@ -204,10 +205,6 @@ class ConfigError(ValueError):
             "invalid configuration:\n" + "\n".join(f"  - {e}" for e in errors)
         )
         self.errors = tuple(errors)
-
-
-def _redact_presence(value: str) -> str:
-    return "[set]" if value else "[unset]"
 
 
 def _is_loopback_host(host: str) -> bool:

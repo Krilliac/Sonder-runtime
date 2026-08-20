@@ -379,3 +379,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Sixty-Sixth Slice: `WP1-ONE-HUNDRED-SIXTY-SIXTH-SLICE.md` —
   moved the read-only validated-configuration check factory into a packaged
   adapter while preserving the root doctor compatibility function.
+- WP1 One-Hundred-Sixty-Seventh Slice: `WP1-ONE-HUNDRED-SIXTY-SEVENTH-SLICE.md` —
+  moved pure interactive control-history message normalization into the domain
+  boundary while preserving the root server compatibility alias.
+- WP1 One-Hundred-Sixty-Eighth Slice: `WP1-ONE-HUNDRED-SIXTY-EIGHTH-SLICE.md` —
+  moved pure secret-presence redaction into the platform boundary while keeping
+  configuration ownership and redacted output compatibility intact.

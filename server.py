@@ -865,6 +865,9 @@ from sonder_runtime.domain.health_formatting import health_bar as _health_bar
 from sonder_runtime.domain.context_formatting import rough_token_count as _rough_token_count
 from sonder_runtime.domain.campaign_policy import output_matches as _campaign_output_matches
 from sonder_runtime.domain.control_timeout import parse_control_timeout as _parse_control_timeout
+from sonder_runtime.domain.control_history import (
+    control_history_messages as _control_history_messages,
+)
 from sonder_runtime.adapters.observability.activity_formatting import _format_activity_status
 from sonder_runtime.adapters.observability.distillation_formatting import (
     _drain_backlog_text,
@@ -1804,20 +1807,6 @@ def _explicit_serve_selection(tier, model_override):
     if str(model_override or "").strip():
         return True
     return str(tier or "").strip().lower() not in ("", "sonder", "local")
-
-
-def _control_history_messages(history, prompt):
-    messages = []
-    for msg in history or []:
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role")
-        content = msg.get("content") or ""
-        if role in ("user", "assistant") and content:
-            messages.append({"role": role, "content": content})
-    if prompt:
-        messages.append({"role": "user", "content": prompt})
-    return messages
 
 
 def _latest_runnable_block(history):
