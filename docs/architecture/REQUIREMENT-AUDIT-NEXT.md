@@ -2,7 +2,7 @@
 
 Date: 2026-08-20  
 Audited branch: `agent/wp1-execution-status`  
-Audit baseline: current branch HEAD `3579215` before this refresh commit
+Audit baseline: current branch HEAD `b5db48f` before this refresh commit
 Scope: SESSION/LOOP/SEAM/CTX/REPO/SKILL/AGENT/JOB/TOOL/EXEC/MEM/EVAL/MODEL/API/DATA/OPS/SEC/TRAIN/UPDATE/DOC
 
 ## Decision summary
@@ -11,8 +11,8 @@ This is an evidence audit, not a formal checklist update. The master
 specification and its formal checkboxes were not edited.
 
 - Requested scope: **163 IDs** across 19 families.
-- Refresh promotions: **14** rows gained direct focused-test and evidence-document support since the prior audit.
-- Current classification: **149 PROVEN-CONTRACT / 11 PARTIAL / 3 MISSING**.
+- Refresh promotions: **6** rows gained direct focused-test and evidence-document support since the prior audit.
+- Current classification: **155 PROVEN-CONTRACT / 8 PARTIAL / 0 MISSING**.
 - Formal master-spec checkboxes: **0/250 checked**.
 - Formal evidence ledger: **204 latest records; all 204 are `planned`**;
   none are `verified`.
@@ -62,7 +62,7 @@ not create ledger records or checkboxes.
 | LOOP-003 | PROVEN-CONTRACT | `WP2-LOOP-001-003.md`; typed interception events and focused tests. |
 | LOOP-004 | PROVEN-CONTRACT | `WP2-LOOP-004.md`; `sonder_runtime/application/loop/events.py`; `tests/test_loop_event_classification.py`. |
 | LOOP-005 | PROVEN-CONTRACT | `WP2-LOOP-005.md`; `tests/test_loop_steering.py`. |
-| LOOP-006 | PARTIAL | `WP2-LOOP-006.md`; cancellation tree is tested, but stream/tool/provider cleanup conformance is not complete. |
+| LOOP-006 | PROVEN-CONTRACT | `REMAINING-LOOP-006-008.md`, `REMAINING-JOB-004-LOOP-006-PROCESS-TREE.md`; `tests/test_remaining_loop_control.py` and `tests/test_process_tree_supervisor.py` directly cover typed cancellation propagation, cleanup conformance evidence, and fail-closed process/provider cleanup. Full provider wiring remains outside this contract slice. |
 | LOOP-007 | PROVEN-CONTRACT | `REMAINING-LOOP-007-008.md`; `tests/test_remaining_loop_007_008.py` directly covers durable retry evidence retention and reconciliation classification. Transport retry execution remains outside this contract slice. |
 | LOOP-008 | PROVEN-CONTRACT | `REMAINING-LOOP-007-008.md`; `tests/test_remaining_loop_007_008.py` directly covers SQLite idempotency, outbox atomicity, recreation, and fingerprint conflict handling. |
 
@@ -138,7 +138,7 @@ not create ledger records or checkboxes.
 | AGENT-007 | PROVEN-CONTRACT | `WP5-AGENT-003.md`, `WP5-SUBAGENT-001.md`; role/depth/count/concurrency budget foundations are tested, but full enforcement integration is open. |
 | AGENT-008 | PROVEN-CONTRACT | `REMAINING-AGENT-004-008-009.md`; `tests/test_remaining_agent_004_008_009.py` directly covers read/write workspace containment and parent-context isolation. |
 | AGENT-009 | PROVEN-CONTRACT | `REMAINING-AGENT-004-008-009.md`; `tests/test_remaining_agent_004_008_009.py` directly covers port-backed delegation, accepted events, bounded result evidence, and lineage validation. |
-| AGENT-010 | MISSING | Explorer/architect/editor/reviewer workflow integration is not evidenced. |
+| AGENT-010 | PROVEN-CONTRACT | `REMAINING-AGENT-010.md`; `tests/test_remaining_agent_010.py` directly covers the explorer → architect → editor → verifier → reviewer → integrator path, preset routing, durable lineage binding, evidence-backed terminal state, failure short-circuiting, and workspace enforcement. Durable child records remain provider-owned. |
 
 ### JOB
 
@@ -147,7 +147,7 @@ not create ledger records or checkboxes.
 | JOB-001 | PROVEN-CONTRACT | `WP5-JOB-001.md`; typed dependency-ordered generic jobs and `tests/test_wp5_generic_jobs.py`. |
 | JOB-002 | PROVEN-CONTRACT | `REMAINING-AGENT-005-JOB-002-004.md`; `tests/test_remaining_agent_005_job_integration.py` directly covers durable start/list/poll/stream linkage and the SQLite registry boundary. |
 | JOB-003 | PROVEN-CONTRACT | `REMAINING-AGENT-005-JOB-002-004.md`; `tests/test_remaining_agent_005_job_integration.py` directly covers restart reconciliation, orphan recovery, and truthful incomplete-cleanup handling. |
-| JOB-004 | PARTIAL | `REMAINING-EXEC-001-006.md`; termination intent/lifecycle is covered, but full process-tree containment is not proven. |
+| JOB-004 | PROVEN-CONTRACT | `REMAINING-JOB-004-LOOP-006-PROCESS-TREE.md`; `tests/test_process_tree_supervisor.py` directly covers Windows tree termination, POSIX process-group enforcement, unsupported/incomplete outcomes, and typed cleanup receipts. End-to-end wiring of every execution provider remains outside this contract slice. |
 | JOB-005 | PROVEN-CONTRACT | `REMAINING-EXEC-001-006.md`; bounded pages, cursors, watermarks, truncation, and spill references are tested. Durable integration remains open. |
 
 ### TOOL
@@ -263,7 +263,7 @@ not create ledger records or checkboxes.
 | SEC-006 | PROVEN-CONTRACT | `REMAINING-SEC-006.md`; `tests/test_remaining_prompt_provenance.py` directly covers untrusted labels, request binding, redacted events, replay, tamper detection, and fail-closed malformed input. |
 | SEC-007 | PROVEN-CONTRACT | `WP9-SEC-007-008-UPDATE.md`; bounded secret scanning and redaction tests. |
 | SEC-008 | PROVEN-CONTRACT | Same evidence covers bounded decoder fuzz-harness behavior. |
-| SEC-009 | MISSING | Same-user recovery and audit-file boundary claims are not sufficiently evidenced. |
+| SEC-009 | PROVEN-CONTRACT | `REMAINING-SEC-009.md`; `tests/test_remaining_sec_009.py` directly covers bounded owner/path recovery artifacts, chained audit integrity, tamper detection, and the explicit tamper-evident-only limitation. Same-user storage is not claimed as an independent security boundary. |
 
 ### TRAIN
 
@@ -283,11 +283,11 @@ not create ledger records or checkboxes.
 
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
-| UPDATE-001 | PARTIAL | `WP9-SEC-007-008-UPDATE.md` provides signed activation foundations, not the complete bounded updates domain/TUF state. |
+| UPDATE-001 | PROVEN-CONTRACT | `REMAINING-UPDATE-001-005.md`; `tests/test_remaining_update_001_005.py` directly covers bounded update lifecycle ordering, digest/health/activation/rollback failure paths, history bounds, and TUF-like metadata links, expiry, signer validation, and target bounds. Network and trust adapters remain injected. |
 | UPDATE-002 | PROVEN-CONTRACT | `REMAINING-UPDATE-002-004.md`; `tests/test_remaining_update_002_004.py` directly covers platform-neutral helper activation requests without platform-specific execution. |
 | UPDATE-003 | PROVEN-CONTRACT | `REMAINING-UPDATE-002-004.md`; `tests/test_remaining_update_002_004.py` directly covers exact sealed dependency equality, missing/extra entries, and digest tampering. |
 | UPDATE-004 | PROVEN-CONTRACT | `REMAINING-UPDATE-002-004.md`; `tests/test_remaining_update_002_004.py` directly covers atomic activation rollback, standalone recovery evidence, and explicit incomplete recovery. |
-| UPDATE-005 | MISSING | Signed release evidence package/SBOM/test publication is not evidenced. |
+| UPDATE-005 | PROVEN-CONTRACT | `REMAINING-UPDATE-001-005.md`; `tests/test_remaining_update_001_005.py` directly covers deterministic signed publication of manifest hashes, SBOM, test results, migration/rollback evidence, complete target verification, and tamper rejection. External publication transport remains outside this contract slice. |
 
 ### DOC
 
@@ -300,6 +300,13 @@ not create ledger records or checkboxes.
 | DOC-005 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers generated command/tool/event/configuration references and freshness. |
 | DOC-006 | PARTIAL | The evidence ledger and this audit establish process, but no requirement has a verified ledger record in this baseline. |
 | DOC-007 | PARTIAL | Several evidence docs correctly state limitations, but a complete stale-promise sweep is still required. |
+
+## Remaining partial rows
+
+`SEAM-014`, `REPO-004`, `REPO-007`, `SKILL-006`, `MEM-008`, `DATA-001`,
+`DOC-006`, and `DOC-007` remain `PARTIAL`. There are no remaining `MISSING`
+rows in the 163-row scoped audit. These classifications are contract evidence
+only and do not promote any formal checkbox or ledger record.
 
 ## Safe checkbox candidates
 
@@ -321,9 +328,9 @@ candidate targets, not safe candidates today.
 1. Add requirement-specific ledger revisions with real `baseline_sha`,
    `verified_sha`, focused/regression evidence, and limitations only after the
    end-to-end requirement is met.
-2. Close the explicit partial/missing rows above, prioritizing session
-   persistence/query, unified agent/job integration, execution adapters,
-   update activation, mobile/schema surfaces, and documentation authority.
+2. Close the eight explicit partial rows above, prioritizing live LSP and
+   multi-root integration, durable procedural publication, per-domain
+   persistence ownership, ledger verification, and stale-promise review.
 3. Run the full acceptance, migration rehearsal, recovery, security, platform,
    soak, and performance matrices; focused tests alone cannot support the
    final checklist.
