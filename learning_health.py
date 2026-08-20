@@ -7,7 +7,7 @@ import embeddings
 import memory_quality
 import sonder_runtime.adapters.memory_store as memory_store
 import retriever
-import reward
+from sonder_runtime.domain.memory import rules as reward_rules
 from sonder_runtime.domain.memory import rules
 
 
@@ -102,7 +102,7 @@ def _outcome_metrics(conn) -> dict:
         signal = str(row["signal"])
         source = str(row["source"])
         count = int(row["count"] or 0)
-        good = reward.is_good(signal)
+        good = reward_rules.reward_is_good(signal)
         if source in _REVIEWED_SOURCES:
             reviewed += count
             reviewed_good += count if good else 0
@@ -138,7 +138,11 @@ def _outcome_metrics(conn) -> dict:
             "SELECT COUNT(DISTINCT interaction_id) FROM outcomes"
         ).fetchone()[0]
     )
-    good_signals = sorted(signal for signal in reward.VALID_SIGNALS if reward.is_good(signal))
+    good_signals = sorted(
+        signal
+        for signal in reward_rules.VALID_SIGNALS
+        if reward_rules.reward_is_good(signal)
+    )
     good_interactions = 0
     if good_signals:
         placeholders = ",".join("?" for _ in good_signals)
@@ -210,7 +214,7 @@ def _reviewed_by_tier(conn) -> list[dict]:
         count = int(row["count"] or 0)
         bucket = totals.setdefault(tier, [0, 0])
         bucket[0] += count
-        if reward.is_good(signal):
+        if reward_rules.reward_is_good(signal):
             bucket[1] += count
     return [
         {

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-import reward
 from sonder_runtime.adapters.strangler_services import (
     LegacyMemoryRepository,
     LegacyUnitOfWork,
 )
 from sonder_runtime.bootstrap import app as bootstrap_app
+from sonder_runtime.domain.memory import rules as reward_rules
 
 
 @pytest.fixture()
@@ -79,9 +79,13 @@ def test_record_outcome_delegates_and_validates(db_path):
         with pytest.raises(TypeError):
             uow.memory.record_outcome("i1", "accepted", 0.8)
         # A valid good signal at its canonical reward is accepted.
-        good = next(s for s in reward.VALID_SIGNALS if reward.is_good(s))
+        good = next(
+            signal
+            for signal in reward_rules.VALID_SIGNALS
+            if reward_rules.reward_is_good(signal)
+        )
         result = uow.memory.record_outcome(
-            "i1", good, reward.score(good), source="caller",
+            "i1", good, reward_rules.reward_score(good), source="caller",
         )
         assert result is not None
 
