@@ -10,6 +10,7 @@ from sonder_runtime.bootstrap.capabilities import (
     _reset_for_tests,
 )
 from sonder_runtime.bootstrap.main import parse_args
+from sonder_runtime.adapters import runtime_capabilities as packaged_caps
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +21,13 @@ def _reset_caps():
 
 
 class TestRuntimeCapabilities:
+    def test_bootstrap_is_identity_compatibility_surface(self):
+        from sonder_runtime.bootstrap import capabilities as bootstrap_caps
+
+        assert bootstrap_caps.RuntimeCapabilities is packaged_caps.RuntimeCapabilities
+        assert bootstrap_caps.freeze is packaged_caps.freeze
+        assert bootstrap_caps.current is packaged_caps.current
+
     def test_defaults_are_false(self):
         caps = RuntimeCapabilities()
         assert caps.unrestricted_tools is False

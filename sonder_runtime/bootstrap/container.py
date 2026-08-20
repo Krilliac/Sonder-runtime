@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .capabilities import RuntimeCapabilities
+from ..adapters.runtime_capabilities import RuntimeCapabilities
 from ..application.ports.model_gateway import ModelGateway
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink

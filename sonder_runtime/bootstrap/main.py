@@ -8,8 +8,8 @@ import argparse
 import os
 import sys
 
-from . import capabilities as caps
-from .capabilities import RuntimeCapabilities
+from ..adapters import runtime_capabilities as caps
+from ..adapters.runtime_capabilities import RuntimeCapabilities
 from .container import RuntimeConfig, build_runtime
 
 
