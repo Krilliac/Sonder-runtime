@@ -477,3 +477,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Ninety-Seventh Slice: `WP1-ONE-HUNDRED-NINETY-SEVENTH-SLICE.md` —
   moved pure permission-mode context rendering into the packaged domain
   boundary while preserving the root server compatibility helper.
+- WP1 One-Hundred-Ninety-Ninth Slice: `WP1-ONE-HUNDRED-NINETY-NINTH-SLICE.md` —
+  moved reasoning-exposure environment policy into the packaged platform
+  boundary while preserving the root server compatibility helper.
+- WP1 Two-Hundredth Slice: `WP1-TWO-HUNDREDTH-SLICE.md` —
+  moved scalar compatibility-environment coercion into the packaged platform
+  configuration-environment boundary while preserving config helper identity.
