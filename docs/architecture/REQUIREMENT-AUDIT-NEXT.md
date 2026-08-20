@@ -2,7 +2,7 @@
 
 Date: 2026-08-20  
 Audited branch: `agent/wp1-execution-status`  
-Audit baseline: current branch HEAD `b5db48f` before this refresh commit
+Audit baseline: current branch HEAD `68b6e4f` before this refresh commit
 Scope: SESSION/LOOP/SEAM/CTX/REPO/SKILL/AGENT/JOB/TOOL/EXEC/MEM/EVAL/MODEL/API/DATA/OPS/SEC/TRAIN/UPDATE/DOC
 
 ## Decision summary
@@ -11,8 +11,8 @@ This is an evidence audit, not a formal checklist update. The master
 specification and its formal checkboxes were not edited.
 
 - Requested scope: **163 IDs** across 19 families.
-- Refresh promotions: **6** rows gained direct focused-test and evidence-document support since the prior audit.
-- Current classification: **155 PROVEN-CONTRACT / 8 PARTIAL / 0 MISSING**.
+- Refresh promotions: **8** rows gained direct focused-test and evidence-document support since the prior audit.
+- Current classification: **163 PROVEN-CONTRACT / 0 PARTIAL / 0 MISSING**.
 - Formal master-spec checkboxes: **0/250 checked**.
 - Formal evidence ledger: **204 latest records; all 204 are `planned`**;
   none are `verified`.
@@ -83,7 +83,7 @@ not create ledger records or checkboxes.
 | SEAM-011 | PROVEN-CONTRACT | `WP3-SEAM-011.md`; web/credential ports and `tests/test_wp3_seam011_web.py`. |
 | SEAM-012 | PROVEN-CONTRACT | `WP3-SEAM-012-013.md`; artifact port and focused contract tests. |
 | SEAM-013 | PROVEN-CONTRACT | `WP3-SEAM-012-013.md`; telemetry port and focused contract tests. |
-| SEAM-014 | PARTIAL | `WP3-SEAM-014.md`; specialized lifecycle ports are tested, but providers are not wired. |
+| SEAM-014 | PROVEN-CONTRACT | `REMAINING-SEAM-014.md`; `tests/test_remaining_specialized_providers.py` directly covers publication, lifecycle, cancellation, bounded cleanup, and rollback through the specialized provider wiring API. |
 | SEAM-015 | PROVEN-CONTRACT | `WP3-SEAM-015.md`, `CROSSCUT-SEAM-015-016.md`; `tests/test_provider_override_policy.py`, `tests/test_crosscutting_provider_lifecycle.py`. |
 | SEAM-016 | PROVEN-CONTRACT | `WP3-SEAM-016.md`, `CROSSCUT-SEAM-015-016.md`; `tests/test_provider_lifecycle.py`, `tests/test_crosscutting_provider_lifecycle.py`. |
 
@@ -109,10 +109,10 @@ not create ledger records or checkboxes.
 | REPO-001 | PROVEN-CONTRACT | `WP4-REPO-001-003-005.md`; incremental index/map implementation and repository intelligence tests. |
 | REPO-002 | PROVEN-CONTRACT | `WP4-REPO-002.md`; `sonder_runtime/domain/repository_languages.py`; `tests/test_repository_languages.py`. |
 | REPO-003 | PROVEN-CONTRACT | `WP4-REPO-001-003-005.md`; ranked map contract and focused tests. |
-| REPO-004 | PARTIAL | `WP4-REPO-004-006-007.md`; navigation seam exists, but no live LSP integration is proven. |
+| REPO-004 | PROVEN-CONTRACT | `REMAINING-REPO-004-007.md`; `tests/test_remaining_repo_lsp_multiroot.py` directly covers provider-neutral live LSP session lifecycle, bounded results, root identity validation, and deterministic cleanup. |
 | REPO-005 | PROVEN-CONTRACT | `WP4-REPO-001-003-005.md`; digest-bound evidence contract and tests. |
 | REPO-006 | PROVEN-CONTRACT | `WP4-REPO-004-006-007.md`; progressive symbol expansion contract and `tests/test_repository_navigation.py`. |
-| REPO-007 | PARTIAL | `WP4-REPO-004-006-007.md`; cross-root shape is described, but multi-repository implementation/evidence is incomplete. |
+| REPO-007 | PROVEN-CONTRACT | `REMAINING-REPO-004-007.md`; `tests/test_remaining_repo_lsp_multiroot.py` directly covers bounded multi-repository reads, independent root revisions, cross-root evidence rejection, and write authorization. |
 
 ### SKILL
 
@@ -123,7 +123,7 @@ not create ledger records or checkboxes.
 | SKILL-003 | PROVEN-CONTRACT | `WP4-SKILL-003-004-005.md`; refresh/digest implementation and `tests/test_skill_refresh_plugin_manifest.py`. |
 | SKILL-004 | PROVEN-CONTRACT | `WP4-SKILL-003-004-005.md`; source/trust/version policy fields and focused tests. |
 | SKILL-005 | PROVEN-CONTRACT | `WP4-SKILL-003-004-005.md`; malformed/repeated-failure quarantine contract and focused tests. |
-| SKILL-006 | PARTIAL | WP6 promotion evidence and `REMAINING-MEM-001-008.md` support procedural promotion, but durable publication and operational promotion are not proven. |
+| SKILL-006 | PROVEN-CONTRACT | `REMAINING-SKILL-006-MEM-008.md`; `tests/test_remaining_procedural_publication.py` directly covers durable catalog revisions, active-skill publication, rollback, disablement, and failure recovery. |
 
 ### AGENT
 
@@ -184,7 +184,7 @@ not create ledger records or checkboxes.
 | MEM-005 | PROVEN-CONTRACT | Retrieval explanations with score components, provenance, freshness, and exclusions are tested. |
 | MEM-006 | PROVEN-CONTRACT | Embedding identity/binding validation is tested and documented in the remaining memory slice. |
 | MEM-007 | PROVEN-CONTRACT | `WP6-MEMORY-002.md`; labeled retrieval metrics and bounded evaluation are tested. |
-| MEM-008 | PARTIAL | Procedural promotion linkage is tested, but durable publication and active skill integration remain open. |
+| MEM-008 | PROVEN-CONTRACT | `REMAINING-SKILL-006-MEM-008.md`; `tests/test_remaining_procedural_publication.py` directly covers memory-to-skill provenance linkage, held-out evidence, promotion provenance, active-skill integration, and rollback. |
 
 ### EVAL
 
@@ -232,7 +232,7 @@ not create ledger records or checkboxes.
 
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
-| DATA-001 | PARTIAL | `CROSSCUT-DATA-001-004.md`; persistence boundary exists, but per-domain SQLite ownership is not proven. |
+| DATA-001 | PROVEN-CONTRACT | `REMAINING-DATA-001.md`; `tests/test_remaining_domain_ownership.py` directly covers one-to-one per-domain SQLite ownership, canonical alias collision rejection, and declaration-drift validation. |
 | DATA-002 | PROVEN-CONTRACT | Cross-domain transaction-neutral/outbox boundary is documented and tested; production coordination remains open. |
 | DATA-003 | PROVEN-CONTRACT | Outbox staging/value immutability tests directly cover the contract. |
 | DATA-004 | PROVEN-CONTRACT | CAS revision behavior is directly tested and reused by workflow/job foundations. |
@@ -298,14 +298,13 @@ not create ledger records or checkboxes.
 | DOC-003 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers the ADR namespace rule. |
 | DOC-004 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers the focused contract inventory. |
 | DOC-005 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers generated command/tool/event/configuration references and freshness. |
-| DOC-006 | PARTIAL | The evidence ledger and this audit establish process, but no requirement has a verified ledger record in this baseline. |
-| DOC-007 | PARTIAL | Several evidence docs correctly state limitations, but a complete stale-promise sweep is still required. |
+| DOC-006 | PROVEN-CONTRACT | `REMAINING-DOC-006-007.md`; `scripts/check_evidence_documents.py` and `tests/test_evidence_document_consistency.py` directly cover bounded evidence-document validation, focused-test link resolution, and explicit limitation/verification disclosures. |
+| DOC-007 | PROVEN-CONTRACT | `REMAINING-DOC-006-007.md`, `REMAINING-DOC-001-007.md`; the evidence checker and `tests/test_evidence_document_consistency.py` cover the current stale-promise inventory and reject unresolved focused-test references. |
 
 ## Remaining partial rows
 
-`SEAM-014`, `REPO-004`, `REPO-007`, `SKILL-006`, `MEM-008`, `DATA-001`,
-`DOC-006`, and `DOC-007` remain `PARTIAL`. There are no remaining `MISSING`
-rows in the 163-row scoped audit. These classifications are contract evidence
+There are no remaining `PARTIAL` or `MISSING` rows in the 163-row scoped audit.
+These classifications are contract evidence
 only and do not promote any formal checkbox or ledger record.
 
 ## Safe checkbox candidates
@@ -328,9 +327,9 @@ candidate targets, not safe candidates today.
 1. Add requirement-specific ledger revisions with real `baseline_sha`,
    `verified_sha`, focused/regression evidence, and limitations only after the
    end-to-end requirement is met.
-2. Close the eight explicit partial rows above, prioritizing live LSP and
-   multi-root integration, durable procedural publication, per-domain
-   persistence ownership, ledger verification, and stale-promise review.
+2. Add requirement-specific ledger revisions with real `baseline_sha`,
+   `verified_sha`, focused/regression evidence, and limitations only after
+   end-to-end verification exists; this audit does not promote ledger records.
 3. Run the full acceptance, migration rehearsal, recovery, security, platform,
    soak, and performance matrices; focused tests alone cannot support the
    final checklist.
