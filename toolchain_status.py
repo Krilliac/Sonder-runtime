@@ -15,6 +15,7 @@ import threading
 import time
 
 import sonder_logging
+from sonder_runtime.adapters import process_termination
 from sonder_runtime.platform import toolchain_policy
 
 
@@ -34,37 +35,13 @@ def _safe_output(text: str) -> str:
 
 
 def _terminate_process_tree(proc) -> None:
-    """Best-effort teardown of the fixed probe and ordinary descendants."""
-    if proc.poll() is not None:
-        return
-    pid = getattr(proc, "pid", None)
-    if os.name == "nt" and pid:
-        # The PID originates from our own fixed-argv Popen call.  `/T` covers
-        # a wrapper's ordinary helper children, avoiding a timeout that only
-        # kills the parent while its spawned work continues.
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-                check=False,
-                shell=False,
-            )
-            return
-        except (OSError, subprocess.SubprocessError):
-            pass
-    elif pid:
-        try:
-            os.killpg(pid, signal.SIGKILL)
-            return
-        except (OSError, ProcessLookupError):
-            pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
+    """Compatibility delegate for the packaged process-teardown adapter."""
+    return process_termination.terminate_process_tree(
+        proc,
+        os_module=os,
+        signal_module=signal,
+        subprocess_module=subprocess,
+    )
 
 
 def _run_bounded(argv: list[str]) -> tuple[str, str]:

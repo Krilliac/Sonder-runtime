@@ -489,3 +489,9 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Second Slice: `WP1-TWO-HUNDRED-SECOND-SLICE.md` —
   moved total physical RAM probing into the packaged hardware platform boundary
   while preserving the legacy hardware probe alias.
+- WP1 Two-Hundred-Third Slice: `WP1-TWO-HUNDRED-THIRD-SLICE.md` —
+  moved the private-COT environment opt-in policy into the packaged platform
+  boundary while preserving the root server compatibility helper.
+- WP1 Two-Hundred-Fourth Slice: `WP1-TWO-HUNDRED-FOURTH-SLICE.md` —
+  moved bounded toolchain process-tree teardown into the packaged adapter
+  boundary while preserving the legacy toolchain-status delegate.

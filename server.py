@@ -96,6 +96,9 @@ from sonder_runtime.platform.location_consent import (
 from sonder_runtime.platform.reasoning_policy import (
     exposure_enabled as _reasoning_exposure_enabled_policy,
 )
+from sonder_runtime.platform.private_cot_policy import (
+    opt_in_enabled as _private_cot_opt_in_enabled_policy,
+)
 from sonder_runtime.platform.version import (
     running_source_commit_at_import as _running_source_commit,
 )
@@ -484,9 +487,7 @@ def private_cot_opt_in_enabled() -> bool:
 
     The flag alone is not sufficient: see ``_private_cot_rule_allows``.
     """
-    return os.environ.get("SONDER_ALLOW_PRIVATE_COT", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return _private_cot_opt_in_enabled_policy()
 
 
 def _private_cot_rule_allows() -> bool:
