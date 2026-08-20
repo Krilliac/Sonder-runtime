@@ -2603,6 +2603,9 @@ _STRUCTURED_TYPES = frozenset({
     "object", "array", "string", "integer", "number", "boolean", "null",
 })
 _STRUCTURED_SCHEMA_MAX_DEPTH = 16
+# Public adapter compatibility value used by schema callers before bootstrap
+# injection. Runtime validation still reads the injected verifier bound below.
+_STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS = 256
 # ``json_schema_verifier`` intentionally compares arbitrary JSON values for
 # ``uniqueItems`` rather than relying on hashing. That is the correct JSON
 # equality semantics, but is quadratic in the array length. HTTP structured
