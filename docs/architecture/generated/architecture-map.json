@@ -377,7 +377,7 @@
       ]
     },
     {
-      "file_count": 10,
+      "file_count": 11,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -389,6 +389,7 @@
         "sonder_runtime/bootstrap/doctor_formatting.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
         "sonder_runtime/bootstrap/legacy_mcp.py",
+        "sonder_runtime/bootstrap/legacy_model.py",
         "sonder_runtime/bootstrap/main.py"
       ]
     },
