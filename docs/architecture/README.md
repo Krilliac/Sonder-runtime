@@ -361,3 +361,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Sixtieth Slice: `WP1-ONE-HUNDRED-SIXTIETH-SLICE.md` —
   moved inference telemetry normalization into the canonical inference adapter
   package while preserving the legacy module's compatibility exports.
+- WP1 One-Hundred-Sixty-Second Slice: `WP1-ONE-HUNDRED-SIXTY-SECOND-SLICE.md` —
+  moved Ollama model-root path resolution into the canonical platform boundary
+  while preserving the storage adapter compatibility export.
+- WP1 One-Hundred-Sixty-First Slice: `WP1-ONE-HUNDRED-SIXTY-FIRST-SLICE.md` —
+  moved cancellation safety policy into the canonical domain boundary while
+  preserving the root server compatibility alias.
