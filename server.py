@@ -851,6 +851,7 @@ from sonder_runtime.adapters.context_formatting import format_context_health
 from sonder_runtime.domain.health_formatting import health_bar as _health_bar
 from sonder_runtime.domain.context_formatting import rough_token_count as _rough_token_count
 from sonder_runtime.domain.campaign_policy import output_matches as _campaign_output_matches
+from sonder_runtime.domain.control_timeout import parse_control_timeout as _parse_control_timeout
 from sonder_runtime.adapters.observability.activity_formatting import _format_activity_status
 from sonder_runtime.adapters.observability.distillation_formatting import (
     _drain_backlog_text,
@@ -1824,16 +1825,6 @@ def _latest_project_files(history):
         if files:
             return files
     return []
-
-
-def _parse_control_timeout(arg, command="/run"):
-    arg = (arg or "").strip()
-    if not arg:
-        return grounding.DEFAULT_TIMEOUT, None
-    try:
-        return grounding.clamp_timeout(int(arg)), None
-    except ValueError:
-        return None, "usage: %s [seconds]  (runs the previous fenced code block)" % command
 
 
 def _control_run(arg, history=None):
