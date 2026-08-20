@@ -79,6 +79,7 @@ from sonder_runtime.domain.execution import status as execution_status
 from sonder_runtime.domain.model_routing import (
     is_cloud_model_name as _is_cloud_model_name,
 )
+from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -4315,16 +4316,6 @@ def _chat_request(
             cloud=cloud,
         )
     return out, content
-
-
-def _model_usage_count(value):
-    if value is None:
-        return None
-    try:
-        value = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return value if value >= 0 else None
 
 
 def _model_usage_source(tokens_in, tokens_out):
