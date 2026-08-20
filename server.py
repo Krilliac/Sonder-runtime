@@ -107,19 +107,22 @@ from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
-import data_query as data_query_module
+from sonder_runtime.adapters.inspection import (
+    archive_tools,
+    content_digest,
+    data_query as data_query_module,
+    dependency_inventory as dependency_inventory_tool,
+    log_inspect as log_inspect_module,
+    project_detect as project_detector,
+    workspace_compare as workspace_compare_module,
+)
 import json_patch_tool
 import json_schema_verifier
 import text_patch as text_patch_ops
-import workspace_compare as workspace_compare_module
-import log_inspect as log_inspect_module
 import data_convert as data_convert_module
 import sqlite_mutate as sqlite_mutate_module
 import symbol_index
-import project_detect as project_detector
 import git_history
-import content_digest
-import archive_tools
 import archive_create as archive_create_tool
 import context_policy
 import command_registry
@@ -137,7 +140,6 @@ import assetgen
 import artifact_grounding
 import game_forge
 import sonder_runtime.adapters.filesystem.workbench as workbench
-import dependency_inventory as dependency_inventory_tool
 import creative_router
 import intents
 import sonder_runtime.adapters.runtime_policy as runtime_policy

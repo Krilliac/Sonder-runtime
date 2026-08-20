@@ -6,7 +6,7 @@ import pytest
 
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
-import project_detect
+from sonder_runtime.adapters.inspection import project_detect
 import server
 
 

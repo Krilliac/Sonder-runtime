@@ -9,7 +9,7 @@ import zipfile
 
 import pytest
 
-import archive_tools
+from sonder_runtime.adapters.inspection import archive_tools
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
 

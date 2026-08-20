@@ -360,6 +360,13 @@ def test_checker_detects_a_violation(tmp_path):
         "sonder_repl.py",
         "sonder_migrations.py",
         "sonder_metrics.py",
+        "archive_tools.py",
+        "content_digest.py",
+        "data_query.py",
+        "dependency_inventory.py",
+        "log_inspect.py",
+        "project_detect.py",
+        "workspace_compare.py",
     ],
 )
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):

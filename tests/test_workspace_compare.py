@@ -8,7 +8,7 @@ import pytest
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
-import workspace_compare
+from sonder_runtime.adapters.inspection import workspace_compare
 
 
 @pytest.fixture
