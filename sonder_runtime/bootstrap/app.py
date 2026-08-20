@@ -29,7 +29,7 @@ from ..adapters.preference_codec import PreferenceCodecAdapter
 from ..adapters.workflow_repository import WorkflowRepositoryAdapter
 from ..adapters.workflow_loop_runner import LoopRunnerAdapter
 from ..adapters.local_observability import LocalObservabilitySink
-from ..adapters.ollama.gateway import OllamaGateway
+from ..adapters.model_gateway_factory import build_model_gateway
 from ..adapters.application_lifecycle import ApplicationLifecycle
 from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
@@ -74,23 +74,8 @@ class Application:
     workflows: WorkflowService
 
 
-def _build_model_gateway() -> ModelGateway:
-    """Select the model transport backend for this graph.
-
-    Ollama is the default. ``SONDER_MODEL_BACKEND=openai`` (aliases:
-    openai-compatible / llamacpp / vllm) selects the OpenAI-compatible gateway,
-    which talks to any /v1 server; its own consent gate still refuses a
-    non-loopback endpoint without cloud consent. Backend selection is a
-    composition concern, so the env read lives here, not in a port or adapter.
-    """
-    import os
-
-    backend = os.environ.get("SONDER_MODEL_BACKEND", "ollama").strip().lower()
-    if backend in ("openai", "openai-compatible", "llamacpp", "vllm"):
-        from ..adapters.openai_compat.gateway import OpenAICompatibleGateway
-
-        return OpenAICompatibleGateway()
-    return OllamaGateway()
+# Compatibility name for callers that used the bootstrap-private selector.
+_build_model_gateway = build_model_gateway
 
 
 def build_application(
@@ -110,7 +95,7 @@ def build_application(
     # SPEC-3 Phase 3: the real transport adapter behind the port — consent
     # enforced against the OperationContext, driver errors mapped into the
     # domain taxonomy. Backend is Ollama by default, selectable via env.
-    gateway = _build_model_gateway()
+    gateway = build_model_gateway()
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),

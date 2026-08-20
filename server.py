@@ -83,6 +83,7 @@ from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
 )
+from sonder_runtime.platform.environment_options import env_int_option as _env_int_option
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -238,19 +239,6 @@ def _live_cloud_model(configured, default):
     return configured
 
 
-def _env_int_option(name, default=None):
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    raw = raw.strip()
-    if raw.lower() in ("", "auto", "default", "none", "off"):
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
 def _cpu_thread_default():
     return max(1, os.cpu_count() or 4)
 
@@ -267,13 +255,17 @@ def _local_model_options(temperature, num_predict, num_ctx):
         "num_ctx": context_policy.native(num_ctx),
     }
     runtime = {
-        "num_thread": _env_int_option("SONDER_NUM_THREAD", _cpu_thread_default()),
+        "num_thread": _env_int_option(
+            "SONDER_NUM_THREAD", _cpu_thread_default(), environ=os.environ
+        ),
         # Omit num_gpu unless the operator explicitly pins it. Ollama can then
         # select CPU, Metal, ROCm, CUDA, Vulkan, or another supported backend
         # from live host capabilities instead of inheriting an NVIDIA-shaped
         # default from the maintainer's workstation.
-        "num_gpu": _env_int_option("SONDER_NUM_GPU"),
-        "num_batch": _env_int_option("SONDER_NUM_BATCH", 512),
+        "num_gpu": _env_int_option("SONDER_NUM_GPU", environ=os.environ),
+        "num_batch": _env_int_option(
+            "SONDER_NUM_BATCH", 512, environ=os.environ
+        ),
     }
     for key, value in runtime.items():
         if value is not None:
