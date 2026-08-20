@@ -16,7 +16,7 @@ from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
-from ..adapters.strangler_services import LegacyUnitOfWork
+from ..adapters.unit_of_work import UnitOfWorkAdapter
 from ..adapters.operations_event_sink import OperationsEventSink
 from ..adapters.eval_history_reader import LegacyEvaluationHistoryReader
 from ..adapters.inspection_executor import LegacyInspectionExecutor
@@ -118,7 +118,7 @@ def build_application(
         automation=AutopilotRepository(),
         # A UnitOfWork is per-transaction, so the graph exposes a factory, not
         # a singleton; each call opens and owns its own connection scope.
-        unit_of_work=LegacyUnitOfWork,
+        unit_of_work=UnitOfWorkAdapter,
         tool_executor=ToolExecutorAdapter(),
         process_probe=ProcessProbeAdapter(),
         # Bounded process-local counters/recent events decorate the durable

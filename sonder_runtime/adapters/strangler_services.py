@@ -8,66 +8,13 @@ service is actually exercised.
 """
 from __future__ import annotations
 
-from .persistence.autopilot_repository import AutopilotRepository
-from .runtime_policy_repository import RuntimePolicyRepository
 from .memory_repository import MemoryRepositoryAdapter
 from .legacy_model_gateway import LegacyModelGateway
 from .tool_executor import ToolExecutorAdapter
-from .operations_event_sink import OperationsEventSink
+from .unit_of_work import UnitOfWorkAdapter
 
 
-class LegacyUnitOfWork:
-    """UnitOfWork owning one memory-store connection for a transaction scope.
-
-    Opens the canonical memory database on ``__enter__`` and exposes the
-    memory repository bound to that connection; the automation and policy
-    repositories are connection-independent (they manage their own stores),
-    and events go to the SPEC-2 operations store.
-
-    Honest boundary note: several root ``memory_store`` operations (e.g.
-    ``add_fact``, ``log_interaction``) still self-commit, so ``rollback`` does
-    not yet undo them. The UnitOfWork owns the connection lifecycle today; the
-    transaction boundary tightens as those ops migrate off self-commit.
-    """
-
-    def __init__(self, db_path: str | None = None) -> None:
-        self._db_path = db_path
-        self._conn = None
-        self.memory = None
-        self.automation = AutopilotRepository()
-        self.policy = RuntimePolicyRepository()
-        self.events = OperationsEventSink()
-
-    def __enter__(self) -> "LegacyUnitOfWork":
-        import sonder_runtime.adapters.memory_store as memory_store
-        from sonder_runtime.platform import paths
-
-        path = self._db_path or paths.memory_db_path()
-        self._conn = memory_store.connect(path)
-        self.memory = MemoryRepositoryAdapter(self._conn)
-        return self
-
-    def commit(self) -> None:
-        if self._conn is not None:
-            self._conn.commit()
-
-    def rollback(self) -> None:
-        if self._conn is not None:
-            self._conn.rollback()
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        try:
-            if exc_type is None:
-                self.commit()
-            else:
-                self.rollback()
-        finally:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
-                self.memory = None
-
-
-# Compatibility name for callers that still import the pre-migration adapter.
+# Compatibility names for callers that still import the pre-migration adapter.
+LegacyUnitOfWork = UnitOfWorkAdapter
 LegacyMemoryRepository = MemoryRepositoryAdapter
 LegacyToolExecutor = ToolExecutorAdapter

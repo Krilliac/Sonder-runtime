@@ -254,3 +254,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Twenty-Sixth Slice: `WP1-ONE-HUNDRED-TWENTY-SIXTH-SLICE.md` —
   moved the pure cloud-model-name classifier into the domain boundary while
   preserving the server compatibility alias.
+- WP1 One-Hundred-Twenty-Seventh Slice: `WP1-ONE-HUNDRED-TWENTY-SEVENTH-SLICE.md` —
+  moved health-meter formatting into the domain boundary while preserving the
+  server compatibility alias.
+- WP1 One-Hundred-Twenty-Eighth Slice: `WP1-ONE-HUNDRED-TWENTY-EIGHTH-SLICE.md` —
+  moved UnitOfWork ownership out of generic strangler services into its
+  canonical packaged adapter while preserving the legacy import identity.

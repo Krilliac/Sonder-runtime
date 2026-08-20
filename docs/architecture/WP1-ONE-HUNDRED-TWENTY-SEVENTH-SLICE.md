@@ -1,19 +1,20 @@
-# WP1 one-hundred-twenty-seventh slice — UnitOfWork adapter ownership
+# WP1 one-hundred-twenty-seventh slice — health-meter formatting ownership
 
-The stateful `LegacyUnitOfWork` implementation now lives in the canonical
-`sonder_runtime.adapters.unit_of_work.UnitOfWorkAdapter`.  Bootstrap composes
-the canonical adapter directly.  `strangler_services.LegacyUnitOfWork` remains
-only as an identity-preserving compatibility alias for existing callers.
+## Scope
 
-The adapter preserves the existing connection lifecycle, repository wiring,
-commit/rollback behavior, and packaged memory-path boundary.  This slice does
-not modify `server.py` or any previously migrated repository, tool, event, or
-model-gateway implementation.
+The pure percentage-to-meter formatter previously lived in `server.py`.
+This slice moves it to `sonder_runtime.domain.health_formatting`, preserving
+the `server._health_bar` compatibility alias and its clamping, rounding, and
+fixed-width rendering contract.
 
 ## Verification
 
-- Focused UnitOfWork, memory, path, and composition tests passed.
-- Compile, architecture, requirement-evidence, and diff gates passed.
-- This note records migration evidence; it does not credit a master-spec
-  checkbox.
+- `pytest -q tests/test_health_formatting.py` — 7 passed.
+- `pytest -q tests/test_server_helpers.py -k context_health` — 2 passed.
+- `python scripts/check_architecture.py` — pass.
+- `python scripts/check_requirement_evidence.py` — pass.
+- `python -m compileall -q sonder_runtime server.py` — pass.
+- `git diff --check` — pass.
 
+The focused pytest runs emitted only the known non-fatal Windows pytest-cache
+permission warning.
