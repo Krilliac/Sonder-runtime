@@ -277,8 +277,10 @@ def test_run_pytest_with_path(tmp_path):
     assert result["ok"] is True
 
 
-def test_run_unknown_framework():
-    result = harness_tools.test_run(root=".", framework="bogus_framework", timeout=5)
+def test_run_unknown_framework(tmp_path):
+    result = harness_tools.test_run(
+        root=str(tmp_path), framework="bogus_framework", timeout=5,
+    )
     assert result["ok"] is False
     assert "unknown framework" in result.get("error", "")
     assert result["framework"] == "bogus_framework"
@@ -308,8 +310,10 @@ def test_run_bad_extra_args_json(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_lint_run_unknown_tool():
-    result = harness_tools.lint_run(root=".", tool="nonexistent_linter", timeout=5)
+def test_lint_run_unknown_tool(tmp_path):
+    result = harness_tools.lint_run(
+        root=str(tmp_path), tool="nonexistent_linter", timeout=5,
+    )
     assert result["ok"] is False
     assert "unknown linter" in result["error"]
     assert result["tool"] == "nonexistent_linter"
@@ -337,8 +341,10 @@ def test_lint_run_ruff_fix_mode(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_format_code_unknown_tool():
-    result = harness_tools.format_code(root=".", tool="nonexistent_formatter", timeout=5)
+def test_format_code_unknown_tool(tmp_path):
+    result = harness_tools.format_code(
+        root=str(tmp_path), tool="nonexistent_formatter", timeout=5,
+    )
     assert result["ok"] is False
     assert "unknown formatter" in result["error"]
     assert result["tool"] == "nonexistent_formatter"
@@ -369,8 +375,10 @@ def test_format_code_ruff_write(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_typecheck_run_unknown_tool():
-    result = harness_tools.typecheck_run(root=".", tool="nonexistent_checker", timeout=5)
+def test_typecheck_run_unknown_tool(tmp_path):
+    result = harness_tools.typecheck_run(
+        root=str(tmp_path), tool="nonexistent_checker", timeout=5,
+    )
     assert result["ok"] is False
     assert "unknown type checker" in result["error"]
     assert result["tool"] == "nonexistent_checker"
