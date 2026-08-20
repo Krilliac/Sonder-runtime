@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-import data_query
+from sonder_runtime.adapters.inspection import data_query
 import server
 
 

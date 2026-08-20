@@ -12,7 +12,7 @@ import secrets
 import threading
 import time
 
-import data_query
+from sonder_runtime.adapters.inspection import data_query
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
