@@ -239,3 +239,10 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Twentieth Slice: `WP1-ONE-HUNDRED-TWENTIETH-SLICE.md` — moved
   the generic tool-executor implementation out of strangler services into its
   canonical packaged adapter while preserving the legacy import identity.
+- WP1 One-Hundred-Twenty-Second Slice: `WP1-ONE-HUNDRED-TWENTY-SECOND-SLICE.md` —
+  moved the stateful memory repository implementation out of generic strangler
+  services into its canonical packaged adapter while preserving the legacy
+  import identity.
+- WP1 One-Hundred-Twenty-First Slice: `WP1-ONE-HUNDRED-TWENTY-FIRST-SLICE.md` —
+  moved the pure prompt-section formatting helper into the domain boundary
+  while preserving the server compatibility alias.
