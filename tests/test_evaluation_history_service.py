@@ -9,6 +9,9 @@ from sonder_runtime.adapters import evaluation_history_store
 from sonder_runtime.adapters.eval_history_reader import (
     LegacyEvaluationHistoryReader,
 )
+from sonder_runtime.adapters.evaluation_history_reader import (
+    EvaluationHistoryReaderAdapter,
+)
 from sonder_runtime.application.evaluation_history import EvaluationHistoryService
 
 pytestmark = pytest.mark.unit
@@ -60,6 +63,10 @@ def test_legacy_reader_resolves_store_lazily(monkeypatch):
 
     assert LegacyEvaluationHistoryReader().status(model="local") == {"groups": []}
     assert calls[0]["model"] == "local"
+
+
+def test_legacy_reader_is_identity_compatible_with_canonical_adapter():
+    assert LegacyEvaluationHistoryReader is EvaluationHistoryReaderAdapter
 
 
 def test_root_evaluation_history_module_is_retired():

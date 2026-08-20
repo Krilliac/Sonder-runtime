@@ -278,3 +278,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Thirty-Fourth Slice: `WP1-ONE-HUNDRED-THIRTY-FOURTH-SLICE.md` —
   moved campaign headline formatting into the domain boundary while
   preserving the server compatibility alias and durable pitfall visibility.
+- WP1 One-Hundred-Thirty-Fifth Slice: `WP1-ONE-HUNDRED-THIRTY-FIFTH-SLICE.md` —
+  moved campaign expected-output policy into the domain boundary while
+  preserving the server compatibility alias and exact task verdicts.
+- WP1 One-Hundred-Thirty-Sixth Slice: `WP1-ONE-HUNDRED-THIRTY-SIXTH-SLICE.md` —
+  moved evaluation-history reader ownership to the canonical packaged adapter
+  while retaining the legacy module and class identity compatibility surface.

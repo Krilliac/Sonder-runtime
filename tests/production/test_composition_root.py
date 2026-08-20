@@ -49,6 +49,16 @@ def test_composition_root_uses_canonical_system_clock_adapter():
     assert not hasattr(strangler_services, "LegacyAutomationRepository")
 
 
+def test_composition_root_uses_canonical_evaluation_history_adapter():
+    from sonder_runtime.adapters.evaluation_history_reader import (
+        EvaluationHistoryReaderAdapter,
+    )
+
+    application = bootstrap_app.build_application()
+
+    assert type(application.evaluation_history._reader) is EvaluationHistoryReaderAdapter
+
+
 def test_importing_bootstrap_has_no_side_effects(tmp_path, monkeypatch):
     # The composition root builds lazily: constructing the graph must not
     # create the policy file; only first use does.
