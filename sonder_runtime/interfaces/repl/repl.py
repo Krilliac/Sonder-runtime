@@ -76,6 +76,22 @@ class _LegacyRuntimeProxy:
                 "injected REPL runtime does not provide %s" % name
             ) from exc
 
+    def __setattr__(self, name, value):
+        """Patch the injected runtime instead of shadowing it on the proxy.
+
+        Besides making the proxy transparent to existing REPL code, this keeps
+        direct unit-test monkeypatches isolated: teardown restores the member
+        on the configured runtime rather than leaving a stale proxy attribute
+        that would bypass a later injection or fail-closed check.
+        """
+        runtime = _legacy_runtime
+        if runtime is None:
+            raise DependencyUnavailable(
+                "REPL requires an injected legacy runtime; call "
+                "configure_legacy_runtime(runtime) first"
+            )
+        setattr(runtime, name, value)
+
 
 _legacy_runtime = None
 server = _LegacyRuntimeProxy()

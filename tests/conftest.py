@@ -59,8 +59,10 @@ def _configure_http_legacy_boundary():
     """Exercise the same explicit runtime injection as the serve bootstrap."""
     import server
     from sonder_runtime.interfaces.http import serve
+    from sonder_runtime.interfaces.repl import repl
 
     serve.configure_legacy_runtime(server)
+    repl.configure_legacy_runtime(server)
     from sonder_runtime.adapters.ollama.gateway import OllamaGateway
 
     OllamaGateway.configure_default_providers(
