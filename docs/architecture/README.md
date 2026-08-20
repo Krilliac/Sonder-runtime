@@ -343,3 +343,9 @@ newer ADR explicitly supersedes them.
   moved checklist event-sink implementation ownership into its dedicated
   packaged task-event adapter while preserving the `task_store` compatibility
   alias.
+- WP1 One-Hundred-Fifty-Sixth Slice: `WP1-ONE-HUNDRED-FIFTY-SIXTH-SLICE.md` —
+  moved deterministic host-environment discovery into the canonical platform
+  adapter while preserving the root compatibility import and shared cache.
+- WP1 One-Hundred-Fifty-Fifth Slice: `WP1-ONE-HUNDRED-FIFTY-FIFTH-SLICE.md` —
+  moved pure upstream HTTP `Retry-After` parsing into the domain boundary
+  while preserving the root server compatibility alias.

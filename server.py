@@ -22,7 +22,6 @@ import collections
 import base64
 import contextlib
 import datetime
-import email.utils
 import hashlib
 import hmac
 import importlib
@@ -182,6 +181,7 @@ import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
+from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_after_seconds
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -3833,40 +3833,6 @@ def _http_error_detail(error: urllib.error.HTTPError) -> str:
     except Exception:
         pass
     return _safe_model_error_detail(detail)
-
-
-def _retry_after_seconds(headers, *, now=None):
-    """Return a bounded upstream Retry-After hint without ever sleeping on it.
-
-    Hosted calls are deliberately single-attempt because a retry can duplicate
-    metered work.  The header is therefore observability for the caller, not an
-    instruction to make the runtime wait or retry.  Both RFC delta-seconds and
-    HTTP-date forms are accepted; malformed or excessive values are ignored or
-    capped so an upstream cannot make status output misleading.
-    """
-    try:
-        value = headers.get("Retry-After", "") if headers else ""
-    except (AttributeError, TypeError):
-        value = ""
-    value = str(value or "").strip()
-    if not value:
-        return None
-    try:
-        seconds = float(value)
-    except ValueError:
-        try:
-            when = email.utils.parsedate_to_datetime(value)
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=datetime.timezone.utc)
-            current = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
-            seconds = (when - current).total_seconds()
-        except (TypeError, ValueError, IndexError, OverflowError):
-            return None
-    if not math.isfinite(seconds):
-        return None
-    if seconds < 0:
-        return 0.0
-    return min(float(seconds), 86400.0)
 
 
 def _transport_error_detail(error) -> str:
