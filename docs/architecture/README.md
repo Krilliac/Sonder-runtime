@@ -416,3 +416,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Seventy-Eighth Slice: `WP1-ONE-HUNDRED-SEVENTY-EIGHTH-SLICE.md` —
   moved doctor-check status coercion into the packaged domain boundary while
   preserving the root doctor compatibility alias.
+- WP1 One-Hundred-Seventy-Ninth Slice: `WP1-ONE-HUNDRED-SEVENTY-NINTH-SLICE.md` —
+  moved local Ollama runtime-option policy into the packaged platform boundary
+  while preserving the root server compatibility delegate.
+- WP1 One-Hundred-Eightieth Slice: `WP1-ONE-HUNDRED-EIGHTIETH-SLICE.md` —
+  moved doctor-check result normalization into the packaged domain boundary
+  while preserving the root doctor compatibility alias.

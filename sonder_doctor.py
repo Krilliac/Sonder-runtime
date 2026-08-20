@@ -38,6 +38,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from sonder_runtime.adapters.config_validation import (
     validated_config_check as _validated_config_check,
 )
+from sonder_runtime.domain.doctor_result import normalize_result as _normalize_result
 from sonder_runtime.domain.doctor_status import coerce_status as _coerce_status
 
 # Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
@@ -63,26 +64,6 @@ _SEVERITY_TO_STATUS = {0: STATUS_OK, 1: STATUS_WARN, 2: STATUS_FAIL}
 #   * a mapping with at least "status" and optionally "name"/"detail"
 # or it may raise -- a raised exception is captured as a ``fail`` entry.
 CheckCallable = Callable[[], Any]
-
-
-def _normalize_result(name: str, raw: Any) -> dict:
-    """Normalize a check's return value into a ``{name, status, detail}`` entry.
-
-    ``name`` is the registry name; a mapping result may override it with its own
-    ``name`` key (useful when a single callable knows its canonical label).
-    """
-    result_name = name
-    detail = ""
-    if isinstance(raw, Mapping):
-        result_name = str(raw.get("name") or name)
-        status = _coerce_status(raw.get("status"))
-        detail = "" if raw.get("detail") is None else str(raw.get("detail"))
-    elif isinstance(raw, tuple) and len(raw) == 2:
-        status = _coerce_status(raw[0])
-        detail = "" if raw[1] is None else str(raw[1])
-    else:
-        status = _coerce_status(raw)
-    return {"name": str(result_name), "status": status, "detail": detail}
 
 
 def _iter_specs(

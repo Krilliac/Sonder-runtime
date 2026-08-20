@@ -1,4 +1,8 @@
-from sonder_runtime.platform.environment_options import cpu_thread_default, env_int_option
+from sonder_runtime.platform.environment_options import (
+    cpu_thread_default,
+    env_int_option,
+    local_model_options,
+)
 import server
 
 
@@ -41,3 +45,39 @@ def test_server_options_read_live_environment(monkeypatch):
 def test_server_alias_reads_process_environment(monkeypatch):
     monkeypatch.setenv("SONDER_NUM_BATCH", "256")
     assert server._env_int_option("SONDER_NUM_BATCH", 512) == 256
+
+
+def test_local_model_options_is_owned_by_platform_policy():
+    assert server._platform_local_model_options is local_model_options
+
+
+def test_local_model_options_injects_context_and_reads_environment():
+    options = local_model_options(
+        0.2,
+        64,
+        2048,
+        native_context=lambda value: value // 2,
+        environ={
+            "SONDER_NUM_THREAD": "9",
+            "SONDER_NUM_GPU": "0",
+            "SONDER_NUM_BATCH": "256",
+        },
+    )
+    assert options == {
+        "temperature": 0.2,
+        "num_predict": 64,
+        "num_ctx": 1024,
+        "num_thread": 9,
+        "num_gpu": 0,
+        "num_batch": 256,
+    }
+
+
+def test_local_model_options_omits_unpinned_gpu():
+    options = local_model_options(
+        0.2,
+        10,
+        4096,
+        environ={},
+    )
+    assert "num_gpu" not in options
