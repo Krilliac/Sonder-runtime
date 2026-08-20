@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
+from sonder_runtime.adapters.strangler_services import LegacyModelGateway
 from sonder_runtime.adapters.ollama.gateway import OllamaGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -114,4 +114,3 @@ def test_ollama_gateway_rejects_invalid_injected_target():
     )
     with pytest.raises(DependencyUnavailable, match="invalid target"):
         gateway.generate(ModelRequest("hello", "code"), _CONTEXT)
-
