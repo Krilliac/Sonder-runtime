@@ -24,4 +24,3 @@ def test_gate_requires_a_reason_and_preserves_first_reason() -> None:
     gate.stop_admission("shutdown")
     with pytest.raises(AdmissionClosed, match="shutdown"):
         gate.admit()
-
