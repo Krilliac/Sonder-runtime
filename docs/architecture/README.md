@@ -266,3 +266,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Thirtieth Slice: `WP1-ONE-HUNDRED-THIRTIETH-SLICE.md` —
   moved preference codec ownership into its canonical packaged adapter while
   preserving the legacy identity alias.
+- WP1 One-Hundred-Thirty-First Slice: `WP1-ONE-HUNDRED-THIRTY-FIRST-SLICE.md` —
+  moved model-usage count normalization into the domain boundary while
+  preserving the server compatibility alias.
+- WP1 One-Hundred-Thirty-Second Slice: `WP1-ONE-HUNDRED-THIRTY-SECOND-SLICE.md` —
+  moved workflow loop-runner ownership into its canonical packaged adapter
+  while preserving the legacy identity alias.
