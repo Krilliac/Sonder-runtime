@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable, Mapping
 
@@ -46,6 +46,8 @@ class CatalogBundle:
     cli: Mapping[str, Any]
     client: Mapping[str, Any]
     digest: str
+    permissions: Mapping[str, Any] = field(default_factory=dict)
+    conformance: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +56,8 @@ class CatalogBundle:
             "digest": self.digest,
             "mcp": dict(self.mcp),
             "openai": dict(self.openai),
+            "permissions": dict(self.permissions),
+            "conformance": dict(self.conformance),
         }
 
 
@@ -181,7 +185,27 @@ class GeneratedCatalogs:
         openai = {"tools": tuple({"function": {"description": t["description"], "name": t["name"], "parameters": t["input_schema"]}, "type": "function"} for t in tool_contracts)}
         cli = {"commands": command_contracts, "tools": tuple({"name": t["name"], "summary": t["description"]} for t in tool_contracts)}
         client = {"digest": digest, "events": event_contracts, "schema_version": cls.SCHEMA_VERSION, "tools": tool_contracts}
-        bundle = CatalogBundle(mcp=mcp, openai=openai, cli=cli, client=client, digest=digest)
+        permissions = {
+            "schema": "sonder-tool-permissions-v1",
+            "tools": tuple({
+                "execution_class": t["execution_class"],
+                "effects": t["effects"],
+                "name": t["name"],
+            } for t in tool_contracts),
+        }
+        conformance = {
+            "schema": "sonder-catalog-conformance-v1",
+            "tools": tuple({
+                "name": t["name"],
+                "surfaces": {"mcp": t["name"], "openai": t["name"], "cli": t["name"], "client": t["name"]},
+                "input_schema": t["input_schema"],
+            } for t in tool_contracts),
+            "events": tuple(event_contracts),
+        }
+        bundle = CatalogBundle(
+            mcp=mcp, openai=openai, cli=cli, client=client, digest=digest,
+            permissions=permissions, conformance=conformance,
+        )
         if len(cls._json(bundle.as_dict()).encode("utf-8")) > limits.max_bytes:
             raise CatalogLimitError("generated catalogs exceed max_bytes")
         return bundle
