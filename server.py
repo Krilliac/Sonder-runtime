@@ -180,6 +180,7 @@ from sonder_runtime.domain.campaign_environment import (
 )
 from sonder_runtime.domain.learning_tier import (
     canonical_learn_tier as _canonical_learn_tier,
+    should_learn as _should_learn_policy,
 )
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
@@ -1211,10 +1212,8 @@ def _direct_fanout_access(run_id: str, token: str, started, tool_name: str):
 
 
 def _should_learn(tier, learn):
-    # A tier feeds the learning loop when it is in LEARN_TIERS (env-configurable) and
-    # the caller didn't opt out with learn=False. Defaults: local 'code' plus the
-    # cloud tiers (teacher distillation); 'fast'/'general' stay mechanical.
-    return bool(learn) and tier in LEARN_TIERS
+    """Compatibility wrapper using the live, environment-resolved tier set."""
+    return _should_learn_policy(tier, learn, LEARN_TIERS)
 
 
 def resolve_sonder_model(strict=False):
