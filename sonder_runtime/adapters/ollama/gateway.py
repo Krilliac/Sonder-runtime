@@ -31,6 +31,13 @@ from ...application.ports.model_gateway import (
     require_embedding_vector,
     require_model_text,
 )
+from ...application.ports.model_target import (
+    ModelGenerateFactory,
+    ModelSystemBuilder,
+    ModelTarget,
+    ModelTargetResolver,
+)
+from ...platform import context_policy
 from ...platform.metrics import default_registry
 from ..inference.telemetry import from_ollama
 from ..model_transport import ModelCallError
@@ -101,18 +108,44 @@ def _map_model_error(exc) -> Exception:
 
 
 class OllamaGateway:
-    """ModelGateway over the local Ollama transport."""
+    """ModelGateway over provider-owned Ollama dependencies.
+
+    ``target_resolver``, ``system_builder``, and ``generate_factory`` are
+    injected because tier policy and system context belong to the application
+    composition boundary, not this transport adapter.
+    """
+
+    def __init__(
+        self,
+        *,
+        target_resolver: ModelTargetResolver | None = None,
+        system_builder: ModelSystemBuilder | None = None,
+        generate_factory: ModelGenerateFactory | None = None,
+        embedding_provider=None,
+        session_num_ctx: int | None = None,
+    ):
+        self._target_resolver = target_resolver
+        self._system_builder = system_builder
+        self._generate_factory = generate_factory
+        self._embedding_provider = embedding_provider
+        self._session_num_ctx = (
+            context_policy.default_requested()
+            if session_num_ctx is None else int(session_num_ctx)
+        )
 
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
-        import server
-
         if not (request.prompt or "").strip():
             raise InvalidInput("model request prompt is empty")
-        model, cloud, _augment, tier_label = server._serve_target(
-            request.tier or "sonder", None,
-        )
+        if self._target_resolver is None or self._generate_factory is None:
+            raise DependencyUnavailable(
+                "Ollama gateway requires injected target and generate providers"
+            )
+        target = self._target_resolver(request.tier or "sonder", False)
+        if not isinstance(target, ModelTarget):
+            raise DependencyUnavailable("model target provider returned invalid target")
+        model, cloud, tier_label = target.model, target.cloud, target.tier_label
         if tier_label == "cloud-disabled":
             raise Forbidden("cloud tiers are disabled on this runtime")
         if tier_label is None:
@@ -133,13 +166,17 @@ class OllamaGateway:
 
         options = dict(request.options or {})
         timeout = _check_liveness(context)
-        gen = server._make_generate(
+        effective_system = request.system
+        if not effective_system and self._system_builder is not None:
+            effective_system = self._system_builder(
+                "", False, "", model=model, cloud=cloud
+            )
+        gen = self._generate_factory(
             model,
-            request.system or server._build_system(
-                "", False, "", model=model, cloud=cloud),
+            effective_system,
             float(options.get("temperature", 0.2)),
             int(options.get("num_predict", 1024)),
-            int(options.get("num_ctx", server.SESSION_NUM_CTX)),
+            int(options.get("num_ctx", self._session_num_ctx)),
             cloud=cloud,
             # Keep a positive sub-second deadline bounded.  ``int(0.5)`` used
             # to become zero and the legacy transport interpreted zero as no
@@ -183,17 +220,22 @@ class OllamaGateway:
     def embed(
         self, texts: Sequence[str], context: OperationContext
     ) -> Sequence[Embedding]:
-        import sonder_runtime.adapters.embeddings as embeddings
+        provider = self._embedding_provider
+        if provider is None:
+            import sonder_runtime.adapters.embeddings as embeddings
 
-        _enforce_local_endpoint(embeddings.BASE, context)
+            provider = embeddings
+
+        _enforce_local_endpoint(getattr(provider, "BASE", ollama_endpoint.normalize()), context)
         results = []
         for text in texts:
             _check_liveness(context)
-            vector = embeddings.embed(text)
+            embed = getattr(provider, "embed", provider)
+            vector = embed(text)
             results.append(
                 Embedding(
                     vector=require_embedding_vector(vector),
-                    model=embeddings.EMBED_MODEL,
+                    model=getattr(provider, "EMBED_MODEL", "nomic-embed-text"),
                 )
             )
         return results

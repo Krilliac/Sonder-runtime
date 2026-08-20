@@ -1,9 +1,8 @@
-"""Compatibility ModelGateway adapter for the legacy server transport.
+"""Compatibility ModelGateway adapter for an injected legacy provider.
 
-This adapter is intentionally separate from the strangler compatibility
-module.  It keeps the old ``server.sonder`` and embedding entry points behind
-the application port while newer deployments can select the packaged Ollama
-or OpenAI-compatible gateways.
+The old provider is still supported, but its chat and embedding callables are
+owned by the composition root/provider wiring.  This adapter never imports
+the root ``server`` module.
 """
 from __future__ import annotations
 
@@ -17,7 +16,12 @@ from ..application.ports.model_gateway import (
     require_embedding_vector,
     require_model_text,
 )
-from ..domain.common.errors import Cancelled, DeadlineExceeded, InvalidInput
+from ..domain.common.errors import (
+    Cancelled,
+    DeadlineExceeded,
+    DependencyUnavailable,
+    InvalidInput,
+)
 
 
 def _check_context_liveness(context: OperationContext) -> None:
@@ -29,18 +33,24 @@ def _check_context_liveness(context: OperationContext) -> None:
 
 
 class LegacyModelGateway:
-    """ModelGateway over the root server module's chat entry point."""
+    """ModelGateway over explicitly injected legacy provider callables."""
+
+    def __init__(self, *, generate=None, embed=None):
+        self._generate_provider = generate
+        self._embedding_provider = embed
 
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
-        import server
-
         if not (request.prompt or "").strip():
             raise InvalidInput("model request prompt is empty")
         _check_context_liveness(context)
+        if self._generate_provider is None:
+            raise DependencyUnavailable(
+                "legacy model gateway requires an injected generate provider"
+            )
         started = time.monotonic()
-        text = server.sonder(
+        text = self._generate_provider(
             request.prompt,
             history=list(request.history) or None,
             tier=request.tier or None,
@@ -53,13 +63,17 @@ class LegacyModelGateway:
         )
 
     def embed(self, texts, context: OperationContext):
-        import sonder_runtime.adapters.embeddings as embeddings
+        provider = self._embedding_provider
+        if provider is None:
+            import sonder_runtime.adapters.embeddings as embeddings
+
+            provider = embeddings.embed
 
         results = []
         for text in texts:
             _check_context_liveness(context)
             results.append(Embedding(
-                vector=require_embedding_vector(embeddings.embed(text)),
+                vector=require_embedding_vector(provider(text)),
                 model="local",
             ))
         return results
