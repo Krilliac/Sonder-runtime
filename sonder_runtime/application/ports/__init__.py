@@ -32,6 +32,20 @@ from .artifact_store import (
     SpillState, SpillStore,
 )
 from .telemetry_sink import TelemetryEvent, TelemetryRedactor, TelemetrySink
+from .web import (
+    CredentialLease,
+    CredentialProvider,
+    CredentialRequest,
+    CredentialScope,
+    EgressPolicy,
+    ProviderHealth,
+    ProviderHealthSnapshot,
+    WebPolicyError,
+    WebProvider,
+    WebRequest,
+    WebResponse,
+    redact,
+)
 from .jobs import (
     JobClaim,
     JobIdentity,
@@ -87,6 +101,20 @@ from .subagents import (
     SubagentUsage,
     TERMINAL_SUBAGENT_STATUSES,
     validate_child_budget,
+)
+from .specialized_lifecycle import (
+    ActivationRequest,
+    ActivationResult,
+    CleanupResult,
+    DeploymentResult,
+    EmbeddingProvider,
+    EmbeddingRequest,
+    EmbeddingResult,
+    HealthReport,
+    HealthStatus,
+    TrainingBackend,
+    TrainingRequest,
+    UpdateActivator,
 )
 
 __all__ = [
@@ -166,6 +194,18 @@ __all__ = [
     "SubagentUsage",
     "TERMINAL_SUBAGENT_STATUSES",
     "validate_child_budget",
+    "ActivationRequest",
+    "ActivationResult",
+    "CleanupResult",
+    "DeploymentResult",
+    "EmbeddingProvider",
+    "EmbeddingRequest",
+    "EmbeddingResult",
+    "HealthReport",
+    "HealthStatus",
+    "TrainingBackend",
+    "TrainingRequest",
+    "UpdateActivator",
     "ArtifactHandle",
     "AttachmentStore",
     "SpillHandle",
@@ -176,4 +216,16 @@ __all__ = [
     "TelemetryEvent",
     "TelemetryRedactor",
     "TelemetrySink",
+    "CredentialLease",
+    "CredentialProvider",
+    "CredentialRequest",
+    "CredentialScope",
+    "EgressPolicy",
+    "ProviderHealth",
+    "ProviderHealthSnapshot",
+    "WebPolicyError",
+    "WebProvider",
+    "WebRequest",
+    "WebResponse",
+    "redact",
 ]
