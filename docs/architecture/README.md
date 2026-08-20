@@ -322,3 +322,10 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Forty-Eighth Slice: `WP1-ONE-HUNDRED-FORTY-EIGHTH-SLICE.md` —
   moved the pure fanout generative-capability eligibility policy into the
   existing domain boundary while preserving the server compatibility alias.
+- WP1 One-Hundred-Forty-Ninth Slice: `WP1-ONE-HUNDRED-FORTY-NINTH-SLICE.md` —
+  moved bootstrap model-backend normalization and gateway construction into a
+  canonical packaged factory while preserving the private bootstrap selector
+  identity and existing transport behavior.
+- WP1 One-Hundred-Fiftieth Slice: `WP1-ONE-HUNDRED-FIFTIETH-SLICE.md` —
+  moved integer environment-option parsing into the platform boundary while
+  preserving the server compatibility alias.
