@@ -51,6 +51,33 @@ def _canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _request_digest(prompt: str, system: str, history: Sequence[object], packet_digest: str) -> str:
+    """Bind every prompt-visible request field to its provenance packet."""
+    return _digest(_canonical({
+        "prompt": prompt,
+        "system": system,
+        "history": list(history),
+        "packet_digest": packet_digest,
+    }))
+
+
+def _provenance_digest(
+    content: str,
+    source_kind: SourceKind,
+    source_id: str,
+    origin: str,
+    parent_ids: Sequence[str],
+) -> str:
+    """Bind visible bytes to the complete external-source identity."""
+    return _digest(_canonical({
+        "content": content,
+        "source_kind": source_kind.value,
+        "source_id": source_id,
+        "origin": origin,
+        "parent_ids": list(parent_ids),
+    }))
+
+
 @dataclass(frozen=True)
 class Provenance:
     """Immutable origin metadata retained with every prompt item."""
@@ -64,6 +91,10 @@ class Provenance:
     observed_at: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.source_kind, SourceKind):
+            raise ProvenanceError("source_kind must be a supported SourceKind")
+        if not isinstance(self.trust, TrustLabel):
+            raise ProvenanceError("trust must be a supported TrustLabel")
         _text(self.source_id, "source_id")
         _text(self.origin, "origin")
         if len(self.content_digest) != 64 or any(c not in "0123456789abcdef" for c in self.content_digest):
@@ -95,8 +126,14 @@ class PromptItem:
     def __post_init__(self) -> None:
         if not isinstance(self.content, str) or len(self.content) > MAX_CONTENT_LENGTH:
             raise ProvenanceError("content exceeds the provenance boundary")
-        if _digest(self.content) != self.provenance.content_digest:
-            raise ProvenanceError("content does not match provenance digest")
+        if _provenance_digest(
+            self.content,
+            self.provenance.source_kind,
+            self.provenance.source_id,
+            self.provenance.origin,
+            self.provenance.parent_ids,
+        ) != self.provenance.content_digest:
+            raise ProvenanceError("content or provenance does not match digest")
 
     @property
     def is_untrusted(self) -> bool:
@@ -104,6 +141,15 @@ class PromptItem:
 
     def as_dict(self) -> dict[str, object]:
         return {"content": self.content, "provenance": self.provenance.as_dict()}
+
+    def redacted_metadata(self) -> dict[str, object]:
+        """Return event-safe provenance without source names or prompt text."""
+        return {
+            "source_kind": self.provenance.source_kind.value,
+            "trust": self.provenance.trust.value,
+            "content_digest": self.provenance.content_digest,
+            "parent_count": len(self.provenance.parent_ids),
+        }
 
 
 @dataclass(frozen=True)
@@ -134,6 +180,45 @@ class ContextPacket:
     def to_json(self) -> str:
         return _canonical(self.as_dict())
 
+    def redacted_metadata(self) -> dict[str, object]:
+        """Return the minimum metadata safe for durable event telemetry."""
+        return {
+            "packet_digest": self.packet_digest,
+            "item_count": len(self.items),
+            "labels": [item.redacted_metadata() for item in self.items],
+        }
+
+
+@dataclass(frozen=True)
+class ModelRequestProvenance:
+    """Tamper-evident binding carried alongside a model request.
+
+    The binding contains no prompt text.  It proves which context packet and
+    prompt-visible fields were sent to the gateway, while keeping event
+    records free of untrusted content.
+    """
+
+    packet_digest: str
+    request_digest: str
+    item_digests: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name, value in (("packet_digest", self.packet_digest), ("request_digest", self.request_digest)):
+            if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ProvenanceError(f"{name} must be a SHA-256 hex digest")
+        if not isinstance(self.item_digests, tuple) or len(self.item_digests) > MAX_ITEMS_PER_CONTEXT:
+            raise ProvenanceError("invalid provenance item digest list")
+        for digest in self.item_digests:
+            if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise ProvenanceError("item_digests must contain SHA-256 hex digests")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "packet_digest": self.packet_digest,
+            "request_digest": self.request_digest,
+            "item_digests": list(self.item_digests),
+        }
+
 
 class PromptProvenanceBoundary:
     """Construct, validate, and replay trust-labelled prompt material."""
@@ -154,7 +239,13 @@ class PromptProvenanceBoundary:
             raise ProvenanceError("unknown prompt source kind") from exc
         content = _text(content, "content")
         parents = tuple(dict.fromkeys(_text(parent, "parent_id") for parent in parent_ids))
-        provenance = Provenance(kind, source_id, origin, _digest(content), TrustLabel.UNTRUSTED, parents, observed_at or "")
+        source_id = _text(source_id, "source_id")
+        origin = _text(origin, "origin")
+        provenance = Provenance(
+            kind, source_id, origin,
+            _provenance_digest(content, kind, source_id, origin, parents),
+            TrustLabel.UNTRUSTED, parents, observed_at or "",
+        )
         return PromptItem(content, provenance)
 
     def evaluate_promotion(
@@ -176,6 +267,64 @@ class PromptProvenanceBoundary:
 
     def assemble_context(self, items: Sequence[PromptItem]) -> ContextPacket:
         return ContextPacket.create(items)
+
+    def bind_model_request(
+        self,
+        prompt: str,
+        *,
+        system: str = "",
+        history: Sequence[object] = (),
+        context: ContextPacket,
+    ) -> ModelRequestProvenance:
+        """Create the required binding before prompt-visible data reaches a gateway."""
+        if not isinstance(context, ContextPacket):
+            raise ProvenanceError("model request requires a validated context packet")
+        if not isinstance(prompt, str) or not prompt.strip() or not isinstance(system, str):
+            raise ProvenanceError("model request prompt fields are invalid")
+        try:
+            history_tuple = tuple(history)
+            _canonical(history_tuple)
+        except (TypeError, ValueError) as exc:
+            raise ProvenanceError("model request history is not JSON-safe") from exc
+        return ModelRequestProvenance(
+            packet_digest=context.packet_digest,
+            request_digest=_request_digest(prompt, system, history_tuple, context.packet_digest),
+            item_digests=tuple(item.provenance.content_digest for item in context.items),
+        )
+
+    def validate_model_request(
+        self,
+        prompt: str,
+        *,
+        system: str = "",
+        history: Sequence[object] = (),
+        context: ContextPacket,
+        binding: ModelRequestProvenance,
+    ) -> None:
+        """Fail closed if a request, packet, or label was altered after binding."""
+        expected = self.bind_model_request(
+            prompt, system=system, history=history, context=context,
+        )
+        if binding != expected:
+            raise ProvenanceError("model request provenance binding mismatch")
+
+    @staticmethod
+    def event_metadata(context: ContextPacket) -> dict[str, object]:
+        """Produce redacted event fields; raw untrusted content never crosses."""
+        if not isinstance(context, ContextPacket):
+            raise ProvenanceError("event provenance requires a validated context packet")
+        return context.redacted_metadata()
+
+    @staticmethod
+    def request_event_metadata(
+        context: ContextPacket, binding: ModelRequestProvenance,
+    ) -> dict[str, object]:
+        """Return redacted packet labels plus the request binding digest."""
+        metadata = PromptProvenanceBoundary.event_metadata(context)
+        if binding.packet_digest != context.packet_digest:
+            raise ProvenanceError("request binding does not match context packet")
+        metadata["request_digest"] = binding.request_digest
+        return metadata
 
     def replay_context(self, serialized: str | Mapping[str, object]) -> ContextPacket:
         try:
@@ -212,6 +361,6 @@ class PromptProvenanceBoundary:
 
 __all__ = [
     "ContextPacket", "MAX_CONTENT_LENGTH", "MAX_ITEMS_PER_CONTEXT", "PromptItem",
-    "PromptProvenanceBoundary", "PromotionDecision", "Provenance", "ProvenanceError",
+    "ModelRequestProvenance", "PromptProvenanceBoundary", "PromotionDecision", "Provenance", "ProvenanceError",
     "SourceKind", "TrustLabel",
 ]

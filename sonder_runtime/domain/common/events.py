@@ -81,7 +81,13 @@ def _schema(*required: tuple[str, type | tuple[type, ...]], optional=()) -> Payl
 
 def _register(kinds: tuple[EventKind, ...], schema: PayloadSchema) -> None:
     for kind in kinds:
-        _SCHEMAS[kind] = schema
+        # Provenance is an optional, redacted envelope on every event.  The
+        # validator below still enforces its shape; raw prompt text is never
+        # accepted as event metadata.
+        _SCHEMAS[kind] = PayloadSchema(
+            required=schema.required,
+            optional={**schema.optional, "provenance": dict},
+        )
 
 
 _register((EventKind.SESSION_STARTED, EventKind.SESSION_ENDED, EventKind.SESSION_PAUSED, EventKind.SESSION_RESUMED), _schema(optional=(("reason", _TEXT), ("status", _TEXT))))
@@ -140,6 +146,49 @@ def _json_safe(value: Any, path: str = "payload") -> None:
     raise EventValidationError(f"{path} contains non-JSON value {type(value).__name__}")
 
 
+_PROVENANCE_SOURCE_KINDS = {"retrieved_memory", "tool_result", "web_result"}
+_PROVENANCE_TRUST_LABELS = {"untrusted", "user_confirmed", "independently_verified"}
+
+
+def _validate_provenance_metadata(value: object) -> None:
+    """Validate only redacted provenance labels at the durable-event edge."""
+    if not isinstance(value, dict):
+        raise EventValidationError("payload.provenance must be an object")
+    allowed = {"packet_digest", "request_digest", "item_count", "labels"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise EventValidationError("payload.provenance has unknown fields")
+    digest = value.get("packet_digest")
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise EventValidationError("payload.provenance.packet_digest is invalid")
+    request_digest = value.get("request_digest")
+    if request_digest is not None and (
+        not isinstance(request_digest, str)
+        or len(request_digest) != 64
+        or any(c not in "0123456789abcdef" for c in request_digest)
+    ):
+        raise EventValidationError("payload.provenance.request_digest is invalid")
+    count = value.get("item_count")
+    labels = value.get("labels")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0 or count > 256:
+        raise EventValidationError("payload.provenance.item_count is invalid")
+    if not isinstance(labels, list) or len(labels) != count:
+        raise EventValidationError("payload.provenance.labels do not match item_count")
+    for label in labels:
+        if not isinstance(label, dict) or set(label) != {"source_kind", "trust", "content_digest", "parent_count"}:
+            raise EventValidationError("payload.provenance label is malformed")
+        if label["source_kind"] not in _PROVENANCE_SOURCE_KINDS:
+            raise EventValidationError("payload.provenance label has invalid source kind")
+        if label["trust"] not in _PROVENANCE_TRUST_LABELS:
+            raise EventValidationError("payload.provenance label has invalid trust")
+        content_digest = label["content_digest"]
+        if not isinstance(content_digest, str) or len(content_digest) != 64 or any(c not in "0123456789abcdef" for c in content_digest):
+            raise EventValidationError("payload.provenance label digest is invalid")
+        parent_count = label["parent_count"]
+        if isinstance(parent_count, bool) or not isinstance(parent_count, int) or parent_count < 0 or parent_count > 16:
+            raise EventValidationError("payload.provenance parent_count is invalid")
+
+
 def validate_payload(kind: EventKind | str, payload: Mapping[str, Any]) -> dict[str, Any]:
     schema = payload_schema(kind)
     if not isinstance(payload, Mapping):
@@ -156,6 +205,8 @@ def validate_payload(kind: EventKind | str, payload: Mapping[str, Any]) -> dict[
             raise EventValidationError(f"payload.{name} has invalid type")
         if name in data and isinstance(data[name], str) and not data[name].strip():
             raise EventValidationError(f"payload.{name} must not be empty")
+    if "provenance" in data:
+        _validate_provenance_metadata(data["provenance"])
     _json_safe(data)
     return data
 
