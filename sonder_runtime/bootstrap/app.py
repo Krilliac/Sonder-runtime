@@ -12,8 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import threading
 
+from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.strangler_services import (
-    LegacyAutomationRepository,
     LegacyPolicyRepository,
     LegacyProcessProbe,
     LegacyToolExecutor,
@@ -117,7 +117,7 @@ def build_application(
         runtime_policy=RuntimePolicyService(LegacyPolicyRepository()),
         model_gateway=gateway,
         chat=ChatService(gateway),
-        automation=LegacyAutomationRepository(),
+        automation=AutopilotRepository(),
         # A UnitOfWork is per-transaction, so the graph exposes a factory, not
         # a singleton; each call opens and owns its own connection scope.
         unit_of_work=LegacyUnitOfWork,

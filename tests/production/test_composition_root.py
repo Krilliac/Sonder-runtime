@@ -46,6 +46,7 @@ def test_composition_root_uses_canonical_system_clock_adapter():
 
     assert type(application.clock) is SystemClock
     assert not hasattr(strangler_services, "SystemClock")
+    assert not hasattr(strangler_services, "LegacyAutomationRepository")
 
 
 def test_importing_bootstrap_has_no_side_effects(tmp_path, monkeypatch):

@@ -133,6 +133,9 @@ from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.runtime_identity import (
     runtime_identity_block as _runtime_identity_block,
 )
+from sonder_runtime.interfaces.http.serve_policy import (
+    serve_temperature as _serve_temperature,
+)
 import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
@@ -238,31 +241,6 @@ def _local_model_options(temperature, num_predict, num_ctx):
         if value is not None:
             options[key] = value
     return options
-
-
-_SERVE_TEMPERATURE_DEFAULT = 0.2
-
-
-def _serve_temperature():
-    """Sampling temperature for the serve chat route (default 0.2, unchanged).
-
-    ``SONDER_SERVE_TEMPERATURE=0`` selects greedy decoding, which is what
-    makes a non-learning local turn eligible for the deterministic request
-    cache (see request_cache.eligible).  Values are clamped to Ollama's
-    accepted range and read at call time like the other live performance
-    knobs; an unparseable value keeps the default so a bad env var can never
-    silently change generation behavior.
-    """
-    raw = os.environ.get("SONDER_SERVE_TEMPERATURE", "").strip()
-    if not raw:
-        return _SERVE_TEMPERATURE_DEFAULT
-    try:
-        value = float(raw)
-    except ValueError:
-        return _SERVE_TEMPERATURE_DEFAULT
-    if not math.isfinite(value):
-        return _SERVE_TEMPERATURE_DEFAULT
-    return min(2.0, max(0.0, value))
 
 
 def _local_runtime_summary():
