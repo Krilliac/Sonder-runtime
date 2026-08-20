@@ -234,6 +234,9 @@ from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
 from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
+from sonder_runtime.domain.cloud_tier_policy import (
+    refresh_live_cloud_tiers as _refresh_live_cloud_tiers_policy,
+)
 from sonder_runtime.domain.tier_names import valid_tier_names as _valid_tier_names_policy
 from sonder_runtime.domain.permission_context import (
     render_permission_mode_context as _render_permission_mode_context,
@@ -334,25 +337,14 @@ LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
 
 
 def _refresh_live_cloud_tiers():
-    """Migrate import-time cloud defaults after an atomic source reload.
-
-    Live reload swaps function implementations but deliberately preserves the
-    module's process state.  Detect only the exact old default pair, so a fresh
-    process with an explicit gpt-oss override remains an intentional override.
-    """
-    preserve_legacy = os.environ.get(
-        "SONDER_PRESERVE_LEGACY_CLOUD_GENERAL", ""
-    ).strip().lower() in ("1", "true", "yes", "on")
-    if (
-        not preserve_legacy
-        and TIERS.get("cloud-general") == "gpt-oss:120b-cloud"
-    ):
-        # Keep the live compatibility repair mutable, but source its target
-        # from the immutable import-time projection rather than duplicating
-        # the configured default in this caller.
-        TIERS["cloud-general"] = (
+    """Compatibility wrapper for the packaged live cloud-tier policy."""
+    _refresh_live_cloud_tiers_policy(
+        TIERS,
+        os.environ,
+        default_cloud_general_model=(
             _RUNTIME_MODEL_CONFIGURATION.default_cloud_general_model
-        )
+        ),
+    )
 
 
 def cloud_allowed():
