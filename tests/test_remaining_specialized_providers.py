@@ -16,7 +16,17 @@ from sonder_runtime.application.ports.specialized_lifecycle import (
     EmbeddingRequest,
     TrainingRequest,
 )
-from sonder_runtime.application.providers.lifecycle_registry import ScopedProviderRegistry
+from sonder_runtime.application.providers import (
+    EmbeddingLifecycleAdapter as PublicEmbeddingLifecycleAdapter,
+    SpecializedLifecycleError as PublicSpecializedLifecycleError,
+    TrainingLifecycleAdapter as PublicTrainingLifecycleAdapter,
+    UpdateLifecycleAdapter as PublicUpdateLifecycleAdapter,
+    wire_specialized_providers as public_wire_specialized_providers,
+)
+from sonder_runtime.application.providers.lifecycle_registry import (
+    ProviderLifecycleError,
+    ScopedProviderRegistry,
+)
 from sonder_runtime.application.providers.specialized_lifecycle import (
     EmbeddingLifecycleAdapter,
     SpecializedLifecycleError,
@@ -75,6 +85,26 @@ def test_wiring_publishes_all_specialized_capabilities_and_normalizes_identity()
     ).provider_id == "update-a"
     bundle.close(timeout=0)
     assert registry.providers() == ()
+
+
+def test_public_composition_boundary_is_fail_closed_for_absent_provider():
+    assert PublicEmbeddingLifecycleAdapter is EmbeddingLifecycleAdapter
+    assert PublicTrainingLifecycleAdapter is TrainingLifecycleAdapter
+    assert PublicUpdateLifecycleAdapter is UpdateLifecycleAdapter
+    assert public_wire_specialized_providers is wire_specialized_providers
+    assert PublicSpecializedLifecycleError is SpecializedLifecycleError
+
+    registry = ScopedProviderRegistry()
+    with pytest.raises(ProviderLifecycleError, match="unknown provider"):
+        registry.resolve("embedding")
+
+    with pytest.raises(SpecializedLifecycleError, match="not callable"):
+        adapter = EmbeddingLifecycleAdapter(object())
+        registry.register(adapter)
+        try:
+            adapter.embed(EmbeddingRequest(("text",), "model"), context())
+        finally:
+            registry.unregister("embedding", timeout=0)
 
 
 def test_embedding_adapter_converts_vectors_and_enforces_request_shape():
