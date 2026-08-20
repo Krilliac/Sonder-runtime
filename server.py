@@ -199,6 +199,10 @@ from sonder_runtime.platform.model_retry_policy import (
     hosted_overflow_retry_enabled as _hosted_overflow_retry_enabled,
     overflow_retry_allowed as _overflow_retry_allowed,
 )
+from sonder_runtime.platform.local_retry_policy import (
+    local_model_retries as _local_model_retries_policy,
+    retry_delay as _local_retry_delay_policy,
+)
 from sonder_runtime.platform.runtime_summary import (
     local_runtime_summary as _platform_local_runtime_summary,
 )
@@ -3652,17 +3656,12 @@ def _bounded_timeout(value) -> int:
 
 
 _TRANSIENT_MODEL_HTTP_CODES = frozenset({408, 429, 502, 503, 504})
-_MAX_LOCAL_MODEL_RETRIES = 2
 _MAX_MODEL_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 def _local_model_retries() -> int:
-    raw = os.environ.get("SONDER_LOCAL_RETRIES", "1").strip()
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = 1
-    return max(0, min(value, _MAX_LOCAL_MODEL_RETRIES))
+    """Compatibility wrapper for the packaged local retry policy."""
+    return _local_model_retries_policy()
 
 
 def _embedded_model_error(result) -> str:
@@ -3694,13 +3693,8 @@ def _compacted_overflow_payload(payload, verdict):
 
 
 def _local_retry_delay(attempt: int) -> float:
-    raw = os.environ.get("SONDER_LOCAL_RETRY_DELAY_MS", "150").strip()
-    try:
-        base_ms = float(raw)
-    except (TypeError, ValueError):
-        base_ms = 150.0
-    base_ms = max(0.0, min(base_ms, 1000.0))
-    return min(1.0, (base_ms / 1000.0) * (2 ** max(0, attempt - 1)))
+    """Compatibility wrapper for the packaged local retry backoff policy."""
+    return _local_retry_delay_policy(attempt)
 
 
 def _http_error_detail(error: urllib.error.HTTPError) -> str:

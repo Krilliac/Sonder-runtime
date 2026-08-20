@@ -39,6 +39,7 @@ from sonder_runtime.platform.hardware_probe import (
     parse_memory_gb,
     probe_cpu_count,
     probe_platform,
+    probe_total_ram_gb,
 )
 from sonder_runtime.platform.hardware_identity import vendor_from_text
 
@@ -48,6 +49,7 @@ _parse_memory_gb = parse_memory_gb
 _probe_platform = probe_platform
 # Legacy private name retained for callers that exercised the old probe helper.
 _probe_cpu_count = probe_cpu_count
+_probe_total_ram_gb = probe_total_ram_gb
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -135,42 +137,6 @@ _MODEL_FOOTPRINTS = (
 # called at import, and every one is overridable through ``detect_hardware``'s
 # ``probes`` argument so tests can inject fakes. Each swallows its own failures
 # and returns a conservative "unknown" rather than raising.
-
-def _probe_total_ram_gb() -> float | None:
-    """Total physical RAM in GB, via stdlib only, or ``None`` if unknown."""
-    # POSIX (Linux, and most BSD/macOS): pages * page size.
-    try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        if pages > 0 and page_size > 0:
-            return round(pages * page_size / 1e9, 1)
-    except (ValueError, AttributeError, OSError):
-        pass
-    # Windows: GlobalMemoryStatusEx via ctypes, guarded hard.
-    try:
-        import ctypes
-
-        class _MemStatus(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        status = _MemStatus()
-        status.dwLength = ctypes.sizeof(_MemStatus)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return round(status.ullTotalPhys / 1e9, 1)
-    except Exception:
-        pass
-    return None
-
 
 def _probe_gpu() -> tuple[bool, float | None]:
     """Return ``(gpu_present, vram_gb)`` by shelling out to ``nvidia-smi``.

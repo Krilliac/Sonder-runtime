@@ -3,6 +3,7 @@ from sonder_runtime.platform.hardware_probe import (
     parse_memory_gb,
     probe_cpu_count,
     probe_platform,
+    probe_total_ram_gb,
 )
 
 
@@ -59,3 +60,26 @@ def test_hardware_cpu_probe_degrades_when_os_lookup_fails(monkeypatch):
 
     monkeypatch.setattr(hardware_probe.os, "cpu_count", fail)
     assert probe_cpu_count() is None
+
+
+def test_hardware_ram_probe_has_canonical_platform_owner():
+    assert sonder_hardware._probe_total_ram_gb is probe_total_ram_gb
+
+
+def test_hardware_ram_probe_uses_posix_page_totals(monkeypatch):
+    import sonder_runtime.platform.hardware_probe as hardware_probe
+
+    values = {"SC_PHYS_PAGES": 2_000_000, "SC_PAGE_SIZE": 4096}
+    monkeypatch.setattr(hardware_probe.os, "sysconf", values.__getitem__, raising=False)
+    assert probe_total_ram_gb() == 8.2
+
+
+def test_hardware_ram_probe_falls_back_when_posix_lookup_fails(monkeypatch):
+    import sonder_runtime.platform.hardware_probe as hardware_probe
+
+    def fail(_name):
+        raise OSError("probe unavailable")
+
+    monkeypatch.setattr(hardware_probe.os, "sysconf", fail, raising=False)
+    result = probe_total_ram_gb()
+    assert result is None or result > 0

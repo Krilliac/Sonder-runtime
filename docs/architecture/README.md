@@ -483,3 +483,9 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundredth Slice: `WP1-TWO-HUNDREDTH-SLICE.md` —
   moved scalar compatibility-environment coercion into the packaged platform
   configuration-environment boundary while preserving config helper identity.
+- WP1 Two-Hundred-First Slice: `WP1-TWO-HUNDRED-FIRST-SLICE.md` —
+  moved bounded local model retry configuration and exponential backoff into
+  the packaged platform boundary while preserving root server wrappers.
+- WP1 Two-Hundred-Second Slice: `WP1-TWO-HUNDRED-SECOND-SLICE.md` —
+  moved total physical RAM probing into the packaged hardware platform boundary
+  while preserving the legacy hardware probe alias.
