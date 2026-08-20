@@ -16,12 +16,14 @@ Run:
     python sonder_client.py
     python sonder_client.py --server http://your-vps:11435 --key s3cret
 """
-import json
 import os
 import sys
 import urllib.error
 import urllib.request
 
+from sonder_runtime.adapters.client_request import (
+    build_chat_request as _build_chat_request,
+)
 from sonder_runtime.platform.client_fallback import enabled as local_fallback_enabled
 
 LOCAL_FALLBACK_SERVER = os.environ.get("SONDER_LOCAL_FALLBACK", "http://127.0.0.1:11435")
@@ -57,18 +59,8 @@ def _parse_argv(argv):
 
 
 def build_request(server, api_key, prompt):
-    """Pure builder: returns (url, headers_dict, body_bytes) for a chat completion
-    POST to `server`, with the given prompt as the sole user message."""
-    url = server.rstrip("/") + "/v1/chat/completions"
-    body = json.dumps({
-        "model": "sonder",
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-    }).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = "Bearer " + api_key
-    return url, headers, body
+    """Compatibility delegate for the packaged standalone-client adapter."""
+    return _build_chat_request(server, api_key, prompt)
 
 
 def send_prompt(server, api_key, prompt):
@@ -78,6 +70,8 @@ def send_prompt(server, api_key, prompt):
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req) as resp:
         raw = resp.read().decode("utf-8")
+    import json
+
     obj = json.loads(raw)
     return obj["choices"][0]["message"]["content"]
 
