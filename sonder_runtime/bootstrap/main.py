@@ -4,38 +4,13 @@ Flags are parsed here, frozen immediately, and never re-read.
 """
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 
 from ..adapters import runtime_capabilities as caps
+from ..adapters.cli_options import parse_args
 from ..adapters.runtime_capabilities import RuntimeCapabilities
 from .container import RuntimeConfig, build_runtime
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="sonder",
-        description="Sonder Runtime — private-first AI orchestration",
-    )
-    parser.add_argument(
-        "--unrestricted-tools",
-        action="store_true",
-        default=False,
-        help="Disable model-tool authorization gates; enable host execution",
-    )
-    parser.add_argument(
-        "--unrestricted-selfmod",
-        action="store_true",
-        default=False,
-        help="Disable selfmod path/approval/isolation/test restrictions",
-    )
-    parser.add_argument(
-        "--profile",
-        choices=("workstation-local", "server-private"),
-        default="workstation-local",
-    )
-    return parser.parse_args(argv)
 
 
 def build_config_from_env(profile: str) -> RuntimeConfig:

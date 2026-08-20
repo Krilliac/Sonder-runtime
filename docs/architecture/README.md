@@ -296,3 +296,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Fortieth Slice: `WP1-ONE-HUNDRED-FORTIETH-SLICE.md` —
   moved learning-tier canonicalization into the pure domain boundary while
   preserving the server compatibility alias.
+- WP1 One-Hundred-Forty-Second Slice: `WP1-ONE-HUNDRED-FORTY-SECOND-SLICE.md` —
+  moved SPEC-5 CLI argument parsing into the canonical packaged input adapter
+  while preserving the bootstrap compatibility import.
+- WP1 One-Hundred-Forty-First Slice: `WP1-ONE-HUNDRED-FORTY-FIRST-SLICE.md` —
+  moved the pure context token-estimate helper into the domain boundary while
+  preserving the server compatibility alias.
