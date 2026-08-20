@@ -315,3 +315,10 @@ newer ADR explicitly supersedes them.
   moved generic process-wide application lifecycle ownership into a canonical
   packaged adapter while preserving bootstrap lazy caching, atomic
   construction, reset behavior, and compatibility functions.
+- WP1 One-Hundred-Forty-Seventh Slice: `WP1-ONE-HUNDRED-FORTY-SEVENTH-SLICE.md` —
+  moved explicit SPEC-5 runtime graph assembly into a canonical packaged
+  adapter while preserving the bootstrap compatibility surface and backend
+  selection behavior.
+- WP1 One-Hundred-Forty-Eighth Slice: `WP1-ONE-HUNDRED-FORTY-EIGHTH-SLICE.md` —
+  moved the pure fanout generative-capability eligibility policy into the
+  existing domain boundary while preserving the server compatibility alias.

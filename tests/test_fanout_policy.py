@@ -1,6 +1,10 @@
 import pytest
+import server
 
-from sonder_runtime.domain.fanout_policy import nonchat_reason
+from sonder_runtime.domain.fanout_policy import (
+    declares_generative_capability,
+    nonchat_reason,
+)
 
 
 @pytest.mark.parametrize(
@@ -23,3 +27,21 @@ def test_explicit_generative_capability_wins_over_vision_metadata():
     assert nonchat_reason(
         {"capabilities": ["chat", "vision"], "details": {"family": "llava"}}
     ) == ""
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        ({"capabilities": ["chat"]}, True),
+        ({"details": {"capabilities": ["completion"]}}, True),
+        ({"capabilities": ["embedding", "vision"]}, False),
+        ({"name": "unknown:latest"}, False),
+        (None, False),
+    ],
+)
+def test_declares_generative_capability_requires_explicit_catalog_metadata(record, expected):
+    assert declares_generative_capability(record) is expected
+
+
+def test_server_keeps_identity_compatible_generative_capability_alias():
+    assert server._fanout_declares_generative_capability is declares_generative_capability
