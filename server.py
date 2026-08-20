@@ -133,6 +133,9 @@ from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.runtime_identity import (
     runtime_identity_block as _runtime_identity_block,
 )
+from sonder_runtime.domain.model_capabilities import (
+    fanout_capabilities as _fanout_capabilities,
+)
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
@@ -415,30 +418,6 @@ _KNOWN_VISION_ONLY_MODEL_FAMILIES = frozenset({
     # serial local slot and produces misleading generic prose.
     "bakllava", "llama3.2-vision", "llava", "minicpm-v", "moondream",
 })
-
-
-def _fanout_capabilities(record):
-    """Normalize capability metadata with the catalog's documented fallback.
-
-    Ollama-compatible catalogs vary between scalar, list, and nested metadata.
-    An empty top-level declaration is not authoritative when the nested record
-    positively describes the model, so every fanout consumer uses the same
-    non-empty-first rule.
-    """
-    record = record if isinstance(record, dict) else {}
-    details = record.get("details") if isinstance(record.get("details"), dict) else {}
-
-    def normalized(raw):
-        if isinstance(raw, str):
-            values = (raw,)
-        elif isinstance(raw, (list, tuple, set)):
-            values = raw
-        else:
-            return set()
-        return {str(value).strip().casefold() for value in values if str(value).strip()}
-
-    capabilities = normalized(record.get("capabilities"))
-    return capabilities or normalized(details.get("capabilities"))
 
 
 def _fanout_nonchat_reason(record):

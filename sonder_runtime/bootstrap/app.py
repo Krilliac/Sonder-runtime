@@ -13,9 +13,9 @@ from dataclasses import dataclass
 import threading
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
+from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.strangler_services import (
     LegacyPolicyRepository,
-    LegacyProcessProbe,
     LegacyToolExecutor,
     LegacyUnitOfWork,
     OperationsEventSink,
@@ -122,7 +122,7 @@ def build_application(
         # a singleton; each call opens and owns its own connection scope.
         unit_of_work=LegacyUnitOfWork,
         tool_executor=LegacyToolExecutor(),
-        process_probe=LegacyProcessProbe(),
+        process_probe=ProcessProbeAdapter(),
         # Bounded process-local counters/recent events decorate the durable
         # operations.db sink; they never replace its audit authority.
         events=LocalObservabilitySink(OperationsEventSink()),
