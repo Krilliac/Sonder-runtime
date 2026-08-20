@@ -14,8 +14,8 @@ import threading
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.process_probe import ProcessProbeAdapter
+from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.strangler_services import (
-    LegacyPolicyRepository,
     LegacyToolExecutor,
     LegacyUnitOfWork,
     OperationsEventSink,
@@ -114,7 +114,7 @@ def build_application(
     gateway = _build_model_gateway()
     return Application(
         profile=profile,
-        runtime_policy=RuntimePolicyService(LegacyPolicyRepository()),
+        runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
         model_gateway=gateway,
         chat=ChatService(gateway),
         automation=AutopilotRepository(),
