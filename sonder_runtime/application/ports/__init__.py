@@ -27,6 +27,24 @@ from .repositories import (
 from .tool_executor import ToolCall, ToolExecutor, ToolResult
 from .task_state import ChecklistEventPort, TaskRepository
 from .workflows import LoopRunner, WorkflowRepository
+from .execution_world import (
+    CleanupResult,
+    ExecutionHandle,
+    ExecutionResult,
+    ExecutionWorld,
+    ExecutionWorldSnapshot,
+    ExecutionWorldSpec,
+    ExecutionWorldState,
+    ShellExecutor,
+    ShellRequest,
+    SubprocessHandle,
+    SubprocessRequest,
+    SubprocessRuntime,
+    TerminalChunk,
+    TerminalHandle,
+    TerminalRequest,
+    TerminalService,
+)
 
 __all__ = [
     "AutomationRepository",
@@ -57,4 +75,20 @@ __all__ = [
     "UnitOfWork",
     "LoopRunner",
     "WorkflowRepository",
+    "CleanupResult",
+    "ExecutionHandle",
+    "ExecutionResult",
+    "ExecutionWorld",
+    "ExecutionWorldSnapshot",
+    "ExecutionWorldSpec",
+    "ExecutionWorldState",
+    "ShellExecutor",
+    "ShellRequest",
+    "SubprocessHandle",
+    "SubprocessRequest",
+    "SubprocessRuntime",
+    "TerminalChunk",
+    "TerminalHandle",
+    "TerminalRequest",
+    "TerminalService",
 ]
