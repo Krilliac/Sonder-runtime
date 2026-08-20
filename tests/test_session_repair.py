@@ -29,6 +29,17 @@ def test_inflight_tail_stops_before_effect_and_does_not_replay_it():
     assert plan.diagnosis.issues[0].code == "truncated_tail"
 
 
+def test_legacy_model_response_closes_a_request_without_repairing_the_tail():
+    events = [
+        event(1, "session.started"),
+        event(2, "model.requested", {"turn_id": "t1", "prompt": "hi"}),
+        event(3, "model.response", {"turn_id": "t1", "content": "hello"}),
+    ]
+    diagnosis = diagnose_session_tail(events)
+    assert diagnosis.disposition == "clean"
+    assert diagnosis.valid_boundary == 3
+
+
 def test_gap_and_cross_session_tail_are_inconsistent_and_not_resumable():
     gap = diagnose_session_tail([event(1, "session.started"), event(3, "session.paused")])
     assert gap.disposition == "inconsistent"
