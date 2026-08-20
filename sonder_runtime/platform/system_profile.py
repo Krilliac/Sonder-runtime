@@ -11,6 +11,13 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass
 
+from sonder_runtime.platform.npu_policy import (
+    NPU_NAME_RE as _NPU_NAME_RE,
+    linux_accel_is_npu as _linux_accel_is_npu,
+    vendor_from_name as _npu_vendor_from_name,
+    vendor_from_pnp_id as _npu_vendor_from_pnp_id,
+)
+
 
 DEFAULT_TEXT = """# Sonder standing instructions
 
@@ -261,44 +268,6 @@ def _system_memory():
 # cache across helper live-reloads, matching the other stateful helpers.
 if "_NPU_PROBE" not in globals():
     _NPU_PROBE = {"value": None}
-
-
-def _npu_vendor_from_name(name):
-    lowered = str(name or "").lower()
-    if "amd" in lowered or "ryzen" in lowered:
-        return "amd"
-    if "intel" in lowered or "ai boost" in lowered:
-        return "intel"
-    if "qualcomm" in lowered or "hexagon" in lowered:
-        return "qualcomm"
-    return "unknown"
-
-
-_NPU_NAME_RE = re.compile(
-    r"(?:\bnpu\b|neural\s+processing\s+unit|ai boost|ryzen\s*ai)",
-    re.IGNORECASE,
-)
-
-
-def _npu_vendor_from_pnp_id(pnp_device_id):
-    value = str(pnp_device_id or "").upper()
-    if "VEN_1022" in value:
-        return "amd"
-    if "VEN_8086" in value:
-        return "intel"
-    if "VEN_17CB" in value:
-        return "qualcomm"
-    return "unknown"
-
-
-def _linux_accel_is_npu(vendor, driver):
-    """Accept only accelerator drivers tied to client NPU device classes."""
-    supported = {
-        "amd": {"amdxdna"},
-        "intel": {"intel_vpu", "ivpu"},
-    }
-    vendor_id = str(vendor or "").lower()
-    return str(driver or "").lower() in supported.get(vendor_id, set())
 
 
 def _linux_npu_from_nodes(nodes):

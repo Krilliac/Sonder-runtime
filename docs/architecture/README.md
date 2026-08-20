@@ -471,3 +471,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Ninety-Fifth Slice: `WP1-ONE-HUNDRED-NINETY-FIFTH-SLICE.md` —
   moved the bounded lesson-distillation timeout policy into the packaged
   domain boundary while preserving the root server compatibility wrapper.
+- WP1 One-Hundred-Ninety-Eighth Slice: `WP1-ONE-HUNDRED-NINETY-EIGHTH-SLICE.md` —
+  moved pure NPU identification policy into the packaged platform boundary
+  while preserving system-profile compatibility aliases.
+- WP1 One-Hundred-Ninety-Seventh Slice: `WP1-ONE-HUNDRED-NINETY-SEVENTH-SLICE.md` —
+  moved pure permission-mode context rendering into the packaged domain
+  boundary while preserving the root server compatibility helper.
