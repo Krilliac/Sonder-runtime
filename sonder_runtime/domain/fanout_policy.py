@@ -58,4 +58,14 @@ def nonchat_reason(record: object) -> str:
     return ""
 
 
-__all__ = ["nonchat_reason"]
+def declares_generative_capability(record: object) -> bool:
+    """Whether a catalog record explicitly declares a text-generation surface.
+
+    Unknown records remain eligible for a bounded probe, but synthesis must
+    require a positive local chat/completion declaration before spending a
+    model slot on a multi-answer prompt.
+    """
+    return bool(fanout_capabilities(record) & _GENERATIVE_CAPABILITIES)
+
+
+__all__ = ["declares_generative_capability", "nonchat_reason"]

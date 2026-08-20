@@ -143,7 +143,10 @@ from sonder_runtime.domain.runtime_identity import (
 from sonder_runtime.domain.model_capabilities import (
     fanout_capabilities as _fanout_capabilities,
 )
-from sonder_runtime.domain.fanout_policy import nonchat_reason as _fanout_nonchat_reason
+from sonder_runtime.domain.fanout_policy import (
+    declares_generative_capability as _fanout_declares_generative_capability,
+    nonchat_reason as _fanout_nonchat_reason,
+)
 from sonder_runtime.domain.campaign_formatting import (
     campaign_headline as _campaign_headline,
 )
@@ -429,18 +432,6 @@ def _inventory_rows(payload, endpoint):
         if isinstance(rows, list):
             return [row for row in rows if isinstance(row, dict)]
     raise ModelCallError("protocol", "invalid Ollama %s response" % endpoint)
-
-
-def _fanout_declares_generative_capability(record):
-    """Whether a catalog record positively declares a text-generation surface.
-
-    Normal fanout can include an unknown catalog model because it is only a
-    bounded probe. Synthesis instead puts multiple durable answer previews in
-    one new prompt, so require a positive local chat/completion declaration.
-    """
-    return bool(_fanout_capabilities(record) & {
-        "completion", "chat", "generate", "text-generation",
-    })
 
 
 def resolve_discovered_model_record(selector):
