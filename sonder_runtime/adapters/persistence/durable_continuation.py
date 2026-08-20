@@ -191,5 +191,18 @@ class SQLiteDurableContinuationRepository:
             ).fetchall()
         return tuple(self._row(row) for row in rows)
 
+    def list_all(self, *, limit: int = 1000) -> tuple[DurableChildSession, ...]:
+        """Return a bounded operator projection without exposing prompts."""
+        if isinstance(limit, bool) or limit < 1:
+            raise InvalidSubagentRequest("limit must be positive")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,"
+                "checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,"
+                "recovery_required,cancellation_requested,cancellation_reason FROM durable_child_session "
+                "ORDER BY rowid LIMIT ?", (limit,)
+            ).fetchall()
+        return tuple(self._row(row) for row in rows)
+
 
 __all__ = ["SQLiteDurableContinuationRepository"]
