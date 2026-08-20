@@ -546,7 +546,9 @@ def cmd_serve(args) -> int:
         return 1
 
     import sonder_runtime.interfaces.http.serve as sonder_serve
+    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
+    configure_legacy_interfaces()
     sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
     sonder_serve.main()
     return 0
@@ -559,7 +561,9 @@ def cmd_repl(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     import sonder_runtime.interfaces.repl.repl as sonder_repl
+    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
+    configure_legacy_interfaces()
     sonder_repl.main()
     return 0
 

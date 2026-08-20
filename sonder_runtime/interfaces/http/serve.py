@@ -31,7 +31,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import permission_modes
-import server
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
 from sonder_runtime.adapters.command_completion import (
@@ -62,6 +61,49 @@ from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
 )
+from sonder_runtime.domain.common.errors import DependencyUnavailable
+
+
+_LEGACY_RUNTIME = None
+
+
+def configure_legacy_runtime(runtime):
+    """Inject the legacy runtime used by the compatibility HTTP routes.
+
+    The HTTP adapter deliberately does not import, discover, or construct the
+    historical runtime.  Its route handlers retain their established
+    ``server.*`` calls through the explicit injection boundary below.  A
+    missing runtime is an operational dependency failure, never an implicit
+    fallback or partially initialized request path.
+    """
+    if runtime is None:
+        raise DependencyUnavailable(
+            "HTTP legacy runtime must be supplied to configure_legacy_runtime"
+        )
+    global _LEGACY_RUNTIME
+    _LEGACY_RUNTIME = runtime
+    return runtime
+
+
+def _legacy_runtime():
+    runtime = _LEGACY_RUNTIME
+    if runtime is None:
+        raise DependencyUnavailable(
+            "HTTP legacy runtime is unavailable; call configure_legacy_runtime"
+        )
+    return runtime
+
+
+class _InjectedLegacyRuntime:
+    """Compatibility namespace delegating every access to the injected port."""
+
+    def __getattr__(self, name):
+        return getattr(_legacy_runtime(), name)
+
+
+# Keep the established route implementation readable while making every
+# legacy access explicit, injectable, and fail-closed.
+server = _InjectedLegacyRuntime()
 
 DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
@@ -1285,9 +1327,10 @@ def _record_chat(role, content, kind="message", state=None):
 
 
 def _maybe_live_reload():
-    global server, grounding, training_tasks, intents, feedback, admin_auth, debug_dump, tool_contract
+    global grounding, training_tasks, intents, feedback, admin_auth, debug_dump, tool_contract
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
-    server = modules.get("server", server)
+    if "server" in modules:
+        configure_legacy_runtime(modules["server"])
     grounding = modules.get("grounding", grounding)
     training_tasks = modules.get("training_tasks", training_tasks)
     intents = modules.get("intents", intents)
@@ -2567,7 +2610,9 @@ _STRUCTURED_SCHEMA_MAX_DEPTH = 16
 # produce such an array.
 # Keep HTTP admission and server-side verification on the same host bound. A
 # model can still return more elements than its decoder schema requested.
-_STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS = server._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS
+def _structured_unique_items_max_items():
+    """Read the shared verifier bound after the runtime has been injected."""
+    return server._STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS
 
 
 def _response_format_error(message):
@@ -2649,12 +2694,12 @@ def _validate_structured_schema(schema, depth=0):
         if isinstance(maximum, bool) or not isinstance(maximum, int):
             raise _response_format_error(
                 "uniqueItems=true requires an integer maxItems no greater than %d"
-                % _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS,
+                % _structured_unique_items_max_items(),
             )
-        if maximum > _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS:
+        if maximum > _structured_unique_items_max_items():
             raise _response_format_error(
                 "uniqueItems=true requires maxItems no greater than %d"
-                % _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS,
+                % _structured_unique_items_max_items(),
             )
     for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
         if keyword in schema and (
