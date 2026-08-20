@@ -6,10 +6,15 @@ from .lifecycle import (
     ProviderRegistration,
     RegistrationScope,
 )
+from .jobs import JobRegistryService, ResumableWorkflowEngine
+from .observability import RedactingTelemetrySink
 
 __all__ = [
     "CapabilityRegistry",
     "ProviderLifecycleError",
     "ProviderRegistration",
     "RegistrationScope",
+    "JobRegistryService",
+    "ResumableWorkflowEngine",
+    "RedactingTelemetrySink",
 ]
