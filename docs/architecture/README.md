@@ -45,6 +45,8 @@
   packaged autopilot repository ownership and compatibility boundary.
 - [`WP1-ONE-HUNDRED-FOURTEENTH-SLICE.md`](WP1-ONE-HUNDRED-FOURTEENTH-SLICE.md) —
   packaged HTTP serve-temperature policy and compatibility boundary.
+- [`WP1-ONE-HUNDRED-FIFTEENTH-SLICE.md`](WP1-ONE-HUNDRED-FIFTEENTH-SLICE.md) —
+  packaged model capability normalization and compatibility boundary.
 - [`WP1-THIRTEENTH-SLICE.md`](WP1-THIRTEENTH-SLICE.md) — embedding adapter
   migration and remaining NPU boundary.
 - [`WP1-FOURTEENTH-SLICE.md`](WP1-FOURTEENTH-SLICE.md) — NPU contract adapter
@@ -226,3 +228,6 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Eleventh Slice: `WP1-ONE-HUNDRED-ELEVENTH-SLICE.md` — retired
   the duplicate `sonder_metrics.py` root delegate after production and
   regression callers moved to the canonical packaged metrics module.
+- WP1 One-Hundred-Sixteenth Slice: `WP1-ONE-HUNDRED-SIXTEENTH-SLICE.md` — moved
+  the process-probe port adapter out of generic strangler services into its
+  named packaged adapter and wired the composition root directly to it.

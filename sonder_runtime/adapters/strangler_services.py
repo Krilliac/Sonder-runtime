@@ -19,7 +19,6 @@ from ..application.ports.model_gateway import (
     require_embedding_vector,
     require_model_text,
 )
-from ..application.ports.process_probe import ProbeResult, ProcessIdentity
 from ..application.ports.tool_executor import ToolCall, ToolResult
 from ..domain.common.errors import Cancelled, DeadlineExceeded, InvalidInput
 
@@ -254,38 +253,6 @@ class OperationsEventSink:
             )
         except Exception:
             return
-
-
-class LegacyProcessProbe:
-    """ProcessProbe over the adapter ``process_liveness`` module.
-
-    ``process_liveness`` encodes start-time / boot-id into one opaque identity
-    string rather than a separate float, so ``started_at`` stays 0.0 and the
-    fingerprint carries the real instance identity. Unknown liveness maps to
-    ``ProbeResult.UNKNOWN`` so it can never drive a split-brain ownership claim.
-    """
-
-    def identity(self, pid: int) -> ProcessIdentity | None:
-        import sonder_runtime.adapters.process_liveness as process_liveness
-
-        state, fingerprint = process_liveness.probe_process(pid)
-        if state == process_liveness.PROCESS_DEAD or not fingerprint:
-            return None
-        return ProcessIdentity(
-            pid=int(pid), started_at=0.0, fingerprint=str(fingerprint)
-        )
-
-    def is_same_live_process(self, identity: ProcessIdentity) -> ProbeResult:
-        import sonder_runtime.adapters.process_liveness as process_liveness
-
-        state, _observed = process_liveness.probe_process(
-            identity.pid, expected_identity=identity.fingerprint or None
-        )
-        if state == process_liveness.PROCESS_ALIVE:
-            return ProbeResult.ALIVE
-        if state == process_liveness.PROCESS_DEAD:
-            return ProbeResult.DEAD
-        return ProbeResult.UNKNOWN
 
 
 class LegacyToolExecutor:
