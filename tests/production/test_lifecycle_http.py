@@ -9,12 +9,11 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-import sonder_lifecycle
-import sonder_serve
+import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+import sonder_runtime.interfaces.http.serve as sonder_serve
 from sonder_service_state import DependencyState
 
 pytestmark = pytest.mark.integration
-
 
 @pytest.fixture()
 def http_server(tmp_path, monkeypatch):
@@ -217,7 +216,7 @@ def test_auth_failure_limiter_and_events(http_server, monkeypatch):
         assert status == 401
     assert saw_429
 
-    from sonder_operations_store import OperationsStore
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     events = OperationsStore().recent_events(limit=50)
     assert any(e.event_code == "AUTH_FAILED" for e in events)

@@ -2,8 +2,8 @@
 
 import server
 import served_action_receipts
-import sonder_lifecycle
-import sonder_serve as serve
+import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+import sonder_runtime.interfaces.http.serve as serve
 from types import SimpleNamespace
 
 

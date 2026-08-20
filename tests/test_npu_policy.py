@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 
 
 @pytest.fixture

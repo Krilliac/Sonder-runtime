@@ -47,7 +47,7 @@ def _isolate_fleet_ledger():
     Clearing before each test keeps the suite order-independent.
     """
     try:
-        import fleet_store
+        import sonder_runtime.adapters.persistence.fleet_store as fleet_store
         fleet_store.clear_all()
     except Exception:
         pass

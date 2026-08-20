@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-import npu_broker
-import npu_service
-import runtime_policy
+import sonder_runtime.adapters.accelerators.npu.npu_broker as npu_broker
+import sonder_runtime.adapters.accelerators.npu.service as npu_service
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 from tests.npu_helpers import (
     embedding_payload,
     isolate_broker_env,

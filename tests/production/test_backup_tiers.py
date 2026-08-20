@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-import sonder_backup
+from sonder_runtime.adapters import backup as sonder_backup
 
 pytestmark = pytest.mark.unit
 

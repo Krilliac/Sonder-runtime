@@ -54,7 +54,7 @@ def _server():
 
 
 def _serve():
-    import sonder_serve
+    import sonder_runtime.interfaces.http.serve as sonder_serve
 
     return sonder_serve
 

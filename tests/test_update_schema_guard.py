@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import sonder_updates
-from sonder_updates import BundleManifest, check_compatibility
+import sonder_runtime.adapters.updates.service as sonder_updates
+from sonder_runtime.adapters.updates.service import BundleManifest, check_compatibility
 
 
 def _manifest(state_schema=None):

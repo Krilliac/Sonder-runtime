@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from sonder_logging import Redactor
-from sonder_operations_store import MaintenanceLockHeld, OperationsStore
+from sonder_runtime.adapters.persistence.operations_store import MaintenanceLockHeld, OperationsStore
 
 pytestmark = pytest.mark.unit
 

@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-import activity_tracker
-import file_ops
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
 import symbol_index
 

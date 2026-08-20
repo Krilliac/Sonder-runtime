@@ -5,10 +5,23 @@ import threading
 
 import pytest
 
-import activity_tracker
-import npu_broker
-import npu_service
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
+import sonder_runtime.adapters.accelerators.npu.npu_broker as npu_broker
+import sonder_runtime.adapters.accelerators.npu.service as npu_service
 from tests.npu_helpers import embedding_manifest, routing_manifest
+
+
+def test_shadow_ledger_uses_packaged_platform_paths(monkeypatch):
+    calls = []
+
+    def fake_state_path(name, env_name=None):
+        calls.append((name, env_name))
+        return "C:/isolated/npu-shadow-ledger.json"
+
+    monkeypatch.setattr(npu_service.runtime_paths, "state_path", fake_state_path)
+
+    assert npu_service._ledger_path() == "C:/isolated/npu-shadow-ledger.json"
+    assert calls == [("npu-shadow-ledger.json", "SONDER_NPU_SHADOW_LEDGER")]
 
 
 class FakeBroker:
@@ -95,7 +108,7 @@ def npu_env(monkeypatch, tmp_path):
 
 
 def _set_mode(mode, **caps):
-    import runtime_policy
+    import sonder_runtime.adapters.runtime_policy as runtime_policy
 
     runtime_policy.update(npu={"mode": mode, **caps})
 

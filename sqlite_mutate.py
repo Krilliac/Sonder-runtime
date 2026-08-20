@@ -13,7 +13,7 @@ import threading
 import time
 
 import data_query
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 MAX_SQL_BYTES = 32_768

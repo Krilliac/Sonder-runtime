@@ -8,7 +8,7 @@ import secrets
 import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 MAX_PATCH_BYTES = 1_000_000
 MAX_FILES = 64

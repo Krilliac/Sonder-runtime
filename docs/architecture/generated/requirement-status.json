@@ -1,0 +1,1572 @@
+{
+  "families": {
+    "AGENT": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "API": {
+      "checked": 0,
+      "total": 8,
+      "verified": 0
+    },
+    "ARCH": {
+      "checked": 0,
+      "total": 13,
+      "verified": 0
+    },
+    "COMPACT": {
+      "checked": 0,
+      "total": 5,
+      "verified": 0
+    },
+    "CORE": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "CTX": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "DATA": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "DOC": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "EVAL": {
+      "checked": 0,
+      "total": 9,
+      "verified": 0
+    },
+    "EXEC": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "EXT": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "JOB": {
+      "checked": 0,
+      "total": 5,
+      "verified": 0
+    },
+    "LOOP": {
+      "checked": 0,
+      "total": 8,
+      "verified": 0
+    },
+    "MEM": {
+      "checked": 0,
+      "total": 8,
+      "verified": 0
+    },
+    "MODEL": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "OPS": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "REPO": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "SEAM": {
+      "checked": 0,
+      "total": 16,
+      "verified": 0
+    },
+    "SEC": {
+      "checked": 0,
+      "total": 9,
+      "verified": 0
+    },
+    "SELFMOD": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "SESSION": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "SKILL": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "TOOL": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "TRAIN": {
+      "checked": 0,
+      "total": 9,
+      "verified": 0
+    },
+    "UPDATE": {
+      "checked": 0,
+      "total": 5,
+      "verified": 0
+    }
+  },
+  "overall": {
+    "checked": 0,
+    "statuses": {
+      "planned": 204
+    },
+    "total": 204,
+    "verified": 0
+  },
+  "requirements": [
+    {
+      "checked": false,
+      "claim": "Unified registry.",
+      "requirement_id": "AGENT-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Migrate existing modes.",
+      "requirement_id": "AGENT-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Presets.",
+      "requirement_id": "AGENT-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Built-ins.",
+      "requirement_id": "AGENT-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Durable lineage.",
+      "requirement_id": "AGENT-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Continuable children.",
+      "requirement_id": "AGENT-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Budgets.",
+      "requirement_id": "AGENT-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Isolated workspaces.",
+      "requirement_id": "AGENT-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Structured delegation.",
+      "requirement_id": "AGENT-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Architect/editor/reviewer.",
+      "requirement_id": "AGENT-010",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Shared event vocabulary.",
+      "requirement_id": "API-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Resumable streams.",
+      "requirement_id": "API-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "MCP.",
+      "requirement_id": "API-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "OpenAI compatibility.",
+      "requirement_id": "API-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Editor/agent interoperability.",
+      "requirement_id": "API-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Operator control plane.",
+      "requirement_id": "API-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Mobile parity.",
+      "requirement_id": "API-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Schema generation.",
+      "requirement_id": "API-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "One implementation path.",
+      "requirement_id": "ARCH-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Root cleanup.",
+      "requirement_id": "ARCH-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Transitional cleanup.",
+      "requirement_id": "ARCH-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Pure domain.",
+      "requirement_id": "ARCH-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Application ports.",
+      "requirement_id": "ARCH-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Adapter ownership.",
+      "requirement_id": "ARCH-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Thin interfaces.",
+      "requirement_id": "ARCH-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "No import side effects.",
+      "requirement_id": "ARCH-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Typed configuration.",
+      "requirement_id": "ARCH-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Architecture enforcement.",
+      "requirement_id": "ARCH-010",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Zero exceptions.",
+      "requirement_id": "ARCH-011",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Ownership catalog.",
+      "requirement_id": "ARCH-012",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Split oversized modules.",
+      "requirement_id": "ARCH-013",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Non-destructive.",
+      "requirement_id": "COMPACT-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Source range.",
+      "requirement_id": "COMPACT-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Structured retention.",
+      "requirement_id": "COMPACT-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Validation.",
+      "requirement_id": "COMPACT-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Typed modalities.",
+      "requirement_id": "COMPACT-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Runtime identity.",
+      "requirement_id": "CORE-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Modular monolith.",
+      "requirement_id": "CORE-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Single operator.",
+      "requirement_id": "CORE-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Local by default.",
+      "requirement_id": "CORE-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Preserve data, remove obsolete interfaces.",
+      "requirement_id": "CORE-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Independent unrestricted authorities.",
+      "requirement_id": "CORE-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Attended training.",
+      "requirement_id": "CORE-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Immutable deployments.",
+      "requirement_id": "CORE-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Signed updates.",
+      "requirement_id": "CORE-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "No blind framework transplant.",
+      "requirement_id": "CORE-010",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "One planner.",
+      "requirement_id": "CTX-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Section budgets.",
+      "requirement_id": "CTX-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Priority and eviction.",
+      "requirement_id": "CTX-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Deduplication.",
+      "requirement_id": "CTX-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Explainability.",
+      "requirement_id": "CTX-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Last-good snapshots.",
+      "requirement_id": "CTX-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Overflow recovery.",
+      "requirement_id": "CTX-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Hardware-aware native context.",
+      "requirement_id": "CTX-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Prefix caching.",
+      "requirement_id": "CTX-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Request replay.",
+      "requirement_id": "CTX-010",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Per-domain SQLite.",
+      "requirement_id": "DATA-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "No cross-database transactions.",
+      "requirement_id": "DATA-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Transactional outbox.",
+      "requirement_id": "DATA-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Compare-and-set.",
+      "requirement_id": "DATA-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Crash-safe migration.",
+      "requirement_id": "DATA-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Epoch adoption.",
+      "requirement_id": "DATA-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Immutable artifact hashes.",
+      "requirement_id": "DATA-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Authority index.",
+      "requirement_id": "DOC-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Historical labeling.",
+      "requirement_id": "DOC-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "ADR namespace.",
+      "requirement_id": "DOC-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Focused contracts.",
+      "requirement_id": "DOC-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Generated references.",
+      "requirement_id": "DOC-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Status evidence.",
+      "requirement_id": "DOC-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "No stale promises.",
+      "requirement_id": "DOC-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "First-class evaluation domain.",
+      "requirement_id": "EVAL-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Suites.",
+      "requirement_id": "EVAL-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Metrics.",
+      "requirement_id": "EVAL-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Dimensions.",
+      "requirement_id": "EVAL-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Trajectory replay.",
+      "requirement_id": "EVAL-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Divergence.",
+      "requirement_id": "EVAL-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Promotion gates.",
+      "requirement_id": "EVAL-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Shadow/canary.",
+      "requirement_id": "EVAL-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Proposal lifecycle.",
+      "requirement_id": "EVAL-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Shared execution world.",
+      "requirement_id": "EXEC-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Container default.",
+      "requirement_id": "EXEC-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Persistent terminal.",
+      "requirement_id": "EXEC-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Spill store.",
+      "requirement_id": "EXEC-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Remote execution.",
+      "requirement_id": "EXEC-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Isolation claims.",
+      "requirement_id": "EXEC-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Extension boundary.",
+      "requirement_id": "EXT-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Manifest.",
+      "requirement_id": "EXT-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Isolation.",
+      "requirement_id": "EXT-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Quarantine.",
+      "requirement_id": "EXT-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Inventory.",
+      "requirement_id": "EXT-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Ephemeral experiments.",
+      "requirement_id": "EXT-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "No automatic promotion.",
+      "requirement_id": "EXT-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Generic registry.",
+      "requirement_id": "JOB-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Control.",
+      "requirement_id": "JOB-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Recovery.",
+      "requirement_id": "JOB-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Process containment.",
+      "requirement_id": "JOB-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Output watermarks.",
+      "requirement_id": "JOB-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Turn contract.",
+      "requirement_id": "LOOP-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Step contract.",
+      "requirement_id": "LOOP-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Interception events.",
+      "requirement_id": "LOOP-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Durable versus live.",
+      "requirement_id": "LOOP-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Steering.",
+      "requirement_id": "LOOP-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Cancellation tree.",
+      "requirement_id": "LOOP-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Bounded retries.",
+      "requirement_id": "LOOP-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Idempotency.",
+      "requirement_id": "LOOP-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Memory classes.",
+      "requirement_id": "MEM-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Per-class policy.",
+      "requirement_id": "MEM-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Evidence-backed experience.",
+      "requirement_id": "MEM-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Temporal truth.",
+      "requirement_id": "MEM-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Retrieval explanation.",
+      "requirement_id": "MEM-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Vector-space identity.",
+      "requirement_id": "MEM-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Quality evaluation.",
+      "requirement_id": "MEM-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Procedural skill promotion.",
+      "requirement_id": "MEM-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "One gateway.",
+      "requirement_id": "MODEL-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Pure route planner.",
+      "requirement_id": "MODEL-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Logical roles.",
+      "requirement_id": "MODEL-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Calibration profiles.",
+      "requirement_id": "MODEL-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Capability profiles.",
+      "requirement_id": "MODEL-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "MoE correctness.",
+      "requirement_id": "MODEL-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Controlled escalation.",
+      "requirement_id": "MODEL-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Separate role budgets.",
+      "requirement_id": "MODEL-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Provider health.",
+      "requirement_id": "MODEL-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "NPU boundary.",
+      "requirement_id": "MODEL-010",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Operation context.",
+      "requirement_id": "OPS-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Structured tracing.",
+      "requirement_id": "OPS-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Health model.",
+      "requirement_id": "OPS-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Startup reconciliation.",
+      "requirement_id": "OPS-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Graceful drain.",
+      "requirement_id": "OPS-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Bounded telemetry.",
+      "requirement_id": "OPS-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Incremental symbol index.",
+      "requirement_id": "REPO-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Language baseline.",
+      "requirement_id": "REPO-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Ranked repository map.",
+      "requirement_id": "REPO-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "LSP integration.",
+      "requirement_id": "REPO-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Evidence revisions.",
+      "requirement_id": "REPO-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Progressive expansion.",
+      "requirement_id": "REPO-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Multi-root.",
+      "requirement_id": "REPO-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "ModelGateway",
+      "requirement_id": "SEAM-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "ToolRegistry/ToolExecutor",
+      "requirement_id": "SEAM-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "FileSystem",
+      "requirement_id": "SEAM-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "SubprocessRuntime/ShellExecutor/TerminalService",
+      "requirement_id": "SEAM-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "SandboxProvider",
+      "requirement_id": "SEAM-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "SessionRepository/SessionQueryEngine",
+      "requirement_id": "SEAM-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "CompactionEngine",
+      "requirement_id": "SEAM-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "SkillRegistry",
+      "requirement_id": "SEAM-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "SubagentProvider",
+      "requirement_id": "SEAM-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "JobRegistry/WorkflowEngine",
+      "requirement_id": "SEAM-010",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "WebProvider/CredentialProvider",
+      "requirement_id": "SEAM-011",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "AttachmentStore/SpillStore",
+      "requirement_id": "SEAM-012",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "TelemetrySink",
+      "requirement_id": "SEAM-013",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "EmbeddingProvider/TrainingBackend/UpdateActivator",
+      "requirement_id": "SEAM-014",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Scoped overrides.",
+      "requirement_id": "SEAM-015",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Atomic lifecycle.",
+      "requirement_id": "SEAM-016",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Credential broker.",
+      "requirement_id": "SEC-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Egress policy.",
+      "requirement_id": "SEC-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Filesystem races.",
+      "requirement_id": "SEC-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Package/archive safety.",
+      "requirement_id": "SEC-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Extension provenance.",
+      "requirement_id": "SEC-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Prompt-injection provenance.",
+      "requirement_id": "SEC-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Secret scanning.",
+      "requirement_id": "SEC-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Fuzzing.",
+      "requirement_id": "SEC-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Recovery boundary.",
+      "requirement_id": "SEC-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Evidence first.",
+      "requirement_id": "SELFMOD-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Isolated candidate.",
+      "requirement_id": "SELFMOD-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Verification.",
+      "requirement_id": "SELFMOD-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Review and deployment.",
+      "requirement_id": "SELFMOD-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Unrestricted truthfulness.",
+      "requirement_id": "SELFMOD-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "No automatic push.",
+      "requirement_id": "SELFMOD-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Typed identities.",
+      "requirement_id": "SESSION-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Append-only log.",
+      "requirement_id": "SESSION-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Durable vocabulary.",
+      "requirement_id": "SESSION-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Model-visible invariant.",
+      "requirement_id": "SESSION-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Deterministic replay.",
+      "requirement_id": "SESSION-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Forking.",
+      "requirement_id": "SESSION-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Resume and repair.",
+      "requirement_id": "SESSION-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Query and export.",
+      "requirement_id": "SESSION-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Projection checkpoints.",
+      "requirement_id": "SESSION-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Retention/privacy.",
+      "requirement_id": "SESSION-010",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Registry.",
+      "requirement_id": "SKILL-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Progressive disclosure.",
+      "requirement_id": "SKILL-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Live refresh.",
+      "requirement_id": "SKILL-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Trust and policy.",
+      "requirement_id": "SKILL-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Health.",
+      "requirement_id": "SKILL-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Procedural promotion.",
+      "requirement_id": "SKILL-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "One gateway.",
+      "requirement_id": "TOOL-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Pipeline.",
+      "requirement_id": "TOOL-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Resource-aware policy.",
+      "requirement_id": "TOOL-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Decisions.",
+      "requirement_id": "TOOL-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Immutable startup authorities.",
+      "requirement_id": "TOOL-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Generated catalogs.",
+      "requirement_id": "TOOL-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Receipts.",
+      "requirement_id": "TOOL-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Reproducible manifest.",
+      "requirement_id": "TRAIN-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Qualified lock.",
+      "requirement_id": "TRAIN-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Dataset provenance.",
+      "requirement_id": "TRAIN-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Evaluation gate.",
+      "requirement_id": "TRAIN-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Immutable deployment.",
+      "requirement_id": "TRAIN-005",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Deployment service.",
+      "requirement_id": "TRAIN-006",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Adapter catalog.",
+      "requirement_id": "TRAIN-007",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Cheap learning first.",
+      "requirement_id": "TRAIN-008",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Rollback.",
+      "requirement_id": "TRAIN-009",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Bounded updates domain.",
+      "requirement_id": "UPDATE-001",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Platform activation.",
+      "requirement_id": "UPDATE-002",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Runtime contract.",
+      "requirement_id": "UPDATE-003",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Atomic activation.",
+      "requirement_id": "UPDATE-004",
+      "revision": 1,
+      "status": "planned"
+    },
+    {
+      "checked": false,
+      "claim": "Signed release evidence.",
+      "requirement_id": "UPDATE-005",
+      "revision": 1,
+      "status": "planned"
+    }
+  ],
+  "schema": "sonder-requirement-status-v1",
+  "source": {
+    "ledger_sha256": "f083cda7b4d7c35db4c551934b5fae1cc0d16108ede804f666dd54335c124b4c",
+    "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
+  }
+}

@@ -1,5 +1,5 @@
 """Integration tests for sonder's conversation memory, with Ollama stubbed out."""
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import pytest
 import server
 

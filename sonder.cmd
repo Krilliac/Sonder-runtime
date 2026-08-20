@@ -87,5 +87,11 @@ if defined SONDER_SERVER (
   )
 )
 
-"%SONDER_PYTHON%" "%REPO%sonder_repl.py" %*
+pushd "%REPO%" >nul
+"%SONDER_PYTHON%" -m sonder_runtime repl %*
+set "EXIT_CODE=%ERRORLEVEL%"
+popd >nul
+if not "%EXIT_CODE%"=="0" (
+  endlocal & exit /b %EXIT_CODE%
+)
 endlocal

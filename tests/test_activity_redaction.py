@@ -7,7 +7,7 @@ same shapes; these pin the shapes that were measured passing through it.
 """
 import json
 
-import activity_tracker as at
+import sonder_runtime.adapters.observability.activity_tracker as at
 
 
 def test_aws_style_env_names_are_redacted():

@@ -2,7 +2,7 @@
 import re
 
 import server
-import sonder_serve as serve
+import sonder_runtime.interfaces.http.serve as serve
 
 
 def _account(name):

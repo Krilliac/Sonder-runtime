@@ -1,4 +1,4 @@
-import embeddings as e
+import sonder_runtime.adapters.embeddings as e
 import memory_store as ms
 import retriever as r
 

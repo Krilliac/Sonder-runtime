@@ -8,7 +8,7 @@ import os
 import pytest
 
 import fleet_provenance
-import fleet_store
+import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import master_orchestrator
 import orchestrator
 import server

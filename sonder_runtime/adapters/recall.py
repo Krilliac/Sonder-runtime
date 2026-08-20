@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.application.ports.recall import validate_recall_request
 from sonder_runtime.domain.common.errors import InvalidInput

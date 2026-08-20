@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 import artifact_risk
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
 
 

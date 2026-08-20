@@ -52,7 +52,7 @@ import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
 import reflection
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import personas
 import summarizer
 import code_runner
@@ -76,10 +76,10 @@ import learning_health
 import domain_grounding
 import master_orchestrator
 from sonder_runtime.domain.execution import status as execution_status
-import ollama_lifecycle
+from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import data_query as data_query_module
 import json_patch_tool
 import json_schema_verifier
@@ -100,32 +100,43 @@ import adaptive_training
 import selfmod
 import permission_rules
 import debug_dump
-import activity_tracker
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
+from sonder_runtime.adapters.model_inventory_formatting import (
+    inventory_model_name as _inventory_model_name,
+    inventory_model_names as _inventory_model_names,
+    residency_display as _residency_display,
+)
 import assetgen
 import artifact_grounding
 import game_forge
-import workbench
+import sonder_runtime.adapters.filesystem.workbench as workbench
 import dependency_inventory as dependency_inventory_tool
 import creative_router
 import intents
-import runtime_policy
-import npu_contract
-import npu_service
+import sonder_runtime.adapters.runtime_policy as runtime_policy
+import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
+import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
 import command_catalog
 import grounded_extraction
 import grounded_outcomes
 import permission_modes
 import reloadable_mcp
-import autopilot_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
 import fanout_store
 import fanout_prompt_vault
-from model_transport import ModelCallError
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
 from sonder_runtime.domain.common.errors import InvalidInput
-import ollama_endpoint
+from sonder_runtime.domain.runtime_identity import (
+    runtime_identity_block as _runtime_identity_block,
+)
+import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.domain.runtime_model_configuration import (
+    RuntimeModelConfiguration,
+)
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -167,24 +178,19 @@ OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
 KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
-SONDER_STABLE_ALIAS = "sonder:latest"
-LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", SONDER_STABLE_ALIAS)
-DEFAULT_CLOUD_CODE_MODEL = "kimi-k2.7-code:cloud"
-DEFAULT_CLOUD_GENERAL_MODEL = "glm-5.2:cloud"
-CLOUD_EXTRA_USAGE_FALLBACK_MODEL = "kimi-k2.7-code:cloud"
-
-# Hosted cloud models Ollama has permanently retired (HTTP 410 at request time).
-# A machine-wide SONDER_CLOUD_* override set before a retirement must not keep
-# resurrecting the dead model forever -- route it to today's default instead of
-# failing every offload call until someone notices and edits their env by hand.
-RETIRED_CLOUD_MODELS = frozenset(
-    {
-        "qwen3-coder:480b-cloud",  # retired 2026-07-15
-    }
+_RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ)
+SONDER_STABLE_ALIAS = _RUNTIME_MODEL_CONFIGURATION.stable_alias
+LOCAL_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.local_code_model
+DEFAULT_CLOUD_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_code_model
+DEFAULT_CLOUD_GENERAL_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_general_model
+CLOUD_EXTRA_USAGE_FALLBACK_MODEL = (
+    _RUNTIME_MODEL_CONFIGURATION.cloud_extra_usage_fallback_model
 )
+RETIRED_CLOUD_MODELS = _RUNTIME_MODEL_CONFIGURATION.retired_cloud_models
 
 
 def _live_cloud_model(configured, default):
+    """Compatibility alias for the packaged model configuration projection."""
     lowered = str(configured or "").strip().lower()
     if not lowered or lowered in RETIRED_CLOUD_MODELS:
         return default
@@ -278,25 +284,9 @@ def _context_native(value=None):
     return context_policy.native(_context_requested(value))
 
 
-TIERS = {
-    "fast": os.environ.get("SONDER_FAST", SONDER_STABLE_ALIAS),
-    "code": os.environ.get("SONDER_CODE", SONDER_STABLE_ALIAS),
-    "general": os.environ.get("SONDER_GENERAL", SONDER_STABLE_ALIAS),
-    # Specialist local tiers the capability router prefers for reasoning and
-    # vision work. `_refresh_runtime_policy` drops either one when the shared
-    # policy leaves it unbound, so an unset tier is simply not offered and
-    # routing degrades to a base tier exactly as it did before they existed.
-    "reasoning": os.environ.get("SONDER_REASONING", ""),
-    "vision": os.environ.get("SONDER_VISION", ""),
-    "cloud-code": _live_cloud_model(
-        os.environ.get("SONDER_CLOUD_CODE"), DEFAULT_CLOUD_CODE_MODEL
-    ),
-    "cloud-general": _live_cloud_model(
-        os.environ.get("SONDER_CLOUD_GENERAL"), DEFAULT_CLOUD_GENERAL_MODEL
-    ),
-}
+TIERS = _RUNTIME_MODEL_CONFIGURATION.tier_map()
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
-CLOUD_TIERS = {"cloud-code", "cloud-general"}
+CLOUD_TIERS = set(_RUNTIME_MODEL_CONFIGURATION.cloud_tiers)
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
 
 
@@ -314,7 +304,12 @@ def _refresh_live_cloud_tiers():
         not preserve_legacy
         and TIERS.get("cloud-general") == "gpt-oss:120b-cloud"
     ):
-        TIERS["cloud-general"] = "glm-5.2:cloud"
+        # Keep the live compatibility repair mutable, but source its target
+        # from the immutable import-time projection rather than duplicating
+        # the configured default in this caller.
+        TIERS["cloud-general"] = (
+            _RUNTIME_MODEL_CONFIGURATION.default_cloud_general_model
+        )
 
 
 def cloud_allowed():
@@ -433,63 +428,6 @@ def _inventory_rows(payload, endpoint):
         if isinstance(rows, list):
             return [row for row in rows if isinstance(row, dict)]
     raise ModelCallError("protocol", "invalid Ollama %s response" % endpoint)
-
-
-def _inventory_model_name(row) -> str:
-    return str(row.get("name") or row.get("model") or "").strip()
-
-
-def _inventory_model_names(rows) -> list:
-    """Canonical, casefold-deduplicated model names from inventory rows."""
-    names, seen = [], set()
-    for row in rows:
-        name = _inventory_model_name(row)
-        key = name.casefold()
-        if name and key not in seen:
-            seen.add(key)
-            names.append(name)
-    names.sort(key=str.casefold)
-    return names
-
-
-def _residency_display(row) -> str:
-    """Render one resident model with bounded, content-free VRAM indicators.
-
-    ``/api/ps`` reports ``size`` and ``size_vram`` per resident model; the
-    split is the only signal an operator has that a "loaded" model is
-    actually spilled to CPU. Malformed or absent size metadata degrades to
-    the bare model name -- never a guessed number.
-    """
-    name = _inventory_model_name(row)
-    if not name:
-        return ""
-
-    def _byte_count(value, minimum):
-        if isinstance(value, bool):
-            return False
-        if isinstance(value, int):
-            # Do not coerce arbitrary JSON integers to float: a malicious or
-            # malformed provider can send a value too large for IEEE-754.
-            return minimum <= value <= (2**63 - 1)
-        return (
-            isinstance(value, float)
-            and math.isfinite(value)
-            and value >= minimum
-        )
-
-    size = row.get("size")
-    vram = row.get("size_vram")
-    if not _byte_count(size, 1) or not _byte_count(vram, 0):
-        return name
-    # A provider claiming more VRAM than the model's own size is nonsense;
-    # clamp rather than advertising >100% GPU.
-    vram = min(float(vram), float(size))
-    gib = float(size) / float(2**30)
-    if vram == 0:
-        return "%s (%.1f GiB, CPU only)" % (name, gib)
-    return "%s (%.1f GiB, %d%% GPU)" % (
-        name, gib, int(round(100.0 * vram / float(size))),
-    )
 
 
 _KNOWN_VISION_ONLY_MODEL_FAMILIES = frozenset({
@@ -1008,8 +946,42 @@ _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS = 256
 
 _DB_PATH = sonder_paths.memory_db_path()
 
-FOOTER_PREFIX = "\n\n[interaction_id: "
-_FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
+from sonder_runtime.adapters.observability.response_formatting import (
+    FOOTER_PREFIX,
+    _FOOTER_RE,
+    _append_activity,
+    _strip_activity_block,
+    parse_interaction_id,
+    with_footer,
+)
+from sonder_runtime.adapters.observability.trace_buffer import (
+    _TURN_TRACES,
+    _capture_turn,
+    _format_trace,
+)
+from sonder_runtime.adapters.command_parsing import (
+    _parse_game_campaign_command,
+)
+from sonder_runtime.adapters.memory_lesson_ids import _parse_lesson_ids
+from sonder_runtime.adapters.admin_formatting import _format_account
+from sonder_runtime.adapters.inspection_executor import _format_file_result
+from sonder_runtime.adapters.task_formatting import _format_checklist, _format_task
+from sonder_runtime.adapters.context_formatting import format_context_health
+from sonder_runtime.adapters.observability.activity_formatting import _format_activity_status
+from sonder_runtime.adapters.observability.distillation_formatting import (
+    _drain_backlog_text,
+    _drain_summary_text,
+)
+from sonder_runtime.adapters.observability.run_result_formatting import (
+    format_run_result as _format_run_result,
+)
+from sonder_runtime.adapters.runtime_readiness_formatting import (
+    format_model_readiness as _runtime_model_readiness_lines,
+)
+from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
+from sonder_runtime.adapters.learning_tier_formatting import (
+    format_learning_tiers,
+)
 _CAMPAIGN_LEARN_LOCK = threading.Lock()
 _AUTOPILOT_THREADS_LOCK = threading.RLock()
 _AUTOPILOT_THREADS = {}
@@ -1054,7 +1026,7 @@ LIVE_RELOAD_MODULES = [
     "master_orchestrator",
     "ollama_lifecycle",
     "admin_auth",
-    "file_ops",
+    "sonder_runtime.adapters.filesystem.file_ops",
     "data_query",
     "json_patch_tool",
     "dependency_inventory",
@@ -1074,14 +1046,14 @@ LIVE_RELOAD_MODULES = [
     "command_registry",
     "permission_rules",
     "debug_dump",
-    "activity_tracker",
+    "sonder_runtime.adapters.observability.activity_tracker",
     "media_assets",
     "model_assets",
     "ooxml_assets",
     "assetgen",
     "artifact_grounding",
     "game_forge",
-    "workbench",
+    "sonder_runtime.adapters.filesystem.workbench",
     "creative_router",
     "intents",
     "runtime_policy",
@@ -1092,11 +1064,11 @@ LIVE_RELOAD_MODULES = [
     "tool_contract",
     # NPU accelerator host modules reload in dependency order; the broker and
     # service keep live worker/process state behind reload guards.
-    "npu_contract",
-    "npu_manifest",
-    "npu_providers",
-    "npu_broker",
-    "npu_service",
+    "sonder_runtime.adapters.accelerators.npu.contract",
+    "sonder_runtime.adapters.accelerators.npu.manifest",
+    "sonder_runtime.adapters.accelerators.npu.providers",
+    "sonder_runtime.adapters.accelerators.npu.npu_broker",
+    "sonder_runtime.adapters.accelerators.npu.service",
     # The controller is stateless and safe to refresh between callback calls.
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
@@ -1261,52 +1233,6 @@ def _open_db_readonly():
     return conn
 
 
-def with_footer(text, interaction_id):
-    current = activity_tracker.current()
-    activity = activity_tracker.format_response(current) if current else ""
-    if activity and not activity.startswith("activity:") and "=== ACTIVITY (observable work) ===" not in (text or ""):
-        text = "%s\n\n%s" % (text, activity)
-    return "%s%s%s]" % (text, FOOTER_PREFIX, interaction_id)
-
-
-def _strip_activity_block(text):
-    """Remove the final observable-activity block while preserving other text."""
-    value = str(text or "")
-    marker = "=== ACTIVITY (observable work) ==="
-    end_marker = "=== END ACTIVITY ==="
-    start = value.rfind(marker)
-    if start < 0:
-        return value
-    end = value.find(end_marker, start)
-    if end < 0:
-        return value
-    end += len(end_marker)
-    before = value[:start].rstrip()
-    after = value[end:].lstrip()
-    return "\n\n".join(part for part in (before, after) if part)
-
-
-def _append_activity(text, response=None, replace=False):
-    current = response if response is not None else activity_tracker.current()
-    if replace:
-        text = _strip_activity_block(text)
-    activity = activity_tracker.format_response(current) if current else ""
-    if activity and not activity.startswith("activity:") and "=== ACTIVITY (observable work) ===" not in (text or ""):
-        footer = _FOOTER_RE.search(text or "")
-        if footer:
-            before = (text or "")[:footer.start()].rstrip()
-            return "%s\n\n%s\n\n%s" % (
-                before, activity, (text or "")[footer.start():],
-            )
-        return "%s\n\n%s" % (text, activity)
-    return text
-
-
-def parse_interaction_id(text):
-    m = _FOOTER_RE.search(text or "")
-    return m.group(1) if m else None
-
-
 TRACE_SYSTEM = (
     "Before giving your answer, output a section titled '## Reasoning' where you "
     "think step by step: restate the task in your own words, note constraints and "
@@ -1407,64 +1333,6 @@ def _direct_fanout_access(run_id: str, token: str, started, tool_name: str):
         return run, None
     # Do not disclose whether another developer's opaque receipt exists.
     return None, _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
-
-
-_TURN_TRACES = collections.deque(maxlen=8)
-
-
-def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
-    """Keep the last few turns' pipeline state so a turn can be debugged after it.
-
-    ``/trace on`` already prints all of this -- the assembled prompt, the
-    lessons retrieved, the tier -- but only for turns run *after* you thought
-    to enable it. That is the wrong way round for debugging: you want the
-    trace for the turn that already surprised you, and reproducing it is
-    exactly what is hard when the behaviour is intermittent.
-
-    ``_answer`` returns ``trace_ctx`` on every turn regardless of the flag, so
-    this state is built and then thrown away. Keeping a bounded ring of it in
-    memory costs nothing and makes ``turn_inspect`` retrospective. Nothing is
-    written to disk; the buffer dies with the process.
-    """
-    if not isinstance(trace_ctx, dict):
-        return
-    try:
-        _TURN_TRACES.append({
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "model": str(model or ""),
-            "tier": str(tier or ""),
-            "interaction_id": str(iid or ""),
-            "prompt": str(prompt or "")[:4000],
-            "augmented_prompt": str(trace_ctx.get("augmented_prompt") or "")[:16000],
-            "lessons": [str(x)[:400] for x in (trace_ctx.get("lessons") or [])][:20],
-            "facts_omitted": int(trace_ctx.get("facts_omitted") or 0),
-            "response_head": str(response or "")[:2000],
-        })
-    except Exception:
-        # Debug bookkeeping must never break the answer path it observes.
-        pass
-
-
-def _format_trace(model, tier, params, trace):
-    lessons = trace.get("lessons", [])
-    lines = [
-        "",
-        "=== TRACE (how Sonder Runtime decided) ===",
-        "model: %s   tier: %s" % (model, tier),
-        "generation params: %r" % (params,),
-        "lessons retrieved: %d" % len(lessons),
-    ]
-    for lesson_text in lessons:
-        lines.append("   - %s" % lesson_text)
-    # A bounded facts block that drops entries must say so on the surface an
-    # operator actually reads, not only inside the prompt text.
-    facts_omitted = int(trace.get("facts_omitted") or 0)
-    if facts_omitted:
-        lines.append("stored facts omitted by the block bound: %d" % facts_omitted)
-    lines.append("--- exact prompt sent to the model ---")
-    lines.append(trace.get("augmented_prompt", ""))
-    lines.append("=== END TRACE ===")
-    return "\n".join(lines)
 
 
 def _should_learn(tier, learn):
@@ -1865,75 +1733,6 @@ def _join_system_parts(*parts):
     return "\n\n".join(p for p in parts if p)
 
 
-def _runtime_identity_block(model: str, cloud: bool = False) -> str:
-    """Authoritative facts about what is actually serving this request.
-
-    Asked what model it was, the runtime answered from the weights -- and a
-    local 7B reported itself as "based on OpenAI's GPT-4 architecture,
-    approximately 175 billion parameters, training data to September 2023,
-    about 10 tokens per second". Every figure is wrong (measured ~36 tok/s
-    here) and the architecture line is another model's identity recalled out of
-    training text.
-
-    Which half was wrong is the useful part. The same answer described Sonder's
-    own surface -- memory, guarded file and program tools, artifact generation,
-    orchestration -- correctly, because those facts were already in the system
-    prompt. The model facts were not, so answering became recall, and recall is
-    the axis this model class is measured worst on.
-
-    Putting the facts in the prompt stops the question being recall. No network
-    call: this runs on every request, and an /api/show round trip per request
-    would charge every caller for a question few of them ask.
-
-    `model` is passed in by the caller, which has already resolved it. It used
-    to arrive through a module global, `_ACTIVE_MODEL_HINT`, whose only writer
-    (`_resolve_model_and_system`) had zero callers anywhere in the tree -- so
-    the hint was always empty and every request fell through to `TIERS["code"]`.
-    A `fast`-tier router and a `code`-tier agent were both handed a block
-    asserting, as authoritative, that the code tier was serving them. The block
-    that exists to stop a model guessing its identity was itself the guess.
-    A global is also the wrong carrier here: two concurrent serve requests on
-    different tiers would race for it. The model is in scope at every call
-    site, so it is now a parameter.
-
-    With no model, this emits nothing. A wrong identity asserted as
-    authoritative is worse than no identity at all.
-    """
-    # Naming THIS request's model, not the tier table. The first version listed
-    # all seven tiers and the model answered "my architecture is based on the
-    # kimi-k2.7-code:cloud tier" while actually running on sonder:latest -- a
-    # menu of names it had no way to choose between, so it picked one. A block
-    # meant to remove a guess must not introduce a new thing to guess.
-    try:
-        current = str(model or "")
-    except Exception:
-        return ""
-    if not current:
-        return ""
-    # Cloud tiers reach this too. Saying a hosted model runs "on this machine"
-    # would replace one confident falsehood with another.
-    where = (
-        "served by Ollama's hosted service, not on this machine"
-        if cloud else
-        "an open-weights model served by Ollama on this machine"
-    )
-    return (
-        "Facts about what is serving this request (authoritative -- use these, "
-        "never your own recollection):\n"
-        "- The model answering right now is `%s`, %s. You are NOT ChatGPT, "
-        "GPT-4, Claude, or Gemini, and you share no architecture or training "
-        "run with them.\n"
-        "- Sonder is the runtime around you (memory, tools, policy, grounding). "
-        "Sonder is not a model and has no parameters of its own.\n"
-        "- If asked about your architecture, parameter count, training data, "
-        "training cutoff, or generation speed, and the answer is not in this "
-        "block or in the conversation, say you do not know and point the caller "
-        "at `ollama ps` or Sonder's diagnostics. Do NOT guess a number, and do "
-        "not infer one from the model's name: a confident wrong figure is worse "
-        "than an admission." % (current, where)
-    )
-
-
 # The mutable, disk-backed parts of the system prompt, pinned for one turn.
 #
 # One turn can build the system prompt more than once, and each build re-read
@@ -2250,18 +2049,6 @@ def _control_dump(arg, prompt, history=None, session="", project=""):
             % (block["language"], block["code"])
         )
     return out
-
-
-def _parse_game_campaign_command(arg: str) -> dict | None:
-    parts = [part.strip() for part in str(arg or "").split("|", 3)]
-    if len(parts) < 2 or not parts[0] or not parts[1]:
-        return None
-    kwargs = {"name": parts[0], "concept": parts[1]}
-    if len(parts) > 2 and parts[2]:
-        kwargs["language"] = parts[2]
-    if len(parts) > 3 and parts[3]:
-        kwargs["dimension"] = parts[3]
-    return kwargs
 
 
 def _autopilot_command(arg: str, project: str = "", request_owner: str | None = None) -> str:
@@ -2670,19 +2457,9 @@ def _goal_command(arg: str) -> str:
     action = action.lower()
     rest = rest.strip()
 
-    def _fmt(goal):
-        if not goal:
-            return "no active goal"
-        lines = ["%s [%s] %s" % (goal["id"], goal["status"], goal["objective"])]
-        for criterion in goal.get("criteria") or []:
-            lines.append("  criterion: %s" % criterion)
-        for note in (goal.get("notes") or [])[-5:]:
-            lines.append("  note: %s" % note.get("text", ""))
-        return "\n".join(lines)
-
     try:
         if action in ("show", "status"):
-            return _fmt(goal_store.get_active())
+            return _format_goal(goal_store.get_active())
         if action == "set":
             objective, _, criteria = rest.partition("--criteria")
             if not objective.strip():
@@ -2690,11 +2467,11 @@ def _goal_command(arg: str) -> str:
             goal = goal_store.set_goal(
                 objective.strip(), criteria.strip(), origin="user",
             )
-            return "goal set\n" + _fmt(goal)
+            return "goal set\n" + _format_goal(goal)
         if action == "note":
             if not rest:
                 return "usage: /goal note <progress note>"
-            return "noted\n" + _fmt(goal_store.add_note(rest))
+            return "noted\n" + _format_goal(goal_store.add_note(rest))
         if action in ("done", "complete"):
             goal = goal_store.complete(rest, actor="user")
             return "goal completed: %s" % goal["objective"]
@@ -3825,36 +3602,6 @@ _EMPTY_DRAIN = {
     "drained": 0, "stored": 0, "deferred": 0, "failed": 0, "skipped": 0,
     "backlog": None,
 }
-
-
-def _drain_backlog_text(drain):
-    """Render the drain's remaining backlog, or say it could not be read."""
-    backlog = drain.get("backlog")
-    return "unknown (count query failed)" if backlog is None else str(backlog)
-
-
-def _drain_summary_text(drain):
-    """The campaign's one line about the drain.
-
-    Rendered here rather than at the two call sites that used to format it
-    identically, so a bucket added to the drain cannot reach one report and
-    miss the other. The healthy line is byte-identical to what it has always
-    been; the failure clause is appended only when non-zero, because an
-    unattended nightly run keeps these lines and a drain whose items raised
-    must not read as a quiet success.
-    """
-    text = (
-        "deferred distillations drained: %d (lessons stored %d, still "
-        "deferred in batch %d, backlog remaining %s)"
-        % (
-            drain.get("drained", 0), drain.get("stored", 0),
-            drain.get("deferred", 0), _drain_backlog_text(drain),
-        )
-    )
-    if drain.get("failed"):
-        text += " -- failed %d (recorder raised; these are NOT deferred and " \
-                "will be retried)" % drain["failed"]
-    return text
 
 
 def _campaign_headline(
@@ -7539,101 +7286,10 @@ def context_health_data(session: str = "", project: str = "") -> dict:
     }
 
 
-def format_context_health(data: dict) -> str:
-    lines = [
-        "sonder context health",
-        "  status: %s" % data.get("status", "unknown"),
-        "  session: %s%s" % (
-            data.get("session", "none"),
-            " (%s)" % data.get("title") if data.get("title") else "",
-        ),
-        "  context %s %s%%  ~%s/%s tokens" % (
-            data.get("context_bar", ""),
-            data.get("context_percent", 0),
-            data.get("estimated_tokens", 0),
-            data.get("context_limit", 0),
-        ),
-        "  native  ~%s token Ollama num_ctx (%s mode)" % (
-            data.get("native_context_limit", 0),
-            data.get("context_mode", "native"),
-        ),
-        "  live    %s %s/%s turns in active prompt (%s total)" % (
-            data.get("turn_bar", ""),
-            data.get("live_turns", 0),
-            data.get("max_live_turns", 0),
-            data.get("total_turns", 0),
-        ),
-        "  memory  %s %s lessons, %s facts, %s prefs, %s interactions, %s outcomes" % (
-            data.get("memory_bar", ""),
-            data.get("lessons", 0),
-            data.get("facts", 0),
-            data.get("preferences", 0),
-            data.get("interactions", 0),
-            data.get("outcomes", 0),
-        ),
-        "  summary: %s chars, ~%s tokens%s" % (
-            data.get("summary_chars", 0),
-            data.get("summary_tokens", 0),
-            " through %s" % data.get("summarized_through")
-            if data.get("summarized_through") else "",
-        ),
-        "  db: %s" % data.get("db_path", ""),
-    ]
-    return "\n".join(lines)
-
-
 @mcp.tool()
 def context_health(session: str = "", project: str = "") -> str:
     """Show context budget, live turns, summaries, and memory as text meters."""
     return format_context_health(context_health_data(session=session, project=project))
-
-
-def _format_activity_status(source: dict, include_events: bool = True, *, scope="") -> str:
-    """Render an already-authorized activity source.
-
-    ``activity_status`` is intentionally an operator surface and may describe
-    the runtime globally.  A tool-using model, on the other hand, must never
-    receive another request's activity merely because it asked for its own
-    progress.  Keeping source selection outside this formatter makes that
-    authority boundary explicit and testable.
-    """
-    snap = activity_tracker.public_snapshot(source)
-    if snap is None:
-        return "sonder activity\n  state: unknown"
-    lines = [
-        "sonder activity%s" % (" (%s)" % scope if scope else ""),
-        "  active responses: %s" % snap.get("active_count", 0),
-        "  total tool calls since start: %s" % snap.get("total_tool_calls", 0),
-    ]
-    active = snap.get("active") or []
-    if active:
-        lines.append("  active:")
-        for row in active[-8:]:
-            last = row.get("last_event") or {}
-            lines.append(
-                "    %s %s tools=%s models=%s tokens=%s/%s last=%s" % (
-                    row.get("id"),
-                    row.get("label"),
-                    row.get("tool_calls", 0),
-                    row.get("model_calls", 0),
-                    row.get("tokens_in", 0),
-                    row.get("tokens_out", 0),
-                    last.get("kind", "starting"),
-                )
-            )
-    latest = snap.get("latest")
-    if latest:
-        lines.extend(["", activity_tracker.format_response(latest)])
-    elif include_events:
-        lines.append("  latest: (none yet)")
-    if include_events:
-        lines.extend([
-            "",
-            activity_tracker.format_execution_feed(
-                activity_tracker.execution_feed(source)
-            ),
-        ])
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -7705,26 +7361,6 @@ def command_registry_list(filter_text: str = "") -> str:
     """List slash commands/tools by name, category, risk, or summary text."""
     _maybe_live_reload()
     return command_registry.format_commands(filter_text)
-
-
-def _format_task(row: dict) -> str:
-    if not row:
-        return "(no task)"
-    detail = (" - " + row.get("detail", "")) if row.get("detail") else ""
-    scope = []
-    if row.get("project"):
-        scope.append("project=%s" % row["project"])
-    if row.get("owner"):
-        scope.append("owner=%s" % row["owner"])
-    suffix = (" [" + ", ".join(scope) + "]") if scope else ""
-    return "%s  p%s  %-11s %s%s%s" % (
-        row.get("id", "")[:8],
-        row.get("priority", 2),
-        row.get("status", "pending"),
-        row.get("title", ""),
-        detail,
-        suffix,
-    )
 
 
 def _task_service(conn):
@@ -8327,31 +7963,6 @@ def memory_quality_repair(apply: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _parse_lesson_ids(value):
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            values = []
-        elif text.startswith("["):
-            values = json.loads(text)
-        else:
-            values = [part for part in re.split(r"[\s,]+", text) if part]
-    else:
-        values = value
-    if not isinstance(values, list):
-        raise ValueError("lesson IDs must be a JSON list or comma-separated text")
-    if len(values) > 50:
-        raise ValueError("at most 50 lesson IDs can be reviewed at once")
-    out = []
-    for raw in values:
-        lesson_id = str(raw or "").strip()
-        if not lesson_id or len(lesson_id) > 128 or any(ord(ch) < 32 for ch in lesson_id):
-            raise ValueError("invalid lesson ID")
-        if lesson_id not in out:
-            out.append(lesson_id)
-    return out
-
-
 @mcp.tool()
 def memory_privacy_review(sample_limit: int = 20) -> str:
     """List redacted path/credential-like lessons without revealing raw values."""
@@ -8699,24 +8310,12 @@ def memory_interaction_embedding_backfill(
 @mcp.tool()
 def learn_tiers() -> str:
     """Show which tiers currently feed the learning loop."""
-    lines = ["learning tiers"]
-    for tier, model in available_tiers(include_disabled=True).items():
-        state = "on" if tier in LEARN_TIERS else "off"
-        locality = "cloud" if _is_cloud_tier(tier, model) else "local"
-        if locality == "cloud" and not cloud_allowed():
-            state = "disabled"
-        lines.append("  %s: %s (%s, %s)" % (tier, state, locality, model))
-    if cloud_allowed():
-        lines.append(
-            "cloud tiers are available; opt into cloud learning explicitly with "
-            "SONDER_LEARN_TIERS"
-        )
-    else:
-        lines.append(
-            "cloud tiers require SONDER_ALLOW_CLOUD=1; override learning with "
-            "SONDER_LEARN_TIERS"
-        )
-    return "\n".join(lines)
+    return format_learning_tiers(
+        available_tiers(include_disabled=True),
+        LEARN_TIERS,
+        cloud_enabled=cloud_allowed(),
+        cloud_tiers=CLOUD_TIERS,
+    )
 
 
 def improvement_report_data(session: str = "", project: str = "") -> dict:
@@ -9609,13 +9208,6 @@ def _admin_require(token: str, role: str = "admin"):
     return ok, msg, account
 
 
-def _format_account(account: dict) -> str:
-    return (
-        "%(username)s role=%(role)s tier=%(tier)s banned=%(banned)s "
-        "dev_flags=%(dev_flags)s"
-    ) % account
-
-
 @mcp.tool()
 def admin_register(username: str, password: str) -> str:
     """Register a local hosted account. The first account becomes admin."""
@@ -9885,38 +9477,8 @@ def _include_ignored_error(tool_name: str, include_ignored, token: str = "") -> 
     )
 
 
-def _format_file_result(title: str, data: dict) -> str:
-    lines = [title]
-    for key, value in data.items():
-        if key == "text":
-            continue
-        lines.append("  %s: %s" % (key, value))
-    if "text" in data:
-        lines.extend(["", data["text"]])
-    return "\n".join(lines)
-
-
 def _checklist_data(conn, checklist_id: str) -> dict:
     return _task_service(conn).checklist(checklist_id).to_dict()
-
-
-def _format_checklist(data: dict) -> str:
-    symbols = {"done": "[x]", "in_progress": "[~]", "blocked": "[!]", "canceled": "[-]"}
-    lines = [
-        "sonder checklist %s" % data.get("id", "")[:8],
-        "  %s [%s] %s" % (
-            data.get("title", ""), data.get("status", "pending"),
-            data.get("summary", "0/0 complete"),
-        ),
-    ]
-    for index, item in enumerate(data.get("items") or [], 1):
-        lines.append("  %s %d. %s  (%s)" % (
-            symbols.get(item.get("status"), "[ ]"), index,
-            item.get("title", ""), item.get("id", "")[:8],
-        ))
-    if not data.get("items"):
-        lines.append("  (no checklist items)")
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -11576,35 +11138,6 @@ def file_delete(
     _record_direct_tool("file_delete", {"path": path, "dry_run": dry_run}, ok=not data.get("dry_run", False), started=started, summary="deleted" if data.get("deleted") else "dry-run")
     _record_file_activity("delete", data)
     return _format_file_result("file delete", data)
-
-
-def _format_run_result(title: str, data: dict) -> str:
-    lines = [
-        title,
-        "  command: %s" % json.dumps(data.get("command") or [], ensure_ascii=False),
-        "  cwd: %s" % data.get("cwd", ""),
-        "  ok: %s" % data.get("ok", False),
-        "  returncode: %s" % data.get("returncode"),
-        "  timed_out: %s" % data.get("timed_out", False),
-        "  elapsed_ms: %s" % data.get("elapsed_ms", 0),
-    ]
-    # Why nothing ran, when nothing ran. `harness_tools` returns `{"ok": False,
-    # "error": ...}` without spawning anything for an unknown framework, an
-    # unknown linter, or a root with no build system, and this dropped the
-    # field: a model was told `ok: False` with no reason at all, and the
-    # rendered text -- the only evidence the agent path ever has -- could not
-    # be told apart from a real failing build. Header block, before the
-    # child's own output, because `grounded_outcomes.rendered_infrastructure_
-    # error` reads exactly this much and stops at `stdout:`.
-    if data.get("error"):
-        lines.append("  error: %s" % data["error"])
-    if data.get("stdout"):
-        lines.extend(["stdout:", data["stdout"].rstrip()])
-    if data.get("stderr"):
-        lines.extend(["stderr:", data["stderr"].rstrip()])
-    if data.get("stdout_truncated") or data.get("stderr_truncated"):
-        lines.append("  output truncated: true")
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -22751,74 +22284,6 @@ def runtime_policy_data() -> dict:
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
     return data
-
-
-def _runtime_model_readiness_lines(data: dict) -> list[str]:
-    """Render a bounded operator-facing readiness summary for `/runtime`.
-
-    Runtime policy is allowed to map several base tiers to one local model, so
-    merely listing mappings does not tell an operator whether the minimum chat
-    path is usable.  Keep this projection local to the server: it is derived
-    from the live inventory that ``runtime_policy_data`` already collected. A
-    sparse embedding tag may require one narrow ``/api/show`` lookup so the
-    status never calls a chat-only model memory-ready.
-    """
-    if data.get("inventory_error"):
-        return [
-            "  readiness: unknown (local model inventory unavailable)",
-        ]
-
-    local_models = data.get("local_models") or {}
-    missing = {
-        str(model or "").strip().casefold()
-        for model in data.get("missing_models") or ()
-        if str(model or "").strip()
-    }
-
-    def unavailable(model) -> bool:
-        return str(model or "").strip().casefold() in missing
-
-    capability_errors = data.get("capability_errors") or {}
-
-    base_missing = [
-        "%s=%s%s" % (
-            tier,
-            local_models.get(tier) or "(unset)",
-            " (%s)" % capability_errors[tier] if tier in capability_errors else "",
-        )
-        for tier in runtime_policy.BASE_LOCAL_TIERS
-        if not str(local_models.get(tier) or "").strip()
-        or unavailable(local_models.get(tier))
-        or tier in capability_errors
-    ]
-    lines = ["  readiness:"]
-    if base_missing:
-        lines.append("    local chat/code: requires %s" % ", ".join(base_missing))
-    else:
-        lines.append("    local chat/code: ready")
-
-    embedding = str(data.get("embedding_model") or "").strip()
-    if not embedding or unavailable(embedding) or "embedding" in capability_errors:
-        lines.append(
-            "    semantic memory: requires embedding model%s%s"
-            % (
-                " %s" % embedding if embedding else "",
-                " (%s)" % capability_errors["embedding"]
-                if "embedding" in capability_errors else "",
-            )
-        )
-    else:
-        lines.append("    semantic memory: ready (%s)" % embedding)
-
-    for tier in runtime_policy.OPTIONAL_LOCAL_TIERS:
-        model = str(local_models.get(tier) or "").strip()
-        if not model:
-            lines.append("    %s: not configured (optional)" % tier)
-        elif unavailable(model):
-            lines.append("    %s: requires %s" % (tier, model))
-        else:
-            lines.append("    %s: configured (%s)" % (tier, model))
-    return lines
 
 
 @mcp.tool()

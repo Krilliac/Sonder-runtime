@@ -318,3 +318,36 @@ def test_legacy_adapter_has_no_server_dependency_or_raw_activity_payload():
     assert "import server" not in source
     assert "activity_tracker" not in source
     assert "preference text" not in source.lower()
+
+
+def test_preference_repository_default_connection_uses_packaged_paths(monkeypatch):
+    from sonder_runtime.adapters import preference_adapters as preferences
+
+    captured = {}
+
+    class Connection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        preferences.sonder_paths,
+        "memory_db_path",
+        lambda: "packaged-memory.db",
+    )
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.memory_store.connect",
+        lambda path, **kwargs: captured.update(path=path, kwargs=kwargs)
+        or Connection(),
+    )
+
+    connection = preferences._default_connection()
+
+    assert isinstance(connection, Connection)
+    assert captured == {
+        "path": "packaged-memory.db",
+        "kwargs": {"check_same_thread": True},
+    }
+
+    source = Path(preferences.__file__).read_text(encoding="utf-8")
+    assert "import sonder_paths" not in source
+    assert "sonder_runtime.platform" in source

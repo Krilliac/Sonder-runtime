@@ -14,7 +14,7 @@ import re
 import stat
 from pathlib import Path
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 HARD_MAX_FILES = 2_000

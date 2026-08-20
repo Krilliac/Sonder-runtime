@@ -36,6 +36,8 @@ import pytest
 import command_catalog
 import permission_modes as pm
 import server
+import sonder_runtime.interfaces.http.serve as sonder_serve
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 
 pytestmark = pytest.mark.unit
 
@@ -62,6 +64,14 @@ _CHAINS = (
     ("sonder_serve.py", "_handle_slash", "http"),
     ("server.py", "_agent_dispatch", "agent"),
 )
+
+
+def _source_path(name):
+    if name == "sonder_repl.py":
+        return sonder_repl.__file__
+    if name == "sonder_serve.py":
+        return sonder_serve.__file__
+    return os.path.join(os.path.dirname(server.__file__), name)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -231,8 +241,7 @@ def _branch_names_in(path, function):
         _tool_branch_names if function == "_agent_dispatch"
         else command_catalog._branch_names
     )
-    with open(os.path.join(os.path.dirname(server.__file__), path),
-              encoding="utf-8") as handle:
+    with open(_source_path(path), encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
     scope = next(
         (node for node in ast.walk(tree)
@@ -457,7 +466,7 @@ def test_location_is_gated_rather_than_excused():
 
     # The write really is in the branch, and really is not just a read.
     source = open(
-        os.path.join(os.path.dirname(server.__file__), "sonder_repl.py"),
+        _source_path("sonder_repl.py"),
         encoding="utf-8",
     ).read()
     tree = ast.parse(source)

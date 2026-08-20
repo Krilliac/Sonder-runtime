@@ -7,8 +7,8 @@ import tarfile
 
 import pytest
 
-import sonder_updates
-from sonder_updates import (
+import sonder_runtime.adapters.updates.service as sonder_updates
+from sonder_runtime.adapters.updates.service import (
     BundleManifest,
     CANCELLABLE_STATES,
     ExtractionError,

@@ -8,7 +8,26 @@ import threading
 
 import pytest
 
-import fleet_store
+import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+
+
+def test_fleet_paths_use_packaged_platform_seam(monkeypatch):
+    calls = []
+
+    def fake_state_path(name, env_name=""):
+        calls.append((name, env_name))
+        return f"/isolated/{name}"
+
+    monkeypatch.setattr(fleet_store._platform_paths, "state_path", fake_state_path)
+
+    assert fleet_store.database_path() == "/isolated/fleet.db"
+    assert fleet_store.principal_credentials_path() == (
+        "/isolated/fleet-principal.json"
+    )
+    assert calls == [
+        ("fleet.db", "SONDER_FLEET_DB"),
+        ("fleet-principal.json", "SONDER_FLEET_PRINCIPAL_FILE"),
+    ]
 
 
 def test_pytest_harness_never_uses_live_fleet_ledger():

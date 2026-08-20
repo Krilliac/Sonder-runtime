@@ -24,10 +24,10 @@ import json
 
 import pytest
 
-import activity_tracker
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import permission_modes as pm
 import server
-import sonder_serve as serve
+import sonder_runtime.interfaces.http.serve as serve
 
 pytestmark = pytest.mark.unit
 
@@ -361,7 +361,7 @@ def test_tool_contract_ships_in_the_packaged_payload():
 
 def test_tool_contract_is_reloaded_with_the_served_authority_gate(monkeypatch):
     """A deployed authority-policy edit must replace the HTTP process module."""
-    import sonder_serve
+    import sonder_runtime.interfaces.http.serve as sonder_serve
 
     original = sonder_serve.tool_contract
     replacement = object()
@@ -565,7 +565,7 @@ def test_a_saved_workflow_replay_meets_the_same_per_action_gate(monkeypatch, tmp
     default store is the workspace root's `workflows.json`, a tracked file
     this test must not touch.
     """
-    import workflow_store
+    from sonder_runtime.adapters.filesystem import workflow_store
 
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)

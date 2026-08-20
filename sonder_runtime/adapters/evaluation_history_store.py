@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-import sonder_paths
+from sonder_runtime.platform import paths as sonder_paths
 
 
 SCHEMA = "sonder.eval-history.v1"

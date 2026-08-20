@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import calibration
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import memory_quality
 import sonder_runtime.adapters.memory_store as memory_store
 import retriever

@@ -5,7 +5,7 @@ import urllib.error
 
 import pytest
 
-import model_transport
+from sonder_runtime.adapters import model_transport
 import server
 from sonder_runtime.application.chat.handle_chat import ChatResult
 from sonder_runtime.domain.common.errors import (

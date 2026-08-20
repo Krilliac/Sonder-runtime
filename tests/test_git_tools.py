@@ -7,8 +7,8 @@ import pytest
 import command_router
 import git_tools
 import server
-import sonder_serve
-import sonder_repl
+import sonder_runtime.interfaces.http.serve as sonder_serve
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 
 
 def _git(repo, *args):

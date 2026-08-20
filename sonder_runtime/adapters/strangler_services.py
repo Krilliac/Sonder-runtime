@@ -34,7 +34,7 @@ class LegacyPolicyRepository:
     """PolicyRepository over the root runtime_policy module."""
 
     def load(self) -> dict:
-        import runtime_policy
+        import sonder_runtime.adapters.runtime_policy as runtime_policy
 
         return runtime_policy.load()
 
@@ -47,7 +47,7 @@ class LegacyPolicyRepository:
         expected_revision: int | None = None,
         source: str = "application",
     ) -> dict:
-        import runtime_policy
+        import sonder_runtime.adapters.runtime_policy as runtime_policy
 
         return runtime_policy.update(
             local_models=local_models,
@@ -81,7 +81,7 @@ class LegacyAutomationRepository:
         max_replans: int = 2,
         adaptive: bool = True,
     ) -> dict:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.create_run(
             objective,
@@ -97,14 +97,14 @@ class LegacyAutomationRepository:
         )
 
     def get_run(self, selector: str = "", request_owner: str | None = None) -> dict | None:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.get_run(selector, request_owner=request_owner)
 
     def list_runs(
         self, include_finished: bool = True, limit: int = 20, request_owner: str | None = None
     ) -> list:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.list_runs(
             include_finished=include_finished, limit=limit, request_owner=request_owner
@@ -119,7 +119,7 @@ class LegacyAutomationRepository:
         request_owner: str | None = None,
         lease_seconds: int | None = None,
     ) -> dict | None:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         if lease_seconds is None:
             return autopilot_store.claim_run(selector, owner_id, owner_pid=owner_pid, request_owner=request_owner)
@@ -128,31 +128,31 @@ class LegacyAutomationRepository:
         )
 
     def save_progress(self, run_id: str, owner_id: str, **changes) -> dict | None:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.save_progress(run_id, owner_id, **changes)
 
     def heartbeat(
         self, run_id: str, owner_id: str, lease_seconds: int | None = None
     ) -> bool:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         if lease_seconds is None:
             return autopilot_store.heartbeat(run_id, owner_id)
         return autopilot_store.heartbeat(run_id, owner_id, lease_seconds)
 
     def request_pause(self, selector: str, request_owner: str | None = None) -> dict | None:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.request_pause(selector, request_owner=request_owner)
 
     def request_cancel(self, selector: str, request_owner: str | None = None) -> dict | None:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.request_cancel(selector, request_owner=request_owner)
 
     def control_flags(self, run_id: str, owner_id: str) -> dict:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.control_flags(run_id, owner_id)
 
@@ -166,7 +166,7 @@ class LegacyAutomationRepository:
         final_report: str = "",
         last_error: str = "",
     ) -> dict | None:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.finish_run(
             run_id,
@@ -178,17 +178,17 @@ class LegacyAutomationRepository:
         )
 
     def reconcile_stale_runs(self, now: float | None = None) -> int:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.reconcile_stale_runs(now)
 
     def events(self, selector: str = "", limit: int = 20, request_owner: str | None = None) -> list:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.events(selector, limit=limit, request_owner=request_owner)
 
     def snapshot(self, include_finished: bool = True, limit: int = 20, request_owner: str | None = None) -> dict:
-        import autopilot_store
+        import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
         return autopilot_store.snapshot(
             include_finished=include_finished, limit=limit, request_owner=request_owner
@@ -293,9 +293,9 @@ class LegacyUnitOfWork:
 
     def __enter__(self) -> "LegacyUnitOfWork":
         import sonder_runtime.adapters.memory_store as memory_store
-        import sonder_paths
+        from sonder_runtime.platform import paths
 
-        path = self._db_path or sonder_paths.memory_db_path()
+        path = self._db_path or paths.memory_db_path()
         self._conn = memory_store.connect(path)
         self.memory = LegacyMemoryRepository(self._conn)
         return self
@@ -346,7 +346,7 @@ class LegacyModelGateway:
         )
 
     def embed(self, texts, context: OperationContext):
-        import embeddings
+        import sonder_runtime.adapters.embeddings as embeddings
 
         results = []
         for text in texts:
@@ -376,7 +376,7 @@ class OperationsEventSink:
     ) -> None:
         try:
             if self._store is None:
-                from sonder_operations_store import OperationsStore
+                from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
                 self._store = OperationsStore()
             self._store.record_event(
@@ -390,14 +390,6 @@ class OperationsEventSink:
             )
         except Exception:
             return
-
-
-class SystemClock:
-    def now_utc_iso(self) -> str:
-        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-    def monotonic(self) -> float:
-        return time.monotonic()
 
 
 class LegacyProcessProbe:
@@ -452,7 +444,7 @@ class LegacyToolExecutor:
                               output="operation cancelled")
         try:
             if call.tool == "run_program":
-                import workbench
+                import sonder_runtime.adapters.filesystem.workbench as workbench
 
                 res = workbench.run_program(**args)
                 return ToolResult(
@@ -461,7 +453,7 @@ class LegacyToolExecutor:
                     evidence=res,
                 )
             if call.tool == "run_script":
-                import workbench
+                import sonder_runtime.adapters.filesystem.workbench as workbench
 
                 res = workbench.run_script(**args)
                 return ToolResult(
@@ -470,26 +462,26 @@ class LegacyToolExecutor:
                     evidence=res,
                 )
             if call.tool == "read_file":
-                import file_ops
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
                 res = file_ops.read_file(**args)
                 return ToolResult(ok=True, output=str(res.get("text", "")), evidence=res)
             if call.tool == "write_file":
-                import file_ops
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
                 res = file_ops.write_file(**args)
                 return ToolResult(
                     ok=True, evidence=res if isinstance(res, dict) else {"result": res}
                 )
             if call.tool == "edit_file":
-                import file_ops
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
                 res = file_ops.edit_file(**args)
                 return ToolResult(
                     ok=True, evidence=res if isinstance(res, dict) else {"result": res}
                 )
             if call.tool == "make_directory":
-                import file_ops
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
                 res = file_ops.make_directory(**args)
                 return ToolResult(ok=True, evidence=res)

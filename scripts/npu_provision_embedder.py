@@ -89,7 +89,7 @@ def verify_equivalence(models_dir: Path, min_cosine: float) -> float:
     import onnxruntime as ort
     from tokenizers import Tokenizer
 
-    import embeddings
+    import sonder_runtime.adapters.embeddings as embeddings
 
     tokenizer = Tokenizer.from_file(str(models_dir / "tokenizer.json"))
     if getattr(tokenizer, "truncation", None) or getattr(tokenizer, "padding", None):
@@ -127,8 +127,8 @@ def main() -> int:
                         help="verify and pin already-downloaded files only")
     args = parser.parse_args()
 
-    import embeddings
-    import npu_manifest
+    import sonder_runtime.adapters.embeddings as embeddings
+    import sonder_runtime.adapters.accelerators.npu.manifest as npu_manifest
 
     manifest_dir = Path(args.manifest_dir or npu_manifest.manifest_dir())
     models_dir = manifest_dir / "models"

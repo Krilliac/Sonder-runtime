@@ -1,4 +1,4 @@
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 
 
 def test_local_open_allows_local_slash_commands():

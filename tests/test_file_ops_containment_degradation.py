@@ -38,7 +38,7 @@ from pathlib import Path
 
 import pytest
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 def _raise_oserror(self, *args, **kwargs):

@@ -43,9 +43,13 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert len(module.ROOT_LEGACY_MODULES) <= module.ROOT_LEGACY_MODULE_LIMIT
+    assert module.ROOT_LEGACY_MODULES == {"server"}
+    assert "autopilot_store" not in module.ROOT_LEGACY_MODULES
     assert "memory_store" not in module.ROOT_LEGACY_MODULES
-    assert "sonder_preflight" not in module.ROOT_LEGACY_MODULES
+    assert Path("sonder_preflight.py") in module.RETIRED_ROOT_MODULES
+    assert Path("model_transport.py") in module.RETIRED_ROOT_MODULES
     assert "model_transport" not in module.ROOT_LEGACY_MODULES
+    assert "runtime_policy" not in module.ROOT_LEGACY_MODULES
     assert "eval_history" not in module.ROOT_LEGACY_MODULES
     assert "unsafe_lab" not in module.ROOT_LEGACY_MODULES
     assert module.ROOT_LEGACY_MODULES <= module.BASELINE_ROOT_LEGACY_MODULES
@@ -58,6 +62,30 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     assert any("new_accidental_legacy" in row for row in violations)
 
 
+def test_version_root_allowance_is_removed_after_packaged_ownership():
+    module = _architecture_module()
+    assert "sonder_version" not in module.ROOT_PLATFORM_MODULES
+
+    offenders = []
+    package_root = _REPO_ROOT / "sonder_runtime"
+    for path in package_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == "sonder_version" for alias in node.names
+            ):
+                offenders.append(str(path.relative_to(_REPO_ROOT)))
+                break
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module == "sonder_version"
+            ):
+                offenders.append(str(path.relative_to(_REPO_ROOT)))
+                break
+    assert offenders == []
+
+
 def test_production_callers_use_the_memory_adapter():
     module = _architecture_module()
     assert module.compatibility_import_offenders(
@@ -67,7 +95,16 @@ def test_production_callers_use_the_memory_adapter():
     ) == ()
 
 
-def test_recall_root_module_is_compatibility_only_and_ratchet_shrank():
+def test_autopilot_root_is_migration_only():
+    module = _architecture_module()
+    assert module.compatibility_import_offenders(
+        "autopilot_store",
+        Path("autopilot_store.py"),
+        allowed_paths=module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS["autopilot_store"],
+    ) == ()
+
+
+def test_recall_root_module_is_retired_and_ratchet_shrank():
     import importlib.util
 
     checker = _REPO_ROOT / "scripts" / "check_architecture.py"
@@ -75,11 +112,10 @@ def test_recall_root_module_is_compatibility_only_and_ratchet_shrank():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert "recall" not in module.ROOT_LEGACY_MODULES
-    assert module.ROOT_LEGACY_MODULE_LIMIT == 16
+    assert module.ROOT_LEGACY_MODULE_LIMIT == 1
 
-    assert module.compatibility_import_offenders(
-        "recall", Path("recall.py")
-    ) == ()
+    assert Path("recall.py") in module.RETIRED_ROOT_MODULES
+    assert "recall" not in module.COMPATIBILITY_ROOT_MODULES
 
 
 def test_recall_use_case_depends_only_on_its_narrow_port():
@@ -136,15 +172,15 @@ def test_the_ratchet_scan_covers_source_and_excludes_vendored_trees():
     assert len(scanned) > 100, "the exclusion filter swallowed the source tree"
 
 
-def test_backup_root_module_is_compatibility_only_and_ratchet_shrank():
+def test_backup_root_module_is_retired_and_ratchet_shrank():
     import importlib.util
 
     checker = _REPO_ROOT / "scripts" / "check_architecture.py"
     spec = importlib.util.spec_from_file_location("backup_architecture", checker)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert "sonder_backup" not in module.ROOT_LEGACY_MODULES
-    assert module.ROOT_LEGACY_MODULE_LIMIT == 16
+    assert Path("sonder_backup.py") in module.RETIRED_ROOT_MODULES
+    assert module.ROOT_LEGACY_MODULE_LIMIT == 1
 
     offenders = []
     for path in _REPO_ROOT.rglob("*.py"):
@@ -168,6 +204,11 @@ def test_backup_root_module_is_compatibility_only_and_ratchet_shrank():
     assert offenders == []
 
 
+def test_storage_root_module_is_retired_and_ratchet_shrank():
+    module = _architecture_module()
+    assert Path("sonder_storage.py") in module.RETIRED_ROOT_MODULES
+
+
 def test_backup_use_case_depends_only_on_its_narrow_port():
     service = (
         _REPO_ROOT / "sonder_runtime" / "application" / "backup" / "use_cases.py"
@@ -186,6 +227,9 @@ def test_applied_memory_baseline_remains_byte_for_byte_immutable():
     module = _architecture_module()
     assert module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS == {
         "memory_store": frozenset({immutable_baseline}),
+        "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
+        "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),
+        "queued_actions": frozenset({Path("migrations/queued_actions/0001_baseline.py")}),
     }
 
     # Never rewrite an already-applied migration merely to satisfy the
@@ -260,7 +304,40 @@ def test_checker_detects_a_violation(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "root_module", ["context_overflow.py", "mmr_rerank.py", "reward.py"],
+    "root_module", [
+        "context_overflow.py",
+        "mmr_rerank.py",
+        "reward.py",
+        "execution_status.py",
+        "process_liveness.py",
+        "eval_history.py",
+        "sonder_backup.py",
+        "sonder_preflight.py",
+        "workflow_store.py",
+        "sonder_storage.py",
+        "model_transport.py",
+        "runtime_policy.py",
+        "ollama_endpoint.py",
+        "embed_cache.py",
+        "embeddings.py",
+        "npu_contract.py",
+        "npu_manifest.py",
+        "npu_providers.py",
+        "npu_broker.py",
+        "npu_worker.py",
+        "npu_service.py",
+        "activity_tracker.py",
+        "sonder_operations_store.py",
+        "file_ops.py",
+        "workbench.py",
+        "sonder_secrets.py",
+        "sonder_updates.py",
+        "sonder_update_engine.py",
+        "sonder_lifecycle.py",
+        "sonder_serve.py",
+        "sonder_repl.py",
+        "sonder_migrations.py",
+    ],
 )
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
     """A completed root migration is a permanent shrink-only boundary."""
@@ -309,7 +386,9 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
     }
     assert resolved == {
         "archive_tools", "content_digest", "data_query",
-        "dependency_inventory", "file_ops", "log_inspect", "project_detect",
+        "dependency_inventory",
+        "sonder_runtime.adapters.filesystem.file_ops",
+        "log_inspect", "project_detect",
         "workspace_compare",
     }
     assert not resolved & {
@@ -383,11 +462,10 @@ def test_evaluation_history_application_service_has_no_persistence_dependency():
     assert "import server" not in source
 
 
-def test_production_callers_use_the_evaluation_history_adapter():
+def test_evaluation_history_root_alias_is_retired():
     module = _architecture_module()
-    assert module.compatibility_import_offenders(
-        "eval_history", Path("eval_history.py")
-    ) == ()
+    assert Path("eval_history.py") in module.RETIRED_ROOT_MODULES
+    assert "eval_history" not in module.COMPATIBILITY_ROOT_MODULES
 
 
 def test_production_inventory_ignores_generated_tree_but_catches_tracked_offender(

@@ -4,7 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-import eval_history
+from sonder_runtime.adapters import evaluation_history_store as eval_history
+from sonder_runtime.platform import paths as packaged_paths
 import eval_models
 import server
 from sonder_runtime.__main__ import main as runtime_main
@@ -14,6 +15,11 @@ DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 SUITE_A = "c" * 64
 SUITE_B = "d" * 64
+
+
+def test_evaluation_history_uses_packaged_path_boundary():
+    assert eval_history.sonder_paths is packaged_paths
+    assert eval_history.default_path().parent == packaged_paths.default_home()
 
 
 def _fields(**overrides):

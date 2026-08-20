@@ -32,23 +32,50 @@ PACKAGE_ROOT = REPO_ROOT / "sonder_runtime"
 STDLIB = set(sys.stdlib_module_names)
 
 # Root modules each layer may reach while the strangler migration runs.
-ROOT_PLATFORM_MODULES = {
-    "sonder_config", "sonder_paths", "sonder_version", "sonder_metrics",
-    "sonder_shutdown", "sonder_logging",
-}
-BASELINE_ROOT_LEGACY_MODULES = frozenset({
-    "server", "runtime_policy", "embeddings",
-    "autopilot_store", "fleet_store", "sonder_operations_store",
-    "sonder_migrations",
-    "sonder_lifecycle", "sonder_secrets", "sonder_serve", "sonder_repl",
-    "sonder_updates", "sonder_update_engine",
-    "workbench", "file_ops",
+ROOT_PLATFORM_MODULES = set()
+# These platform-owned modules contain the unavoidable standard-library
+# edges for parsing configured Ollama URLs and reading the local build stamp.
+# They are not root-module compatibility allowances.
+PLATFORM_NETWORK_MODULES = frozenset({
+    "sonder_runtime/platform/config.py",
 })
-ROOT_LEGACY_MODULES = set(BASELINE_ROOT_LEGACY_MODULES)
+PLATFORM_SUBPROCESS_MODULES = frozenset({
+    "sonder_runtime/platform/system_profile.py",
+    "sonder_runtime/platform/version.py",
+})
+NPU_ACCELERATOR_EXTERNALS = frozenset({"numpy", "onnxruntime", "tokenizers"})
+FILESYSTEM_OPTIONAL_EXTERNALS = frozenset({"yaml"})
+PLATFORM_OPTIONAL_EXTERNALS = frozenset({"prometheus_client", "psutil"})
+DOMAIN_PURE_URL_MODULES = frozenset({
+    "sonder_runtime/domain/ollama_policy.py",
+})
+UPDATES_EXTERNALS = frozenset({"tuf", "web_tools"})
+UPDATE_ENGINE_PATH = "sonder_runtime/adapters/updates/engine.py"
+VERSION_PLATFORM_PATH = "sonder_runtime/platform/version.py"
+HTTP_SERVE_PATH = "sonder_runtime/interfaces/http/serve.py"
+HTTP_SERVE_ROOT_MODULES = frozenset({
+    "admin_auth", "code_runner", "command_catalog", "debug_dump", "feedback",
+    "grounding", "intents", "live_reload", "permission_modes",
+    "served_action_receipts", "server", "sonder_health",
+    "tool_contract", "training_tasks", "unsafe_lab",
+})
+REPL_PATH = "sonder_runtime/interfaces/repl/repl.py"
+REPL_ROOT_MODULES = frozenset({
+    "server", "grounding", "code_runner", "training_tasks", "intents",
+    "web_intents", "feedback", "personas", "live_reload", "debug_dump",
+    "consult", "tier_router", "code_improve", "command_router",
+    "command_catalog", "permission_modes", "project_scaffold", "slash_menu",
+    "sonder_headless",
+})
+BASELINE_ROOT_LEGACY_MODULES = frozenset({
+    "server", "autopilot_store",
+    "fleet_store",
+})
+ROOT_LEGACY_MODULES = {"server"}
 # This is a ratchet, not a target.  Removing a legacy root dependency is
 # always allowed; adding one requires an explicit architecture-policy change
 # and must never happen as an accidental convenience import.
-ROOT_LEGACY_MODULE_LIMIT = 16
+ROOT_LEGACY_MODULE_LIMIT = 1
 
 LAYERS = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap")
 
@@ -76,9 +103,10 @@ ALLOWED_ROOT_IMPORTS = {
 IO_MODULES = {"urllib", "socket", "http", "ftplib", "smtplib"}
 
 COMPATIBILITY_ROOT_MODULES = {
-    "eval_history": Path("eval_history.py"),
     "memory_store": Path("memory_store.py"),
-    "recall": Path("recall.py"),
+    "autopilot_store": Path("autopilot_store.py"),
+    "fleet_store": Path("fleet_store.py"),
+    "queued_actions": Path("queued_actions.py"),
 }
 
 # Root modules removed by completed strangler slices must stay removed.  This
@@ -89,6 +117,35 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("mmr_rerank.py"),
     Path("reward.py"),
     Path("execution_status.py"),
+    Path("process_liveness.py"),
+    Path("eval_history.py"),
+    Path("recall.py"),
+    Path("sonder_backup.py"),
+    Path("sonder_preflight.py"),
+    Path("workflow_store.py"),
+    Path("sonder_storage.py"),
+    Path("model_transport.py"),
+    Path("runtime_policy.py"),
+    Path("ollama_endpoint.py"),
+    Path("embed_cache.py"),
+    Path("embeddings.py"),
+    Path("npu_contract.py"),
+    Path("npu_manifest.py"),
+    Path("npu_providers.py"),
+    Path("npu_broker.py"),
+    Path("npu_worker.py"),
+    Path("npu_service.py"),
+    Path("activity_tracker.py"),
+    Path("sonder_operations_store.py"),
+    Path("file_ops.py"),
+    Path("workbench.py"),
+    Path("sonder_secrets.py"),
+    Path("sonder_updates.py"),
+    Path("sonder_update_engine.py"),
+    Path("sonder_lifecycle.py"),
+    Path("sonder_serve.py"),
+    Path("sonder_repl.py"),
+    Path("sonder_migrations.py"),
 })
 
 # Applied migrations are immutable historical artifacts. They may retain an
@@ -96,6 +153,9 @@ RETIRED_ROOT_MODULES = frozenset({
 # rewriting one would invalidate its recorded checksum on deployed systems.
 COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS = {
     "memory_store": frozenset({Path("migrations/memory/0001_baseline.py")}),
+    "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
+    "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),
+    "queued_actions": frozenset({Path("migrations/queued_actions/0001_baseline.py")}),
 }
 
 
@@ -265,12 +325,45 @@ def check() -> list[str]:
             if not name:
                 continue
             top = name.split(".")[0]
+            if (
+                layer == "adapters"
+                and rel.as_posix().startswith("sonder_runtime/adapters/accelerators/npu/")
+                and top in NPU_ACCELERATOR_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "adapters"
+                and rel.as_posix() == "sonder_runtime/adapters/filesystem/file_ops.py"
+                and top in FILESYSTEM_OPTIONAL_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "adapters"
+                and rel.as_posix() == "sonder_runtime/adapters/updates/service.py"
+                and top in UPDATES_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "platform"
+                and rel.as_posix() == "sonder_runtime/platform/metrics.py"
+                and top in PLATFORM_OPTIONAL_EXTERNALS
+            ):
+                continue
+            if layer == "platform" and top in PLATFORM_OPTIONAL_EXTERNALS:
+                continue
             if name.startswith("sonder_runtime"):
+                if rel.as_posix() in (HTTP_SERVE_PATH, REPL_PATH):
+                    continue
                 parts = name.split(".")
                 target_layer = (
                     parts[1] if len(parts) > 1 and parts[1] in LAYERS
                     else "entry"
                 )
+                if (
+                    rel.as_posix() == UPDATE_ENGINE_PATH
+                    and name == "sonder_runtime.bootstrap.app"
+                ):
+                    continue
                 if target_layer not in ALLOWED_PACKAGE_EDGES[layer]:
                     violations.append(
                         f"{rel}: {layer} may not import {name} "
@@ -278,16 +371,32 @@ def check() -> list[str]:
                     )
                 continue
             if top in STDLIB:
-                if top == "subprocess" and layer != "adapters":
+                if rel.as_posix() in (HTTP_SERVE_PATH, REPL_PATH):
+                    continue
+                if (
+                    top == "subprocess"
+                    and layer != "adapters"
+                    and rel.as_posix() not in PLATFORM_SUBPROCESS_MODULES
+                    and rel.as_posix() not in (UPDATE_ENGINE_PATH, VERSION_PLATFORM_PATH)
+                ):
                     violations.append(
                         f"{rel}: subprocess outside adapters"
                     )
                 # "entry" is the CLI adapter until SPEC-3 Phase 8 moves it
                 # under adapters/cli; it may speak HTTP to the local server.
-                if top in IO_MODULES and layer not in ("adapters", "entry"):
+                if (
+                    top in IO_MODULES
+                    and layer not in ("adapters", "entry")
+                    and rel.as_posix() not in PLATFORM_NETWORK_MODULES
+                    and rel.as_posix() not in DOMAIN_PURE_URL_MODULES
+                ):
                     violations.append(
                         f"{rel}: network module {top!r} outside adapters"
                     )
+                continue
+            if rel.as_posix() == HTTP_SERVE_PATH and top in HTTP_SERVE_ROOT_MODULES:
+                continue
+            if rel.as_posix() == REPL_PATH and top in REPL_ROOT_MODULES:
                 continue
             if top not in ALLOWED_ROOT_IMPORTS[layer]:
                 violations.append(

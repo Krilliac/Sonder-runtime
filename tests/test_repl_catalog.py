@@ -3,7 +3,7 @@ import builtins
 
 import command_catalog
 import server
-import sonder_repl
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 
 
 def test_every_tool_typed_as_a_slash_command_dispatches():

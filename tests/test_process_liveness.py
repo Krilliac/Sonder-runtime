@@ -6,12 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-import process_liveness
-from sonder_runtime.adapters import process_liveness as adapter_process_liveness
-
-
-def test_root_module_is_only_a_compatibility_alias():
-    assert process_liveness is adapter_process_liveness
+from sonder_runtime.adapters import process_liveness
 
 
 def _linux_stat(pid=321, comm="worker", state="S", starttime="4242"):

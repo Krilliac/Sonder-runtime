@@ -1,8 +1,8 @@
 """Reasoning exposure: off by default, gated by audience, never cross-turn."""
-import activity_tracker as at
+import sonder_runtime.adapters.observability.activity_tracker as at
 import orchestrator
 import server
-import sonder_serve as ts
+import sonder_runtime.interfaces.http.serve as ts
 
 import pytest
 
@@ -276,7 +276,7 @@ def test_a_lost_auto_negative_is_recorded_not_swallowed(monkeypatch):
     a swallowed exception here drops a NEGATIVE and nothing else -- re-inflating
     the ~97%-positive skew this function exists to correct, invisibly and in the
     flattering direction."""
-    import activity_tracker
+    import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 
     activity_tracker.reset_for_tests()
     monkeypatch.setattr(

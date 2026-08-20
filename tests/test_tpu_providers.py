@@ -6,8 +6,8 @@ honestly instead of staying silent, and the resolver can never select one.
 """
 from __future__ import annotations
 
-import npu_contract
-import npu_providers
+import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
+import sonder_runtime.adapters.accelerators.npu.providers as npu_providers
 
 
 def _rows():

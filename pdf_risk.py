@@ -13,7 +13,7 @@ import time
 import zlib
 from pathlib import Path
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 DEFAULT_MAX_SCAN_BYTES = 16 * 1024 * 1024

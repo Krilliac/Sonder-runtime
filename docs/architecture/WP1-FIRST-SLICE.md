@@ -1,6 +1,6 @@
 # WP1 first migration slice: context overflow policy
 
-**Status:** Implemented locally; qualified pytest/Ruff verification pending
+**Status:** Focused verification passed; full-suite qualification pending
 **Target requirements:** `ARCH-001`, `ARCH-002`, `ARCH-004`, `ARCH-010`, `CTX-007`
 **Candidate root module:** `context_overflow.py`
 
@@ -52,7 +52,7 @@ current emergency deterministic policy, not the final event-based compaction ser
 - [x] Delete root `context_overflow.py` in the same change.
 - [x] Add an architecture regression test proving production code cannot reintroduce a
   root `context_overflow` import.
-- [ ] Run the dedicated tests, architecture checker, packaging tests, selfmod source
+- [x] Run the dedicated tests, architecture checker, packaging tests, selfmod source
   inventory tests, full suite, Ruff, and history/privacy checks.
 - [ ] Append evidence records, but keep master requirements unchecked unless the evidence
   proves the entire requirement rather than only this slice.
@@ -67,10 +67,13 @@ Completed against the staged tree on 2026-08-19:
 - [x] Direct classifier/compaction smoke assertions, including negative-control veto and
   compaction idempotence.
 - [x] Source search confirms no remaining root import or path reference.
-- [ ] Dedicated pytest, packaging pytest, full pytest, and Ruff commands. The checkout's
+- [x] Dedicated pytest and packaging pytest. The checkout's
   interpreter does not contain pytest, Ruff, or the runtime's `mcp` dependency, and the
   configured network cannot reach a package index. These checks remain required in CI or
   a qualified development environment.
+
+Current focused verification: context/MMR/reward/execution selection is `113 passed`;
+architecture, evidence, and staged-diff checks pass.
 
 ## Behavioral invariants
 

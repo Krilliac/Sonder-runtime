@@ -5,7 +5,7 @@ import re
 import pytest
 
 import sonder_headless
-import sonder_repl
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 import command_catalog
 
 

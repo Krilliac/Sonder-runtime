@@ -24,8 +24,9 @@ import json
 import os
 import sys
 
-import sonder_config
-import sonder_version
+from sonder_runtime.platform import config as sonder_config
+from sonder_runtime.platform import paths as runtime_paths
+from sonder_runtime.platform import version as sonder_version
 
 
 def _load_config(args) -> "sonder_config.SonderConfig":
@@ -37,6 +38,10 @@ def _load_config(args) -> "sonder_config.SonderConfig":
             )
         key, _, value = item.partition("=")
         overrides[key.strip()] = value.strip()
+    # Preserve the legacy ``python sonder_serve.py [port]`` launcher contract
+    # for the packaged ``python -m sonder_runtime serve [port]`` entrypoint.
+    if getattr(args, "port", None) is not None:
+        overrides["server.port"] = str(args.port)
     return sonder_config.load_config(
         _configured_path(getattr(args, "config", None), "SONDER_CONFIG", "sonder.toml"),
         secrets_path=_configured_path(
@@ -144,7 +149,7 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_status(args) -> int:
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     build = sonder_version.build_info()
     payload: dict = {"build": build.as_dict()}
@@ -179,7 +184,7 @@ def cmd_status(args) -> int:
 
 
 def cmd_diagnostics(args) -> int:
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     payload: dict = {"build": sonder_version.build_info().as_dict()}
     try:
@@ -217,7 +222,7 @@ def cmd_config(args) -> int:
 
 
 def cmd_migrate(args) -> int:
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     try:
         config = _load_config(args)
@@ -258,9 +263,7 @@ def _backup_target(args, config=None) -> str:
     config = config or _load_config(args)
     if config and config.backup.target:
         return config.backup.target
-    import sonder_paths
-
-    return str(sonder_paths.default_home() / "backups")
+    return str(runtime_paths.default_home() / "backups")
 
 
 def _report_problems(
@@ -372,8 +375,8 @@ def cmd_restore(args) -> int:
 
 def cmd_smoke(args) -> int:
     """Minimal end-to-end: config, migrations, operations write/read."""
-    import sonder_migrations
-    from sonder_operations_store import OperationsStore
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     try:
         config = _load_config(args)
@@ -526,7 +529,7 @@ def cmd_serve(args) -> int:
     _export_runtime_environment(config)
 
     # MIGRATING phase: no listener opens until migrations complete.
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     try:
         sonder_migrations.migrate_all(
@@ -536,9 +539,9 @@ def cmd_serve(args) -> int:
         print(f"migration failed, refusing to bind: {exc}", file=sys.stderr)
         return 1
 
-    import sonder_serve
+    import sonder_runtime.interfaces.http.serve as sonder_serve
 
-    sys.argv = ["sonder_serve.py", str(config.server.port)]
+    sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
     sonder_serve.main()
     return 0
 
@@ -549,7 +552,7 @@ def cmd_repl(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    import sonder_repl
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
 
     sonder_repl.main()
     return 0
@@ -602,8 +605,8 @@ def cmd_drain(args) -> int:
 
 
 def cmd_update(args) -> int:
-    import sonder_update_engine
-    import sonder_updates
+    import sonder_runtime.adapters.updates.engine as sonder_update_engine
+    import sonder_runtime.adapters.updates.service as sonder_updates
 
     manager = sonder_update_engine.UpdateManager()
     try:
@@ -660,7 +663,7 @@ def cmd_update(args) -> int:
 
 
 def cmd_rotate_key(args) -> int:
-    import sonder_secrets
+    import sonder_runtime.adapters.secrets as sonder_secrets
 
     if not args.secrets:
         print("rotate-key requires --secrets <path>", file=sys.stderr)
@@ -672,7 +675,7 @@ def cmd_rotate_key(args) -> int:
     except sonder_secrets.RotationError as exc:
         print(f"rotation failed: {exc}", file=sys.stderr)
         return 1
-    from sonder_operations_store import OperationsStore
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     try:
         OperationsStore().record_event(
@@ -822,6 +825,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="run the HTTP adapter")
     common(p, ollama_flag=True)
+    p.add_argument("port", nargs="?", type=int)
     p.add_argument("--skip-preflight", action="store_true")
     p.set_defaults(func=cmd_serve)
 

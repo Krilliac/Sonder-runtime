@@ -14,7 +14,7 @@ import re
 import stat
 import time
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 DEFAULT_MAX_FILE_BYTES = 64_000_000

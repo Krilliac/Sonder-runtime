@@ -22,7 +22,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from sonder_logging import REDACTION_FAILED, Redactor
+from sonder_runtime.platform.logging import REDACTION_FAILED, Redactor
 
 
 SEVERITIES = frozenset(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))

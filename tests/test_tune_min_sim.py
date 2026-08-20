@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import memory_store
 import tune_min_sim
 
