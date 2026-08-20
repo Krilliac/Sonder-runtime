@@ -92,6 +92,9 @@ def build_application(
     """
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
+    # SPEC-3 Phase 3: bind the transitional provider only at composition time.
+    from .legacy_model import configure_legacy_model_providers
+    configure_legacy_model_providers()
     # SPEC-3 Phase 3: the real transport adapter behind the port — consent
     # enforced against the OperationContext, driver errors mapped into the
     # domain taxonomy. Backend is Ollama by default, selectable via env.

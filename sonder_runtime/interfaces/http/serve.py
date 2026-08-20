@@ -2054,7 +2054,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             return "usage: /login <username> <password>"
         out = server.admin_login(parts2[0], parts2[1])
         marker = "token: "
-        if marker in out and not out.startswith("ERROR:"):
+        from ...domain.cloud_access import has_legacy_error_prefix
+        if marker in out and not has_legacy_error_prefix(out):
             state.token = out.split(marker, 1)[1].strip().splitlines()[0]
             state.account = server._admin_account_from_token(state.token)
         return out
@@ -4101,7 +4102,8 @@ class Handler(BaseHTTPRequestHandler):
             # HTTP boundary as a successful 200 response: API clients need a
             # non-2xx status and the standard machine-readable error shape to
             # distinguish a rejected mutation from a completed one.
-            if out.startswith("ERROR:"):
+            from ...domain.cloud_access import has_legacy_error_prefix
+            if has_legacy_error_prefix(out):
                 self._send_json_payload(
                     {"error": {
                         "message": out.removeprefix("ERROR:").strip() or "account update failed",

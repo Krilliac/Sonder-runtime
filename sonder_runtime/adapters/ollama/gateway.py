@@ -115,6 +115,17 @@ class OllamaGateway:
     composition boundary, not this transport adapter.
     """
 
+    _default_target_resolver = None
+    _default_generate_factory = None
+
+    @classmethod
+    def configure_default_providers(cls, *, target_resolver, generate_factory) -> None:
+        """Install providers from an explicit composition boundary."""
+        if target_resolver is None or generate_factory is None:
+            raise ValueError("default Ollama providers must be callable")
+        cls._default_target_resolver = target_resolver
+        cls._default_generate_factory = generate_factory
+
     def __init__(
         self,
         *,
@@ -124,9 +135,9 @@ class OllamaGateway:
         embedding_provider=None,
         session_num_ctx: int | None = None,
     ):
-        self._target_resolver = target_resolver
+        self._target_resolver = target_resolver or type(self)._default_target_resolver
         self._system_builder = system_builder
-        self._generate_factory = generate_factory
+        self._generate_factory = generate_factory or type(self)._default_generate_factory
         self._embedding_provider = embedding_provider
         self._session_num_ctx = (
             context_policy.default_requested()
