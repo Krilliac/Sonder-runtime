@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 def test_default_config_checks_use_packaged_configuration_boundary():
     source = open(sonder_doctor.__file__, encoding="utf-8").read()
-    assert "from sonder_runtime.platform import config as sonder_config" in source
+    assert "from sonder_runtime.bootstrap.config_loading import (" in source
     assert "import sonder_config" not in source
 
 

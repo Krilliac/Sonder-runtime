@@ -56,6 +56,7 @@ from sonder_runtime.domain.doctor_specs import (
     iter_specs as _iter_specs,
 )
 from sonder_runtime.bootstrap.config_loading import (
+    check_config as _check_config_impl,
     load_config_or_none as _load_config_or_none_impl,
 )
 from sonder_runtime.bootstrap.doctor_checks import (
@@ -129,18 +130,8 @@ def _load_config_or_none():
 
 
 def _check_config() -> dict:
-    """Report whether configuration loads and validates (read-only)."""
-    try:
-        from sonder_runtime.platform import config as sonder_config
-    except Exception as exc:
-        return _skip("sonder_config unavailable (%s)" % exc)
-    try:
-        config = sonder_config.load_config()
-    except sonder_config.ConfigError as exc:
-        return {"status": STATUS_FAIL, "detail": "config invalid: %s" % exc}
-    except Exception as exc:
-        return _skip("config load failed (%s)" % exc)
-    return validated_config_check(config)()
+    """Compatibility wrapper for the packaged read-only config check."""
+    return _check_config_impl()()
 
 
 def validated_config_check(config):

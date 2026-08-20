@@ -32,6 +32,13 @@ from pathlib import Path
 import sonder_health
 import command_recovery
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.adapters.launcher_idempotency import (
+    _IDEMPOTENCY_KEY,
+    _REPLAY_HEADER_NAME,
+    _REPLAY_HEADER_VALUE,
+    normalize_idempotency_key,
+    valid_command_replay,
+)
 from sonder_runtime.application.lifecycle import (
     MAX_CONTEXT_TOKENS,
     _CONTEXT_SIZE,
@@ -64,9 +71,9 @@ FINALIZE_RETRY_DELAYS = (0.0, 0.05, 0.2)
 ACTIVE_PHASES = ("queued", "running")
 TERMINAL_PHASES = ("succeeded", "failed", "cancelled", "interrupted")
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
-_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
-_REPLAY_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
-_REPLAY_HEADER_VALUE = re.compile(r"^[\x20-\x7e]{0,1024}$")
+# Compatibility aliases for the historical private policy surface.
+_normalize_idempotency_key = normalize_idempotency_key
+_valid_command_replay = valid_command_replay
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sonder_launcher_operations (
@@ -557,36 +564,6 @@ def _windows_terminate_pid(pid, identity=""):
             kernel32.CloseHandle(handle)
     except (AttributeError, ImportError, OSError, ValueError):
         return False
-
-
-def _normalize_idempotency_key(value):
-    key = str(value or "").strip()
-    if key and not _IDEMPOTENCY_KEY.fullmatch(key):
-        raise ValueError(
-            "Idempotency-Key must be 8-128 letters, numbers, or . _ : -"
-        )
-    return key
-
-
-def _valid_command_replay(value):
-    """Validate a durable response before it reaches BaseHTTPRequestHandler."""
-    if not isinstance(value, dict) or not set(value) <= {"status", "payload", "headers"}:
-        return False
-    status = value.get("status")
-    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
-        return False
-    if not isinstance(value.get("payload"), dict):
-        return False
-    headers = value.get("headers", {})
-    if not isinstance(headers, dict) or len(headers) > 16:
-        return False
-    return all(
-        isinstance(name, str)
-        and isinstance(header_value, str)
-        and _REPLAY_HEADER_NAME.fullmatch(name)
-        and _REPLAY_HEADER_VALUE.fullmatch(header_value)
-        for name, header_value in headers.items()
-    )
 
 
 def _write_private_file(path, value):

@@ -16,11 +16,16 @@ Run:
     python sonder_client.py
     python sonder_client.py --server http://your-vps:11435 --key s3cret
 """
-import os
 import sys
 import urllib.error
-import urllib.request
 
+from sonder_runtime.adapters.client_endpoint import (
+    local_fallback_server as _local_fallback_server,
+    same_server as _same_server,
+)
+from sonder_runtime.adapters.client_fallback import (
+    send_prompt_with_fallback as _send_prompt_with_fallback,
+)
 from sonder_runtime.adapters.client_request import (
     build_chat_request as _build_chat_request,
 )
@@ -33,7 +38,7 @@ from sonder_runtime.adapters.client_config import (
 )
 from sonder_runtime.platform.client_fallback import enabled as local_fallback_enabled
 
-LOCAL_FALLBACK_SERVER = os.environ.get("SONDER_LOCAL_FALLBACK", "http://127.0.0.1:11435")
+LOCAL_FALLBACK_SERVER = _local_fallback_server()
 
 USAGE = """usage: sonder_client.py [--server URL] [--key API_KEY]
 
@@ -60,36 +65,13 @@ def send_prompt(server, api_key, prompt):
     )
 
 
-def _same_server(a, b):
-    return (a or "").strip().rstrip("/") == (b or "").strip().rstrip("/")
-
-
 def send_prompt_with_fallback(server, api_key, prompt, fallback_server=None):
-    """Try hosted/server URL first, then local Sonder on connection failure.
-
-    HTTP errors intentionally do not fall back: auth, ban, rate-limit, and server
-    policy failures should stay visible instead of silently changing hosts.
-    Returns (reply, server_used, warning_text).
-    """
-    fallback_server = fallback_server or LOCAL_FALLBACK_SERVER
-    try:
-        return send_prompt(server, api_key, prompt), server, ""
-    except urllib.error.HTTPError:
-        raise
-    except urllib.error.URLError as first_error:
-        if (
-            not local_fallback_enabled()
-            or not fallback_server
-            or _same_server(server, fallback_server)
-        ):
-            raise
-        reply = send_prompt(fallback_server, "", prompt)
-        warning = (
-            "WARNING: hosted server %s was unreachable (%s). "
-            "Fell back to local server %s for this request."
-            % (server, first_error, fallback_server)
-        )
-        return reply, fallback_server, warning
+    """Compatibility delegate for packaged fallback orchestration."""
+    return _send_prompt_with_fallback(
+        server, api_key, prompt, fallback_server or LOCAL_FALLBACK_SERVER,
+        sender=send_prompt,
+        fallback_policy=local_fallback_enabled,
+    )
 
 
 def resolve_config(argv):

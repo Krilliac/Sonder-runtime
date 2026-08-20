@@ -54,9 +54,8 @@ from sonder_runtime.platform.hardware_identity import vendor_from_text
 
 # Legacy private name retained for callers that exercised the old probe helper.
 _parse_memory_gb = parse_memory_gb
-# Legacy private name retained for callers that exercised the old probe helper.
+# Legacy private names retained for callers that exercised the old probe helpers.
 _probe_platform = probe_platform
-# Legacy private name retained for callers that exercised the old probe helper.
 _probe_cpu_count = probe_cpu_count
 _read_text = read_text
 _probe_total_ram_gb = probe_total_ram_gb
@@ -155,14 +154,10 @@ _PCI_VENDORS = {
 }
 
 
-def _vendor_from_text(*values: object) -> str:
-    """Legacy compatibility alias for packaged vendor normalization."""
-    return vendor_from_text(*values)
-
-
-def _looks_integrated(name: str, vendor: str) -> bool | None:
-    """Legacy compatibility alias for packaged accelerator classification."""
-    return looks_integrated(name, vendor)
+# Legacy private names retained for callers that exercised the old
+# classification helpers.  The packaged platform boundary owns the policy.
+_vendor_from_text = vendor_from_text
+_looks_integrated = looks_integrated
 
 
 _accelerator = accelerator_record

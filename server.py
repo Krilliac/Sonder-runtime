@@ -198,6 +198,10 @@ from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
 )
+from sonder_runtime.domain.agent_mutation_policy import (
+    WORK_MUTATION_TOOLS as _WORK_MUTATION_TOOLS,
+    invocation_mutates as _agent_tool_mutates,
+)
 from sonder_runtime.domain.schema_policy import (
     format_schema_gaps as _format_schema_gaps,
     leading_json_object as _leading_json_object_policy,
@@ -18149,66 +18153,6 @@ def _agent_dispatch_observed(
                 run_id=activity_tracker.current_response_id() or "",
             )
 
-
-_WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "file_delete", "text_patch", "data_convert",
-    "sqlite_mutate", "scaffold_project", "archive_extract", "archive_create",
-    "fetch_artifact",
-    "artifact_generate", "game_generate_and_test", "game_generation_campaign",
-    "ensemble_codegen_build_loop",
-    "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
-    "memory_interaction_embedding_backfill",
-    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
-    "git_merge", "git_cherry_pick",
-    "dependency_add", "dependency_remove", "dependency_update",
-    "build_clean", "rename_symbol", "apply_patch",
-    # lint_run(fix=True) runs the linter's fix command and format_code writes
-    # in place unless check_only -- both rewrite source files, so both must be
-    # able to count as mutations. _agent_tool_mutates decides per invocation.
-    "lint_run", "format_code",
-    "task_delete",
-})
-
-
-def _agent_tool_mutates(tool_name, args):
-    """True only when this invocation can change persistent workspace state."""
-    args = args if isinstance(args, dict) else {}
-    if tool_name not in _WORK_MUTATION_TOOLS:
-        return False
-    if tool_name == "file_delete":
-        return args.get("dry_run") is False
-    if tool_name == "json_patch":
-        return str(args.get("mode", "preview")).strip().lower() == "apply"
-    if tool_name == "text_patch":
-        return args.get("apply") is True
-    if tool_name == "rename_symbol":
-        return args.get("dry_run") is False
-    if tool_name == "apply_patch":
-        # Unlike rename_symbol's dry_run (default True, opt-in to mutate),
-        # apply_patch's check_only defaults False -- it applies by default,
-        # so only an explicit check_only=True is a non-mutating dry run.
-        return args.get("check_only") is not True
-    if tool_name == "lint_run":
-        # `ruff check --fix`, `npx eslint --fix` and `cargo clippy --fix`
-        # rewrite source files. Linters with no fix command (flake8, pylint)
-        # fall back to checking, but which linter runs is auto-detected inside
-        # the tool -- long after this gate has to answer -- so fix=True is
-        # treated as a mutation rather than guessing that it is harmless.
-        return args.get("fix") is True
-    if tool_name == "format_code":
-        # Every formatter in the table writes in place by default, so like
-        # apply_patch this applies unless explicitly told only to check.
-        return args.get("check_only") is not True
-    if tool_name == "data_convert":
-        return args.get("apply") is True
-    if tool_name == "sqlite_mutate":
-        return str(args.get("mode", "preview")).strip().lower() == "apply"
-    if tool_name in {
-        "memory_quality_repair", "memory_privacy_repair",
-        "memory_embedding_backfill", "memory_interaction_embedding_backfill",
-    }:
-        return args.get("apply") is True
-    return True
 
 # Read-only tools whose default (empty-args) invocation is meaningful, so a
 # name-only branch prediction yields a deterministic call signature that can
