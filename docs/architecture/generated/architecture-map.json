@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 139,
+      "file_count": 140,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -141,6 +141,7 @@
         "sonder_runtime/adapters/persistence/sqlite/__init__.py",
         "sonder_runtime/adapters/persistence/sqlite/automation.py",
         "sonder_runtime/adapters/persistence/sqlite/bridge_migration.py",
+        "sonder_runtime/adapters/persistence/sqlite/job_registry.py",
         "sonder_runtime/adapters/persistence/sqlite/loop_state.py",
         "sonder_runtime/adapters/persistence/sqlite/memory.py",
         "sonder_runtime/adapters/persistence/sqlite/operations.py",
@@ -188,7 +189,7 @@
       ]
     },
     {
-      "file_count": 174,
+      "file_count": 178,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -196,6 +197,7 @@
         "sonder_runtime/application/agent_registry/workbench_review.py",
         "sonder_runtime/application/agents/__init__.py",
         "sonder_runtime/application/agents/delegation_service.py",
+        "sonder_runtime/application/agents/durable_lineage.py",
         "sonder_runtime/application/agents/lineage_delegation.py",
         "sonder_runtime/application/agents/presets.py",
         "sonder_runtime/application/artifacts/__init__.py",
@@ -303,6 +305,7 @@
         "sonder_runtime/application/protocol/client_schema.py",
         "sonder_runtime/application/protocol/editor_interop.py",
         "sonder_runtime/application/protocol/mcp_compatibility.py",
+        "sonder_runtime/application/protocol/mobile_parity.py",
         "sonder_runtime/application/protocol/openai_compatibility.py",
         "sonder_runtime/application/protocol/resumable_streams.py",
         "sonder_runtime/application/provider_overrides.py",
@@ -331,6 +334,7 @@
         "sonder_runtime/application/selfmod/governance.py",
         "sonder_runtime/application/selfmod/selfmod_service.py",
         "sonder_runtime/application/session/__init__.py",
+        "sonder_runtime/application/session/capture.py",
         "sonder_runtime/application/session/checkpoints.py",
         "sonder_runtime/application/session/durable_replay.py",
         "sonder_runtime/application/session/fork.py",
@@ -349,6 +353,7 @@
         "sonder_runtime/application/subagents/durable_continuation.py",
         "sonder_runtime/application/tasks/__init__.py",
         "sonder_runtime/application/tasks/use_cases.py",
+        "sonder_runtime/application/tools/catalog_artifacts.py",
         "sonder_runtime/application/tools/gateway_contract.py",
         "sonder_runtime/application/tools/generated_catalogs.py",
         "sonder_runtime/application/tools/resource_policy.py",
