@@ -851,6 +851,7 @@ from sonder_runtime.adapters.inspection_executor import _format_file_result
 from sonder_runtime.adapters.task_formatting import _format_checklist, _format_task
 from sonder_runtime.adapters.context_formatting import format_context_health
 from sonder_runtime.domain.health_formatting import health_bar as _health_bar
+from sonder_runtime.domain.campaign_policy import output_matches as _campaign_output_matches
 from sonder_runtime.adapters.observability.activity_formatting import _format_activity_status
 from sonder_runtime.adapters.observability.distillation_formatting import (
     _drain_backlog_text,
@@ -6354,28 +6355,6 @@ def _campaign_expected(task_name):
         "wordfreq": "the:3",
         "fib": "6765",
     }.get(task_name, "")
-
-
-def _campaign_output_matches(output, expected):
-    """Whether executed output satisfies a task that says "print exactly".
-
-    Substring containment let a chatty answer false-pass: "The result of 12 +
-    30 is 42." contains "42" and was recorded as a success even though every
-    campaign task asks to print the value exactly. The comparison is now the
-    faithful one - each line stripped, blank leading/trailing lines dropped,
-    platform line-endings normalised, then equal - which tolerates trailing
-    whitespace and newlines while rejecting embedded prose and extra lines.
-    """
-    def _norm(text):
-        lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        stripped = [line.strip() for line in lines]
-        while stripped and not stripped[0]:
-            stripped.pop(0)
-        while stripped and not stripped[-1]:
-            stripped.pop()
-        return "\n".join(stripped)
-
-    return _norm(output) == _norm(expected)
 
 
 def _campaign_environment_failure(output):
