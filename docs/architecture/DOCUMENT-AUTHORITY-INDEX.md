@@ -78,7 +78,7 @@ sources and emits a SHA-256 freshness digest. The contract is exercised by
 | Commands | typed command inputs to `GeneratedCatalogs.generate` | catalog digest and bounds | implemented foundation |
 | Events | `EventKind` and payload schemas | catalog digest and derived event schema | implemented foundation |
 | Client schema | generated client projection | client digest equals bundle digest | implemented foundation |
-| Configuration | focused contract documents and typed configuration boundaries | no generator yet; tracked as a remaining gap | not generated |
+| Configuration | typed configuration dataclasses | generated field/default projection and source digest | generated where metadata permits |
 
 A changed typed source must produce a changed digest; a reordered source must
 not. Oversized output fails closed rather than silently truncating.

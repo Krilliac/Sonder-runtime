@@ -23,9 +23,17 @@
 - **Generated references:** tool, command, event, and client projections are
   generated from typed application/domain sources by
   `GeneratedCatalogs`; freshness is represented by its deterministic SHA-256
-  digest and covered by the document-authority tests. Configuration references
-  remain a documented source contract until a typed configuration generator is
-  added.
+  digest and covered by the document-authority tests. The checked-in runtime
+  reference is [`generated/runtime-reference.md`](generated/runtime-reference.md);
+  its JSON companion is machine-readable. Configuration fields are projected
+  from typed configuration dataclasses where runtime metadata permits.
+
+- **Generated maps:** [`generated/architecture-map.md`](generated/architecture-map.md)
+  records package layers and composition roots, while
+  [`generated/focused-contract-inventory.md`](generated/focused-contract-inventory.md)
+  is the complete current-contract inventory. Refresh with
+  `python scripts/generate_documentation_catalogs.py --write` and gate with
+  `python scripts/check_documentation_authority.py`.
 
 - WP1 Two-Hundred-Forty-Ninth Slice: `WP1-TWO-HUNDRED-FORTY-NINTH-SLICE.md` —
   moved pure launcher output, timeout, and retention policy into a packaged
