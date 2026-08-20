@@ -7,6 +7,12 @@ from .replay import (
     reconstruct_transcript,
     replay_session,
 )
+from .fork import ForkBoundary, SessionFork, SessionLineage, fork_session
+from .checkpoints import (
+    ProjectionCheckpoint,
+    checkpoint_projection,
+    create_projection_checkpoint,
+)
 
 __all__ = [
     "SessionProjection",
@@ -15,4 +21,11 @@ __all__ = [
     "reconstruct_model_request",
     "reconstruct_transcript",
     "replay_session",
+    "ForkBoundary",
+    "SessionFork",
+    "SessionLineage",
+    "fork_session",
+    "ProjectionCheckpoint",
+    "checkpoint_projection",
+    "create_projection_checkpoint",
 ]
