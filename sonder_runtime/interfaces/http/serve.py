@@ -49,8 +49,10 @@ import feedback
 import live_reload
 import debug_dump
 import sonder_health
+from sonder_runtime.domain.launcher_health import token_is_configured
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
 import sonder_runtime.platform.config as runtime_config
+import sonder_runtime.platform.paths as runtime_paths
 import sonder_runtime.adapters.secrets as sonder_secrets
 import served_action_receipts
 import tool_contract
@@ -86,7 +88,7 @@ def _reject_nonfinite_json_number(value):
 
 def _local_server_log_tail():
     """Return a bounded, redacted tail for the loopback-only diagnostics page."""
-    path = Path(server.sonder_paths.default_home()) / "run" / "sonder_serve.log"
+    path = Path(runtime_paths.default_home()) / "run" / "sonder_serve.log"
     try:
         with path.open("rb") as stream:
             stream.seek(0, os.SEEK_END)
@@ -1575,7 +1577,7 @@ def _dump_chat(messages=None, label="chat", state=None):
         ("diagnostics", server.diagnostics()),
     ]
     path = debug_dump.write_dump(
-        server.sonder_paths.default_home(),
+        runtime_paths.default_home(),
         label=label,
         messages=messages or [],
         sections=sections,
@@ -3158,7 +3160,7 @@ class Handler(BaseHTTPRequestHandler):
         nonce = self.headers.get(sonder_health.NONCE_HEADER, "")
         if (
             not _is_loopback_host(client_host)
-            or not sonder_health.token_is_configured(LAUNCHER_HEALTH_TOKEN)
+            or not token_is_configured(LAUNCHER_HEALTH_TOKEN)
             or RUNTIME_ROLE != sonder_health.MANAGED_ROLE
             or not sonder_health.nonce_is_valid(nonce)
         ):
@@ -3484,7 +3486,7 @@ class Handler(BaseHTTPRequestHandler):
                 "learning_health": server.learning_health_data(),
                 "activity": activity,
                 "db_path": getattr(server, "_DB_PATH", ""),
-                "state_home": str(server.sonder_paths.default_home()),
+                "state_home": str(runtime_paths.default_home()),
                 "account": account or {},
                 "models": [
                     {"id": "sonder", "owned_by": "local"},

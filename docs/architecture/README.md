@@ -1,5 +1,9 @@
 # Sonder Runtime architecture documents
 
+- WP1 Two-Hundred-Twenty-Seventh Slice: `WP1-TWO-HUNDRED-TWENTY-SEVENTH-SLICE.md` —
+  moved environment-file parsing into the packaged configuration policy
+  boundary while preserving the root `ConfigError` compatibility contract.
+
 - WP1 One-Hundred-Eighty-Seventh Slice: `WP1-ONE-HUNDRED-EIGHTY-SEVENTH-SLICE.md` —
   moved pure learning-enablement policy into the packaged domain boundary
   while preserving the root server compatibility wrapper.
@@ -562,6 +566,12 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Twenty-Sixth Slice: `WP1-TWO-HUNDRED-TWENTY-SIXTH-SLICE.md` —
   moved system-profile boolean environment-override parsing into the packaged
   configuration-environment boundary while preserving the `_env_bool` alias.
+- WP1 Two-Hundred-Thirtieth Slice: `WP1-TWO-HUNDRED-THIRTIETH-SLICE.md` —
+  moved the pure local-observability percentile helper into the packaged
+  observability boundary while preserving the `_percentile` compatibility alias.
+- WP1 Two-Hundred-Twenty-Eighth Slice: `WP1-TWO-HUNDRED-TWENTY-EIGHTH-SLICE.md` —
+  moved launcher-health token status ownership into the packaged health
+  status boundary while preserving the root `sonder_health` alias.
 - WP1 Two-Hundred-Twenty-Second Slice: `WP1-TWO-HUNDRED-TWENTY-SECOND-SLICE.md` —
   moved accelerator-inventory de-duplication into the packaged hardware
   adapter boundary while preserving the legacy hardware compatibility alias.

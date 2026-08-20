@@ -7,6 +7,33 @@ historical ``SONDER_*`` environment variables.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+class EnvironmentFileError(ValueError):
+    """Malformed compatibility environment-file input."""
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a ``KEY=VALUE`` environment file without owning config types."""
+    values: dict[str, str] = {}
+    for lineno, raw in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise EnvironmentFileError(
+                f"{path}:{lineno}: expected KEY=VALUE, got {line[:32]!r}"
+            )
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        values[key] = value
+    return values
 
 
 def env_bool(value: str) -> bool:
@@ -55,4 +82,11 @@ def env_float(
         return default
 
 
-__all__ = ["env_bool", "env_bool_from_env", "env_int", "env_float"]
+__all__ = [
+    "EnvironmentFileError",
+    "env_bool",
+    "env_bool_from_env",
+    "env_int",
+    "env_float",
+    "parse_env_file",
+]

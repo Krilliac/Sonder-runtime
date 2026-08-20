@@ -31,7 +31,12 @@ from urllib.parse import urlsplit
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform import unsafe_lab_policy
-from sonder_runtime.platform.config_environment import env_bool, env_int
+from sonder_runtime.platform.config_environment import (
+    EnvironmentFileError,
+    env_bool,
+    env_int,
+    parse_env_file as _parse_env_file,
+)
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -218,25 +223,11 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
-    """Parse a KEY=VALUE secrets file (comments and blank lines allowed)."""
-    values: dict[str, str] = {}
-    for lineno, raw in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise ConfigError(
-                [f"{path}:{lineno}: expected KEY=VALUE, got {line[:32]!r}"]
-            )
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        values[key] = value
-    return values
+    """Parse a secrets environment file with the historical error contract."""
+    try:
+        return _parse_env_file(path)
+    except EnvironmentFileError as exc:
+        raise ConfigError([str(exc)]) from None
 
 
 def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
