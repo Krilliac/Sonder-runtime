@@ -39,7 +39,7 @@ def test_exact_dependency_lock_requires_environment_and_all_artifacts():
 
 
 def dataset(**overrides):
-    values = dict(dataset_id="ds", snapshot_digest="sha:data", source="curated", license_id="MIT", privacy_review_id="privacy-1", dedup_digest="sha:dedup", train_snapshot_digest="sha:train", eval_snapshot_digest="sha:eval", row_count=10)
+    values = dict(dataset_id="ds", snapshot_digest="sha:data", source="curated", license_id="MIT", privacy_review_id="privacy-1", dedup_digest="sha:dedup", train_snapshot_digest="sha:train", eval_snapshot_digest="sha:eval", row_count=10, source_revision="source-v1", dedup_method="content_hash", dedup_snapshot_digest="sha:data")
     values.update(overrides)
     return DatasetQualification(**values)
 
