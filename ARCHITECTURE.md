@@ -1,5 +1,9 @@
 # Sonder Runtime architecture
 
+The authoritative plan for unfinished architecture and implementation work is
+[`docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`](docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+This document describes Sonder's current product boundary and high-level behavior.
+
 ## What Sonder is
 
 Sonder is an AI runtime and orchestration system. It is not a foundation model,

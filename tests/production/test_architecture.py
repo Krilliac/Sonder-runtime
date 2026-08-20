@@ -259,6 +259,34 @@ def test_checker_detects_a_violation(tmp_path):
     assert "domain may not import" in result.stdout
 
 
+@pytest.mark.parametrize("root_module", ["context_overflow.py", "mmr_rerank.py"])
+def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
+    """A completed root migration is a permanent shrink-only boundary."""
+    shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
+    (tmp_path / "scripts").mkdir()
+    checker = tmp_path / "scripts" / "check_architecture.py"
+    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
+
+    retired = tmp_path / root_module
+    retired.write_text("# retired migration boundary\n", encoding="utf-8")
+    for command in (["git", "init", "-q"], ["git", "add", "-A"]):
+        staged = subprocess.run(
+            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+        if staged.returncode != 0:
+            pytest.skip(
+                "git is required to stage the isolated copy: %s"
+                % (staged.stderr.strip() or staged.stdout.strip())
+            )
+
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 1
+    assert f"{root_module}: retired root module was reintroduced" in result.stdout
+
+
 def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
     path = (
         _REPO_ROOT / "sonder_runtime" / "adapters"

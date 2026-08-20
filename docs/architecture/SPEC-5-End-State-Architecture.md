@@ -1,5 +1,11 @@
 # SPEC-5-Sonder-Runtime-End-State-Architecture
 
+> **Superseded as an implementation plan.** This document is retained as the approved
+> historical design record. Current requirements, sequencing, checkboxes, references,
+> and completion evidence live in
+> [`SONDER-MASTER-IMPLEMENTATION-SPEC.md`](SONDER-MASTER-IMPLEMENTATION-SPEC.md).
+> If the documents conflict, the master implementation specification wins.
+
 **Status:** Approved for implementation  
 **Target:** Sonder Runtime end-state architecture  
 **Deployment model:** Single trusted operator; workstation or privately controlled server  
@@ -3447,9 +3453,3 @@ SPEC-5 is complete only when all are simultaneously true:
 At that point Sonder is no longer "migrating toward" a modular architecture.
 
 The modular architecture **is the runtime**.
-
----
-
-## Need Professional Help in Developing Your Architecture?
-
-Please contact me at [sammuti.com](https://sammuti.com) :)

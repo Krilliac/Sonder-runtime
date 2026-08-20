@@ -1,12 +1,11 @@
 """Hybrid lexical+semantic retrieval over distilled lessons. RRF fusion."""
-from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 import re
+from datetime import datetime, timedelta, timezone
 
 import embeddings
-import mmr_rerank
-import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.adapters import memory_rerank, memory_store
 
 # Recalibrated 2026-07-06 against the 557-lesson corpus via tune_min_sim.py
 # (nomic-embed-text). Over 22 natural-language coding intents vs 15 off-domain
@@ -639,7 +638,7 @@ def retrieve_with_ids(
     # truncation stacks near-duplicate restatements of the strongest lesson
     # and crowds out genuinely different ones. lambda=1 restores pure
     # relevance order (the pre-MMR behavior).
-    relevant = mmr_rerank.mmr_rerank(
+    relevant = memory_rerank.mmr_rerank(
         qv,
         [(lid, relevant_vectors[lid]) for lid in relevant],
         k=k,

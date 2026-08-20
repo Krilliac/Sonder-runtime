@@ -122,7 +122,8 @@ import autopilot_controller
 import fanout_store
 import fanout_prompt_vault
 from model_transport import ModelCallError
-import context_overflow
+from sonder_runtime.domain.context import compaction as context_compaction
+from sonder_runtime.domain.context import overflow as context_overflow
 import ollama_endpoint
 import sonder_speculation
 import consult as consult_flow
@@ -4162,7 +4163,7 @@ def _compacted_overflow_payload(payload, verdict):
     """
     if not verdict.overflow or not isinstance(payload, dict):
         return None
-    compacted = context_overflow.compact_messages(payload.get("messages"))
+    compacted = context_compaction.compact_messages(payload.get("messages"))
     if compacted is None:
         return None
     updated = dict(payload)

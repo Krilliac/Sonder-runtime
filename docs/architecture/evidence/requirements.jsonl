@@ -1,0 +1,204 @@
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-001","revision":1,"status":"planned","claim":"Runtime identity."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-002","revision":1,"status":"planned","claim":"Modular monolith."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-003","revision":1,"status":"planned","claim":"Single operator."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-004","revision":1,"status":"planned","claim":"Local by default."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-005","revision":1,"status":"planned","claim":"Preserve data, remove obsolete interfaces."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-006","revision":1,"status":"planned","claim":"Independent unrestricted authorities."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-007","revision":1,"status":"planned","claim":"Attended training."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-008","revision":1,"status":"planned","claim":"Immutable deployments."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-009","revision":1,"status":"planned","claim":"Signed updates."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CORE-010","revision":1,"status":"planned","claim":"No blind framework transplant."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-001","revision":1,"status":"planned","claim":"One implementation path."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-002","revision":1,"status":"planned","claim":"Root cleanup."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-003","revision":1,"status":"planned","claim":"Transitional cleanup."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-004","revision":1,"status":"planned","claim":"Pure domain."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-005","revision":1,"status":"planned","claim":"Application ports."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-006","revision":1,"status":"planned","claim":"Adapter ownership."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-007","revision":1,"status":"planned","claim":"Thin interfaces."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-008","revision":1,"status":"planned","claim":"No import side effects."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-009","revision":1,"status":"planned","claim":"Typed configuration."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-010","revision":1,"status":"planned","claim":"Architecture enforcement."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-011","revision":1,"status":"planned","claim":"Zero exceptions."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-012","revision":1,"status":"planned","claim":"Ownership catalog."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"ARCH-013","revision":1,"status":"planned","claim":"Split oversized modules."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-001","revision":1,"status":"planned","claim":"Typed identities."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-002","revision":1,"status":"planned","claim":"Append-only log."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-003","revision":1,"status":"planned","claim":"Durable vocabulary."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-004","revision":1,"status":"planned","claim":"Model-visible invariant."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-005","revision":1,"status":"planned","claim":"Deterministic replay."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-006","revision":1,"status":"planned","claim":"Forking."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-007","revision":1,"status":"planned","claim":"Resume and repair."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-008","revision":1,"status":"planned","claim":"Query and export."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-009","revision":1,"status":"planned","claim":"Projection checkpoints."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SESSION-010","revision":1,"status":"planned","claim":"Retention/privacy."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-001","revision":1,"status":"planned","claim":"Turn contract."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-002","revision":1,"status":"planned","claim":"Step contract."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-003","revision":1,"status":"planned","claim":"Interception events."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-004","revision":1,"status":"planned","claim":"Durable versus live."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-005","revision":1,"status":"planned","claim":"Steering."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-006","revision":1,"status":"planned","claim":"Cancellation tree."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-007","revision":1,"status":"planned","claim":"Bounded retries."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"LOOP-008","revision":1,"status":"planned","claim":"Idempotency."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-001","revision":1,"status":"planned","claim":"ModelGateway"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-002","revision":1,"status":"planned","claim":"ToolRegistry/ToolExecutor"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-003","revision":1,"status":"planned","claim":"FileSystem"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-004","revision":1,"status":"planned","claim":"SubprocessRuntime/ShellExecutor/TerminalService"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-005","revision":1,"status":"planned","claim":"SandboxProvider"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-006","revision":1,"status":"planned","claim":"SessionRepository/SessionQueryEngine"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-007","revision":1,"status":"planned","claim":"CompactionEngine"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-008","revision":1,"status":"planned","claim":"SkillRegistry"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-009","revision":1,"status":"planned","claim":"SubagentProvider"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-010","revision":1,"status":"planned","claim":"JobRegistry/WorkflowEngine"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-011","revision":1,"status":"planned","claim":"WebProvider/CredentialProvider"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-012","revision":1,"status":"planned","claim":"AttachmentStore/SpillStore"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-013","revision":1,"status":"planned","claim":"TelemetrySink"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-014","revision":1,"status":"planned","claim":"EmbeddingProvider/TrainingBackend/UpdateActivator"}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-015","revision":1,"status":"planned","claim":"Scoped overrides."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEAM-016","revision":1,"status":"planned","claim":"Atomic lifecycle."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-001","revision":1,"status":"planned","claim":"One planner."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-002","revision":1,"status":"planned","claim":"Section budgets."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-003","revision":1,"status":"planned","claim":"Priority and eviction."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-004","revision":1,"status":"planned","claim":"Deduplication."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-005","revision":1,"status":"planned","claim":"Explainability."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-006","revision":1,"status":"planned","claim":"Last-good snapshots."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-007","revision":1,"status":"planned","claim":"Overflow recovery."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-008","revision":1,"status":"planned","claim":"Hardware-aware native context."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-009","revision":1,"status":"planned","claim":"Prefix caching."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"CTX-010","revision":1,"status":"planned","claim":"Request replay."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"COMPACT-001","revision":1,"status":"planned","claim":"Non-destructive."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"COMPACT-002","revision":1,"status":"planned","claim":"Source range."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"COMPACT-003","revision":1,"status":"planned","claim":"Structured retention."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"COMPACT-004","revision":1,"status":"planned","claim":"Validation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"COMPACT-005","revision":1,"status":"planned","claim":"Typed modalities."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"REPO-001","revision":1,"status":"planned","claim":"Incremental symbol index."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"REPO-002","revision":1,"status":"planned","claim":"Language baseline."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"REPO-003","revision":1,"status":"planned","claim":"Ranked repository map."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"REPO-004","revision":1,"status":"planned","claim":"LSP integration."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"REPO-005","revision":1,"status":"planned","claim":"Evidence revisions."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"REPO-006","revision":1,"status":"planned","claim":"Progressive expansion."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"REPO-007","revision":1,"status":"planned","claim":"Multi-root."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-001","revision":1,"status":"planned","claim":"Registry."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-002","revision":1,"status":"planned","claim":"Progressive disclosure."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-003","revision":1,"status":"planned","claim":"Live refresh."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-004","revision":1,"status":"planned","claim":"Trust and policy."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-005","revision":1,"status":"planned","claim":"Health."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-006","revision":1,"status":"planned","claim":"Procedural promotion."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-001","revision":1,"status":"planned","claim":"Extension boundary."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-002","revision":1,"status":"planned","claim":"Manifest."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-003","revision":1,"status":"planned","claim":"Isolation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-004","revision":1,"status":"planned","claim":"Quarantine."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-005","revision":1,"status":"planned","claim":"Inventory."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-006","revision":1,"status":"planned","claim":"Ephemeral experiments."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-007","revision":1,"status":"planned","claim":"No automatic promotion."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-001","revision":1,"status":"planned","claim":"Unified registry."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-002","revision":1,"status":"planned","claim":"Migrate existing modes."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-003","revision":1,"status":"planned","claim":"Presets."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-004","revision":1,"status":"planned","claim":"Built-ins."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-005","revision":1,"status":"planned","claim":"Durable lineage."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-006","revision":1,"status":"planned","claim":"Continuable children."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-007","revision":1,"status":"planned","claim":"Budgets."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-008","revision":1,"status":"planned","claim":"Isolated workspaces."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-009","revision":1,"status":"planned","claim":"Structured delegation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"AGENT-010","revision":1,"status":"planned","claim":"Architect/editor/reviewer."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"JOB-001","revision":1,"status":"planned","claim":"Generic registry."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"JOB-002","revision":1,"status":"planned","claim":"Control."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"JOB-003","revision":1,"status":"planned","claim":"Recovery."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"JOB-004","revision":1,"status":"planned","claim":"Process containment."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"JOB-005","revision":1,"status":"planned","claim":"Output watermarks."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TOOL-001","revision":1,"status":"planned","claim":"One gateway."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TOOL-002","revision":1,"status":"planned","claim":"Pipeline."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TOOL-003","revision":1,"status":"planned","claim":"Resource-aware policy."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TOOL-004","revision":1,"status":"planned","claim":"Decisions."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TOOL-005","revision":1,"status":"planned","claim":"Immutable startup authorities."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TOOL-006","revision":1,"status":"planned","claim":"Generated catalogs."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TOOL-007","revision":1,"status":"planned","claim":"Receipts."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXEC-001","revision":1,"status":"planned","claim":"Shared execution world."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXEC-002","revision":1,"status":"planned","claim":"Container default."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXEC-003","revision":1,"status":"planned","claim":"Persistent terminal."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXEC-004","revision":1,"status":"planned","claim":"Spill store."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXEC-005","revision":1,"status":"planned","claim":"Remote execution."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXEC-006","revision":1,"status":"planned","claim":"Isolation claims."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-001","revision":1,"status":"planned","claim":"Memory classes."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-002","revision":1,"status":"planned","claim":"Per-class policy."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-003","revision":1,"status":"planned","claim":"Evidence-backed experience."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-004","revision":1,"status":"planned","claim":"Temporal truth."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-005","revision":1,"status":"planned","claim":"Retrieval explanation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-006","revision":1,"status":"planned","claim":"Vector-space identity."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-007","revision":1,"status":"planned","claim":"Quality evaluation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MEM-008","revision":1,"status":"planned","claim":"Procedural skill promotion."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-001","revision":1,"status":"planned","claim":"First-class evaluation domain."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-002","revision":1,"status":"planned","claim":"Suites."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-003","revision":1,"status":"planned","claim":"Metrics."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-004","revision":1,"status":"planned","claim":"Dimensions."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-005","revision":1,"status":"planned","claim":"Trajectory replay."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-006","revision":1,"status":"planned","claim":"Divergence."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-007","revision":1,"status":"planned","claim":"Promotion gates."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-008","revision":1,"status":"planned","claim":"Shadow/canary."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EVAL-009","revision":1,"status":"planned","claim":"Proposal lifecycle."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-001","revision":1,"status":"planned","claim":"Evidence first."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-002","revision":1,"status":"planned","claim":"Isolated candidate."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-003","revision":1,"status":"planned","claim":"Verification."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-004","revision":1,"status":"planned","claim":"Review and deployment."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-005","revision":1,"status":"planned","claim":"Unrestricted truthfulness."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-006","revision":1,"status":"planned","claim":"No automatic push."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-001","revision":1,"status":"planned","claim":"One gateway."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-002","revision":1,"status":"planned","claim":"Pure route planner."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-003","revision":1,"status":"planned","claim":"Logical roles."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-004","revision":1,"status":"planned","claim":"Calibration profiles."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-005","revision":1,"status":"planned","claim":"Capability profiles."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-006","revision":1,"status":"planned","claim":"MoE correctness."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-007","revision":1,"status":"planned","claim":"Controlled escalation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-008","revision":1,"status":"planned","claim":"Separate role budgets."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-009","revision":1,"status":"planned","claim":"Provider health."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-010","revision":1,"status":"planned","claim":"NPU boundary."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-001","revision":1,"status":"planned","claim":"Shared event vocabulary."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-002","revision":1,"status":"planned","claim":"Resumable streams."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-003","revision":1,"status":"planned","claim":"MCP."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-004","revision":1,"status":"planned","claim":"OpenAI compatibility."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-005","revision":1,"status":"planned","claim":"Editor/agent interoperability."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-006","revision":1,"status":"planned","claim":"Operator control plane."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-007","revision":1,"status":"planned","claim":"Mobile parity."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"API-008","revision":1,"status":"planned","claim":"Schema generation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DATA-001","revision":1,"status":"planned","claim":"Per-domain SQLite."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DATA-002","revision":1,"status":"planned","claim":"No cross-database transactions."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DATA-003","revision":1,"status":"planned","claim":"Transactional outbox."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DATA-004","revision":1,"status":"planned","claim":"Compare-and-set."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DATA-005","revision":1,"status":"planned","claim":"Crash-safe migration."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DATA-006","revision":1,"status":"planned","claim":"Epoch adoption."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DATA-007","revision":1,"status":"planned","claim":"Immutable artifact hashes."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"OPS-001","revision":1,"status":"planned","claim":"Operation context."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"OPS-002","revision":1,"status":"planned","claim":"Structured tracing."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"OPS-003","revision":1,"status":"planned","claim":"Health model."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"OPS-004","revision":1,"status":"planned","claim":"Startup reconciliation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"OPS-005","revision":1,"status":"planned","claim":"Graceful drain."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"OPS-006","revision":1,"status":"planned","claim":"Bounded telemetry."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-001","revision":1,"status":"planned","claim":"Credential broker."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-002","revision":1,"status":"planned","claim":"Egress policy."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-003","revision":1,"status":"planned","claim":"Filesystem races."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-004","revision":1,"status":"planned","claim":"Package/archive safety."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-005","revision":1,"status":"planned","claim":"Extension provenance."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-006","revision":1,"status":"planned","claim":"Prompt-injection provenance."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-007","revision":1,"status":"planned","claim":"Secret scanning."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-008","revision":1,"status":"planned","claim":"Fuzzing."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-009","revision":1,"status":"planned","claim":"Recovery boundary."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-001","revision":1,"status":"planned","claim":"Reproducible manifest."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-002","revision":1,"status":"planned","claim":"Qualified lock."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-003","revision":1,"status":"planned","claim":"Dataset provenance."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-004","revision":1,"status":"planned","claim":"Evaluation gate."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-005","revision":1,"status":"planned","claim":"Immutable deployment."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-006","revision":1,"status":"planned","claim":"Deployment service."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-007","revision":1,"status":"planned","claim":"Adapter catalog."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-008","revision":1,"status":"planned","claim":"Cheap learning first."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"TRAIN-009","revision":1,"status":"planned","claim":"Rollback."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"UPDATE-001","revision":1,"status":"planned","claim":"Bounded updates domain."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"UPDATE-002","revision":1,"status":"planned","claim":"Platform activation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"UPDATE-003","revision":1,"status":"planned","claim":"Runtime contract."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"UPDATE-004","revision":1,"status":"planned","claim":"Atomic activation."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"UPDATE-005","revision":1,"status":"planned","claim":"Signed release evidence."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DOC-001","revision":1,"status":"planned","claim":"Authority index."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DOC-002","revision":1,"status":"planned","claim":"Historical labeling."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DOC-003","revision":1,"status":"planned","claim":"ADR namespace."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DOC-004","revision":1,"status":"planned","claim":"Focused contracts."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DOC-005","revision":1,"status":"planned","claim":"Generated references."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DOC-006","revision":1,"status":"planned","claim":"Status evidence."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"DOC-007","revision":1,"status":"planned","claim":"No stale promises."}
