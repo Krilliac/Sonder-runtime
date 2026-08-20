@@ -22,7 +22,6 @@ get deterministic advice back with no host access at all.
 from __future__ import annotations
 
 import os
-import platform
 import json
 import subprocess
 import threading
@@ -36,11 +35,13 @@ from sonder_runtime.domain.model_sizing import (
     params_from_model_tag,
 )
 from sonder_runtime.platform.hardware_identity import looks_integrated
-from sonder_runtime.platform.hardware_probe import parse_memory_gb
+from sonder_runtime.platform.hardware_probe import parse_memory_gb, probe_platform
 from sonder_runtime.platform.hardware_identity import vendor_from_text
 
 # Legacy private name retained for callers that exercised the old probe helper.
 _parse_memory_gb = parse_memory_gb
+# Legacy private name retained for callers that exercised the old probe helper.
+_probe_platform = probe_platform
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -514,13 +515,6 @@ def _probe_accelerators() -> list[dict]:
     if system == "darwin":
         return _probe_macos_accelerators()
     return []
-
-
-def _probe_platform() -> str:
-    try:
-        return platform.system() or "unknown"
-    except Exception:
-        return "unknown"
 
 
 _DEFAULT_PROBES = {

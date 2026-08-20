@@ -1,5 +1,5 @@
 import sonder_hardware
-from sonder_runtime.platform.hardware_probe import parse_memory_gb
+from sonder_runtime.platform.hardware_probe import parse_memory_gb, probe_platform
 
 
 def test_hardware_memory_parser_has_canonical_platform_owner():
@@ -16,3 +16,21 @@ def test_hardware_memory_parser_rejects_missing_or_unknown_units():
     assert parse_memory_gb(None) is None
     assert parse_memory_gb("16") is None
     assert parse_memory_gb("unknown") is None
+
+
+def test_hardware_platform_probe_has_canonical_platform_owner(monkeypatch):
+    import sonder_runtime.platform.hardware_probe as hardware_probe
+
+    monkeypatch.setattr(hardware_probe.platform, "system", lambda: "Windows")
+    assert sonder_hardware._probe_platform is probe_platform
+    assert probe_platform() == "Windows"
+
+
+def test_hardware_platform_probe_degrades_when_platform_lookup_fails(monkeypatch):
+    import sonder_runtime.platform.hardware_probe as hardware_probe
+
+    def fail():
+        raise RuntimeError("platform lookup failed")
+
+    monkeypatch.setattr(hardware_probe.platform, "system", fail)
+    assert probe_platform() == "unknown"
