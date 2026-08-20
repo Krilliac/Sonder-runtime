@@ -5,6 +5,10 @@ from pathlib import Path
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
+def test_legacy_path_attribute_aliases_canonical_platform_module():
+    assert file_ops.sonder_paths is file_ops.runtime_paths
+
+
 def test_roots_file_path_uses_packaged_default_home(monkeypatch, tmp_path):
     home = tmp_path / "sonder-home"
     monkeypatch.delenv("SONDER_FILE_ROOTS_FILE", raising=False)

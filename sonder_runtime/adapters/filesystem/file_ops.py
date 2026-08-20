@@ -20,6 +20,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import sonder_runtime.adapters.git_discovery as git_discovery
 from sonder_runtime.platform import paths as runtime_paths
 
+# Preserve the packaged filesystem adapter's historical attribute shape while
+# callers migrate from the old root ``sonder_paths`` name.  This is an alias
+# to the canonical platform module, not a second path implementation.
+sonder_paths = runtime_paths
+
 
 MAX_READ_BYTES = 256_000
 MAX_WRITE_BYTES = 1_000_000
