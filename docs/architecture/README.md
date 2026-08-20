@@ -246,3 +246,6 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Twenty-First Slice: `WP1-ONE-HUNDRED-TWENTY-FIRST-SLICE.md` —
   moved the pure prompt-section formatting helper into the domain boundary
   while preserving the server compatibility alias.
+- WP1 One-Hundred-Twenty-Fourth Slice: `WP1-ONE-HUNDRED-TWENTY-FOURTH-SLICE.md` —
+  moved the pure schema-gap formatting helper into the domain boundary while
+  preserving the server compatibility alias.

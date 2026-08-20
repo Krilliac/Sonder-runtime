@@ -140,6 +140,9 @@ from sonder_runtime.domain.fanout_policy import nonchat_reason as _fanout_noncha
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
 )
+from sonder_runtime.domain.schema_policy import (
+    format_schema_gaps as _format_schema_gaps,
+)
 from sonder_runtime.domain.prompt_composition import (
     join_system_parts as _join_system_parts,
 )
@@ -4578,9 +4581,6 @@ _VERIFIED_SCHEMA_KEYWORDS = frozenset({
 })
 
 # How many gaps a disclosure names before it summarizes the rest.
-_MAX_REPORTED_SCHEMA_GAPS = 8
-
-
 def _schema_coverage(value, schema, path, gaps):
     """Mirror `json_schema_verifier._validate`'s descent, recording what it skips.
 
@@ -4646,14 +4646,6 @@ def _schema_coverage_gaps(value, schema):
         return _schema_coverage(value, schema, "$", [])
     except Exception as exc:
         return [("$", "coverage could not be determined: %s" % exc)]
-
-
-def _format_schema_gaps(gaps):
-    shown = ["%s (%s)" % (path, reason) for path, reason in gaps[:_MAX_REPORTED_SCHEMA_GAPS]]
-    remaining = len(gaps) - len(shown)
-    if remaining > 0:
-        shown.append("and %d more" % remaining)
-    return "; ".join(shown)
 
 
 def _with_schema_coverage(text, gaps):

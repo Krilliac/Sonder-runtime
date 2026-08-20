@@ -394,6 +394,8 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Ninety-Eighth Slice: structured logging, redaction, and child-environment filtering now belong to `sonder_runtime.platform.logging`; `sonder_logging` remains a thin module-identity compatibility shim preserving logger and monkeypatch behavior.
 - WP1 One-Hundred-Eleventh Slice: metrics ownership is now single-path under `sonder_runtime.platform.metrics`; the duplicate `sonder_metrics.py` root delegate is retired after all production callers and focused tests moved to the canonical module.
 - WP1 One-Hundred-Twelfth Slice: unsafe-lab state now belongs to the security adapter, with pure explicit-input policy separated into the platform seam and zero architecture violations.
+- WP1 One-Hundred-Twenty-Third Slice: durable operations-event sink ownership now belongs to `sonder_runtime.adapters.operations_event_sink`; the generic strangler name remains an identity-preserving compatibility alias.
+- WP1 One-Hundred-Twenty-Fourth Slice: pure schema-gap formatting now belongs to `sonder_runtime.domain.schema_policy`, preserving the server compatibility alias.
 - WP1 One-Hundred-Thirteenth Slice: autopilot repository ownership now belongs to `sonder_runtime.adapters.persistence.autopilot_repository`, removing the generic strangler repository implementation.
 - WP1 One-Hundred-Fourteenth Slice: HTTP serve-temperature policy now belongs to `sonder_runtime.interfaces.http.serve_policy`, preserving the server compatibility alias.
 - WP1 One-Hundred-Sixteenth Slice: process-probe ownership now belongs to `sonder_runtime.adapters.process_probe.ProcessProbeAdapter`; the generic strangler no longer owns that port adapter.

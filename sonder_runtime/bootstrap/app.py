@@ -16,10 +16,8 @@ from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
-from ..adapters.strangler_services import (
-    LegacyUnitOfWork,
-    OperationsEventSink,
-)
+from ..adapters.strangler_services import LegacyUnitOfWork
+from ..adapters.operations_event_sink import OperationsEventSink
 from ..adapters.eval_history_reader import LegacyEvaluationHistoryReader
 from ..adapters.inspection_executor import LegacyInspectionExecutor
 from ..adapters.backup_gateway import LegacyBackupGateway
