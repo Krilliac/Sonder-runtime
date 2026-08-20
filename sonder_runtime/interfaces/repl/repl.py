@@ -1,8 +1,10 @@
 """sonder — interactive terminal REPL for Sonder Runtime's local learning loop.
 
-Boots straight into the real learning loop (server.sonder), the way `claude`
-drops you into an interactive session. Slash-commands control trace/strict mode,
-teach outcomes back, and surface stats/lessons. Stdlib only + server/memory_store.
+Boots straight into the injected legacy runtime's learning loop, the way
+`claude` drops you into an interactive session. Slash-commands control
+trace/strict mode, teach outcomes back, and surface stats/lessons. The legacy
+runtime is an explicit composition dependency; this interface never discovers
+it at import time.
 """
 import json
 import inspect
@@ -13,7 +15,7 @@ import sys
 import threading
 import time
 
-import server
+from sonder_runtime.domain.common.errors import DependencyUnavailable
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import elapsed_label as _elapsed_label
 import sonder_runtime.adapters.memory_store as memory_store
@@ -49,6 +51,50 @@ except ImportError:  # pragma: no cover - the REPL must never hard-depend on it
 
 CURRENT_TOKEN = ""
 REPL_HISTORY_LIMIT = 200
+
+
+class _LegacyRuntimeProxy:
+    """Late-bound view of the explicitly configured legacy runtime.
+
+    Keeping the existing command branches pointed at one proxy makes the
+    migration mechanical without giving the interface an import-time escape
+    hatch. Missing configuration is an explicit dependency failure rather
+    than an attempted module lookup or a partially working REPL.
+    """
+
+    def __getattr__(self, name):
+        runtime = _legacy_runtime
+        if runtime is None:
+            raise DependencyUnavailable(
+                "REPL requires an injected legacy runtime; call "
+                "configure_legacy_runtime(runtime) first"
+            )
+        try:
+            return getattr(runtime, name)
+        except AttributeError as exc:
+            raise DependencyUnavailable(
+                "injected REPL runtime does not provide %s" % name
+            ) from exc
+
+
+_legacy_runtime = None
+server = _LegacyRuntimeProxy()
+
+
+def configure_legacy_runtime(runtime):
+    """Inject the runtime used by all REPL commands.
+
+    The caller owns composition and lifetime. ``None`` is rejected so a
+    failed bootstrap cannot silently reset a previously valid runtime.
+    No module discovery or dynamic import is performed here.
+    """
+    if runtime is None:
+        raise DependencyUnavailable(
+            "cannot configure the REPL with an empty legacy runtime"
+        )
+    global _legacy_runtime
+    _legacy_runtime = runtime
+    return runtime
 
 # The raw composer history is deliberately process-local, but that is not a
 # reason to retain credentials for the lifetime of the terminal.  Ctrl+R
@@ -1031,7 +1077,6 @@ def _env_int(name, default):
 TRAIN_MAX_N = max(1, _env_int("SONDER_TRAIN_MAX_N", 500))
 
 LIVE_RELOAD_MODULES = [
-    "server",
     "sonder_runtime.adapters.memory_store",
     "grounding",
     "training_tasks",
@@ -1047,9 +1092,8 @@ LIVE_RELOAD_MODULES = [
 
 
 def _maybe_live_reload():
-    global server, memory_store, grounding, training_tasks, intents, feedback, personas, debug_dump
+    global memory_store, grounding, training_tasks, intents, feedback, personas, debug_dump
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
-    server = modules.get("server", server)
     memory_store = modules.get(
         "sonder_runtime.adapters.memory_store", memory_store
     )
