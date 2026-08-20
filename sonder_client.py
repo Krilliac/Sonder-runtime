@@ -24,6 +24,10 @@ import urllib.request
 from sonder_runtime.adapters.client_request import (
     build_chat_request as _build_chat_request,
 )
+from sonder_runtime.adapters.client_config import (
+    parse_argv as _parse_argv,
+    resolve_config as _resolve_config,
+)
 from sonder_runtime.platform.client_fallback import enabled as local_fallback_enabled
 
 LOCAL_FALLBACK_SERVER = os.environ.get("SONDER_LOCAL_FALLBACK", "http://127.0.0.1:11435")
@@ -38,24 +42,6 @@ Example:
     set SONDER_API_KEY=s3cret
     python sonder_client.py
 """
-
-
-def _parse_argv(argv):
-    """Parse --server/--key overrides out of argv. Returns (server, key)."""
-    server = None
-    key = None
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--server" and i + 1 < len(argv):
-            server = argv[i + 1]
-            i += 2
-        elif arg == "--key" and i + 1 < len(argv):
-            key = argv[i + 1]
-            i += 2
-        else:
-            i += 1
-    return server, key
 
 
 def build_request(server, api_key, prompt):
@@ -109,11 +95,8 @@ def send_prompt_with_fallback(server, api_key, prompt, fallback_server=None):
 
 
 def resolve_config(argv):
-    """Resolve (server, api_key) from argv overrides then env. Returns (server, key)."""
-    argv_server, argv_key = _parse_argv(argv)
-    server = argv_server or os.environ.get("SONDER_SERVER", "")
-    key = argv_key or os.environ.get("SONDER_API_KEY", "")
-    return server, key
+    """Compatibility delegate for the packaged client configuration adapter."""
+    return _resolve_config(argv)
 
 
 def main(argv=None):
