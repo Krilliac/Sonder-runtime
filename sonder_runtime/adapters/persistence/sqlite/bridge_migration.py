@@ -21,6 +21,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from .automation import init_automation_db, AUTOMATION_DDL
 from .memory import add_outbox_to_memory_db, add_epoch_marker as memory_epoch
@@ -190,6 +191,8 @@ def _stamp_epoch(conn: sqlite3.Connection, version: str) -> None:
 def run_bridge_migration(
     sonder_home: Path,
     version: str = "spec5-bridge",
+    *,
+    step_hook: Callable[[str], None] | None = None,
 ) -> MigrationReceipt:
     """Execute the full epoch 1→2 bridge migration.
 
@@ -199,29 +202,56 @@ def run_bridge_migration(
     now = datetime.now(timezone.utc).isoformat()
     backup_dir = sonder_home / "backups" / f"pre-epoch2-{now.replace(':', '-')}"
 
+    active_connections: list[sqlite3.Connection] = []
+
+    def checkpoint(name: str) -> None:
+        # This hook is intentionally an explicit test/rehearsal seam.  The
+        # normal runtime supplies no hook, so production behavior is
+        # unchanged; the rehearsal harness can stop at a named boundary and
+        # prove recovery from the already-created backup.
+        if step_hook is not None:
+            try:
+                step_hook(name)
+            except Exception:
+                # Fault injection is deliberately allowed to model a process
+                # stop, but the rehearsal must not retain Windows file locks
+                # while it verifies/restores the disposable copy.
+                for connection in active_connections:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+                raise
+
     # 1. Backup all existing databases
     db_names = ["memory.db", "autopilot.db", "fleet.db",
                 "operations.db", "updates.db"]
     for name in db_names:
         _backup_db(sonder_home / name, backup_dir)
+    checkpoint("after_backup")
 
     # 2. Initialize new databases
     automation_db_path = sonder_home / "automation.db"
     automation_conn = init_automation_db(automation_db_path)
+    active_connections.append(automation_conn)
 
     # Ensure operations.db has the new projection tables
     ops_db_path = sonder_home / "operations.db"
     ops_conn = init_operations_db(ops_db_path)
+    active_connections.append(ops_conn)
 
     # Create new selfmod.db and training.db
     selfmod_conn = init_selfmod_db(sonder_home / "selfmod.db")
     training_conn = init_training_db(sonder_home / "training.db")
+    active_connections.extend((selfmod_conn, training_conn))
+    checkpoint("after_domain_initialization")
 
     # 3. Migrate tasks from memory.db → automation.db
     tasks_migrated = 0
     memory_db_path = sonder_home / "memory.db"
     if memory_db_path.exists():
         memory_conn = sqlite3.connect(str(memory_db_path))
+        active_connections.append(memory_conn)
         tasks_migrated = _migrate_tasks(memory_conn, automation_conn)
         # Add outbox to memory.db
         add_outbox_to_memory_db(memory_conn)
@@ -234,11 +264,13 @@ def run_bridge_migration(
         memory_conn.close()
     else:
         memory_row_count = 0
+    checkpoint("after_data_adoption")
 
     # Add outbox to updates.db if it exists
     updates_db_path = sonder_home / "updates.db"
     if updates_db_path.exists():
         updates_conn = sqlite3.connect(str(updates_db_path))
+        active_connections.append(updates_conn)
         add_outbox_to_updates_db(updates_conn)
         updates_epoch(updates_conn)
         _stamp_epoch(updates_conn, version)
@@ -251,6 +283,7 @@ def run_bridge_migration(
     _stamp_epoch(training_conn, version)
 
     automation_row_count = _count_rows(automation_conn, "automation_runs")
+    checkpoint("after_epoch_stamp")
 
     # Close all connections
     automation_conn.close()
