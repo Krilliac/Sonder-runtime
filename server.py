@@ -197,6 +197,7 @@ from sonder_runtime.domain.thinking_policy import (
 )
 from sonder_runtime.domain.schema_policy import (
     format_schema_gaps as _format_schema_gaps,
+    leading_json_object as _leading_json_object_policy,
 )
 from sonder_runtime.platform.model_retry_policy import (
     hosted_overflow_retry_enabled as _hosted_overflow_retry_enabled,
@@ -4733,28 +4734,10 @@ def offload(
 
 
 def _leading_json_object(text):
-    """The JSON object a schema-constrained reply starts with.
-
-    A constrained response is JSON first and footers after -- the interaction-id
-    line, an activity block, a `[schema_unverified: ...]` disclosure. Decoding
-    the leading value instead of matching those trailers means this does not
-    have to know their formats, and cannot be broken by a new one.
-    """
-    body = (text or "").lstrip()
     try:
-        data, _end = json.JSONDecoder().raw_decode(body)
+        return _leading_json_object_policy(text)
     except ValueError as exc:
-        raise ModelCallError(
-            "protocol",
-            "response did not begin with the JSON object the schema required: %s" % exc,
-        ) from exc
-    if not isinstance(data, dict):
-        raise ModelCallError(
-            "protocol",
-            "response was a JSON %s, not the object the schema required"
-            % type(data).__name__,
-        )
-    return data
+        raise ModelCallError("protocol", str(exc)) from exc
 
 
 def _extract_grounded_impl(

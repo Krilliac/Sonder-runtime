@@ -521,3 +521,10 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Twelfth Slice: `WP1-TWO-HUNDRED-TWELFTH-SLICE.md` —
   moved the concrete NVIDIA GPU memory probe into the packaged platform
   hardware-probe boundary while preserving the legacy hardware alias.
+- WP1 Two-Hundred-Fourteenth Slice: `WP1-TWO-HUNDRED-FOURTEENTH-SLICE.md` —
+  moved standalone-client chat request construction into the packaged adapter
+  boundary while preserving the root client compatibility delegate.
+- WP1 Two-Hundred-Thirteenth Slice: `WP1-TWO-HUNDRED-THIRTEENTH-SLICE.md` —
+  moved leading JSON-object parsing for schema-constrained responses into the
+  packaged domain schema-policy boundary while preserving the root protocol
+  error contract.
