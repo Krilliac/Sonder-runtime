@@ -62,6 +62,8 @@ _TERMINALS = {
     "model.completed", "model.failed", "tool.completed", "tool.failed",
     "approval.granted", "approval.denied", "compaction.completed",
     "retrieval.completed", "subagent.completed", "subagent.failed",
+    # Legacy session event spellings remain valid at this application seam.
+    "model.response", "tool.result",
 }
 
 
@@ -112,7 +114,14 @@ def diagnose_session_tail(events: Iterable[DomainEvent]) -> SessionTailDiagnosis
         if event.event_type in _IN_FLIGHT:
             pending.setdefault(_operation_key(event), index)
         elif event.event_type in _TERMINALS:
-            pending.pop(_operation_key(event), None)
+            key = _operation_key(event)
+            if key in pending:
+                pending.pop(key)
+            else:
+                family = key[0]
+                fallback = next((candidate for candidate in pending if candidate[0] == family), None)
+                if fallback is not None:
+                    pending.pop(fallback)
     if not issues and pending:
         first = min(pending.values())
         boundary = first
