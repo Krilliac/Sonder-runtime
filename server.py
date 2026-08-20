@@ -86,6 +86,9 @@ from sonder_runtime.platform.environment_options import (
     cpu_thread_default as _cpu_thread_default,
     env_int_option as _env_int_option,
 )
+from sonder_runtime.platform.location_consent import (
+    location_consent as _location_consent,
+)
 from sonder_runtime.platform.version import (
     running_source_commit_at_import as _running_source_commit,
 )
@@ -4981,15 +4984,8 @@ def extract_grounded(
 
 
 def _env_location_consent() -> bool:
-    """Opt-in approximate-IP-location consent for the local MCP/REPL surfaces.
-
-    Off by default to preserve the privacy contract. Set
-    SONDER_LOCATION_CONSENT=1 to allow server-side approximate location lookup
-    on this host's own chat surfaces.
-    """
-    return os.environ.get("SONDER_LOCATION_CONSENT", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    """Compatibility delegate for the approximate-location opt-in policy."""
+    return _location_consent()
 
 
 def _session_messages_light(

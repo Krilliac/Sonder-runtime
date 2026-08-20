@@ -29,7 +29,13 @@ import subprocess
 import threading
 from pathlib import Path
 
-from sonder_runtime.domain.model_sizing import params_from_model_tag
+from sonder_runtime.domain.model_sizing import (
+    band_fits,
+    decode_band,
+    estimated_footprint_gb,
+    memory_band,
+    params_from_model_tag,
+)
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -111,87 +117,6 @@ _MODEL_FOOTPRINTS = (
 # One ladder, deliberately applied to two different counts: the *total* decides
 # which memory class the weights land in, the *active* decides how fast it
 # answers. Same question ("how big is this many parameters"), asked twice.
-_PARAM_BANDS = (
-    (5.0, "3-4B"),
-    (13.0, "7B"),
-    (40.0, "13-34B"),
-    (float("inf"), "70B+"),
-)
-# Ascending, so two bands can be compared to answer "does this model fit here".
-_BAND_ORDER = tuple(label for _ceiling, label in _PARAM_BANDS)
-
-# Ollama/Qwen spell an MoE tag as "<total>b-a<active>b" -- qwen3-coder:30b-a3b,
-# qwen3:235b-a22b, qwen3-coder:480b-a35b. A dense tag carries a single "<n>b".
-# Quantization suffixes (-q4_K_M, -fp16, -instruct) trail the size and are
-# ignored. Anything unrecognised returns None rather than a guess, because a
-# wrong parameter count is worse here than an absent one: absent falls back to
-# today's hardware-derived behavior, wrong silently changes the advice.
-def decode_band(active_params_b) -> str | None:
-    """Return the band whose *decode speed* an ``active_params_b`` model matches.
-
-    ``None`` when the active count is unknown or nonsensical, so callers keep
-    their existing hardware-derived band instead of acting on a bad number.
-    """
-    try:
-        active = float(active_params_b)
-    except (TypeError, ValueError):
-        return None
-    if active <= 0:
-        return None
-    return _band_for(active, _PARAM_BANDS)
-
-
-def memory_band(total_params_b) -> str | None:
-    """Return the memory class a model's *total* parameter count lands in.
-
-    This is the model's own footprint, independent of the host: every expert has
-    to be resident whether or not the card can hold them. Pairing it with the
-    hardware band is what answers "does this fit here", which a hardware-derived
-    band alone cannot -- that one only ever reports the largest model that would
-    fit, so it silently agrees with whatever you point at it.
-    """
-    try:
-        total = float(total_params_b)
-    except (TypeError, ValueError):
-        return None
-    if total <= 0:
-        return None
-    return _band_for(total, _PARAM_BANDS)
-
-
-def band_fits(model_band: str, capacity_band: str) -> bool | None:
-    """Whether ``model_band`` fits inside ``capacity_band``. None if unknown."""
-    if model_band not in _BAND_ORDER or capacity_band not in _BAND_ORDER:
-        return None
-    return _BAND_ORDER.index(model_band) <= _BAND_ORDER.index(capacity_band)
-
-
-# Measured, not assumed: qwen3-coder:30b-a3b at Q4_K_M reports 18.56 GB of
-# weights and `ollama ps` shows 19 GB resident, i.e. ~0.62 GB per billion
-# parameters. That lines up with the _MODEL_FOOTPRINTS ladder above (32B -> 20
-# GB) and with the module's stated convention of quoting sizes at roughly 4-bit.
-_Q4_GB_PER_BILLION = 0.62
-
-
-def estimated_footprint_gb(total_params_b) -> float | None:
-    """Approximate resident size, in GB, of a Q4-class model of this size.
-
-    A planning estimate, not a promise: the real number moves with quantization,
-    KV cache type, and context length. It exists because comparing *bands* is too
-    coarse to answer "does this fit" -- the ``13-34B`` band spans roughly 8 GB to
-    20 GB, so a 16 GB card and a 30B model land in the same band while the model
-    genuinely does not fit. Confirmed on exactly that pair: 19 GB resident
-    against 16 GB of VRAM, which Ollama served at a 23%/77% CPU/GPU split.
-    """
-    try:
-        total = float(total_params_b)
-    except (TypeError, ValueError):
-        return None
-    if total <= 0:
-        return None
-    return round(total * _Q4_GB_PER_BILLION, 1)
-
-
 # --- default host probes ------------------------------------------------------
 #
 # These are the only functions that actually look at the machine. They are never
