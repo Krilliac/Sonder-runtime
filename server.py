@@ -147,6 +147,9 @@ from sonder_runtime.domain.campaign_formatting import (
 from sonder_runtime.domain.campaign_expectations import (
     campaign_expected as _campaign_expected,
 )
+from sonder_runtime.domain.cloud_access import (
+    cloud_disabled_message as _cloud_disabled_message,
+)
 from sonder_runtime.domain.campaign_environment import (
     environment_failure as _campaign_environment_failure,
 )
@@ -334,13 +337,6 @@ def available_tiers(include_disabled=False):
 
 def _valid_tier_names():
     return ", ".join(available_tiers())
-
-
-def _cloud_disabled_message():
-    return (
-        "ERROR: hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 "
-        "to opt in; prompts sent to cloud tiers leave this machine."
-    )
 
 
 def discovered_models():

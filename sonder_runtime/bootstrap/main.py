@@ -4,21 +4,13 @@ Flags are parsed here, frozen immediately, and never re-read.
 """
 from __future__ import annotations
 
-import os
 import sys
 
 from ..adapters import runtime_capabilities as caps
 from ..adapters.cli_options import parse_args
+from ..adapters.runtime_configuration import build_config_from_env
 from ..adapters.runtime_capabilities import RuntimeCapabilities
-from .container import RuntimeConfig, build_runtime
-
-
-def build_config_from_env(profile: str) -> RuntimeConfig:
-    return RuntimeConfig(
-        profile=profile,
-        model_backend=os.environ.get("SONDER_MODEL_BACKEND", "ollama").strip().lower(),
-        sonder_home=os.environ.get("SONDER_HOME", ""),
-    )
+from .container import build_runtime
 
 
 def main(argv: list[str] | None = None) -> int:

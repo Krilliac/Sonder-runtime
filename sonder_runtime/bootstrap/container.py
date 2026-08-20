@@ -12,18 +12,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..adapters.runtime_configuration import RuntimeConfig
 from ..adapters.runtime_capabilities import RuntimeCapabilities
 from ..application.ports.model_gateway import ModelGateway
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
-
-
-@dataclass(frozen=True)
-class RuntimeConfig:
-    """Validated, frozen configuration — no environment reads after this."""
-    profile: str = "workstation-local"
-    model_backend: str = "ollama"
-    sonder_home: str = ""
 
 
 @dataclass(frozen=True)
