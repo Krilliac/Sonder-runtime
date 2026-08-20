@@ -1,8 +1,9 @@
 # REMAINING-DOC-001-007 — Documentation authority closure
 
-This record closes the documentation contract work for DOC-001 through DOC-007
-as an implementation foundation. It does not edit the master-spec checkboxes or
-the append-only evidence ledger.
+This record implements the documentation authority/catalog foundation for
+DOC-001 through DOC-005. It does not edit the master-spec checkboxes or the
+append-only evidence ledger. DOC-006 and DOC-007 remain process/source-review
+work beyond this focused slice.
 
 ## Contract coverage
 
@@ -12,7 +13,7 @@ the append-only evidence ledger.
 | DOC-002 | Historical labeling | authority index historical table and README labels | implemented foundation |
 | DOC-003 | Unique ADR namespace | `adr/README.md` and namespace test | implemented foundation |
 | DOC-004 | Focused contracts | focused current-contract map | implemented foundation |
-| DOC-005 | Generated references | generated catalog map and freshness tests | implemented foundation; configuration generator remains open |
+| DOC-005 | Generated references | generated runtime reference, architecture map, and freshness checker | implemented foundation where runtime metadata permits |
 | DOC-006 | Status evidence discipline | explicit no-checkbox/no-ledger-change rule and evidence hierarchy | process documented; formal verification remains open |
 | DOC-007 | No stale promises | inventory below and authority tests | implemented inventory; source prose still requires ordinary review |
 
@@ -33,15 +34,14 @@ document and the master-spec checkbox/evidence state.
 
 ## Generated-reference freshness
 
-`GeneratedCatalogs.generate` is the current source for MCP, OpenAI, CLI, and
-client catalog projections. Its digest is deterministic across source ordering,
-changes when a typed contract changes, and is present in the client projection.
-`tests/test_remaining_tool_catalogs.py` covers the generator; the document
-authority test checks that this source and freshness contract remain discoverable.
-
-Configuration references are intentionally listed as an open gap because the
-current generator does not generate a configuration catalog. This is a
-truthful limitation, not a stale promise.
+`scripts/generate_documentation_catalogs.py` projects command and MCP tool
+metadata, typed event payload fields, and typed configuration dataclass fields
+into deterministic JSON/Markdown references. `GeneratedCatalogs.generate`
+remains the application-level client/schema projection; this documentation
+adapter does not alter runtime behavior. Unavailable optional metadata is
+recorded as an explicit source error. The freshness gate is
+`scripts/check_documentation_authority.py` and its focused contract is
+`tests/test_remaining_doc_001_005.py`.
 
 ## Verification boundary
 
