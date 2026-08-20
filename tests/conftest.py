@@ -54,6 +54,16 @@ def _isolate_fleet_ledger():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _configure_http_legacy_boundary():
+    """Exercise the same explicit runtime injection as the serve bootstrap."""
+    import server
+    from sonder_runtime.interfaces.http import serve
+
+    serve.configure_legacy_runtime(server)
+    yield
+
+
 @pytest.fixture
 def without_standing():
     """Drop the calibration standing an agent end report may now carry.
