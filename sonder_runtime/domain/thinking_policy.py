@@ -13,6 +13,17 @@ _INLINE_THINKING_TAG_RE = re.compile(
 )
 
 
+def thinking_exhausted_budget(out, message, *, inline_thinking=False) -> bool:
+    """Return whether reasoning consumed an output budget before an answer."""
+    if not isinstance(message, dict):
+        return False
+    thinking = message.get("thinking")
+    if not inline_thinking and (not isinstance(thinking, str) or not thinking.strip()):
+        return False
+    done_reason = out.get("done_reason") if isinstance(out, dict) else None
+    return str(done_reason or "").strip().casefold() == "length"
+
+
 def strip_inline_thinking(content):
     """Drop closed leading model reasoning tags from public assistant text.
 

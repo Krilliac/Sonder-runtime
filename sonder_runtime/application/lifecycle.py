@@ -15,6 +15,24 @@ MAX_CONTEXT_TOKENS = 1_000_000
 _CONTEXT_SIZE = re.compile(r"^(\d{1,7})(?:\.(\d{1,3}))?([km]?)$")
 
 
+def process_state_number(tracker) -> int:
+    """Return the stable numeric projection used by lifecycle metrics.
+
+    The application boundary owns this presentation policy. It accepts the
+    tracker protocol by shape so it does not depend on platform state types.
+    """
+    process = tracker.snapshot().process
+    return {
+        "starting": 0,
+        "migrating": 1,
+        "ready": 2,
+        "degraded": 3,
+        "draining": 4,
+        "stopping": 5,
+        "failed": 6,
+    }[process.value]
+
+
 def normalize_context_size(value):
     """Validate the bounded context syntax accepted by lifecycle requests."""
     text = str(value or "8192").strip().lower()

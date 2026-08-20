@@ -28,3 +28,19 @@ def test_server_keeps_identity_compatible_alias():
     import server
 
     assert server._strip_inline_thinking is thinking_policy.strip_inline_thinking
+
+
+def test_thinking_budget_predicate_is_packaged_and_root_alias_is_identical():
+    import server
+
+    thinking = {"thinking": "private", "content": ""}
+    assert thinking_policy.thinking_exhausted_budget(
+        {"done_reason": "length"}, thinking,
+    )
+    assert not thinking_policy.thinking_exhausted_budget(
+        {"done_reason": "stop"}, thinking,
+    )
+    assert not thinking_policy.thinking_exhausted_budget(
+        {"done_reason": "length"}, {"content": ""},
+    )
+    assert server._thinking_exhausted_budget is thinking_policy.thinking_exhausted_budget

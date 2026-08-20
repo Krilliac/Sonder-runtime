@@ -1,8 +1,20 @@
 # Sonder Runtime architecture documents
 
+- WP1 Two-Hundred-Thirty-Ninth Slice: `WP1-TWO-HUNDRED-THIRTY-NINTH-SLICE.md` —
+  moved standalone-client HTTP execution into the packaged transport adapter
+  while preserving the root request-builder compatibility seam.
+
 - WP1 Two-Hundred-Thirty-Fifth Slice: `WP1-TWO-HUNDRED-THIRTY-FIFTH-SLICE.md` —
   moved speculative-tool safety policy into the packaged domain boundary while
   preserving the root allowlist alias.
+
+- WP1 Two-Hundred-Fortieth Slice: `WP1-TWO-HUNDRED-FORTIETH-SLICE.md` —
+  moved pure doctor terminal formatting and status rollup into the packaged
+  bootstrap boundary while preserving root compatibility aliases.
+
+- WP1 Two-Hundred-Forty-First Slice: `WP1-TWO-HUNDRED-FORTY-FIRST-SLICE.md` —
+  moved the pure thinking-budget exhaustion predicate into the packaged
+  domain boundary while preserving the root `server` compatibility alias.
 
 - WP1 Two-Hundred-Twenty-Seventh Slice: `WP1-TWO-HUNDRED-TWENTY-SEVENTH-SLICE.md` —
   moved environment-file parsing into the packaged configuration policy
@@ -582,9 +594,15 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Thirty-Sixth Slice: `WP1-TWO-HUNDRED-THIRTY-SIXTH-SLICE.md` —
   moved the debug-dump redaction import to the packaged logging boundary while
   preserving the `debug_dump.Redactor` compatibility alias.
+- WP1 Two-Hundred-Thirty-Eighth Slice: `WP1-TWO-HUNDRED-THIRTY-EIGHTH-SLICE.md` —
+  moved context-health text formatting to the packaged observability boundary
+  while preserving the generic packaged formatter alias.
 - WP1 Two-Hundred-Twenty-Eighth Slice: `WP1-TWO-HUNDRED-TWENTY-EIGHTH-SLICE.md` —
   moved launcher-health token status ownership into the packaged health
   status boundary while preserving the root `sonder_health` alias.
 - WP1 Two-Hundred-Twenty-Second Slice: `WP1-TWO-HUNDRED-TWENTY-SECOND-SLICE.md` —
   moved accelerator-inventory de-duplication into the packaged hardware
   adapter boundary while preserving the legacy hardware compatibility alias.
+- WP1 Two-Hundred-Forty-Second Slice: `WP1-TWO-HUNDRED-FORTY-SECOND-SLICE.md` —
+  moved the remaining pure hardware sizing helpers into the packaged domain
+  boundary and documented the packaged accelerator/platform probe seams.

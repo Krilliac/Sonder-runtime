@@ -31,6 +31,9 @@ from sonder_runtime.domain.model_sizing import (
     band_fits,
     decode_band,
     estimated_footprint_gb,
+    band_for_capacity,
+    largest_model_class,
+    MODEL_FOOTPRINTS,
     memory_band,
     params_from_model_tag,
 )
@@ -59,6 +62,8 @@ _read_text = read_text
 _probe_total_ram_gb = probe_total_ram_gb
 _probe_gpu = probe_nvidia_gpu
 _dedupe_accelerators = dedupe_accelerators
+_band_for = band_for_capacity
+_largest_model_class = largest_model_class
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -111,13 +116,7 @@ _PROFILE_CACHE: dict | None = None
 # classes, not promises: exact architectures, quantizers, and context lengths
 # vary. The explicit ladder is more useful than the broad legacy bands when a
 # user is deciding whether CPU/unified-memory spill can make a model runnable.
-_MODEL_FOOTPRINTS = (
-    (3.0, "3-4B"),
-    (6.0, "7-8B"),
-    (10.0, "14B"),
-    (20.0, "32B"),
-    (40.0, "70B"),
-)
+_MODEL_FOOTPRINTS = MODEL_FOOTPRINTS
 
 
 # --- mixture-of-experts: two parameter counts, two different questions --------
@@ -509,13 +508,6 @@ def profile_text(*, workload: str = "general", refresh: bool = False,
     return render(profile["hardware"], profile["recommendation"])
 
 
-def _band_for(capacity_gb: float, ladder) -> str:
-    for ceiling, band in ladder:
-        if capacity_gb < ceiling:
-            return band
-    return ladder[-1][1]
-
-
 def _capacity(hw: dict) -> tuple[float, str]:
     """Return ``(usable_gb, basis)`` where basis is ``'vram'`` or ``'ram'``.
 
@@ -540,15 +532,6 @@ def _capacity(hw: dict) -> tuple[float, str]:
         return float(hw["vram_gb"]), "vram"
     ram = hw.get("total_ram_gb")
     return (float(ram) if ram else 0.0), "ram"
-
-
-def _largest_model_class(usable_gb: float) -> str:
-    chosen = "below 3B"
-    for footprint, label in _MODEL_FOOTPRINTS:
-        if usable_gb + 1e-9 < footprint:
-            break
-        chosen = label
-    return chosen
 
 
 def _execution_plan(hw: dict) -> dict:

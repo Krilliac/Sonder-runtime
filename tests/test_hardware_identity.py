@@ -1,5 +1,8 @@
 from sonder_runtime.platform import hardware_identity
 import sonder_hardware
+from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
+from sonder_runtime.domain.model_sizing import band_for_capacity, largest_model_class
+from sonder_runtime.platform.hardware_probe import probe_platform
 
 
 def test_vendor_policy_is_owned_by_platform_boundary():
@@ -67,3 +70,16 @@ def test_accelerator_record_keeps_explicit_unknown_values_conservative():
     assert record["integrated"] is None
     assert record["presence_verified"] is None
     assert record["runtime_ready"] is None
+
+
+def test_hardware_boundaries_keep_accelerator_and_platform_probes_packaged():
+    assert sonder_hardware._probe_gpu is probe_nvidia_gpu
+    assert sonder_hardware._probe_platform is probe_platform
+
+
+def test_model_sizing_helpers_own_remaining_root_capacity_policy():
+    assert sonder_hardware._band_for is band_for_capacity
+    assert sonder_hardware._largest_model_class is largest_model_class
+    assert sonder_hardware._band_for(8.0, ((10.0, "small"), (float("inf"), "large"))) == "small"
+    assert sonder_hardware._largest_model_class(20.0) == largest_model_class(20.0)
+    assert band_for_capacity(10.0, ((10.0, "small"), (float("inf"), "large"))) == "large"

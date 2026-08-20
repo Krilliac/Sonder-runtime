@@ -24,6 +24,9 @@ import urllib.request
 from sonder_runtime.adapters.client_request import (
     build_chat_request as _build_chat_request,
 )
+from sonder_runtime.adapters.client_transport import (
+    send_chat_prompt as _send_chat_prompt,
+)
 from sonder_runtime.adapters.client_config import (
     parse_argv as _parse_argv,
     resolve_config as _resolve_config,
@@ -52,14 +55,9 @@ def build_request(server, api_key, prompt):
 def send_prompt(server, api_key, prompt):
     """Send a prompt to the hosted Sonder Runtime; returns the assistant's reply text,
     or raises on a network/HTTP error (caller handles presentation)."""
-    url, headers, body = build_request(server, api_key, prompt)
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req) as resp:
-        raw = resp.read().decode("utf-8")
-    import json
-
-    obj = json.loads(raw)
-    return obj["choices"][0]["message"]["content"]
+    return _send_chat_prompt(
+        server, api_key, prompt, request_builder=build_request
+    )
 
 
 def _same_server(a, b):
