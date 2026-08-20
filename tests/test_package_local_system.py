@@ -407,8 +407,8 @@ def test_empty_package_marker_is_scannable_not_oversized(tmp_path):
 
 
 def test_layered_package_ships_so_the_served_app_can_actually_start():
-    """The flat modules alone are not a runnable server. reward.py, recall.py,
-    runtime_policy.py and others import sonder_runtime.*, so omitting that
+    """The flat modules alone are not a runnable server. recall.py,
+    runtime_policy.py, and others import sonder_runtime.*, so omitting that
     directory produced bundles whose server died on first import with
     ModuleNotFoundError before binding a port -- and the desktop app showed
     only "cannot reach server", because the crash lands in a detached

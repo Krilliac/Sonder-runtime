@@ -18,6 +18,8 @@
   record.
 - [`WP1-SECOND-SLICE.md`](WP1-SECOND-SLICE.md) — memory MMR adapter migration and
   verification record.
+- [`WP1-THIRD-SLICE.md`](WP1-THIRD-SLICE.md) — root reward facade retirement and
+  verification record.
 
 ## Current focused contracts
 

@@ -87,6 +87,7 @@ COMPATIBILITY_ROOT_MODULES = {
 RETIRED_ROOT_MODULES = frozenset({
     Path("context_overflow.py"),
     Path("mmr_rerank.py"),
+    Path("reward.py"),
 })
 
 # Applied migrations are immutable historical artifacts. They may retain an

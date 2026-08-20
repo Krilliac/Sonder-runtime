@@ -33,7 +33,7 @@ ALLOWED_DIRS = {
     "seed",
     # The SPEC-3 layered package. Leaving it out produced a bundle whose flat
     # modules were all present and whose server still died on its first
-    # import: reward.py, recall.py, runtime_policy.py and 8 others import
+    # import: recall.py, runtime_policy.py, and other entry modules import
     # sonder_runtime.*, so sonder_serve raised ModuleNotFoundError before it
     # ever bound a port. The app surfaced only "cannot reach server", because
     # the crash happens in a detached process whose log the GUI never reads.

@@ -27,8 +27,8 @@ import pytest
 
 import json_schema_verifier
 import learning_health
-import reward
 import server
+from sonder_runtime.domain.memory import rules as reward_rules
 
 
 SCHEMA = {
@@ -228,9 +228,9 @@ def test_rejected_lands_in_the_caller_judged_population(monkeypatch):
     # The point of filing this at all: `failed` would bury a real caller-facing
     # rejection in the self-graded curriculum's thousands of autograded rows,
     # where the only quality figure anyone should trust cannot see it.
-    assert "rejected" in reward.VALID_SIGNALS
+    assert "rejected" in reward_rules.VALID_SIGNALS
     assert "rejected" not in learning_health._AUTOGRADED_SIGNALS
-    assert not reward.is_good("rejected")
+    assert not reward_rules.reward_is_good("rejected")
 
 
 def test_a_schema_violation_is_filed_as_a_rejected_outcome(monkeypatch):

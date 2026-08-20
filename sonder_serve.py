@@ -2217,7 +2217,7 @@ def _handle_feedback(content, state=None):
         return None
 
     signal = feedback.classify_signal(content)
-    if signal and server.reward.score(signal) > 0:
+    if signal and server.reward_rules.reward_score(signal) > 0:
         server.record_outcome(state.last_iid, signal)
         state.last_iid = None
         return "Got it - recorded %s so I can learn." % signal

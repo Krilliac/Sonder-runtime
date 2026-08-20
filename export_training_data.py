@@ -16,7 +16,7 @@ import unicodedata
 
 import contribute
 import sonder_runtime.adapters.memory_store as memory_store
-import reward
+from sonder_runtime.domain.memory import rules as reward_rules
 import sonder_paths
 import training_data
 
@@ -97,8 +97,8 @@ def _select_examples(conn):
             "response": response,
             "prompt_key": _canonical_prompt(task),
             "population": (
-                "caller" if best.get("outcome_source") == reward.SOURCE_CALLER
-                else reward.signal_population(best.get("signal"))
+                "caller" if best.get("outcome_source") == reward_rules.OUTCOME_SOURCE_CALLER
+                else reward_rules.signal_population(best.get("signal"))
             ),
             "evidence_rowid": int(best.get("outcome_rowid") or 0),
             "interaction_rowid": int(first.get("interaction_rowid") or 0),
@@ -109,12 +109,15 @@ def _select_examples(conn):
         # duplicate-prompt resolution and capacity eviction both preferred the
         # runtime's own marking to a human's -- in a corpus already ~98%
         # self-graded, that is the wrong row surviving every squeeze.
-        evidence_rank = reward.evidence_rank(best.get("signal"))
+        evidence_rank = reward_rules.evidence_rank(best.get("signal"))
         # Provenance is the actual answer to who judged this row.  A caller
         # recording a passing test has still reviewed the delegated work; do
         # not demote that row merely because its signal name is execution-like.
-        if best.get("outcome_source") == reward.SOURCE_CALLER:
-            evidence_rank = (evidence_rank[0], 2, reward.score(best.get("signal")))
+        if best.get("outcome_source") == reward_rules.OUTCOME_SOURCE_CALLER:
+            evidence_rank = (
+                evidence_rank[0], 2,
+                reward_rules.reward_score(best.get("signal")),
+            )
         candidate["rank"] = (
             evidence_rank,
             candidate["evidence_rowid"],
@@ -153,9 +156,9 @@ def _select_examples(conn):
 
     def row_evidence_rank(row):
         signal = row.get("signal")
-        rank = reward.evidence_rank(signal)
-        if row.get("outcome_source") == reward.SOURCE_CALLER:
-            rank = (rank[0], 2, reward.score(signal))
+        rank = reward_rules.evidence_rank(signal)
+        if row.get("outcome_source") == reward_rules.OUTCOME_SOURCE_CALLER:
+            rank = (rank[0], 2, reward_rules.reward_score(signal))
         return rank, int(row.get("outcome_rowid") or 0)
 
     for row in memory_store.interaction_outcome_evidence(
@@ -183,14 +186,14 @@ def _select_examples(conn):
         except (TypeError, ValueError, OverflowError):
             stored_reward = float("nan")
         canonical = (
-            signal in reward.VALID_SIGNALS
+            signal in reward_rules.VALID_SIGNALS
             and math.isfinite(stored_reward)
-            and stored_reward == reward.score(signal)
+            and stored_reward == reward_rules.reward_score(signal)
         )
         if not canonical:
             # A corrupt reward row is untrustworthy evidence.
             current["contradictory"] = True
-        elif reward.is_good(signal):
+        elif reward_rules.reward_is_good(signal):
             # is_good is eligibility; evidence_rank is the ordering. Comparing
             # rows by score() alone lets a self-graded pass displace the
             # caller's judgement of the same interaction.
@@ -198,7 +201,7 @@ def _select_examples(conn):
                 row_evidence_rank(row) > row_evidence_rank(current["best"])
             ):
                 current["best"] = row
-        elif reward.score(signal) < 0:
+        elif reward_rules.reward_score(signal) < 0:
             # Only a genuinely negative outcome disputes a good one. A weak
             # positive below the good threshold - "compiled" (0.70) once
             # GOOD_THRESHOLD rose to 0.71 - is not evidence against the work;

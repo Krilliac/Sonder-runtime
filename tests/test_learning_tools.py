@@ -2,6 +2,7 @@ import threading
 import memory_store
 import pytest
 import server
+from sonder_runtime.domain.common.errors import InvalidInput
 
 
 def _prepared_candidate(lesson_id="LNEW", text="Use pathlib.Path for path joins."):
@@ -78,6 +79,13 @@ def test_learn_from_example_records_distilled_lesson(monkeypatch, tmp_path):
         assert memory_store.get_lesson_text(conn, "LNEW") == "Use pathlib.Path for path joins."
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("tool", [server.record_outcome, server.learn_from_example])
+def test_learning_tools_reject_unknown_signals_with_typed_error(tool):
+    args = ("I1",) if tool is server.record_outcome else ("task", "solution")
+    with pytest.raises(InvalidInput, match="unknown signal 'bogus'"):
+        tool(*args, signal="bogus")
 
 
 def test_record_outcome_same_signal_is_idempotent_and_distills_once(

@@ -8,7 +8,7 @@ Reproduced before the fix::
     go.note_generation("gen-1", "sonder", project="p")
     go.attribute("build_run", ok=False, project="p", record_fn=...)
       -> {"attributed": True, "signal": "failed", "recorded": True}
-      -> reward.score("failed") == -1.0
+      -> reward_rules.reward_score("failed") == -1.0
 
 and the entry is *burned*: ``build_run`` joins ``pending.judged``, so the later,
 genuine passing ``build_run`` for that same generation comes back
@@ -47,7 +47,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import grounded_outcomes as go  # noqa: E402
-import reward  # noqa: E402
+from sonder_runtime.domain.memory import rules as reward_rules  # noqa: E402
 import server  # noqa: E402
 
 
@@ -143,7 +143,7 @@ def test_a_real_failure_is_still_recorded_as_failed():
     )
     assert report["attributed"] is True
     assert written == [("gen-1", "failed")]
-    assert reward.score("failed") == -1.0
+    assert reward_rules.reward_score("failed") == -1.0
 
 
 def test_an_unmeasured_run_is_counted_separately():

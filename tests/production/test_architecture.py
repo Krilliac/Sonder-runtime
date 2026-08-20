@@ -259,7 +259,9 @@ def test_checker_detects_a_violation(tmp_path):
     assert "domain may not import" in result.stdout
 
 
-@pytest.mark.parametrize("root_module", ["context_overflow.py", "mmr_rerank.py"])
+@pytest.mark.parametrize(
+    "root_module", ["context_overflow.py", "mmr_rerank.py", "reward.py"],
+)
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
     """A completed root migration is a permanent shrink-only boundary."""
     shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
