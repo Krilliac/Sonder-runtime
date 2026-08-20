@@ -22,6 +22,7 @@ from .query_export import (
     SessionQueryPage,
     TranscriptRecord,
 )
+from .capture import CapturedTool, CapturedTurn, SessionCaptureService
 
 __all__ = [
     "SessionProjection",
@@ -44,4 +45,7 @@ __all__ = [
     "SessionQueryEngine",
     "SessionQueryPage",
     "TranscriptRecord",
+    "CapturedTool",
+    "CapturedTurn",
+    "SessionCaptureService",
 ]
