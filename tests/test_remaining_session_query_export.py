@@ -68,3 +68,28 @@ def test_rejects_unbounded_limits_and_malformed_cursor(tmp_path):
         engine.query_events("s1", page_size=3)
     with pytest.raises(QueryExportError, match="cursor"):
         engine.query_events("s1", page_size=2, cursor="not-a-cursor")
+
+
+def test_cursor_is_bound_to_the_initial_range(tmp_path):
+    engine = SessionQueryEngine(_repo(tmp_path), max_page_size=2, max_scan=4)
+    first = engine.query_events("s1", page_size=1, start_sequence=2)
+    with pytest.raises(QueryExportError, match="does not match"):
+        engine.query_events("s1", page_size=1, start_sequence=1, cursor=first.next_cursor)
+
+
+def test_query_respects_a_stricter_adapter_read_ceiling(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "session.db", max_read_limit=2)
+    for sequence in range(4):
+        repo.append("s3", "event", {"sequence": sequence})
+    engine = SessionQueryEngine(repo, max_page_size=2, max_scan=10)
+    page = engine.query_events("s3", page_size=1)
+    assert [item.sequence for item in page.records] == [1]
+    assert page.scanned == 2
+
+
+def test_range_export_has_stable_order_and_reports_range_integrity(tmp_path):
+    engine = SessionQueryEngine(_repo(tmp_path), max_page_size=2, max_scan=10)
+    exported = engine.export_events("s1", start_sequence=2, end_sequence=3, max_events=5)
+    assert [item.sequence for item in exported.events] == [2, 3]
+    assert exported.integrity is not None and exported.integrity.valid
+    assert exported.to_jsonl() == exported.to_jsonl()
