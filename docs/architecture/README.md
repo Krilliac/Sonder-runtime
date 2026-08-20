@@ -299,6 +299,12 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Forty-Second Slice: `WP1-ONE-HUNDRED-FORTY-SECOND-SLICE.md` —
   moved SPEC-5 CLI argument parsing into the canonical packaged input adapter
   while preserving the bootstrap compatibility import.
+- WP1 One-Hundred-Forty-Third Slice: `WP1-ONE-HUNDRED-FORTY-THIRD-SLICE.md` —
+  moved hosted-tier opt-in policy text into the pure domain boundary while
+  preserving the server compatibility alias.
 - WP1 One-Hundred-Forty-First Slice: `WP1-ONE-HUNDRED-FORTY-FIRST-SLICE.md` —
   moved the pure context token-estimate helper into the domain boundary while
   preserving the server compatibility alias.
+- WP1 One-Hundred-Forty-Fourth Slice: `WP1-ONE-HUNDRED-FORTY-FOURTH-SLICE.md` —
+  moved startup `RuntimeConfig` and environment normalization into a
+  canonical packaged adapter while preserving bootstrap compatibility imports.
