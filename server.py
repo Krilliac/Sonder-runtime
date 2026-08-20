@@ -157,6 +157,9 @@ from sonder_runtime.domain.campaign_expectations import (
 from sonder_runtime.domain.cloud_access import (
     cloud_disabled_message as _cloud_disabled_message,
 )
+from sonder_runtime.domain.interaction_footer import (
+    trailing_interaction_id as _trailing_interaction_id,
+)
 from sonder_runtime.domain.campaign_environment import (
     environment_failure as _campaign_environment_failure,
 )
@@ -4932,21 +4935,6 @@ def offload(
         )
     except ModelCallError as error:
         return _format_model_call_error(error)
-
-
-def _trailing_interaction_id(text):
-    """Read back the id `with_footer` appended, using the footer's own delimiters.
-
-    `parse_interaction_id` only matches the lowercase-hex ids the store happens
-    to mint today. Using it here would mean that the day an id gains a hyphen, a
-    rejection stops being filed -- silently, and in the direction that flatters
-    the numbers, since only negative outcomes are filed from this path.
-    """
-    body = (text or "").rstrip()
-    start = body.rfind(FOOTER_PREFIX)
-    if start < 0 or not body.endswith("]"):
-        return None
-    return body[start + len(FOOTER_PREFIX):-1].strip() or None
 
 
 def _leading_json_object(text):
