@@ -60,6 +60,7 @@ from sonder_runtime.bootstrap.config_loading import (
     load_config_or_none as _load_config_or_none_impl,
 )
 from sonder_runtime.bootstrap.doctor_checks import (
+    summarize_memory_quality as _summarize_memory_quality,
     summarize_self_heal as _summarize_self_heal,
 )
 
@@ -154,7 +155,7 @@ def _check_self_heal() -> dict:
 
 
 def _check_memory_quality() -> dict:
-    """Summarize memory-quality audit counters (read-only)."""
+    """Compatibility delegate for the packaged memory-quality policy."""
     import os
 
     db_path = os.environ.get("SONDER_DB")
@@ -165,37 +166,9 @@ def _check_memory_quality() -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("memory quality surfaces unavailable (%s)" % exc)
-    try:
-        conn = memory_store.connect(db_path)
-    except Exception as exc:
-        return _skip("cannot open memory db (%s)" % exc)
-    try:
-        audit = memory_quality.audit(conn)
-    except Exception as exc:
-        return _skip("audit failed (%s)" % exc)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    severe = int(audit.get("path_or_secret_like", 0)) + int(
-        audit.get("missing_fts", 0)
-    ) + int(audit.get("orphan_fts", 0))
-    hygiene = int(audit.get("exact_duplicate_prunable", 0)) + int(
-        audit.get("no_embedding", 0)
-    ) + int(audit.get("vague_without_anchor", 0))
-    total = int(audit.get("total_lessons", 0))
-    if severe:
-        return {
-            "status": STATUS_FAIL,
-            "detail": "%d lessons, %d severe issue(s)" % (total, severe),
-        }
-    if hygiene:
-        return {
-            "status": STATUS_WARN,
-            "detail": "%d lessons, %d hygiene issue(s)" % (total, hygiene),
-        }
-    return {"status": STATUS_OK, "detail": "%d lessons clean" % total}
+    return _summarize_memory_quality(
+        memory_store.connect, memory_quality.audit, db_path
+    )
 
 
 def _check_runtime_policy() -> dict:

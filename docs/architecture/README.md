@@ -1,5 +1,12 @@
 # Sonder Runtime architecture documents
 
+- WP1 Two-Hundred-Forty-Ninth Slice: `WP1-TWO-HUNDRED-FORTY-NINTH-SLICE.md` —
+  moved pure launcher output, timeout, and retention policy into a packaged
+  adapter while preserving root helper aliases.
+- WP1 Two-Hundred-Fiftieth Slice: `WP1-TWO-HUNDRED-FIFTIETH-SLICE.md` —
+  moved read-only memory-quality doctor policy into the packaged bootstrap
+  boundary while preserving the root compatibility delegate.
+
 - WP1 Two-Hundred-Forty-Fourth Slice: `WP1-TWO-HUNDRED-FORTY-FOURTH-SLICE.md` —
   moved launcher idempotency-key and durable replay validation into a packaged
   adapter while preserving root helper and regex aliases.

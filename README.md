@@ -428,6 +428,8 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
   uses identity-preserving aliases to the packaged platform boundary; the
   accelerator and host-platform probe seams remain explicitly packaged.
 - WP1 Two-Hundred-Forty-Eighth Slice: standalone-client endpoint comparison and connection-error fallback now live in packaged client adapters; root names remain compatibility aliases.
+- WP1 Two-Hundred-Forty-Ninth Slice: pure launcher output-tail, timeout, and operation-retention policy now live in `sonder_runtime.adapters.launcher_output`; root private helper names remain identity-preserving compatibility aliases.
+- WP1 Two-Hundred-Fiftieth Slice: read-only memory-quality doctor policy now lives in `sonder_runtime.bootstrap.doctor_checks`, preserving the root `_check_memory_quality` compatibility delegate and injected legacy collaborators.
 - WP1 Two-Hundred-Thirty-Eighth Slice: context-health text formatting now belongs to the packaged observability health-formatting boundary, preserving the generic packaged formatter alias while leaving the root launcher-health contract unchanged.
 - WP1 Two-Hundred-Thirty-Ninth Slice: standalone-client HTTP execution now lives in `sonder_runtime.adapters.client_transport`, preserving the root `send_prompt` and `build_request` compatibility seams.
 - WP1 Two-Hundred-Fortieth Slice: pure doctor terminal formatting and status rollup now live in `sonder_runtime.bootstrap.doctor_formatting`, preserving root rendering, status, and rollup aliases.
