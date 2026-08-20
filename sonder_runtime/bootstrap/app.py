@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-import threading
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.process_probe import ProcessProbeAdapter
@@ -31,6 +30,7 @@ from ..adapters.workflow_repository import WorkflowRepositoryAdapter
 from ..adapters.workflow_loop_runner import LoopRunnerAdapter
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
+from ..adapters.application_lifecycle import ApplicationLifecycle
 from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
 from ..application.backup import BackupService
@@ -141,21 +141,13 @@ def build_application(
     )
 
 
-_default: Application | None = None
-_default_lock = threading.Lock()
+_application_lifecycle = ApplicationLifecycle(lambda: build_application())
 
 
 def default_app() -> Application:
     """Process-wide default graph for compatibility shims."""
-    global _default
-    with _default_lock:
-        if _default is None:
-            # Two first callers previously built different process-wide graphs,
-            # splitting stateful adapters between requests during startup.
-            _default = build_application()
-        return _default
+    return _application_lifecycle.get()
 
 
 def reset_for_tests() -> None:
-    global _default
-    _default = None
+    _application_lifecycle.reset()

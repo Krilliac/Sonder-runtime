@@ -308,3 +308,10 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Forty-Fourth Slice: `WP1-ONE-HUNDRED-FORTY-FOURTH-SLICE.md` —
   moved startup `RuntimeConfig` and environment normalization into a
   canonical packaged adapter while preserving bootstrap compatibility imports.
+- WP1 One-Hundred-Forty-Fifth Slice: `WP1-ONE-HUNDRED-FORTY-FIFTH-SLICE.md` —
+  moved model-usage provenance classification into the pure domain boundary
+  while preserving the server compatibility alias.
+- WP1 One-Hundred-Forty-Sixth Slice: `WP1-ONE-HUNDRED-FORTY-SIXTH-SLICE.md` —
+  moved generic process-wide application lifecycle ownership into a canonical
+  packaged adapter while preserving bootstrap lazy caching, atomic
+  construction, reset behavior, and compatibility functions.
