@@ -90,7 +90,10 @@ def test_legacy_adapter_delegates_existing_server_hooks(monkeypatch):
         lambda *, safety_checked: events.append(("run", safety_checked)),
     )
 
-    runtime = LegacyServerMcpRuntime()
+    runtime = LegacyServerMcpRuntime(
+        require_startup_safety=server.require_mcp_startup_safety,
+        run_mcp=server.run_mcp,
+    )
     runtime.require_startup_safety()
     runtime.run(safety_checked=True)
 

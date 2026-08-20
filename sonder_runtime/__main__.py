@@ -27,8 +27,8 @@ import sys
 from sonder_runtime.platform import config as sonder_config
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
-from sonder_runtime.adapters.command_surface import LegacyServerMcpRuntime
 from sonder_runtime.application.command_surface import McpCommand
+from sonder_runtime.bootstrap.legacy_mcp import build_legacy_server_mcp_runtime
 
 
 def _load_config(args) -> "sonder_config.SonderConfig":
@@ -566,7 +566,7 @@ def cmd_repl(args) -> int:
 
 def cmd_mcp(args) -> int:
     try:
-        McpCommand(LegacyServerMcpRuntime()).execute(
+        McpCommand(build_legacy_server_mcp_runtime()).execute(
             lambda: _export_runtime_environment(_load_config(args))
         )
     except sonder_config.ConfigError as exc:
