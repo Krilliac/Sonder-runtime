@@ -217,6 +217,7 @@ from sonder_runtime.domain.prompt_composition import (
     join_system_parts as _join_system_parts,
 )
 from sonder_runtime.domain.model_error_formatting import (
+    embedded_model_error as _embedded_model_error_policy,
     redact_model_error_value as _redact_model_error_value,
     safe_model_error_detail as _safe_model_error_detail,
 )
@@ -3667,12 +3668,7 @@ def _local_model_retries() -> int:
 
 def _embedded_model_error(result) -> str:
     """Error text from a 2xx body that reports failure in-band, else ""."""
-    if not isinstance(result, dict):
-        return ""
-    embedded = result.get("error")
-    if not embedded:
-        return ""
-    return _safe_model_error_detail(embedded)
+    return _embedded_model_error_policy(result)
 
 
 def _compacted_overflow_payload(payload, verdict):

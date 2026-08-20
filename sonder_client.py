@@ -22,6 +22,8 @@ import sys
 import urllib.error
 import urllib.request
 
+from sonder_runtime.platform.client_fallback import enabled as local_fallback_enabled
+
 LOCAL_FALLBACK_SERVER = os.environ.get("SONDER_LOCAL_FALLBACK", "http://127.0.0.1:11435")
 
 USAGE = """usage: sonder_client.py [--server URL] [--key API_KEY]
@@ -82,12 +84,6 @@ def send_prompt(server, api_key, prompt):
 
 def _same_server(a, b):
     return (a or "").strip().rstrip("/") == (b or "").strip().rstrip("/")
-
-
-def local_fallback_enabled():
-    return os.environ.get("SONDER_FALLBACK_LOCAL", "1").strip().lower() not in (
-        "0", "false", "no", "off",
-    )
 
 
 def send_prompt_with_fallback(server, api_key, prompt, fallback_server=None):
