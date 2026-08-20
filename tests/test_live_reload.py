@@ -426,3 +426,22 @@ def test_server_live_reload_rebinds_evaluation_history_modules(monkeypatch):
 
     assert server.eval_history_use_cases is service_module
     assert server.eval_history_adapter is adapter_module
+
+
+def test_server_reloads_authoritative_reward_rules(monkeypatch):
+    import server
+
+    original = server.reward_rules
+    replacement = object()
+    monkeypatch.setattr(
+        server.live_reload,
+        "reload_changed_modules",
+        lambda names: {"sonder_runtime.domain.memory.rules": replacement},
+    )
+    try:
+        server._maybe_live_reload()
+        assert server.reward_rules is replacement
+        assert "sonder_runtime.domain.memory.rules" in server.LIVE_RELOAD_MODULES
+        assert "reward" not in server.LIVE_RELOAD_MODULES
+    finally:
+        server.reward_rules = original
