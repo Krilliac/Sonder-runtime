@@ -27,7 +27,7 @@ from ..adapters.preference_adapters import (
     NullPreferenceEventSink,
 )
 from ..adapters.preference_codec import PreferenceCodecAdapter
-from ..adapters.workflow_adapters import LegacyWorkflowRepository
+from ..adapters.workflow_repository import WorkflowRepositoryAdapter
 from ..adapters.workflow_loop_runner import LoopRunnerAdapter
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
@@ -137,7 +137,7 @@ def build_application(
             PreferenceCodecAdapter(preference_module_provider),
             NullPreferenceEventSink(),
         ),
-        workflows=WorkflowService(LegacyWorkflowRepository(), LoopRunnerAdapter()),
+        workflows=WorkflowService(WorkflowRepositoryAdapter(), LoopRunnerAdapter()),
     )
 
 

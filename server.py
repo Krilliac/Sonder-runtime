@@ -141,6 +141,9 @@ from sonder_runtime.domain.model_capabilities import (
     fanout_capabilities as _fanout_capabilities,
 )
 from sonder_runtime.domain.fanout_policy import nonchat_reason as _fanout_nonchat_reason
+from sonder_runtime.domain.campaign_formatting import (
+    campaign_headline as _campaign_headline,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
 )
@@ -3484,28 +3487,6 @@ _EMPTY_DRAIN = {
     "drained": 0, "stored": 0, "deferred": 0, "failed": 0, "skipped": 0,
     "backlog": None,
 }
-
-
-def _campaign_headline(
-    passed, total, recorded, failed_recorded, pitfall_errors, elapsed,
-):
-    """Build the campaign's first line - the only line an unattended run keeps.
-
-    scripts/nightly_self_improve.py records _first_line() of each tool result,
-    so anything a nightly review must be able to see has to appear here. A
-    pitfall-distillation crash reported only in a per-attempt record, or on a
-    later summary line, is invisible in exactly the run where nobody is
-    watching. The count is appended only when non-zero so a healthy run's
-    headline stays byte-identical to what it has always been.
-    """
-    headline = (
-        "campaign generate/compile/execute/record: "
-        "%d/%d passed, %d recorded, %d failed-recorded"
-        % (passed, total, recorded, failed_recorded)
-    )
-    if pitfall_errors:
-        headline += ", %d pitfall-errors" % pitfall_errors
-    return "%s in %.3fs" % (headline, elapsed)
 
 
 def _record_failure_pitfall(interaction_id, task, response, error):
