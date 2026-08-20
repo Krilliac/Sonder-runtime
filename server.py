@@ -193,6 +193,9 @@ from sonder_runtime.platform.model_retry_policy import (
     hosted_overflow_retry_enabled as _hosted_overflow_retry_enabled,
     overflow_retry_allowed as _overflow_retry_allowed,
 )
+from sonder_runtime.platform.runtime_summary import (
+    local_runtime_summary as _platform_local_runtime_summary,
+)
 from sonder_runtime.domain.prompt_composition import (
     join_system_parts as _join_system_parts,
 )
@@ -277,14 +280,12 @@ def _local_model_options(temperature, num_predict, num_ctx):
 
 
 def _local_runtime_summary():
+    """Compatibility delegate for the packaged local-runtime summary."""
     options = _local_model_options(0.2, 1, SESSION_NUM_CTX)
-    return {
-        "num_thread": options.get("num_thread", "ollama-default"),
-        "num_gpu": options.get("num_gpu", "ollama-default"),
-        "num_batch": options.get("num_batch", "ollama-default"),
-        "num_ctx_native": options.get("num_ctx", "ollama-default"),
-        "num_ctx_requested": context_policy.requested(SESSION_NUM_CTX),
-    }
+    return _platform_local_runtime_summary(
+        options,
+        context_policy.requested(SESSION_NUM_CTX),
+    )
 
 
 def _context_requested(value=None):

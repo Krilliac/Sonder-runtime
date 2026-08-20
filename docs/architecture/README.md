@@ -453,3 +453,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Eighty-Ninth Slice: `WP1-ONE-HUNDRED-EIGHTY-NINTH-SLICE.md` —
   moved Ollama inventory-envelope validation into the packaged adapter
   boundary while preserving the root server compatibility delegate.
+- WP1 One-Hundred-Ninety-Second Slice: `WP1-ONE-HUNDRED-NINETY-SECOND-SLICE.md` —
+  moved doctor check-registry normalization into the packaged domain boundary
+  while preserving the root doctor compatibility delegate.
+- WP1 One-Hundred-Ninety-First Slice: `WP1-ONE-HUNDRED-NINETY-FIRST-SLICE.md` —
+  moved local-runtime summary projection into the packaged platform boundary
+  while preserving the root server compatibility delegate.
