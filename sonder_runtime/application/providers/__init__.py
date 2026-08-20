@@ -7,6 +7,14 @@ from .lifecycle_registry import (
     ScopedProviderOverride,
     ScopedProviderRegistry,
 )
+from .specialized_lifecycle import (
+    EmbeddingLifecycleAdapter,
+    SpecializedLifecycleError,
+    SpecializedProviderBundle,
+    TrainingLifecycleAdapter,
+    UpdateLifecycleAdapter,
+    wire_specialized_providers,
+)
 
 __all__ = [
     "LifecycleProvider",
@@ -14,4 +22,10 @@ __all__ = [
     "ProviderRegistration",
     "ScopedProviderOverride",
     "ScopedProviderRegistry",
+    "EmbeddingLifecycleAdapter",
+    "SpecializedLifecycleError",
+    "SpecializedProviderBundle",
+    "TrainingLifecycleAdapter",
+    "UpdateLifecycleAdapter",
+    "wire_specialized_providers",
 ]
