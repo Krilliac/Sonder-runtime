@@ -1,4 +1,4 @@
-from sonder_runtime.platform.environment_options import env_int_option
+from sonder_runtime.platform.environment_options import cpu_thread_default, env_int_option
 import server
 
 
@@ -17,6 +17,16 @@ def test_integer_is_trimmed_and_parsed():
 
 def test_invalid_integer_returns_default():
     assert env_int_option("OPTION", 17, environ={"OPTION": "wat"}) == 17
+
+
+def test_cpu_thread_default_uses_a_single_thread_minimum():
+    assert cpu_thread_default(cpu_count=None) >= 1
+    assert cpu_thread_default(cpu_count=0) == 4
+    assert cpu_thread_default(cpu_count=-2) == 1
+
+
+def test_server_cpu_thread_alias_preserves_identity():
+    assert server._cpu_thread_default is cpu_thread_default
 
 
 def test_server_alias_preserves_identity():

@@ -82,7 +82,10 @@ from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
 from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
 )
-from sonder_runtime.platform.environment_options import env_int_option as _env_int_option
+from sonder_runtime.platform.environment_options import (
+    cpu_thread_default as _cpu_thread_default,
+    env_int_option as _env_int_option,
+)
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -254,10 +257,6 @@ def _live_cloud_model(configured, default):
     if not lowered or lowered in RETIRED_CLOUD_MODELS:
         return default
     return configured
-
-
-def _cpu_thread_default():
-    return max(1, os.cpu_count() or 4)
 
 
 def _local_model_options(temperature, num_predict, num_ctx):
