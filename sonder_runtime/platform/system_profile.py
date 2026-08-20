@@ -17,7 +17,10 @@ from sonder_runtime.platform.npu_policy import (
     vendor_from_name as _npu_vendor_from_name,
     vendor_from_pnp_id as _npu_vendor_from_pnp_id,
 )
-from sonder_runtime.platform.config_environment import env_float as _env_float
+from sonder_runtime.platform.config_environment import (
+    env_bool_from_env as _env_bool,
+    env_float as _env_float,
+)
 
 
 DEFAULT_TEXT = """# Sonder standing instructions
@@ -143,13 +146,6 @@ def system_prompt():
     if not text:
         return ""
     return "Standing instructions from system_profile.md:\n%s" % text
-
-
-def _env_bool(name, default=False):
-    value = os.environ.get(name, "").strip().lower()
-    if not value:
-        return default
-    return value in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)

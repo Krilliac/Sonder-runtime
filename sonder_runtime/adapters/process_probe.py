@@ -10,8 +10,8 @@ class ProcessProbeAdapter:
     def identity(self, pid: int) -> ProcessIdentity | None:
         import sonder_runtime.adapters.process_liveness as process_liveness
 
-        state, fingerprint = process_liveness.probe_process(pid)
-        if state == process_liveness.PROCESS_DEAD or not fingerprint:
+        fingerprint = process_liveness.process_identity(pid)
+        if not fingerprint:
             return None
         return ProcessIdentity(pid=int(pid), started_at=0.0, fingerprint=str(fingerprint))
 

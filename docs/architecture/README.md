@@ -547,6 +547,9 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Twenty-Fourth Slice: `WP1-TWO-HUNDRED-TWENTY-FOURTH-SLICE.md` —
   moved standalone-client argv and environment configuration resolution into
   the packaged client adapter while preserving root compatibility delegates.
+- WP1 Two-Hundred-Twenty-Fifth Slice: `WP1-TWO-HUNDRED-TWENTY-FIFTH-SLICE.md` —
+  moved live-process fingerprint selection into the canonical process-liveness
+  adapter while preserving the `ProcessProbeAdapter.identity` port surface.
 - WP1 Two-Hundred-Seventeenth Slice: `WP1-TWO-HUNDRED-SEVENTEENTH-SLICE.md` —
   moved bounded integer-limit normalization into the packaged domain boundary
   while preserving the root server compatibility delegate.
@@ -556,6 +559,9 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Twenty-Third Slice: `WP1-TWO-HUNDRED-TWENTY-THIRD-SLICE.md` —
   moved self-heal doctor-result classification into the packaged bootstrap
   doctor boundary while preserving root compatibility wiring.
+- WP1 Two-Hundred-Twenty-Sixth Slice: `WP1-TWO-HUNDRED-TWENTY-SIXTH-SLICE.md` —
+  moved system-profile boolean environment-override parsing into the packaged
+  configuration-environment boundary while preserving the `_env_bool` alias.
 - WP1 Two-Hundred-Twenty-Second Slice: `WP1-TWO-HUNDRED-TWENTY-SECOND-SLICE.md` —
   moved accelerator-inventory de-duplication into the packaged hardware
   adapter boundary while preserving the legacy hardware compatibility alias.
