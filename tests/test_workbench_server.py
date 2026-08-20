@@ -1,7 +1,7 @@
 import json
 import threading
 
-import activity_tracker
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import memory_store
 import server
 

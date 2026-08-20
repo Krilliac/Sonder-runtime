@@ -1,6 +1,6 @@
 # WP1 third migration slice: reward facade retirement
 
-**Status:** Implemented locally; CI verification pending
+**Status:** Focused verification passed; CI/full-suite qualification pending
 **Target requirements:** `ARCH-001`, `ARCH-002`, `ARCH-004`, `ARCH-010`, `MEM-005`
 **Retired root module:** `reward.py`
 
@@ -36,7 +36,9 @@ deletes the facade without a compatibility shim.
   regressions pass.
 - [x] Source scan finds no production import of root `reward`.
 - [x] Reward, memory-domain, export, learning-health, grounded-outcome, offload,
-  repository, serve, architecture, and packaging selection: 470 passed.
+  repository, serve, architecture, and packaging coverage is included in the
+  current production acceptance run; focused reward/context/MMR selection is
+  `113 passed` in the current environment.
 - [ ] Full suite and cross-platform bundles in GitHub Actions.
 
 ## CI acceptance

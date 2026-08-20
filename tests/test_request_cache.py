@@ -18,7 +18,7 @@ import pytest
 import request_cache
 import server
 import sonder_metrics
-import sonder_serve as ts
+import sonder_runtime.interfaces.http.serve as ts
 
 
 @pytest.fixture(autouse=True)

@@ -10,7 +10,7 @@ import zipfile
 import pytest
 
 import archive_tools
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
 
 

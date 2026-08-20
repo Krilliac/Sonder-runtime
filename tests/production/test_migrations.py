@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-import sonder_migrations
-from sonder_migrations import (
+import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from sonder_runtime.adapters.persistence.migrations import (
     FutureSchemaError,
     MigrationError,
     migrate_store,

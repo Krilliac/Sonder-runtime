@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shutil
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import pytest
 
 from sonder_runtime.adapters.strangler_services import LegacyToolExecutor

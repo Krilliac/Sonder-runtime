@@ -1,9 +1,9 @@
 import pytest
 
 import autopilot_controller
-import autopilot_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import server
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 
 
 @pytest.fixture(autouse=True)

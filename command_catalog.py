@@ -34,6 +34,27 @@ from dataclasses import dataclass, replace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
+# The console and HTTP surfaces now live under ``sonder_runtime.interfaces``.
+# Retain the root names as compatibility fallbacks for older checkouts while
+# making source-derived catalog data follow the packaged implementations.
+_SOURCE_PATHS = {
+    "sonder_repl.py": os.path.join(
+        "sonder_runtime", "interfaces", "repl", "repl.py",
+    ),
+    "sonder_serve.py": os.path.join(
+        "sonder_runtime", "interfaces", "http", "serve.py",
+    ),
+}
+
+
+def _source_path(name: str) -> str:
+    """Resolve a scanned module in the current or legacy source layout."""
+    root_path = os.path.join(_HERE, name)
+    if os.path.exists(root_path):
+        return root_path
+    packaged = _SOURCE_PATHS.get(os.path.basename(name))
+    return os.path.join(_HERE, packaged) if packaged else root_path
+
 
 class CatalogUnavailable(RuntimeError):
     """The tool registry could not be read, so nothing here can be trusted.
@@ -515,7 +536,7 @@ def _native_groups() -> list[tuple[str, ...]]:
     groups: list[tuple[str, ...]] = []
     claimed: set[str] = set()
     for path in ("server.py", "sonder_repl.py"):
-        for group in _slash_groups(os.path.join(_HERE, path)):
+        for group in _slash_groups(_source_path(path)):
             fresh = tuple(n for n in group if n not in claimed)
             if fresh:
                 groups.append(fresh)
@@ -533,7 +554,7 @@ def http_native_names() -> frozenset:
     the HTTP index from advertising console-only controls such as ``/model``
     and ``/project`` that would otherwise fall through to the model as prose.
     """
-    path = os.path.join(_HERE, "sonder_serve.py")
+    path = _source_path("sonder_serve.py")
     try:
         with open(path, encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
@@ -570,7 +591,7 @@ def _module_level_functions(module: str) -> dict:
     ``<module>.<name>``, so admitting one would attribute a call that cannot
     happen.
     """
-    path = os.path.join(_HERE, module + ".py")
+    path = _source_path(module + ".py")
     if not os.path.exists(path):
         return {}
     try:
@@ -629,7 +650,7 @@ def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
     actually registered MCP tools, so ``_open_db`` and friends drop out.
     """
     try:
-        with open(os.path.join(_HERE, path), encoding="utf-8") as handle:
+        with open(_source_path(path), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
     except (OSError, SyntaxError):
         return {}
@@ -757,7 +778,7 @@ def _disarmed_branch_tools(path: str, function: str) -> dict:
     `dangerous` grade instead of inheriting the exemption.
     """
     try:
-        with open(os.path.join(_HERE, path), encoding="utf-8") as handle:
+        with open(_source_path(path), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
     except (OSError, SyntaxError):
         return {}
@@ -949,7 +970,7 @@ def _help_summaries() -> dict:
     ``server``, which imports this module.
     """
     try:
-        with open(os.path.join(_HERE, "sonder_repl.py"), encoding="utf-8") as handle:
+        with open(_source_path("sonder_repl.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
     except (OSError, SyntaxError):
         return {}

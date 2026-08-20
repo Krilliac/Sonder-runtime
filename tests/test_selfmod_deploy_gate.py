@@ -35,7 +35,7 @@ import pytest
 import permission_modes as pm
 import selfmod
 import server
-import sonder_serve as ts
+import sonder_runtime.interfaces.http.serve as ts
 
 pytestmark = pytest.mark.unit
 
@@ -213,7 +213,7 @@ def test_a_piped_console_is_not_an_operator(monkeypatch):
     there would have handed every piped script the approval a person never
     gave.
     """
-    import sonder_repl
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
 
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
     assert sonder_repl._console_has_operator() is False
@@ -243,7 +243,7 @@ def test_the_console_never_hardcodes_the_operator_approval():
     import ast
     import pathlib
 
-    import sonder_repl
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
 
     source = pathlib.Path(sonder_repl.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)

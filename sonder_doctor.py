@@ -238,7 +238,7 @@ def _skip(reason: str) -> dict:
 def _load_config_or_none():
     """Best-effort read-only config load; ``None`` if unavailable."""
     try:
-        import sonder_config
+        from sonder_runtime.platform import config as sonder_config
     except Exception:
         return None
     try:
@@ -250,7 +250,7 @@ def _load_config_or_none():
 def _check_config() -> dict:
     """Report whether configuration loads and validates (read-only)."""
     try:
-        import sonder_config
+        from sonder_runtime.platform import config as sonder_config
     except Exception as exc:
         return _skip("sonder_config unavailable (%s)" % exc)
     try:
@@ -346,7 +346,7 @@ def _check_memory_quality() -> dict:
 def _check_runtime_policy() -> dict:
     """Report runtime-policy load status without creating the file."""
     try:
-        import runtime_policy
+        import sonder_runtime.adapters.runtime_policy as runtime_policy
     except Exception as exc:
         return _skip("runtime_policy unavailable (%s)" % exc)
     try:
@@ -370,7 +370,7 @@ def schema_check(config=None):
     """Bind a non-mutating, non-disclosing migration-health check."""
     def check():
         try:
-            import sonder_migrations
+            import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
             cfg = config if config is not None else _load_config_or_none()
             if cfg is None:
@@ -473,7 +473,7 @@ def storage_checks(config=None, *, throughput: bool = False):
         return loaded
 
     def state_check():
-        import sonder_storage
+        from sonder_runtime.adapters import storage as sonder_storage
 
         cfg = loaded_config()
         record = sonder_storage.inspect_root(
@@ -491,7 +491,7 @@ def storage_checks(config=None, *, throughput: bool = False):
         return {"status": status, "detail": detail}
 
     def models_check():
-        import sonder_storage
+        from sonder_runtime.adapters import storage as sonder_storage
 
         cfg = loaded_config()
         records = [

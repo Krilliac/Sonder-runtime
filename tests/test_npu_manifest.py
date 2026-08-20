@@ -3,8 +3,9 @@ import json
 
 import pytest
 
-import npu_contract
-import npu_manifest as m
+import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
+import sonder_runtime.adapters.accelerators.npu.manifest as m
+import sonder_runtime.platform.paths as runtime_paths
 
 
 def _write_model(directory, name="model.onnx", data=b"tiny-model-bytes"):
@@ -49,6 +50,18 @@ def _embedding_manifest(directory, **overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def test_manifest_dir_uses_packaged_platform_paths(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_state_path(filename, env_name=None):
+        calls.append((filename, env_name))
+        return tmp_path / "manifests"
+
+    monkeypatch.setattr(runtime_paths, "state_path", fake_state_path)
+    assert m.manifest_dir() == tmp_path / "manifests"
+    assert calls == [("npu-manifests", "SONDER_NPU_MANIFEST_DIR")]
 
 
 def test_normalize_accepts_minimal_routing_manifest(tmp_path):

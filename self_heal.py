@@ -7,8 +7,8 @@ import emotion_vectors
 import live_reload
 import sonder_runtime.adapters.memory_store as memory_store
 import store_integrity
-import system_profile
-import workflow_store
+from sonder_runtime.platform import system_profile
+from sonder_runtime.adapters.filesystem import workflow_store
 
 
 Issue = collections.namedtuple("Issue", ["code", "target", "detail", "repairable"])

@@ -1019,6 +1019,27 @@ def test_live_reload_migrates_old_cloud_general_unless_preserved(monkeypatch):
     assert server.TIERS["cloud-general"] == "gpt-oss:120b-cloud"
 
 
+def test_live_cloud_general_repair_uses_typed_projection(monkeypatch):
+    monkeypatch.delenv("SONDER_PRESERVE_LEGACY_CLOUD_GENERAL", raising=False)
+    monkeypatch.setitem(server.TIERS, "cloud-general", "gpt-oss:120b-cloud")
+    projection = server._RUNTIME_MODEL_CONFIGURATION
+    replacement = type(projection)(
+        stable_alias=projection.stable_alias,
+        local_code_model=projection.local_code_model,
+        default_cloud_code_model=projection.default_cloud_code_model,
+        default_cloud_general_model="replacement:cloud",
+        cloud_extra_usage_fallback_model=projection.cloud_extra_usage_fallback_model,
+        retired_cloud_models=projection.retired_cloud_models,
+        tier_bindings=projection.tier_bindings,
+        cloud_tiers=projection.cloud_tiers,
+    )
+    monkeypatch.setattr(server, "_RUNTIME_MODEL_CONFIGURATION", replacement)
+
+    server._refresh_live_cloud_tiers()
+
+    assert server.TIERS["cloud-general"] == "replacement:cloud"
+
+
 def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
     calls = []
 

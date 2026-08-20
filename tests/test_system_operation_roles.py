@@ -7,7 +7,7 @@ operation.  These checks cover the dispatch-independent HTTP authority gate.
 
 from __future__ import annotations
 
-import sonder_serve as serve
+import sonder_runtime.interfaces.http.serve as serve
 import server
 
 

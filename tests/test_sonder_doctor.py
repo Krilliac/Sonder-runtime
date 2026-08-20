@@ -6,6 +6,40 @@ exercised here; the module's contract is that ``run_doctor`` faithfully rolls up
 whatever registry it is handed and never lets one check abort the report.
 """
 import sonder_doctor
+from types import SimpleNamespace
+
+
+def test_default_config_checks_use_packaged_configuration_boundary():
+    source = open(sonder_doctor.__file__, encoding="utf-8").read()
+    assert "from sonder_runtime.platform import config as sonder_config" in source
+    assert "import sonder_config" not in source
+
+
+def test_config_check_preserves_validated_output_from_packaged_boundary(monkeypatch):
+    import sonder_runtime.platform.config as packaged_config
+
+    monkeypatch.setattr(
+        packaged_config,
+        "load_config",
+        lambda: SimpleNamespace(ollama=SimpleNamespace(url="http://local")),
+    )
+    assert sonder_doctor._check_config() == {
+        "status": "ok",
+        "detail": "ollama=http://local",
+    }
+
+
+def test_config_check_preserves_config_error_diagnostic(monkeypatch):
+    import sonder_runtime.platform.config as packaged_config
+
+    def fail():
+        raise packaged_config.ConfigError(["bad config"])
+
+    monkeypatch.setattr(packaged_config, "load_config", fail)
+    assert sonder_doctor._check_config() == {
+        "status": "fail",
+        "detail": "config invalid: invalid configuration:\n  - bad config",
+    }
 
 
 def _ok(detail=""):
@@ -179,7 +213,7 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
 
 
 def test_schema_check_reports_healthy_counts(monkeypatch):
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
     from types import SimpleNamespace
 
     monkeypatch.setattr(
@@ -205,7 +239,7 @@ def test_schema_check_reports_healthy_counts(monkeypatch):
 
 
 def test_schema_check_fails_safely_for_modified_history(monkeypatch):
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
     from types import SimpleNamespace
 
     secret_path = "C:/Users/private/secret-memory.db"

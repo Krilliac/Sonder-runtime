@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import ollama_lifecycle
-import process_liveness
+from sonder_runtime.adapters import ollama_lifecycle
+from sonder_runtime.adapters import process_liveness
 
 
 def test_resident_models_accepts_name_and_model_fields():
@@ -11,6 +11,33 @@ def test_resident_models_accepts_name_and_model_fields():
         "models": [{"name": "Sonder:latest"}, {"model": "qwen2.5:3b"}],
     }) == {"sonder:latest", "qwen2.5:3b"}
     assert ollama_lifecycle.resident_models({"models": "invalid"}) == set()
+
+
+def test_root_compatibility_import_uses_packaged_public_implementation():
+    import ollama_lifecycle as legacy_lifecycle
+
+    assert legacy_lifecycle.__all__ == (
+        "cleanup_orphaned_discovery_probes",
+        "resident_models",
+    )
+    assert not hasattr(legacy_lifecycle, "_is_windows")
+    assert legacy_lifecycle.resident_models is ollama_lifecycle.resident_models
+    assert (
+        legacy_lifecycle.cleanup_orphaned_discovery_probes
+        is ollama_lifecycle.cleanup_orphaned_discovery_probes
+    )
+
+
+def test_root_compatibility_surface_survives_reload():
+    import importlib
+    import ollama_lifecycle as legacy_lifecycle
+
+    reloaded = importlib.reload(legacy_lifecycle)
+    assert reloaded.resident_models is ollama_lifecycle.resident_models
+    assert reloaded.cleanup_orphaned_discovery_probes is (
+        ollama_lifecycle.cleanup_orphaned_discovery_probes
+    )
+    assert not hasattr(reloaded, "_trusted_model_roots")
 
 
 def test_windows_process_inspector_parses_single_json_object(monkeypatch):

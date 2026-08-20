@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
 
 
@@ -43,7 +43,7 @@ def workspace(tmp_path, monkeypatch):
     ws.mkdir()
     home.mkdir()
     monkeypatch.setattr(file_ops, "workspace_root", lambda: ws)
-    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: home)
+    monkeypatch.setattr(file_ops.runtime_paths, "default_home", lambda: home)
     monkeypatch.delenv("SONDER_FILE_BYPASS", raising=False)
     monkeypatch.delenv("SONDER_FILE_APPROVAL_CODE", raising=False)
     return ws

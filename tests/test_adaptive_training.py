@@ -12,7 +12,7 @@ import pytest
 
 import adaptive_training
 import qlora_train
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 import system_profile
 from system_profile import HardwareProfile
 

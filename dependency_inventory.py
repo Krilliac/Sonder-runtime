@@ -12,7 +12,7 @@ import configparser
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 try:
     import tomllib

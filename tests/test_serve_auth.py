@@ -8,8 +8,8 @@ import threading
 
 import pytest
 
-import sonder_serve as ts
-import sonder_config
+import sonder_runtime.interfaces.http.serve as ts
+import sonder_runtime.platform.config as runtime_config
 import sonder_health
 
 
@@ -2886,7 +2886,7 @@ def test_bind_gate_tracks_the_named_minimum_key_length(monkeypatch):
     sonder_config.validate and left this gate -- the one that actually decides
     whether a non-loopback listener opens -- at the old minimum.
     """
-    monkeypatch.setattr(sonder_config, "MIN_API_KEY_LENGTH", 40)
+    monkeypatch.setattr(runtime_config, "MIN_API_KEY_LENGTH", 40)
 
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(

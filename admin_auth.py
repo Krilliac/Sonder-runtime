@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import sonder_paths
-import sonder_secrets
+import sonder_runtime.adapters.secrets as sonder_secrets
 
 
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14

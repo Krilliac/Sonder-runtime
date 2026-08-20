@@ -9,7 +9,7 @@ import re
 import sqlite3
 import time
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 DEFAULT_MAX_ROWS = 100

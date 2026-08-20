@@ -30,10 +30,18 @@ import pytest
 import command_catalog
 import permission_modes as pm
 import server
-import sonder_repl
-import sonder_serve as ts
+import sonder_runtime.interfaces.repl.repl as sonder_repl
+import sonder_runtime.interfaces.http.serve as ts
 
 pytestmark = pytest.mark.unit
+
+
+def _source_path(name):
+    if name == "sonder_serve.py":
+        return ts.__file__
+    if name == "sonder_repl.py":
+        return sonder_repl.__file__
+    return os.path.join(os.path.dirname(server.__file__), name)
 
 
 class _Exploded(AssertionError):
@@ -245,8 +253,7 @@ def _tools_called_anywhere_in(path, function):
     Flat on purpose -- no branch attribution and no helper following -- so it
     is an independent check on the map ``command_catalog`` derives.
     """
-    with open(os.path.join(os.path.dirname(server.__file__), path),
-              encoding="utf-8") as handle:
+    with open(_source_path(path), encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
     scope = next(
         (node for node in ast.walk(tree)
@@ -292,8 +299,7 @@ def test_the_gate_sits_in_front_of_every_branch_in_the_chain():
     placed after even one of them leaves that one ungated, and no behavioural
     test of the other 129 would notice.
     """
-    with open(os.path.join(os.path.dirname(server.__file__), "sonder_serve.py"),
-              encoding="utf-8") as handle:
+    with open(_source_path("sonder_serve.py"), encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
     scope = next(
         (node for node in ast.walk(tree)

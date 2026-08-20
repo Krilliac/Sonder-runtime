@@ -281,7 +281,9 @@ class LegacyInspectionExecutor:
             return _failure(exc, audit_args)
 
     def _data_inspect(self, args: dict, context: OperationContext) -> ToolResult:
-        file_ops = _legacy_module("file_ops")
+        file_ops = _legacy_module(
+            "sonder_runtime.adapters.filesystem.file_ops"
+        )
 
         audit_args = {"path": args["path"]}
         try:

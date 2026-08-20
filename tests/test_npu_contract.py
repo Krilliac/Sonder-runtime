@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-import activity_tracker
-import npu_contract as c
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
+import sonder_runtime.adapters.accelerators.npu.contract as c
 
 
 def test_encode_line_is_compact_json_with_newline():

@@ -26,11 +26,11 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 import promotion_eval
-import ollama_endpoint
+import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
-import system_profile
+from sonder_runtime.platform import system_profile
 import sonder_paths
 import training_data
 

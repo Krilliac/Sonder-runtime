@@ -66,9 +66,10 @@ class PreflightExecutor(Protocol):
     ) -> PreflightReport: ...
 
 
-# Keep repr/pickle/type paths stable for callers of the historical root module.
-CheckResult.__module__ = "sonder_preflight"
-PreflightReport.__module__ = "sonder_preflight"
+# The package adapter is the stable public package path; retired root aliases
+# must not remain a pickle or type-identity dependency.
+CheckResult.__module__ = "sonder_runtime.adapters.preflight"
+PreflightReport.__module__ = "sonder_runtime.adapters.preflight"
 
 __all__ = [
     "CheckResult",

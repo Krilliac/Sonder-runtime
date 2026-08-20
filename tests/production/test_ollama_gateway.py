@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-import model_transport
+from sonder_runtime.adapters import model_transport
 import server
+from sonder_runtime.adapters.ollama import endpoint as ollama_endpoint
 from sonder_runtime.adapters.ollama.gateway import OllamaGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -165,7 +166,13 @@ def test_expired_context_stops_before_model_call(monkeypatch):
 def test_remote_ollama_requires_context_consent(monkeypatch):
     _fake_target(monkeypatch)
     _fake_gen(monkeypatch)
-    monkeypatch.setattr(server, "BASE", "http://192.0.2.10:11434")
+    # The gateway's endpoint boundary is the packaged Ollama adapter, not the
+    # legacy server composition root. Keep the legacy value deliberately local
+    # to prove this caller migration is real.
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        ollama_endpoint, "normalize", lambda value=None: "http://192.0.2.10:11434",
+    )
 
     with pytest.raises(Forbidden, match="remote Ollama"):
         OllamaGateway().generate(ModelRequest(prompt="x", tier="code"), _context())
@@ -178,7 +185,7 @@ def test_remote_ollama_requires_context_consent(monkeypatch):
 
 
 def test_embed_maps_empty_vector_to_dependency_error(monkeypatch):
-    import embeddings
+    import sonder_runtime.adapters.embeddings as embeddings
 
     monkeypatch.setattr(embeddings, "embed", lambda text: None)
     with pytest.raises(DependencyUnavailable):
@@ -186,7 +193,7 @@ def test_embed_maps_empty_vector_to_dependency_error(monkeypatch):
 
 
 def test_embed_returns_typed_embeddings(monkeypatch):
-    import embeddings
+    import sonder_runtime.adapters.embeddings as embeddings
 
     monkeypatch.setattr(embeddings, "embed", lambda text: [0.1, 0.2, 0.3])
     out = OllamaGateway().embed(["a", "b"], _context())
@@ -195,7 +202,7 @@ def test_embed_returns_typed_embeddings(monkeypatch):
 
 
 def test_embed_honours_expired_context(monkeypatch):
-    import embeddings
+    import sonder_runtime.adapters.embeddings as embeddings
 
     called = []
     monkeypatch.setattr(embeddings, "embed", lambda text: called.append(text) or [0.1])

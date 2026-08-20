@@ -2,7 +2,7 @@ import urllib.request
 
 import pytest
 
-import ollama_endpoint as endpoint
+import sonder_runtime.adapters.ollama.endpoint as endpoint
 
 
 @pytest.mark.parametrize(

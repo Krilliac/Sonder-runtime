@@ -1,7 +1,7 @@
 """Headless Ollama + Sonder server supervisor.
 
 This starts/stops/checks the local Ollama daemon and the OpenAI-compatible
-sonder_serve.py API without requiring the Flutter app or a visible console.
+Sonder Runtime API without requiring the Flutter app or a visible console.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 import engine_bundle
-import ollama_endpoint
+import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
 import unsafe_lab
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 import sonder_health
@@ -195,8 +195,7 @@ def _pid_command_line(pid: int) -> str:
 
 def _is_sonder_server_pid(pid: int) -> bool:
     command = _pid_command_line(pid).lower().replace("/", os.sep).replace("\\", os.sep)
-    script = str((repo_root() / "sonder_serve.py").resolve()).lower()
-    return bool(command and script in command)
+    return bool(command and re.search(r"(?:^|\s)-m\s+sonder_runtime\s+serve(?:\s|$)", command))
 
 
 def _is_sonder_server_for_port(pid: int, port: int) -> bool:
@@ -211,10 +210,15 @@ def _is_sonder_server_for_port(pid: int, port: int) -> bool:
     """
     command = _pid_command_line(pid)
     normalized = command.lower().replace("/", os.sep).replace("\\", os.sep)
-    script = str((repo_root() / "sonder_serve.py").resolve()).lower()
-    if not command or script not in normalized:
+    if not command or not re.search(
+        r"(?:^|\s)-m\s+sonder_runtime\s+serve(?:\s|$)", normalized
+    ):
         return False
-    match = re.search(r"sonder_serve\.py[\"']?\s+(\d+)(?:\s|$)", command, re.IGNORECASE)
+    match = re.search(
+        r"(?:-m\s+sonder_runtime\s+serve)\s+(\d+)(?:\s|$)",
+        command,
+        re.IGNORECASE,
+    )
     if match:
         return int(match.group(1)) == int(port)
     return int(port) == DEFAULT_PORT
@@ -427,7 +431,7 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
         pid = _managed_pid("sonder_serve", host, port)
         suffix = " pid=%s" % pid if pid else " (unmanaged listener)"
         return "sonder: already listening on http://%s:%s%s" % (host, port, suffix)
-    cmd = [python_exe(), str(repo_root() / "sonder_serve.py"), str(port)]
+    cmd = [python_exe(), "-m", "sonder_runtime", "serve", str(port)]
     merged_env = runtime_environment()
     child_overrides = dict(env or {})
     health_token = child_overrides.pop(

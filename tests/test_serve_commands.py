@@ -13,7 +13,7 @@ from contextlib import contextmanager
 
 import command_catalog
 import permission_modes
-import sonder_serve as ts
+import sonder_runtime.interfaces.http.serve as ts
 
 
 @contextmanager

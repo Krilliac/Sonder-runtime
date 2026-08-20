@@ -13,7 +13,7 @@ import time
 import zipfile
 from pathlib import Path
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 CHUNK_BYTES = 64 * 1024

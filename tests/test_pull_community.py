@@ -1,4 +1,4 @@
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import memory_store as ms
 import pull_community as pc
 

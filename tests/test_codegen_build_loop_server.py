@@ -6,7 +6,7 @@ guard that needs the current file silently no-opped), and it derived
 BUILD SUCCEEDED from "no line matched the error regex" while throwing away
 the build process's own exit status.
 """
-import activity_tracker
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import server
 
 

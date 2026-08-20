@@ -15,9 +15,9 @@ pytest.importorskip("securesystemslib")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 
-import sonder_updates
+import sonder_runtime.adapters.updates.service as sonder_updates
 import tuf_repo
-from sonder_updates import BundleManifest, TrustError, verify_bundle_trust
+from sonder_runtime.adapters.updates.service import BundleManifest, TrustError, verify_bundle_trust
 
 pytestmark = pytest.mark.integration
 
@@ -131,7 +131,7 @@ def test_end_to_end_install_from_signed_bundle(published, monkeypatch, tmp_path)
     # unsigned gate (allow_unverified=False), proving the publisher and the
     # engine agree on the trust contract.
     repo_root, bundle = published
-    import sonder_update_engine
+    import sonder_runtime.adapters.updates.engine as sonder_update_engine
 
     home = tmp_path / "home"
     monkeypatch.setenv("SONDER_HOME", str(home))

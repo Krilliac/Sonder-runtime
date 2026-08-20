@@ -38,6 +38,16 @@ def test_build_application_requires_known_profile():
         bootstrap_app.build_application("public-saas")
 
 
+def test_composition_root_uses_canonical_system_clock_adapter():
+    from sonder_runtime.adapters.system_clock import SystemClock
+    from sonder_runtime.adapters import strangler_services
+
+    application = bootstrap_app.build_application()
+
+    assert type(application.clock) is SystemClock
+    assert not hasattr(strangler_services, "SystemClock")
+
+
 def test_importing_bootstrap_has_no_side_effects(tmp_path, monkeypatch):
     # The composition root builds lazily: constructing the graph must not
     # create the policy file; only first use does.

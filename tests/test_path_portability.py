@@ -1,7 +1,7 @@
 from pathlib import Path
 
-import sonder_paths
-import sonder_update_engine
+import sonder_runtime.adapters.updates.engine as sonder_update_engine
+import sonder_runtime.platform.paths as sonder_paths
 
 
 def test_update_defaults_follow_platform_machine_home(monkeypatch, tmp_path):

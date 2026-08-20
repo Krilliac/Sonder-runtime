@@ -11,7 +11,7 @@ never touches the database.
 """
 import argparse
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import sonder_runtime.adapters.memory_store as memory_store
 import sonder_paths
 

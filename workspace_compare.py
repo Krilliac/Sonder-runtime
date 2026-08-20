@@ -9,7 +9,7 @@ from pathlib import Path
 import stat
 import time
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 DEFAULT_MAX_ENTRIES = 2_000

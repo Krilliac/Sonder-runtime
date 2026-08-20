@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-import embed_cache
-import embeddings as e
+from sonder_runtime.adapters import embedding_cache as embed_cache
+import sonder_runtime.adapters.embeddings as e
 
 
 class FakeResponse:
@@ -52,6 +52,18 @@ def test_disabled_cache_never_stores_or_serves(monkeypatch):
 def test_missing_revision_is_never_cached():
     assert not embed_cache.put("text", "model:latest", "", [1.0])
     assert embed_cache.get("text", "model:latest", "") is None
+
+
+def test_db_path_uses_packaged_path_boundary(monkeypatch):
+    calls = []
+
+    def fake_state_path(name, env_name=None):
+        calls.append((name, env_name))
+        return "packaged-cache.db"
+
+    monkeypatch.setattr(embed_cache, "state_path", fake_state_path)
+    assert embed_cache._db_path() == "packaged-cache.db"
+    assert calls == [("embed-cache.db", "SONDER_EMBED_CACHE_DB")]
 
 
 def test_lru_eviction_bounds_row_count(monkeypatch):

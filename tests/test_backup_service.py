@@ -1,7 +1,6 @@
 """Typed backup seam, compatibility identity, and caller routing."""
 from __future__ import annotations
 
-import importlib
 import hashlib
 import inspect
 import json
@@ -13,8 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import sonder_backup
-import sonder_update_engine
+import sonder_runtime.adapters.updates.engine as sonder_update_engine
 from sonder_runtime.adapters import backup as backup_adapter
 from sonder_runtime.adapters.backup_gateway import LegacyBackupGateway
 from sonder_runtime.application.backup import BackupService
@@ -94,18 +92,6 @@ def test_service_does_not_translate_gateway_errors():
     with pytest.raises(backup_adapter.BackupError) as caught:
         BackupService(gateway).verify("opaque")
     assert caught.value is expected
-
-
-def test_root_backup_is_true_reload_safe_compatibility_alias():
-    assert sonder_backup is backup_adapter
-    original = sonder_backup.MANIFEST_FORMAT_VERSION
-    sonder_backup.MANIFEST_FORMAT_VERSION = 99
-    assert backup_adapter.MANIFEST_FORMAT_VERSION == 99
-    sonder_backup.MANIFEST_FORMAT_VERSION = original
-    assert importlib.reload(sonder_backup) is backup_adapter
-    assert sys.modules["sonder_backup"] is sys.modules[
-        "sonder_runtime.adapters.backup"
-    ]
 
 
 def test_legacy_gateway_resolves_live_adapter_module(monkeypatch):

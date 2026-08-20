@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 from sonder_runtime.adapters import memory_rerank, memory_store
 
 # Recalibrated 2026-07-06 against the 557-lesson corpus via tune_min_sim.py

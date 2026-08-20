@@ -1,62 +1,25 @@
-"""Single authoritative version and build identity for the Sonder runtime.
+"""Release-tooling compatibility surface for the runtime build identity.
 
-Every surface that reports a version — ``/version``, diagnostics, backup
-manifests, migration ledgers, release directories — must import from here
-so a release has exactly one identity.  Release tooling stamps
-``sonder_build.json`` next to this module when building an immutable
-release directory; a source checkout falls back to asking git.
+Release validation parses this file without importing it, so ``VERSION`` must
+remain a literal assignment.  Runtime implementation ownership is in
+``sonder_runtime.platform.version``; the module alias below also preserves
+legacy module identity for callers that still import this root name.
 """
 from __future__ import annotations
-
-import json
-import subprocess
-from dataclasses import dataclass
-from pathlib import Path
 
 # Bumped by the release process.  The ".dev0" suffix marks a build taken
 # from a mutable source checkout rather than a stamped release artifact.
 VERSION = "0.9.0.dev0"
 
-_BUILD_STAMP = Path(__file__).resolve().with_name("sonder_build.json")
+import sys
 
+from sonder_runtime.platform import version as _canonical
 
-@dataclass(frozen=True)
-class BuildInfo:
-    version: str
-    commit_sha: str
-    stamped: bool
+BuildInfo = _canonical.BuildInfo
+build_info = _canonical.build_info
 
-    def as_dict(self) -> dict:
-        return {
-            "version": self.version,
-            "commit_sha": self.commit_sha,
-            "stamped": self.stamped,
-        }
-
-
-def _commit_from_git() -> str:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    sha = out.stdout.strip()
-    return sha if out.returncode == 0 and len(sha) == 40 else "unknown"
-
-
-def build_info() -> BuildInfo:
-    if _BUILD_STAMP.exists():
-        try:
-            raw = json.loads(_BUILD_STAMP.read_text(encoding="utf-8"))
-            version = str(raw.get("version") or VERSION)
-            commit = str(raw.get("commit_sha") or "unknown")
-            return BuildInfo(version=version, commit_sha=commit, stamped=True)
-        except (OSError, ValueError):
-            pass
-    return BuildInfo(version=VERSION, commit_sha=_commit_from_git(), stamped=False)
+# Imports of ``sonder_version`` receive the canonical module object, matching
+# the identity-preserving compatibility pattern used by other migrated root
+# platform modules.  The literal above remains available to AST-based release
+# tooling even though normal runtime imports resolve to the packaged module.
+sys.modules[__name__] = _canonical

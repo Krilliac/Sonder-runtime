@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-import embeddings as e
-import npu_service
+import sonder_runtime.adapters.embeddings as e
+import sonder_runtime.adapters.accelerators.npu.service as npu_service
 
 
 class FakeResponse:
@@ -256,7 +256,7 @@ def test_embed_total_failure_still_soft_fails_to_none(monkeypatch):
 
 def test_space_gating_end_to_end_prevents_mixing(legacy_http, monkeypatch):
     """A manifest pinned to a different revision must never serve vectors."""
-    import runtime_policy
+    import sonder_runtime.adapters.runtime_policy as runtime_policy
     from tests.npu_helpers import embedding_payload
 
     manifest_dir = npu_service.npu_manifest.manifest_dir()

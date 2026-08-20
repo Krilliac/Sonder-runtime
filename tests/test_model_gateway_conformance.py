@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import server
+from sonder_runtime.adapters.ollama import endpoint as ollama_endpoint
 from sonder_runtime.adapters.strangler_services import LegacyModelGateway
 from sonder_runtime.adapters.ollama.gateway import OllamaGateway
 from sonder_runtime.adapters.openai_compat.gateway import (
@@ -373,7 +374,10 @@ def test_gate_4_openai_remote_endpoint_requires_consent():
 
 def test_gate_4_remote_ollama_requires_consent(monkeypatch):
     calls = []
-    monkeypatch.setattr(server, "BASE", "http://192.0.2.1:11434")
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        ollama_endpoint, "normalize", lambda value=None: "http://192.0.2.1:11434",
+    )
     monkeypatch.setattr(
         server, "_serve_target", lambda tier, strict: ("m", False, True, "code")
     )

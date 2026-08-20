@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import contribute  # noqa: E402
-import embeddings  # noqa: E402
+import sonder_runtime.adapters.embeddings as embeddings  # noqa: E402
 import sonder_runtime.adapters.memory_store as memory_store  # noqa
 import reflection  # noqa: E402
 

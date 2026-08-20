@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-import sonder_secrets
+import sonder_runtime.adapters.secrets as sonder_secrets
 
 pytestmark = pytest.mark.unit
 
@@ -52,7 +52,7 @@ def test_secret_rotation_accepts_previous_until_expiry(secrets_file):
 
 
 def test_rotation_via_auth_context(secrets_file, monkeypatch):
-    import sonder_serve
+    import sonder_runtime.interfaces.http.serve as sonder_serve
 
     old_key = "old-key-value-0123456789abcdef"
     sonder_secrets.rotate_api_key(secrets_file, overlap_seconds=3600)
@@ -92,3 +92,15 @@ def test_rotate_adds_key_when_absent(tmp_path, monkeypatch):
     # No previous key existed, so no overlap window is created.
     assert report["previous_accepted_until"] is None
     assert not (tmp_path / "rotation.json").exists()
+
+
+def test_rotation_state_path_uses_packaged_platform_home(tmp_path, monkeypatch):
+    packaged_home = tmp_path / "packaged-home"
+    monkeypatch.delenv("SONDER_ROTATION_STATE", raising=False)
+    monkeypatch.setattr(
+        sonder_secrets.runtime_paths, "ensure_home", lambda: packaged_home
+    )
+
+    assert sonder_secrets.rotation_state_path() == (
+        packaged_home / "secrets" / "rotation.json"
+    )

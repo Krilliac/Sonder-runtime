@@ -11,7 +11,7 @@ import os
 import pytest
 
 import autopilot_controller
-import autopilot_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
 
 @pytest.fixture(autouse=True)

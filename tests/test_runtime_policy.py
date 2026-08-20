@@ -8,7 +8,8 @@ import time
 
 import pytest
 
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
+from sonder_runtime.platform import paths as runtime_paths
 
 
 @pytest.fixture
@@ -32,6 +33,16 @@ def test_default_policy_prefers_shared_sonder_alias():
     assert policy["embedding_model"] == "nomic-embed-text"
     assert policy["routing"]["router"] == "fast"
     assert policy["routing"]["autopilot"] == "code"
+
+
+def test_policy_path_uses_packaged_paths_boundary(monkeypatch, tmp_path):
+    expected = tmp_path / "runtime-policy.json"
+    monkeypatch.delenv("SONDER_RUNTIME_POLICY", raising=False)
+    monkeypatch.setattr(
+        runtime_paths, "state_path", lambda name, env_name=None: expected
+    )
+
+    assert runtime_policy.policy_path() == expected
 
 
 def test_environment_seeds_first_policy_without_allowing_cloud(policy_file, monkeypatch):
@@ -89,7 +100,7 @@ import json
 import os
 from pathlib import Path
 import time
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 
 path = runtime_policy.policy_path()
 with runtime_policy._policy_file_lock(path=path):
@@ -111,7 +122,7 @@ Path(os.environ["TEST_RESULT"]).write_text(json.dumps(created), encoding="utf-8"
     env["TEST_RESULT"] = str(result)
     child = subprocess.Popen(
         [sys.executable, "-c", script],
-        cwd=Path(runtime_policy.__file__).parent,
+        cwd=Path(runtime_policy.__file__).parents[2],
         env=env,
     )
     try:
@@ -283,7 +294,7 @@ def test_expected_revision_is_serialized_across_processes(policy_file, tmp_path)
 import os
 from pathlib import Path
 import time
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 
 path = runtime_policy.policy_path()
 with runtime_policy._policy_file_lock(path=path):
@@ -304,7 +315,7 @@ with runtime_policy._policy_file_lock(path=path):
     env["TEST_SIGNAL"] = str(signal)
     child = subprocess.Popen(
         [sys.executable, "-c", script],
-        cwd=Path(runtime_policy.__file__).parent,
+        cwd=Path(runtime_policy.__file__).parents[2],
         env=env,
     )
     try:

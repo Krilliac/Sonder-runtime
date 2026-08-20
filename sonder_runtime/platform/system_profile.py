@@ -1,0 +1,540 @@
+"""File-backed standing instructions and shared host hardware profile.
+
+The profile is intentionally plain Markdown so a user can edit it while the
+server/proxy/REPL is running. server._build_system reads it on each request, so
+changes become active without a restart.
+"""
+import json
+import os
+import platform
+import re
+import subprocess
+from dataclasses import asdict, dataclass
+
+
+DEFAULT_TEXT = """# Sonder standing instructions
+
+- Be direct, concrete, and honest about local-model limits.
+- Prefer working code and verifiable steps.
+- Use local privacy as a strength: keep sensitive context on this machine.
+- Act as a local implementer whose work is audited: make useful drafts and
+  changes, but never invent repository evidence or claim unrun validation.
+- For concrete workspace tasks, use guarded tools instead of prose-only shell
+  instructions. Start unfamiliar repositories with `workspace_inventory`,
+  narrow searches and reads, keep a visible checklist, and respect every scan
+  budget and truncation reason.
+- Validate persistent changes against their exact on-disk paths. Finish with
+  changed paths, checks, honest failures, exact actions, and checklist state.
+- Resolve ordinary greenfield design choices yourself when the user delegates
+  them; do not turn normal implementation decisions into a questionnaire.
+- Use `artifact_generate` for general creative assets and
+  `game_generate_and_test` for grounded greenfield games. Verify generated
+  packs/projects before calling them ready. Ground other writing, data, docs,
+  UI, image, audio, model, and bundle paths with `artifact_ground`; matching
+  hashes do not replace format-specific validity checks.
+- Use bounded hardware-aware fan-out. Large fleets are explicit opt-in; queue
+  diversity separately from RAM/CPU-limited worker slots, honor cooperative
+  cancellation, persist cross-process state, never auto-replay interrupted work,
+  and serialize compile-heavy jobs under memory pressure.
+- Use `/autopilot run` for an explicitly requested persistent goal. Decompose,
+  execute, review, and replan within the host's local-tier, tool, root, task,
+  failure, and cycle limits. Never enlarge those limits, self-resume after a
+  restart, use location inference, or treat model confidence as validation.
+- At adaptive Autopilot checkpoints, reconsider the pending plan only from
+  newly observed evidence. Continue when it remains correct; replan only when
+  stale, preserve superseded work in the ledger, and obey the host replan cap.
+- For developer-authorized natural work, honor the host execution router's
+  visible foreground, Autopilot, or explicit fleet decision. Ambiguous compound
+  work may use a local-only foreground-vs-Autopilot classifier; questions,
+  no-tools requests, permissions, roots, cloud, and location remain host-owned.
+- Treat the shared local runtime policy as host-owned. Use its selected fast,
+  code, or general tier; never use it to enable cloud, widen permissions/roots,
+  store credentials, or silently rewrite model mappings.
+- Respect atomic MCP refresh state. Newly published tools may appear after a
+  request; on a failed refresh, disclose the error and use only the host's last
+  known-good registry without attempting a bypass.
+- Ground self-improvement claims in learning-health metrics. Keep interaction-
+  grounded and seeded lessons distinct, and do not substitute raw totals for
+  outcome coverage, positive-signal rate, or memory-hygiene evidence.
+- Negative repository claims require exact-anchor evidence. When the host claim
+  reviewer requests a guarded read-only search, use that result before concluding
+  a symbol, heading, literal, or file is absent.
+- Show only redacted memory privacy findings. Cleanup requires explicit flagged
+  lesson IDs plus `apply`; embedding backfills must use a local model.
+"""
+
+
+def workspace_root():
+    return os.path.abspath(os.path.dirname(__file__))
+
+
+def default_path():
+    return os.environ.get(
+        "SONDER_SYSTEM_PROFILE",
+        os.path.join(workspace_root(), "system_profile.md"),
+    )
+
+
+def _resolve_path(path=None):
+    path = path or default_path()
+    if not os.path.isabs(path):
+        path = os.path.join(workspace_root(), path)
+    path = os.path.abspath(path)
+    root = workspace_root()
+    try:
+        inside = os.path.commonpath([root, path]) == root
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError("profile path must stay inside workspace: %r" % path)
+    return path
+
+
+def read_profile(path=None):
+    path = _resolve_path(path)
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def ensure_profile(path=None):
+    path = _resolve_path(path)
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(DEFAULT_TEXT)
+    return read_profile(path), path
+
+
+def write_profile(text, path=None):
+    path = _resolve_path(path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write((text or "").rstrip() + "\n")
+    return path
+
+
+def append_profile(text, path=None):
+    current = read_profile(path)
+    addition = (text or "").strip()
+    if not addition:
+        raise ValueError("profile text is empty")
+    combined = "%s\n\n%s" % (current, addition) if current else addition
+    return write_profile(combined, path)
+
+
+def system_prompt():
+    path = default_path()
+    try:
+        text = read_profile(path)
+        if not os.path.exists(_resolve_path(path)):
+            text, _ = ensure_profile(path)
+    except (OSError, ValueError):
+        # A read-only install should still be usable; diagnostics reports the
+        # path problem and the built-in server prompt remains in effect.
+        return ""
+    if not text:
+        return ""
+    return "Standing instructions from system_profile.md:\n%s" % text
+
+
+def _env_float(name, default=None):
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return default
+
+
+def _env_bool(name, default=False):
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class HardwareProfile:
+    """Live host capacity. RAM and VRAM intentionally remain independent."""
+
+    os_name: str
+    architecture: str
+    system_ram_total_gb: float
+    system_ram_available_gb: float
+    gpu_vendor: str = "none"
+    gpu_name: str = ""
+    cuda_available: bool = False
+    rocm_available: bool = False
+    vram_total_gb: float = 0.0
+    vram_free_gb: float = 0.0
+    compute_capability: str = ""
+    cpu_offload_supported: bool = False
+    availability_live: bool = True
+    system_ram_availability_live: bool = True
+    vram_availability_live: bool = True
+    # NPU presence is detection-only here: whether the accelerator is actually
+    # runtime-callable is owned by the npu_service/broker capability probe.
+    npu_vendor: str = "none"
+    npu_name: str = ""
+    npu_detected: bool = False
+
+    def to_dict(self):
+        return asdict(self)
+
+
+def _windows_system_memory():
+    """Fast stdlib-only Windows memory query; never spawns PowerShell."""
+    try:
+        import ctypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return (
+                status.ullTotalPhys / 1024**3,
+                status.ullAvailPhys / 1024**3,
+                True,
+            )
+    except (AttributeError, OSError):
+        pass
+    return 0.0, 0.0, False
+
+
+def _system_memory():
+    total = available = 0.0
+    try:
+        import psutil  # optional; already present in many Sonder installs
+        vm = psutil.virtual_memory()
+        return vm.total / 1024**3, vm.available / 1024**3, True
+    except ImportError:
+        pass
+    # Honor the declared host platform before probing Unix pseudo-filesystems.
+    # This also keeps MSYS/Cygwin-style /proc mounts from bypassing the native,
+    # synchronous Windows API path.
+    if os.name == "nt":
+        return _windows_system_memory()
+    if os.path.exists("/proc/meminfo"):
+        values = {}
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as stream:
+                for line in stream:
+                    key, _, value = line.partition(":")
+                    if key in {"MemTotal", "MemAvailable", "MemFree"}:
+                        values[key] = int(value.split()[0]) / 1024**2
+            total = values.get("MemTotal", 0.0)
+            available = values.get("MemAvailable", values.get("MemFree", 0.0))
+            return total, available, bool(total and available)
+        except (OSError, ValueError):
+            pass
+    if platform.system() == "Darwin":
+        try:
+            total = int(subprocess.check_output(
+                ["sysctl", "-n", "hw.memsize"], text=True, timeout=10
+            ).strip()) / 1024**3
+            # vm_stat free+inactive+speculative pages are safely reclaimable.
+            raw = subprocess.check_output(["vm_stat"], text=True, timeout=10)
+            page = int(re.search(r"page size of (\d+)", raw).group(1))
+            counts = [int(x.replace(".", "")) for x in re.findall(
+                r"Pages (?:free|inactive|speculative):\s+(\d+\.)", raw
+            )]
+            return total, sum(counts) * page / 1024**3, bool(counts)
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+            pass
+    return total, available, False
+
+
+# NPU hardware is static per boot; probe once per process. The guard keeps the
+# cache across helper live-reloads, matching the other stateful helpers.
+if "_NPU_PROBE" not in globals():
+    _NPU_PROBE = {"value": None}
+
+
+def _npu_vendor_from_name(name):
+    lowered = str(name or "").lower()
+    if "amd" in lowered or "ryzen" in lowered:
+        return "amd"
+    if "intel" in lowered or "ai boost" in lowered:
+        return "intel"
+    if "qualcomm" in lowered or "hexagon" in lowered:
+        return "qualcomm"
+    return "unknown"
+
+
+_NPU_NAME_RE = re.compile(
+    r"(?:\bnpu\b|neural\s+processing\s+unit|ai boost|ryzen\s*ai)",
+    re.IGNORECASE,
+)
+
+
+def _npu_vendor_from_pnp_id(pnp_device_id):
+    value = str(pnp_device_id or "").upper()
+    if "VEN_1022" in value:
+        return "amd"
+    if "VEN_8086" in value:
+        return "intel"
+    if "VEN_17CB" in value:
+        return "qualcomm"
+    return "unknown"
+
+
+def _linux_accel_is_npu(vendor, driver):
+    """Accept only accelerator drivers tied to client NPU device classes."""
+    supported = {
+        "amd": {"amdxdna"},
+        "intel": {"intel_vpu", "ivpu"},
+    }
+    vendor_id = str(vendor or "").lower()
+    return str(driver or "").lower() in supported.get(vendor_id, set())
+
+
+def _linux_npu_from_nodes(nodes):
+    """Return the first strict NPU match from a bounded accel-node list."""
+    for node in list(nodes)[:16]:
+        vendor = "unknown"
+        driver = ""
+        try:
+            with open(
+                "/sys/class/accel/%s/device/vendor" % node,
+                "r",
+                encoding="ascii",
+            ) as stream:
+                vendor = {
+                    "0x1022": "amd",
+                    "0x8086": "intel",
+                    "0x17cb": "qualcomm",
+                }.get(stream.read().strip().lower(), "unknown")
+        except (OSError, ValueError):
+            pass
+        try:
+            driver = os.path.basename(os.path.realpath(
+                "/sys/class/accel/%s/device/driver" % node
+            )).lower()
+        except (OSError, ValueError):
+            driver = ""
+        if _linux_accel_is_npu(vendor, driver):
+            return vendor, str(node)[:80], True
+    return "none", "", False
+
+
+def _npu_probe():
+    """Best-effort NPU device detection: (vendor, name, detected)."""
+    cached = _NPU_PROBE["value"]
+    if cached is not None:
+        return cached
+    result = ("none", "", False)
+    if _env_bool("SONDER_NPU_PROBE", True):
+        if os.name == "nt":
+            script = (
+                "Get-CimInstance Win32_PnPEntity | Where-Object {"
+                " $_.Name -match '\\bNPU\\b|Neural\\s+Processing\\s+Unit|"
+                "AI Boost|Ryzen\\s*AI' } |"
+                " Select-Object -First 4 Name,PNPDeviceID |"
+                " ConvertTo-Json -Compress"
+            )
+            try:
+                raw = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", script],
+                    text=True,
+                    timeout=10,
+                ).strip()
+                rows = json.loads(raw) if raw else []
+                if isinstance(rows, (str, dict)):
+                    rows = [rows]
+                for row in rows:
+                    if isinstance(row, dict):
+                        name = str(row.get("Name") or "").strip()
+                        pnp_id = str(row.get("PNPDeviceID") or "").strip()
+                    else:
+                        name = str(row or "").strip()
+                        pnp_id = ""
+                    # Keep the same strict filter host-side as a defense against
+                    # PowerShell/regex drift. In particular, bare ``NPU`` used
+                    # to match the middle of "Input" on every Windows system.
+                    if not name or not _NPU_NAME_RE.search(name):
+                        continue
+                    vendor = _npu_vendor_from_pnp_id(pnp_id)
+                    if vendor == "unknown":
+                        vendor = _npu_vendor_from_name(name)
+                    result = (vendor, name[:80], True)
+                    break
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+        elif os.path.isdir("/sys/class/accel"):
+            try:
+                nodes = sorted(os.listdir("/sys/class/accel"))
+            except OSError:
+                nodes = []
+            if nodes:
+                result = _linux_npu_from_nodes(nodes)
+    _NPU_PROBE["value"] = result
+    return result
+
+
+def _npu_hardware(env=None):
+    """Resolve NPU fields with the same override style as GPU detection."""
+    env = os.environ if env is None else env
+    forced = str(env.get("SONDER_NPU_DETECTED", "") or "").strip()
+    if forced:
+        detected = _env_bool("SONDER_NPU_DETECTED", False)
+        if not detected:
+            return "none", "", False
+        vendor = str(env.get("SONDER_NPU_VENDOR", "") or "").strip().lower()
+        name = str(env.get("SONDER_NPU_NAME", "") or "").strip()
+        return vendor or "unknown", name[:80], True
+    vendor, name, detected = _npu_probe()
+    vendor = str(env.get("SONDER_NPU_VENDOR", vendor) or "").strip().lower() or vendor
+    name = str(env.get("SONDER_NPU_NAME", name) or "").strip()[:80]
+    return vendor, name, detected
+
+
+def detect_npu_hardware():
+    """Return cached NPU-only ``(vendor, name, detected)`` host state.
+
+    Unlike ``detect_hardware()``, this does not inspect RAM, CPU, or GPU state,
+    so frequent accelerator status rendering stays lightweight.
+    """
+    return _npu_hardware()
+
+
+def _nvidia_profile(gpu_index=None):
+    query = "name,memory.total,memory.free,compute_cap"
+    try:
+        raw = subprocess.check_output(
+            ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Older nvidia-smi builds do not expose compute_cap in query mode.
+        try:
+            raw = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
+                text=True,
+                timeout=10,
+            )
+            raw = "\n".join(f"{row}, " for row in raw.splitlines())
+        except (OSError, subprocess.SubprocessError):
+            return None
+    rows = [row for row in raw.splitlines() if row.strip()]
+    if not rows:
+        return None
+    parsed = []
+    for index, row in enumerate(rows):
+        fields = [part.strip() for part in row.split(",")]
+        if len(fields) < 4:
+            continue
+        try:
+            parsed.append((index, fields[0], float(fields[1]), float(fields[2]), fields[3]))
+        except ValueError:
+            continue
+    if not parsed:
+        return None
+    if gpu_index is None:
+        # Training is single-GPU. Recommend against the GPU with the most free VRAM.
+        selected = max(parsed, key=lambda item: item[3])
+    else:
+        selected = next((item for item in parsed if item[0] == gpu_index), None)
+        if selected is None:
+            return None
+    _index, name, total_mib, free_mib, capability = selected
+    return name, total_mib / 1024, free_mib / 1024, capability
+
+
+def _rocm_profile():
+    try:
+        raw = subprocess.check_output(
+            ["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--json"],
+            text=True,
+            timeout=10,
+        )
+        data = json.loads(raw)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    cards = []
+    for values in data.values():
+        if not isinstance(values, dict):
+            continue
+        name = str(values.get("Card series") or values.get("Card model") or "AMD GPU")
+        numbers = {}
+        for key, value in values.items():
+            match = re.search(r"(\d+)", str(value).replace(",", ""))
+            if match and "VRAM" in key.upper():
+                numbers[key.lower()] = int(match.group(1)) / 1024**3
+        total = next((v for k, v in numbers.items() if "total" in k), 0.0)
+        used = next((v for k, v in numbers.items() if "used" in k), 0.0)
+        if total:
+            cards.append((name, total, max(0.0, total - used)))
+    return max(cards, key=lambda item: item[2]) if cards else None
+
+
+def detect_hardware(gpu_index=None) -> HardwareProfile:
+    """Detect live capacity with environment overrides for testing/admin use."""
+    total, available, ram_live = _system_memory()
+    total = _env_float("SONDER_RAM_GB", total) or 0.0
+    available_override = _env_float("SONDER_AVAILABLE_RAM_GB")
+    if available_override is not None:
+        available, ram_live = min(total or available_override, available_override), True
+    elif not available and total:
+        available, ram_live = total * 0.75, False
+
+    nvidia = _nvidia_profile() if gpu_index is None else _nvidia_profile(gpu_index)
+    rocm = None if nvidia else _rocm_profile()
+    vram_live = bool(nvidia or rocm)
+    vendor = "nvidia" if nvidia else "amd" if rocm else "none"
+    name, vram_total, vram_free, capability = (
+        (*nvidia, ) if nvidia else (*rocm, "") if rocm else ("", 0.0, 0.0, "")
+    )
+    vendor = os.environ.get("SONDER_GPU_VENDOR", vendor).strip().lower() or "none"
+    vram_total = _env_float("SONDER_VRAM_GB", vram_total) or 0.0
+    free_override = _env_float("SONDER_FREE_VRAM_GB")
+    if free_override is not None:
+        # An explicit/live zero means the GPU is occupied, not that detection
+        # failed. Preserve it so the planner cannot fabricate training room.
+        vram_free = min(vram_total or free_override, free_override)
+        vram_live = True
+    elif not vram_live and vram_total:
+        # Total-only overrides cannot reveal current pressure. Use a
+        # conservative fallback and report that it is not a live reading.
+        vram_free = vram_total * 0.75
+        vram_live = False
+    cuda = _env_bool("SONDER_CUDA_AVAILABLE", bool(nvidia))
+    rocm_available = _env_bool("SONDER_ROCM_AVAILABLE", bool(rocm))
+    npu_vendor, npu_name, npu_detected = _npu_hardware()
+    os_name = platform.system() or os.name
+    offload = bool((cuda or rocm_available) and os_name in {"Linux", "Windows"})
+    return HardwareProfile(
+        os_name=os_name,
+        architecture=platform.machine(),
+        system_ram_total_gb=round(total, 2),
+        system_ram_available_gb=round(min(total or available, available), 2),
+        gpu_vendor=vendor,
+        gpu_name=os.environ.get("SONDER_GPU_NAME", name).strip(),
+        cuda_available=cuda,
+        rocm_available=rocm_available,
+        vram_total_gb=round(vram_total, 2),
+        vram_free_gb=round(min(vram_total or vram_free, vram_free), 2),
+        compute_capability=os.environ.get("SONDER_COMPUTE_CAPABILITY", capability).strip(),
+        cpu_offload_supported=offload,
+        # Preserve the original aggregate field for callers that have not yet
+        # adopted the independent freshness fields.
+        availability_live=ram_live and (vram_live or not vram_total),
+        system_ram_availability_live=ram_live,
+        vram_availability_live=vram_live,
+        npu_vendor=npu_vendor,
+        npu_name=npu_name,
+        npu_detected=npu_detected,
+    )

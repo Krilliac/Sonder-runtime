@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 
+from sonder_runtime.platform import paths as sonder_paths
 from ..application.ports.preferences import (
     ConnectionFactory,
     PreferenceModuleProvider,
@@ -11,7 +12,6 @@ from ..application.ports.preferences import (
 
 def _default_connection():
     import sonder_runtime.adapters.memory_store as memory_store
-    import sonder_paths
 
     return memory_store.connect(
         sonder_paths.memory_db_path(), check_same_thread=True

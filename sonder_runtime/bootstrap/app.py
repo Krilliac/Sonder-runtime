@@ -19,7 +19,6 @@ from ..adapters.strangler_services import (
     LegacyToolExecutor,
     LegacyUnitOfWork,
     OperationsEventSink,
-    SystemClock,
 )
 from ..adapters.eval_history_reader import LegacyEvaluationHistoryReader
 from ..adapters.inspection_executor import LegacyInspectionExecutor
@@ -33,6 +32,7 @@ from ..adapters.preference_adapters import (
 from ..adapters.workflow_adapters import LegacyLoopRunner, LegacyWorkflowRepository
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
+from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
 from ..application.backup import BackupService
 from ..application.evaluation_history import EvaluationHistoryService

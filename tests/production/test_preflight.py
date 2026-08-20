@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 import sonder_config
-import sonder_preflight
+from sonder_runtime.adapters import preflight as sonder_preflight
 
 pytestmark = pytest.mark.unit
 

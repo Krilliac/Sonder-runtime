@@ -22,7 +22,7 @@ import command_catalog
 import command_router as cr
 import permission_modes
 import server
-import sonder_repl
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 
 
 # Every phrase this slice adds, grouped by the command it must resolve to.

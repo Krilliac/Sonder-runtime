@@ -4,7 +4,7 @@ import subprocess
 import pytest
 
 import sonder_headless as H
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 import unsafe_lab
 
 
@@ -247,9 +247,9 @@ def test_listener_pid_parses_windows_netstat(monkeypatch):
 
 
 def test_server_pid_port_match_rejects_another_managed_endpoint(monkeypatch):
-    script = H.repo_root() / "sonder_serve.py"
+    script = "-m sonder_runtime serve"
     monkeypatch.setattr(
-        H, "_pid_command_line", lambda pid: 'python "%s" 11436' % script,
+        H, "_pid_command_line", lambda pid: "python %s 11436" % script,
     )
 
     assert H._is_sonder_server_for_port(4567, 11435) is False

@@ -1,6 +1,6 @@
 # Master-spec evidence tracking design
 
-**Status:** Adopted locally; CI freshness integration pending
+**Status:** Adopted locally; CI freshness integration complete
 **Applies to:** `SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 
 ## Objective
@@ -29,6 +29,9 @@ docs/architecture/
     requirements.jsonl
     artifacts/
       <requirement-id>/README.md
+  generated/
+    requirement-status.md
+    requirement-status.json
   generated/
     requirement-status.md
     requirement-status.json
@@ -141,7 +144,7 @@ Every implementation PR must:
 - [x] Add the `requirements.jsonl` ledger and a JSON Schema.
 - [x] Add a documentation checker that runs without importing production code.
 - [x] Seed `planned` records for all 204 IDs from the master spec.
-- [ ] Add CI freshness checks for generated status.
+- [x] Add CI freshness checks for generated status.
 - [ ] Begin checking implementation requirements only as complete evidence is gathered.
 
 This sequencing avoids retroactively treating existing code presence as proof.

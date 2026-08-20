@@ -30,10 +30,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-import runtime_policy
-import sonder_migrations
-import sonder_version
-from sonder_operations_store import OperationsStore
+import sonder_runtime.adapters.runtime_policy as runtime_policy
+import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from sonder_runtime.platform import version as sonder_version
+from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
 MANIFEST_FORMAT_VERSION = 1
 MAX_MANIFEST_BYTES = 1 << 20

@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-import sonder_migrations
+import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
 pytestmark = pytest.mark.integration
 

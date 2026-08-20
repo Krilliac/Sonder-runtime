@@ -34,6 +34,7 @@ from ...application.ports.model_gateway import (
 from ...platform.metrics import default_registry
 from ..inference_telemetry import from_ollama
 from ..model_transport import ModelCallError
+from . import endpoint as ollama_endpoint
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -120,7 +121,7 @@ class OllamaGateway:
             raise DependencyUnavailable(
                 "the sonder:latest alias is not available; run setup_alias.py"
             )
-        _enforce_local_endpoint(server.BASE, context)
+        _enforce_local_endpoint(ollama_endpoint.normalize(), context)
         # The port-level consent gate: an explicitly cloud-classified tier
         # needs the caller's context to allow it — regardless of how the
         # request reached this lane (R: consent cannot be bypassed).
@@ -182,7 +183,7 @@ class OllamaGateway:
     def embed(
         self, texts: Sequence[str], context: OperationContext
     ) -> Sequence[Embedding]:
-        import embeddings
+        import sonder_runtime.adapters.embeddings as embeddings
 
         _enforce_local_endpoint(embeddings.BASE, context)
         results = []
