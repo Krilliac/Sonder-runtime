@@ -27,6 +27,8 @@ import sys
 from sonder_runtime.platform import config as sonder_config
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
+from sonder_runtime.adapters.command_surface import LegacyServerMcpRuntime
+from sonder_runtime.application.command_surface import McpCommand
 
 
 def _load_config(args) -> "sonder_config.SonderConfig":
@@ -563,18 +565,13 @@ def cmd_repl(args) -> int:
 
 
 def cmd_mcp(args) -> int:
-    # Preserve the unsafe-lab startup fence ahead of every configuration read.
-    # A hostile/invalid model endpoint must not mask the dedicated safety
-    # refusal or let the adapter import far enough to begin initialization.
-    import server
-
-    server.require_mcp_startup_safety()
     try:
-        _export_runtime_environment(_load_config(args))
+        McpCommand(LegacyServerMcpRuntime()).execute(
+            lambda: _export_runtime_environment(_load_config(args))
+        )
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    server.run_mcp(safety_checked=True)
     return 0
 
 

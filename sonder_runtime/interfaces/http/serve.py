@@ -57,9 +57,11 @@ import sonder_runtime.adapters.secrets as sonder_secrets
 import served_action_receipts
 import tool_contract
 import unsafe_lab
+from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 
 DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
+_HEALTH_STATUS_FACADE = HealthStatusFacade()
 
 
 class _DuplicateJsonObjectKey(ValueError):
@@ -3074,28 +3076,20 @@ class Handler(BaseHTTPRequestHandler):
         loopback (the reverse proxy restricts them to loopback upstream).
         """
         lifecycle = sonder_lifecycle.get()
-        if path == "/live":
-            self._send_json_payload(lifecycle.live_payload())
-            return True
-        if path not in ("/ready", "/health", "/version", "/metrics"):
+        route = _HEALTH_STATUS_FACADE.route(path)
+        if route is None:
             return False
-        if not self._peer_is_loopback():
+        if route.requires_auth and not self._peer_is_loopback():
             if self._auth_rate_limited():
                 return True
             if not self._request_auth_context()["authorized"]:
                 self._send_auth_error()
                 return True
-        if path == "/ready":
-            status, payload = lifecycle.ready_payload()
+        status, payload = route.render(lifecycle)
+        if route.media_type == "application/json":
             self._send_json_payload(payload, status=status)
             return True
-        if path == "/health":
-            self._send_json_payload(lifecycle.health_payload())
-            return True
-        if path == "/version":
-            self._send_json_payload(lifecycle.version_payload())
-            return True
-        body = lifecycle.metrics.render()
+        body = payload
         must_close = self._close_for_unread_body()
         self.send_response(200)
         self._cors()
