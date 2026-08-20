@@ -515,3 +515,9 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Ninth Slice: `WP1-TWO-HUNDRED-NINTH-SLICE.md` —
   moved hosted-model prediction-budget normalization into the packaged domain
   boundary while preserving the root server compatibility helper.
+- WP1 Two-Hundred-Eleventh Slice: `WP1-TWO-HUNDRED-ELEVENTH-SLICE.md` —
+  moved context-overflow retry payload compaction into the packaged context
+  domain boundary while preserving the root server compatibility helper.
+- WP1 Two-Hundred-Twelfth Slice: `WP1-TWO-HUNDRED-TWELFTH-SLICE.md` —
+  moved the concrete NVIDIA GPU memory probe into the packaged platform
+  hardware-probe boundary while preserving the legacy hardware alias.

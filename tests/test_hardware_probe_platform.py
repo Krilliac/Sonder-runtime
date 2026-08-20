@@ -83,3 +83,50 @@ def test_hardware_ram_probe_falls_back_when_posix_lookup_fails(monkeypatch):
     monkeypatch.setattr(hardware_probe.os, "sysconf", fail, raising=False)
     result = probe_total_ram_gb()
     assert result is None or result > 0
+
+
+def test_hardware_gpu_probe_has_canonical_platform_owner():
+    from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
+
+    assert sonder_hardware._probe_gpu is probe_nvidia_gpu
+
+
+def test_hardware_gpu_probe_uses_largest_reported_vram(monkeypatch):
+    import sonder_runtime.adapters.accelerators.gpu_probe as hardware_probe
+
+    class Result:
+        returncode = 0
+        stdout = "8192\n24576\n"
+
+    monkeypatch.setattr(hardware_probe.subprocess, "run", lambda *args, **kwargs: Result())
+    assert hardware_probe.probe_nvidia_gpu() == (True, 24.0)
+
+
+def test_hardware_gpu_probe_retries_a_cold_driver_timeout(monkeypatch):
+    import sonder_runtime.adapters.accelerators.gpu_probe as hardware_probe
+
+    class Result:
+        returncode = 0
+        stdout = "16384\n"
+
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(kwargs["timeout"])
+        if len(calls) == 1:
+            raise hardware_probe.subprocess.TimeoutExpired("nvidia-smi", kwargs["timeout"])
+        return Result()
+
+    monkeypatch.setattr(hardware_probe.subprocess, "run", run)
+    assert hardware_probe.probe_nvidia_gpu() == (True, 16.0)
+    assert calls == [8.0, 8.0]
+
+
+def test_hardware_gpu_probe_degrades_on_missing_driver(monkeypatch):
+    import sonder_runtime.adapters.accelerators.gpu_probe as hardware_probe
+
+    def fail(*args, **kwargs):
+        raise OSError("missing")
+
+    monkeypatch.setattr(hardware_probe.subprocess, "run", fail)
+    assert hardware_probe.probe_nvidia_gpu() == (False, None)
