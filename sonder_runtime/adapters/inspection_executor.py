@@ -61,8 +61,8 @@ def _failure(exc: Exception, audit_args: dict) -> ToolResult:
     )
 
 
-class LegacyInspectionExecutor:
-    """Strict allowlisted executor for legacy read-only inspection modules."""
+class InspectionExecutorAdapter:
+    """Strict allowlisted adapter for read-only inspection modules."""
 
     def execute(self, call: ToolCall, context: OperationContext) -> ToolResult:
         args = dict(call.arguments or {})
@@ -131,6 +131,7 @@ class LegacyInspectionExecutor:
         except Exception as exc:
             return _failure(exc, audit_args)
 
+
     def _workspace_compare(
         self, args: dict, context: OperationContext
     ) -> ToolResult:
@@ -174,6 +175,7 @@ class LegacyInspectionExecutor:
             )
         except Exception as exc:
             return _failure(exc, audit_args)
+
 
     def _project_detect(self, args: dict, context: OperationContext) -> ToolResult:
         project_detect = _legacy_module("project_detect")
@@ -376,3 +378,7 @@ class LegacyInspectionExecutor:
             )
         except Exception as exc:
             return _failure(exc, audit_args)
+
+
+# Compatibility name for callers that still import the pre-migration adapter.
+LegacyInspectionExecutor = InspectionExecutorAdapter

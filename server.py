@@ -147,6 +147,9 @@ from sonder_runtime.domain.campaign_formatting import (
 from sonder_runtime.domain.campaign_expectations import (
     campaign_expected as _campaign_expected,
 )
+from sonder_runtime.domain.campaign_environment import (
+    environment_failure as _campaign_environment_failure,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
 )
@@ -6313,18 +6316,6 @@ _CAMPAIGN_TASKS = [
     ("fib",
      "print the 20th Fibonacci number where fib(1)=1 and fib(2)=1"),
 ]
-
-
-def _campaign_environment_failure(output):
-    """Whether a failed attempt broke on the host, not the model.
-
-    A missing interpreter/compiler fails every attempt in that language no
-    matter what the model wrote; recording it as 'failed' would penalize the
-    model for the host's toolchain - the same mis-attribution class as the
-    pytest timeouts campaign_repo_repair no longer records. A repair round
-    cannot install a toolchain either, so callers also stop retrying.
-    """
-    return str(output or "").startswith("missing runtime/compiler:")
 
 
 def _campaign_prompt(language, task_name, task_text, repair_note=""):

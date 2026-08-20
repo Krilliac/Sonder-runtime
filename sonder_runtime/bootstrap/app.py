@@ -19,7 +19,7 @@ from ..adapters.tool_executor import ToolExecutorAdapter
 from ..adapters.unit_of_work import UnitOfWorkAdapter
 from ..adapters.operations_event_sink import OperationsEventSink
 from ..adapters.evaluation_history_reader import EvaluationHistoryReaderAdapter
-from ..adapters.inspection_executor import LegacyInspectionExecutor
+from ..adapters.inspection_executor import InspectionExecutorAdapter
 from ..adapters.backup_gateway import LegacyBackupGateway
 from ..adapters.recall_gateway import LegacyRecallGateway
 from ..adapters.preference_adapters import (
@@ -127,7 +127,7 @@ def build_application(
         events=LocalObservabilitySink(OperationsEventSink()),
         clock=SystemClock(),
         backup=BackupService(LegacyBackupGateway()),
-        inspections=InspectionService(LegacyInspectionExecutor()),
+        inspections=InspectionService(InspectionExecutorAdapter()),
         recall=RecallService(LegacyRecallGateway()),
         evaluation_history=EvaluationHistoryService(
             EvaluationHistoryReaderAdapter()
