@@ -27,3 +27,41 @@ def env_int_option(name, default=None, *, environ=None):
         return int(raw)
     except ValueError:
         return default
+
+
+def local_model_options(
+    temperature,
+    num_predict,
+    num_ctx,
+    *,
+    native_context=None,
+    environ=None,
+):
+    """Build the runtime options sent with a local Ollama model request.
+
+    The context normalizer is injected so this platform policy does not depend
+    on the domain context policy.  ``environ`` is likewise injectable for
+    deterministic tests while callers may still observe live process changes.
+    """
+    values = environ if environ is not None else os.environ
+    normalize_context = native_context or (lambda value: value)
+    options = {
+        "temperature": temperature,
+        "num_predict": num_predict,
+        "num_ctx": normalize_context(num_ctx),
+    }
+    runtime = {
+        "num_thread": env_int_option(
+            "SONDER_NUM_THREAD", cpu_thread_default(), environ=values
+        ),
+        # Let Ollama select the available accelerator unless the operator
+        # explicitly pins one.
+        "num_gpu": env_int_option("SONDER_NUM_GPU", environ=values),
+        "num_batch": env_int_option(
+            "SONDER_NUM_BATCH", 512, environ=values
+        ),
+    }
+    for key, value in runtime.items():
+        if value is not None:
+            options[key] = value
+    return options

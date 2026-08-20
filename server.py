@@ -88,6 +88,7 @@ from sonder_runtime.domain.model_usage_formatting import (
 from sonder_runtime.platform.environment_options import (
     cpu_thread_default as _cpu_thread_default,
     env_int_option as _env_int_option,
+    local_model_options as _platform_local_model_options,
 )
 from sonder_runtime.platform.location_consent import (
     location_consent as _location_consent,
@@ -256,33 +257,14 @@ RETIRED_CLOUD_MODELS = _RUNTIME_MODEL_CONFIGURATION.retired_cloud_models
 
 
 def _local_model_options(temperature, num_predict, num_ctx):
-    """Options sent with every local Ollama model request.
-
-    Read env at call time so a long-running process can pick up live env patches made
-    inside this Python process, and so tests can exercise the performance knobs.
-    """
-    options = {
-        "temperature": temperature,
-        "num_predict": num_predict,
-        "num_ctx": context_policy.native(num_ctx),
-    }
-    runtime = {
-        "num_thread": _env_int_option(
-            "SONDER_NUM_THREAD", _cpu_thread_default(), environ=os.environ
-        ),
-        # Omit num_gpu unless the operator explicitly pins it. Ollama can then
-        # select CPU, Metal, ROCm, CUDA, Vulkan, or another supported backend
-        # from live host capabilities instead of inheriting an NVIDIA-shaped
-        # default from the maintainer's workstation.
-        "num_gpu": _env_int_option("SONDER_NUM_GPU", environ=os.environ),
-        "num_batch": _env_int_option(
-            "SONDER_NUM_BATCH", 512, environ=os.environ
-        ),
-    }
-    for key, value in runtime.items():
-        if value is not None:
-            options[key] = value
-    return options
+    """Compatibility delegate for the packaged local-model option policy."""
+    return _platform_local_model_options(
+        temperature,
+        num_predict,
+        num_ctx,
+        native_context=context_policy.native,
+        environ=os.environ,
+    )
 
 
 def _local_runtime_summary():
