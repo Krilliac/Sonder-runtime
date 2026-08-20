@@ -14,8 +14,8 @@ import subprocess
 import threading
 import time
 
-import environment_probe
 import sonder_logging
+from sonder_runtime.platform import toolchain_policy
 
 
 TIMEOUT_SECONDS = 3
@@ -24,41 +24,8 @@ MAX_OUTPUT_CHARS = 2_000
 # Keep this intentionally small.  A tool must have a non-interactive,
 # read-only version switch before it can be probed.  Unknown tools remain
 # discoverable through environment_status but are not executable here.
-_VERSION_ARGUMENTS = {
-    "python": ("--version",),
-    "python3": ("--version",),
-    "node": ("--version",),
-    "npm": ("--version",),
-    "npx": ("--version",),
-    "cargo": ("--version",),
-    "rustc": ("--version",),
-    "go": ("version",),
-    "dotnet": ("--version",),
-    "cmake": ("--version",),
-    "ninja": ("--version",),
-    "gcc": ("--version",),
-    "g++": ("--version",),
-    "clang": ("--version",),
-    "clang++": ("--version",),
-    "git": ("--version",),
-    "gh": ("--version",),
-    "rg": ("--version",),
-    "curl": ("--version",),
-    "pip": ("--version",),
-    "uv": ("--version",),
-    "ruff": ("--version",),
-    "pytest": ("--version",),
-    "sccache": ("--version",),
-    "clcache": ("--version",),
-    "doxygen": ("--version",),
-}
-
-
 def _available_path(name: str, refresh: bool) -> str:
-    env = environment_probe.probe(refresh=refresh)
-    return (env.get("toolchains", {}).get(name)
-            or env.get("specialist_tools", {}).get(name)
-            or "")
+    return toolchain_policy.discovered_path(name, refresh=refresh)
 
 
 def _safe_output(text: str) -> str:
@@ -182,7 +149,8 @@ def _run_bounded(argv: list[str]) -> tuple[str, str]:
 def status(name: str, refresh: bool = False) -> dict[str, object]:
     """Run a fixed non-interactive version probe for one discovered tool."""
     tool = (name or "").strip().lower()
-    if tool not in _VERSION_ARGUMENTS:
+    arguments = toolchain_policy.allowed_arguments(tool)
+    if arguments is None:
         return {
             "ok": False,
             "tool": tool,
@@ -192,7 +160,7 @@ def status(name: str, refresh: bool = False) -> dict[str, object]:
     if not path:
         return {"ok": False, "tool": tool, "error": "tool is not available on this host"}
     try:
-        outcome, output = _run_bounded([path, *_VERSION_ARGUMENTS[tool]])
+        outcome, output = _run_bounded([path, *arguments])
     except subprocess.TimeoutExpired:
         return {"ok": False, "tool": tool, "error": "status probe timed out"}
     except OSError:

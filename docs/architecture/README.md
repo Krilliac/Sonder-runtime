@@ -349,3 +349,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Fifty-Fifth Slice: `WP1-ONE-HUNDRED-FIFTY-FIFTH-SLICE.md` —
   moved pure upstream HTTP `Retry-After` parsing into the domain boundary
   while preserving the root server compatibility alias.
+- WP1 One-Hundred-Fifty-Eighth Slice: `WP1-ONE-HUNDRED-FIFTY-EIGHTH-SLICE.md` —
+  moved fixed toolchain status-probe policy and canonical discovery lookup
+  into the platform boundary while retaining bounded execution in the adapter.
+- WP1 One-Hundred-Fifty-Seventh Slice: `WP1-ONE-HUNDRED-FIFTY-SEVENTH-SLICE.md` —
+  moved pure model-error redaction and bounded-detail formatting into the
+  domain boundary while preserving root server compatibility aliases.
