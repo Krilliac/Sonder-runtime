@@ -75,7 +75,7 @@ import memory_quality
 import learning_health
 import domain_grounding
 import master_orchestrator
-import execution_status
+from sonder_runtime.domain.execution import status as execution_status
 import ollama_lifecycle
 import admin_auth
 import codegen_loop
