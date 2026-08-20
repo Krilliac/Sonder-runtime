@@ -47,3 +47,13 @@ def safe_model_error_detail(value, limit: int = 600) -> str:
             text,
         )
     return text[:limit] or "model request failed"
+
+
+def embedded_model_error(result) -> str:
+    """Extract and safely format an in-band error from a model response."""
+    if not isinstance(result, dict):
+        return ""
+    embedded = result.get("error")
+    if not embedded:
+        return ""
+    return safe_model_error_detail(embedded)

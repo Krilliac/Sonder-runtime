@@ -495,3 +495,9 @@ newer ADR explicitly supersedes them.
 - WP1 Two-Hundred-Fourth Slice: `WP1-TWO-HUNDRED-FOURTH-SLICE.md` —
   moved bounded toolchain process-tree teardown into the packaged adapter
   boundary while preserving the legacy toolchain-status delegate.
+- WP1 Two-Hundred-Sixth Slice: `WP1-TWO-HUNDRED-SIXTH-SLICE.md` —
+  moved the standalone client's local-fallback environment policy into the
+  packaged platform boundary while preserving the legacy client export.
+- WP1 Two-Hundred-Fifth Slice: `WP1-TWO-HUNDRED-FIFTH-SLICE.md` —
+  moved in-band model-error extraction into the packaged domain formatting
+  boundary while preserving the root server compatibility wrapper.
