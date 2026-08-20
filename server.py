@@ -171,6 +171,10 @@ from sonder_runtime.domain.thinking_policy import (
 from sonder_runtime.domain.schema_policy import (
     format_schema_gaps as _format_schema_gaps,
 )
+from sonder_runtime.platform.model_retry_policy import (
+    hosted_overflow_retry_enabled as _hosted_overflow_retry_enabled,
+    overflow_retry_allowed as _overflow_retry_allowed,
+)
 from sonder_runtime.domain.prompt_composition import (
     join_system_parts as _join_system_parts,
 )
@@ -3713,31 +3717,6 @@ def _local_model_retries() -> int:
     except (TypeError, ValueError):
         value = 1
     return max(0, min(value, _MAX_LOCAL_MODEL_RETRIES))
-
-
-def _hosted_overflow_retry_enabled() -> bool:
-    """Operator opt-in for compaction retries on hosted/remote model routes.
-
-    Off by default. Even when on it is not sufficient: the calling site must also
-    declare the request idempotent, because a hosted retry is metered work that
-    may duplicate a side effect.
-    """
-    return os.environ.get("SONDER_HOSTED_OVERFLOW_RETRY", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-
-
-def _overflow_retry_allowed(*, cloud: bool, remote: bool, idempotent: bool) -> bool:
-    """Whether this route may spend one extra attempt on a compacted prompt.
-
-    Loopback Ollama is free and side-effect-free, so it may always take the one
-    retry. Anything that leaves the machine - a hosted tier or a remote Ollama -
-    keeps the existing "no retries" posture unless the request was explicitly
-    declared idempotent *and* the operator opted in.
-    """
-    if not (cloud or remote):
-        return True
-    return bool(idempotent) and _hosted_overflow_retry_enabled()
 
 
 def _embedded_model_error(result) -> str:

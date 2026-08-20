@@ -355,3 +355,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Fifty-Seventh Slice: `WP1-ONE-HUNDRED-FIFTY-SEVENTH-SLICE.md` —
   moved pure model-error redaction and bounded-detail formatting into the
   domain boundary while preserving root server compatibility aliases.
+- WP1 One-Hundred-Fifty-Ninth Slice: `WP1-ONE-HUNDRED-FIFTY-NINTH-SLICE.md` —
+  moved model overflow-retry eligibility into the platform boundary while
+  preserving root server compatibility aliases.
+- WP1 One-Hundred-Sixtieth Slice: `WP1-ONE-HUNDRED-SIXTIETH-SLICE.md` —
+  moved inference telemetry normalization into the canonical inference adapter
+  package while preserving the legacy module's compatibility exports.
