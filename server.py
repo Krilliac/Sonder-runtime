@@ -76,6 +76,9 @@ import learning_health
 import domain_grounding
 import master_orchestrator
 from sonder_runtime.domain.execution import status as execution_status
+from sonder_runtime.domain.model_routing import (
+    is_cloud_model_name as _is_cloud_model_name,
+)
 from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
@@ -325,11 +328,6 @@ def _cloud_disabled_message():
         "ERROR: hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 "
         "to opt in; prompts sent to cloud tiers leave this machine."
     )
-
-
-def _is_cloud_model_name(model):
-    name = (model or "").lower()
-    return "-cloud" in name or name.endswith(":cloud")
 
 
 def discovered_models():
