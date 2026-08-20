@@ -19,3 +19,24 @@ def vendor_from_text(*values: object) -> str:
     if "apple" in text or "ven_106b" in text:
         return "Apple"
     return "unknown"
+
+
+def looks_integrated(name: str, vendor: str) -> bool | None:
+    """Classify whether an enumerated display adapter is integrated."""
+    lowered = (name or "").lower()
+    if vendor == "Apple":
+        return True
+    if vendor == "NVIDIA":
+        return False
+    if vendor == "Intel":
+        if any(marker in lowered for marker in (" arc a", " arc b", "arc pro", "data center gpu flex")):
+            return False
+        if any(marker in lowered for marker in ("uhd graphics", "iris", "hd graphics")):
+            return True
+        return None
+    if vendor == "AMD":
+        if any(marker in lowered for marker in ("radeon graphics", "780m", "760m", "740m", "680m", "660m", "890m")):
+            return True
+        if any(marker in lowered for marker in ("radeon rx", "radeon pro", "instinct")):
+            return False
+    return None

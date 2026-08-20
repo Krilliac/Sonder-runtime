@@ -35,6 +35,7 @@ from sonder_runtime.domain.model_sizing import (
     memory_band,
     params_from_model_tag,
 )
+from sonder_runtime.platform.hardware_identity import looks_integrated
 from sonder_runtime.platform.hardware_probe import parse_memory_gb
 from sonder_runtime.platform.hardware_identity import vendor_from_text
 
@@ -241,23 +242,8 @@ def _vendor_from_text(*values: object) -> str:
 
 
 def _looks_integrated(name: str, vendor: str) -> bool | None:
-    lowered = (name or "").lower()
-    if vendor == "Apple":
-        return True
-    if vendor == "NVIDIA":
-        return False
-    if vendor == "Intel":
-        if any(marker in lowered for marker in (" arc a", " arc b", "arc pro", "data center gpu flex")):
-            return False
-        if any(marker in lowered for marker in ("uhd graphics", "iris", "hd graphics")):
-            return True
-        return None
-    if vendor == "AMD":
-        if any(marker in lowered for marker in ("radeon graphics", "780m", "760m", "740m", "680m", "660m", "890m")):
-            return True
-        if any(marker in lowered for marker in ("radeon rx", "radeon pro", "instinct")):
-            return False
-    return None
+    """Legacy compatibility alias for packaged accelerator classification."""
+    return looks_integrated(name, vendor)
 
 
 def _accelerator(
