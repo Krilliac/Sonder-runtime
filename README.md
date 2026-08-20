@@ -399,6 +399,7 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 One-Hundred-Thirteenth Slice: autopilot repository ownership now belongs to `sonder_runtime.adapters.persistence.autopilot_repository`, removing the generic strangler repository implementation.
 - WP1 One-Hundred-Fourteenth Slice: HTTP serve-temperature policy now belongs to `sonder_runtime.interfaces.http.serve_policy`, preserving the server compatibility alias.
 - WP1 One-Hundred-Sixteenth Slice: process-probe ownership now belongs to `sonder_runtime.adapters.process_probe.ProcessProbeAdapter`; the generic strangler no longer owns that port adapter.
+- WP1 Two-Hundred-Twenty-Fifth Slice: live-process fingerprint selection now belongs to `sonder_runtime.adapters.process_liveness.process_identity`; `ProcessProbeAdapter.identity` remains the compatibility port surface.
 - WP1 One-Hundred-Fifteenth Slice: pure model-catalog capability normalization now belongs to `sonder_runtime.domain.model_capabilities`, preserving the server compatibility alias.
 - WP1 One-Hundred-Eighteenth Slice: pure inline-thinking output policy now belongs to `sonder_runtime.domain.thinking_policy`, preserving the server compatibility alias.
 - WP1 One-Hundredth Slice: full shutdown coordination now belongs to `sonder_runtime.platform.shutdown`; `sonder_shutdown` remains an identity-preserving compatibility shim with cancellation, signal, drain, deadline, and concurrent idempotence semantics unchanged.
@@ -408,6 +409,7 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 One-Hundred-Sixth Slice: full system-profile implementation ownership now lives in `sonder_runtime.platform.system_profile`; the root module remains an identity-preserving shim while hardware detection, mutable probe state, profile editing, and monkeypatch behavior remain unchanged.
 - WP1 One-Hundred-Seventh Slice: the `sonder_version` root-platform allowance is removed after all packaged runtime callers moved to `sonder_runtime.platform.version`; the literal root `VERSION` contract remains intact for release tooling.
 - WP1 One-Hundred-Eighth Slice: pure Ollama-origin normalization and fail-closed security policy now live in `sonder_runtime.domain.ollama_policy`; `unsafe_lab` no longer imports the transport adapter, preserving the security gate while removing the blocked platform-to-adapter dependency.
+- WP1 Two-Hundred-Twenty-Sixth Slice: system-profile boolean environment overrides now use the canonical `sonder_runtime.platform.config_environment` policy, preserving the `_env_bool` compatibility alias and hardware override behavior.
 - WP1 One-Hundred-Second Slice: complete typed configuration ownership now belongs to `sonder_runtime.platform.config`; `sonder_config` remains a thin external-tooling compatibility surface with exact class, loader, exception, precedence, default, and validation semantics preserved.
 # WP1 One-Hundred-Tenth Slice
 

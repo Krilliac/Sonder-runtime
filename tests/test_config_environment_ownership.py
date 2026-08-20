@@ -32,6 +32,15 @@ def test_system_profile_float_policy_is_owned_by_configuration_environment():
     assert config_environment.env_float.__module__ == config_environment.__name__
 
 
+def test_system_profile_boolean_policy_is_owned_by_configuration_environment():
+    import system_profile
+
+    assert system_profile._env_bool is config_environment.env_bool_from_env
+    assert system_profile._env_bool("FLAG", environ={"FLAG": " true "}) is True
+    assert system_profile._env_bool("FLAG", True, environ={}) is True
+    assert system_profile._env_bool("FLAG", True, environ={"FLAG": "off"}) is False
+
+
 def test_env_float_preserves_default_and_clamps_negative_values():
     assert config_environment.env_float("N", 7.5, environ={}) == 7.5
     assert config_environment.env_float("N", 7.5, environ={"N": " 12.25 "}) == 12.25

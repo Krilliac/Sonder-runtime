@@ -14,6 +14,18 @@ def env_bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def env_bool_from_env(
+    name: str,
+    default: bool = False,
+    *,
+    environ: dict[str, str] | None = None,
+) -> bool:
+    """Read a named compatibility boolean while preserving its default."""
+    source = environ if environ is not None else os.environ
+    raw = source.get(name, "").strip()
+    return default if not raw else env_bool(raw)
+
+
 def env_int(name: str, env: dict[str, str], current: int, errors: list[str]) -> int:
     """Read one compatibility integer without bypassing typed validation."""
     raw = env.get(name, "").strip()
@@ -43,4 +55,4 @@ def env_float(
         return default
 
 
-__all__ = ["env_bool", "env_int", "env_float"]
+__all__ = ["env_bool", "env_bool_from_env", "env_int", "env_float"]
