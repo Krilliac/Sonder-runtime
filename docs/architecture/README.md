@@ -535,3 +535,9 @@ newer ADR explicitly supersedes them.
   moved child-process environment secret/control-name classification into the
   packaged platform policy boundary while preserving the logging compatibility
   alias.
+- WP1 Two-Hundred-Eighteenth Slice: `WP1-TWO-HUNDRED-EIGHTEENTH-SLICE.md` —
+  moved normalized accelerator-record construction into the packaged platform
+  hardware-identity boundary while preserving the legacy hardware alias.
+- WP1 Two-Hundred-Seventeenth Slice: `WP1-TWO-HUNDRED-SEVENTEENTH-SLICE.md` —
+  moved bounded integer-limit normalization into the packaged domain boundary
+  while preserving the root server compatibility delegate.
