@@ -14,6 +14,13 @@ def _legacy_module(name: str):
     return importlib.import_module(name)
 
 
+def _packaged_module(name: str):
+    """Resolve an inspection implementation owned by the packaged adapter."""
+    return importlib.import_module(
+        "sonder_runtime.adapters.inspection.%s" % name
+    )
+
+
 def _authorized(context: OperationContext) -> bool:
     return context.auth_level in ("user", "developer", "admin")
 
@@ -178,7 +185,7 @@ class InspectionExecutorAdapter:
 
 
     def _project_detect(self, args: dict, context: OperationContext) -> ToolResult:
-        project_detect = _legacy_module("project_detect")
+        project_detect = _packaged_module("project_detect")
 
         audit_args = {key: args[key] for key in (
             "path", "max_depth", "max_files", "max_total_bytes",
@@ -204,7 +211,7 @@ class InspectionExecutorAdapter:
             return _failure(exc, audit_args)
 
     def _file_digest(self, args: dict, context: OperationContext) -> ToolResult:
-        content_digest = _legacy_module("content_digest")
+        content_digest = _packaged_module("content_digest")
 
         audit_args = {"path": args["path"], "max_bytes": args["max_bytes"]}
         try:
@@ -227,7 +234,7 @@ class InspectionExecutorAdapter:
     def _directory_digest(
         self, args: dict, context: OperationContext
     ) -> ToolResult:
-        content_digest = _legacy_module("content_digest")
+        content_digest = _packaged_module("content_digest")
 
         audit_args = {key: args[key] for key in (
             "path", "max_depth", "max_files", "max_total_bytes",
@@ -253,7 +260,7 @@ class InspectionExecutorAdapter:
             return _failure(exc, audit_args)
 
     def _archive_list(self, args: dict, context: OperationContext) -> ToolResult:
-        archive_tools = _legacy_module("archive_tools")
+        archive_tools = _packaged_module("archive_tools")
 
         audit_args = {
             "path": args["path"], "max_entries": args["max_entries"],
