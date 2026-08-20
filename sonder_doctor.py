@@ -39,6 +39,7 @@ from sonder_runtime.adapters.config_validation import (
     validated_config_check as _validated_config_check,
 )
 from sonder_runtime.domain.doctor_result import normalize_result as _normalize_result
+from sonder_runtime.domain.doctor_result import skipped as _skipped_result
 from sonder_runtime.domain.doctor_status import coerce_status as _coerce_status
 
 # Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
@@ -188,7 +189,7 @@ def render_report(report: Mapping[str, Any]) -> str:
 
 
 def _skip(reason: str) -> dict:
-    return {"status": STATUS_SKIPPED, "detail": "skipped: %s" % reason}
+    return _skipped_result(reason)
 
 
 def _load_config_or_none():

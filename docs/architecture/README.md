@@ -1,5 +1,9 @@
 # Sonder Runtime architecture documents
 
+- WP1 One-Hundred-Eighty-Seventh Slice: `WP1-ONE-HUNDRED-EIGHTY-SEVENTH-SLICE.md` —
+  moved pure learning-enablement policy into the packaged domain boundary
+  while preserving the root server compatibility wrapper.
+
 ## Authoritative implementation plan
 
 - [`SONDER-MASTER-IMPLEMENTATION-SPEC.md`](SONDER-MASTER-IMPLEMENTATION-SPEC.md)
@@ -440,3 +444,6 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Eighty-Fifth Slice: `WP1-ONE-HUNDRED-EIGHTY-FIFTH-SLICE.md` —
   moved pure valid-tier-name presentation into the packaged domain boundary
   while preserving the root server compatibility delegate.
+- WP1 One-Hundred-Eighty-Eighth Slice: `WP1-ONE-HUNDRED-EIGHTY-EIGHTH-SLICE.md` —
+  moved skipped doctor-result construction into the packaged domain boundary
+  while preserving the root doctor compatibility delegate.

@@ -8,6 +8,12 @@ from typing import Any
 from sonder_runtime.domain.doctor_status import coerce_status
 
 
+def skipped(reason: str) -> dict[str, str]:
+    """Build the stable result used when a doctor check cannot run."""
+
+    return {"status": "skipped", "detail": "skipped: %s" % reason}
+
+
 def normalize_result(name: str, raw: Any) -> dict[str, str]:
     """Normalize a check result into a stable name/status/detail mapping.
 
@@ -26,3 +32,6 @@ def normalize_result(name: str, raw: Any) -> dict[str, str]:
     else:
         status = coerce_status(raw)
     return {"name": str(result_name), "status": status, "detail": detail}
+
+
+__all__ = ["normalize_result", "skipped"]
