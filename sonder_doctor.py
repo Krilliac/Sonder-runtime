@@ -35,6 +35,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from sonder_runtime.adapters.config_validation import (
+    validated_config_check as _validated_config_check,
+)
+
 # Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
 # is simply absent should not make an otherwise-healthy runtime look sick.
 STATUS_OK = "ok"
@@ -263,14 +267,8 @@ def _check_config() -> dict:
 
 
 def validated_config_check(config):
-    """Return a check bound to the exact config already validated by the CLI."""
-    def check():
-        detail = "ollama=%s" % getattr(
-            getattr(config, "ollama", None), "url", "?"
-        )
-        return {"status": STATUS_OK, "detail": detail}
-
-    return check
+    """Compatibility alias for the packaged config-check adapter."""
+    return _validated_config_check(config)
 
 
 def _check_self_heal() -> dict:

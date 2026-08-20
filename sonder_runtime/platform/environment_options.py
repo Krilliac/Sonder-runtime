@@ -1,6 +1,17 @@
-"""Parsing policy for environment-backed runtime options."""
+"""Policies for environment-backed runtime options."""
 
 import os
+
+
+def cpu_thread_default(*, cpu_count=None):
+    """Return the safe default worker count for local model requests.
+
+    ``cpu_count`` is injectable for deterministic callers and tests; when it
+    is omitted the host's current CPU count is used.  A missing or invalid
+    host count still produces a usable single-thread minimum.
+    """
+    count = os.cpu_count() if cpu_count is None else cpu_count
+    return max(1, count or 4)
 
 
 def env_int_option(name, default=None, *, environ=None):

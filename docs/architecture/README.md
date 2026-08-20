@@ -373,3 +373,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Sixty-Fourth Slice: `WP1-ONE-HUNDRED-SIXTY-FOURTH-SLICE.md` —
   moved repository storage-error translation to a dedicated adapter boundary
   while preserving the task repository compatibility helper.
+- WP1 One-Hundred-Sixty-Fifth Slice: `WP1-ONE-HUNDRED-SIXTY-FIFTH-SLICE.md` —
+  moved the pure CPU-thread default policy into the platform environment-options
+  boundary while preserving the root server compatibility alias.
+- WP1 One-Hundred-Sixty-Sixth Slice: `WP1-ONE-HUNDRED-SIXTY-SIXTH-SLICE.md` —
+  moved the read-only validated-configuration check factory into a packaged
+  adapter while preserving the root doctor compatibility function.
