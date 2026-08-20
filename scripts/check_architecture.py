@@ -89,6 +89,7 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("mmr_rerank.py"),
     Path("reward.py"),
     Path("execution_status.py"),
+    Path("process_liveness.py"),
 })
 
 # Applied migrations are immutable historical artifacts. They may retain an

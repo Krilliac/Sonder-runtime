@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import ollama_lifecycle
-import process_liveness
+from sonder_runtime.adapters import process_liveness
 
 
 def test_resident_models_accepts_name_and_model_fields():
