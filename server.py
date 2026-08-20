@@ -174,6 +174,10 @@ from sonder_runtime.domain.schema_policy import (
 from sonder_runtime.domain.prompt_composition import (
     join_system_parts as _join_system_parts,
 )
+from sonder_runtime.domain.model_error_formatting import (
+    redact_model_error_value as _redact_model_error_value,
+    safe_model_error_detail as _safe_model_error_detail,
+)
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
@@ -3772,47 +3776,6 @@ def _local_retry_delay(attempt: int) -> float:
         base_ms = 150.0
     base_ms = max(0.0, min(base_ms, 1000.0))
     return min(1.0, (base_ms / 1000.0) * (2 ** max(0, attempt - 1)))
-
-
-def _redact_model_error_value(value, depth: int = 0):
-    if depth > 4:
-        return "<nested>"
-    if isinstance(value, dict):
-        redacted = {}
-        for key, item in list(value.items())[:64]:
-            name = str(key)
-            lowered = name.lower().replace("-", "_")
-            if any(part in lowered for part in (
-                "password", "passwd", "secret", "token", "api_key",
-                "authorization", "credential",
-            )):
-                redacted[name] = "<redacted>"
-            else:
-                redacted[name] = _redact_model_error_value(item, depth + 1)
-        return redacted
-    if isinstance(value, (list, tuple)):
-        return [_redact_model_error_value(item, depth + 1) for item in list(value)[:64]]
-    return value
-
-
-def _safe_model_error_detail(value, limit: int = 600) -> str:
-    structured = isinstance(value, (dict, list, tuple))
-    if structured:
-        value = json.dumps(
-            _redact_model_error_value(value), ensure_ascii=False, sort_keys=True,
-        )
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    # Error bodies should not become a second persistence surface for bearer
-    # tokens or API keys accidentally echoed by an upstream proxy.
-    if not structured:
-        text = re.sub(
-            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*"
-            r"(?!(?:limit|count|budget|window|usage|quota|length|context|maximum|minimum)\b)"
-            r"\S+",
-            r"\1=<redacted>",
-            text,
-        )
-    return text[:limit] or "model request failed"
 
 
 def _http_error_detail(error: urllib.error.HTTPError) -> str:
