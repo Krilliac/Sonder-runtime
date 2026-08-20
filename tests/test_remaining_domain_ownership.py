@@ -5,9 +5,12 @@ import pytest
 from sonder_runtime.application.persistence.domain_ownership import (
     DomainDatabaseOwnership,
     DomainOwnershipError,
+    DomainStoreBinding,
+    DomainStoreRegistry,
     MigrationOutboxIntegration,
     TransactionBoundary,
     default_domain_ownership,
+    default_domain_store_registry,
     ownership_for,
 )
 
@@ -72,3 +75,44 @@ def test_unknown_domains_and_non_atomic_outboxes_fail_closed():
         ownership_for("unknown")
     with pytest.raises(DomainOwnershipError, match="atomic state and outbox"):
         MigrationOutboxIntegration("memory", state_and_outbox_atomic=False)
+
+
+def test_registry_proves_one_to_one_domain_and_path_owner_mapping(tmp_path):
+    registry = default_domain_store_registry(tmp_path)
+    assert set(registry.domain_to_path) == set(default_domain_ownership())
+    assert len(registry.path_to_domain) == len(registry.domain_to_path)
+    for domain, path in registry.domain_to_path.items():
+        assert registry.owner_for(path) == domain
+        assert registry.binding_for(domain).path == path
+    registry.validate_ownership(default_domain_ownership())
+
+
+def test_registry_rejects_shared_path_even_through_relative_alias(tmp_path):
+    with pytest.raises(DomainOwnershipError, match="shared by domains"):
+        DomainStoreRegistry.from_paths(
+            {"memory": "memory.db", "automation": "nested/../memory.db"},
+            root=tmp_path,
+        )
+
+
+def test_registry_rejects_ambiguous_sqlite_targets_and_unknown_paths(tmp_path):
+    registry = DomainStoreRegistry((DomainStoreBinding("memory", tmp_path / "memory.db", "sqlite.memory"),))
+    with pytest.raises(DomainOwnershipError, match="filesystem SQLite path"):
+        DomainStoreRegistry.from_paths({"memory": ":memory:"}, root=tmp_path)
+    with pytest.raises(DomainOwnershipError, match="SQLite suffix"):
+        DomainStoreRegistry.from_paths({"memory": "memory.data"}, root=tmp_path)
+    with pytest.raises(DomainOwnershipError, match="no registered owner"):
+        registry.owner_for(tmp_path / "other.db")
+
+
+def test_registry_rejects_declaration_mapping_drift(tmp_path):
+    registry = default_domain_store_registry(tmp_path)
+    altered = dict(default_domain_ownership())
+    altered["memory"] = DomainDatabaseOwnership(
+        domain="memory", database="memory.db", repository="sqlite.other",
+        migration_store="memory", owned_tables=("sessions",),
+        transaction=TransactionBoundary("memory.db", ("write",)),
+        integration=MigrationOutboxIntegration("memory"),
+    )
+    with pytest.raises(DomainOwnershipError, match="repository owner mismatch"):
+        registry.validate_ownership(altered)
