@@ -210,6 +210,9 @@ from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_afte
 from sonder_runtime.domain.cancellation_policy import (
     cancellation_requested as _cancel_requested,
 )
+from sonder_runtime.domain.code_gate_policy import (
+    code_gate_target as _code_gate_target_policy,
+)
 from sonder_runtime.domain.request_timeout import (
     bound_request_timeout as _bound_request_timeout,
 )
@@ -3077,10 +3080,6 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
 # explicit NOT VERIFIED banner and record a negative outcome so broken code
 # never distills into lessons. Python-only for now; opt out with
 # SONDER_CODE_GATE=0.
-_CODE_GATE_SIGNS = re.compile(
-    r"^\s*(?:def\s+\w+|class\s+\w+|import\s+\w+|from\s+[\w.]+\s+import\s)",
-    re.MULTILINE,
-)
 _CODE_GATE_TIMEOUT = 8
 
 
@@ -3091,23 +3090,8 @@ def _code_gate_enabled() -> bool:
 
 
 def _code_gate_target(reply):
-    """Return the reply's runnable Python block worth gating, or None.
-
-    Only fenced Python with real definitions/imports is gated (keeps latency
-    off trivial snippet turns on this RAM-tight box), and interactive samples
-    that read stdin are skipped: a smoke run would EOFError on correct code.
-    """
-    if "```" not in str(reply or ""):
-        return None
-    block = grounding.extract_runnable_code_block(reply)
-    if not block or block.get("language") != "python":
-        return None
-    code = block.get("code") or ""
-    if not _CODE_GATE_SIGNS.search(code):
-        return None
-    if re.search(r"\binput\s*\(", code):
-        return None
-    return code
+    """Compatibility delegate for the packaged chat code-gate policy."""
+    return _code_gate_target_policy(reply, grounding.extract_runnable_code_block)
 
 
 def _release_lesson_distillation_claim(

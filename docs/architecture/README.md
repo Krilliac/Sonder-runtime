@@ -428,3 +428,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Eighty-First Slice: `WP1-ONE-HUNDRED-EIGHTY-FIRST-SLICE.md` —
   moved master-orchestration timeout normalization into the packaged domain
   boundary while preserving the root server compatibility delegate.
+- WP1 One-Hundred-Eighty-Fourth Slice: `WP1-ONE-HUNDRED-EIGHTY-FOURTH-SLICE.md` —
+  moved pure artifact execution-risk denial policy into the packaged domain
+  boundary while preserving the root compatibility export.
+- WP1 One-Hundred-Eighty-Third Slice: `WP1-ONE-HUNDRED-EIGHTY-THIRD-SLICE.md` —
+  moved pure chat code-gate target selection into the packaged domain boundary
+  while preserving the root server compatibility delegate.
