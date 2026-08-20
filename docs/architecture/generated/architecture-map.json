@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 140,
+      "file_count": 147,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -93,6 +93,13 @@
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/telemetry.py",
         "sonder_runtime/adapters/inference_telemetry.py",
+        "sonder_runtime/adapters/inspection/archive_tools.py",
+        "sonder_runtime/adapters/inspection/content_digest.py",
+        "sonder_runtime/adapters/inspection/data_query.py",
+        "sonder_runtime/adapters/inspection/dependency_inventory.py",
+        "sonder_runtime/adapters/inspection/log_inspect.py",
+        "sonder_runtime/adapters/inspection/project_detect.py",
+        "sonder_runtime/adapters/inspection/workspace_compare.py",
         "sonder_runtime/adapters/inspection_executor.py",
         "sonder_runtime/adapters/launcher_idempotency.py",
         "sonder_runtime/adapters/launcher_output.py",
