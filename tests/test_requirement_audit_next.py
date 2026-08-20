@@ -47,9 +47,9 @@ def test_audit_lists_every_requested_requirement() -> None:
     assert len(requested) == 163
     assert set(audit_rows) == requested
     assert Counter(audit_rows.values()) == Counter({
-        "PROVEN-CONTRACT": 109,
-        "PARTIAL": 30,
-        "MISSING": 24,
+        "PROVEN-CONTRACT": 135,
+        "PARTIAL": 17,
+        "MISSING": 11,
     })
 
 

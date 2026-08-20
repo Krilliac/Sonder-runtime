@@ -2,7 +2,7 @@
 
 Date: 2026-08-20  
 Audited branch: `agent/wp1-execution-status`  
-Audit baseline: commit `9848ad4` plus the concurrent uncommitted files observed during this audit
+Audit baseline: current branch HEAD `105b431` before this refresh commit
 Scope: SESSION/LOOP/SEAM/CTX/REPO/SKILL/AGENT/JOB/TOOL/EXEC/MEM/EVAL/MODEL/API/DATA/OPS/SEC/TRAIN/UPDATE/DOC
 
 ## Decision summary
@@ -11,6 +11,8 @@ This is an evidence audit, not a formal checklist update. The master
 specification and its formal checkboxes were not edited.
 
 - Requested scope: **163 IDs** across 19 families.
+- Refresh promotions: **26** rows gained direct focused-test and evidence-document support since the prior audit.
+- Current classification: **135 PROVEN-CONTRACT / 17 PARTIAL / 11 MISSING**.
 - Formal master-spec checkboxes: **0/250 checked**.
 - Formal evidence ledger: **204 latest records; all 204 are `planned`**;
   none are `verified`.
@@ -47,7 +49,7 @@ not create ledger records or checkboxes.
 | SESSION-005 | PARTIAL | `WP2-SESSION-004-005.md`; `tests/test_session_replay.py`; full request/transcript/UI/tool reconstruction is not proven. |
 | SESSION-006 | PROVEN-CONTRACT | `WP2-SESSION-006.md`; `sonder_runtime/application/session/fork.py`; `tests/test_session_fork.py`. |
 | SESSION-007 | PROVEN-CONTRACT | `WP2-SESSION-007.md`; `sonder_runtime/application/session/repair.py`; `tests/test_session_repair.py`. |
-| SESSION-008 | MISSING | No complete bounded search, transcript export, and event export path with end-to-end evidence was found. |
+| SESSION-008 | PROVEN-CONTRACT | `REMAINING-SESSION-008.md`, `REMAINING-SESSION-008-SEAM-006.md`; `tests/test_remaining_session_query_export.py` directly covers bounded query, cursor binding, transcript, redaction, export, and integrity behavior. |
 | SESSION-009 | PROVEN-CONTRACT | `WP2-SESSION-009.md`; `sonder_runtime/application/session/checkpoints.py`; `tests/test_session_checkpoints.py`. Durable adapter integration remains unproved. |
 | SESSION-010 | PROVEN-CONTRACT | `WP2-SESSION-010.md`; `tests/test_session_privacy.py`. End-to-end retention execution remains unproved. |
 
@@ -61,8 +63,8 @@ not create ledger records or checkboxes.
 | LOOP-004 | PROVEN-CONTRACT | `WP2-LOOP-004.md`; `sonder_runtime/application/loop/events.py`; `tests/test_loop_event_classification.py`. |
 | LOOP-005 | PROVEN-CONTRACT | `WP2-LOOP-005.md`; `tests/test_loop_steering.py`. |
 | LOOP-006 | PARTIAL | `WP2-LOOP-006.md`; cancellation tree is tested, but stream/tool/provider cleanup conformance is not complete. |
-| LOOP-007 | PARTIAL | `WP2-LOOP-007-008.md`; policy and tests exist, but adapter retry execution and evidence retention are explicitly outside the slice. |
-| LOOP-008 | PARTIAL | `WP2-LOOP-007-008.md`; key policy exists, but persistent idempotency/reconciliation integration is not proven. |
+| LOOP-007 | PROVEN-CONTRACT | `REMAINING-LOOP-007-008.md`; `tests/test_remaining_loop_007_008.py` directly covers durable retry evidence retention and reconciliation classification. Transport retry execution remains outside this contract slice. |
+| LOOP-008 | PROVEN-CONTRACT | `REMAINING-LOOP-007-008.md`; `tests/test_remaining_loop_007_008.py` directly covers SQLite idempotency, outbox atomicity, recreation, and fingerprint conflict handling. |
 
 ### SEAM
 
@@ -130,12 +132,12 @@ not create ledger records or checkboxes.
 | AGENT-001 | PROVEN-CONTRACT | `WP5-AGENT-001.md`; registry adapter and `tests/test_wp5_fleet_autopilot.py`. Full unified service integration remains open. |
 | AGENT-002 | PROVEN-CONTRACT | `WP5-AGENT-002.md`; Workbench/review adapters and `tests/test_wp5_workbench_review.py`. |
 | AGENT-003 | PROVEN-CONTRACT | `WP5-AGENT-003.md`; roles/presets/budgets and `tests/test_wp5_roles_presets_budgets.py`. |
-| AGENT-004 | MISSING | No complete built-in general/code/plan/reviewer/researcher preset catalog with end-to-end use was found. |
+| AGENT-004 | PROVEN-CONTRACT | `REMAINING-AGENT-004-008-009.md`; `tests/test_remaining_agent_004_008_009.py` directly covers the typed built-in preset catalog, including `researcher`. |
 | AGENT-005 | MISSING | Durable parent/child lineage persistence and operator exposure are not evidenced. |
-| AGENT-006 | PARTIAL | `WP5-SUBAGENT-001.md`; continuable child service is tested, but the repository is an in-memory reference adapter, not a production durability proof. |
+| AGENT-006 | PROVEN-CONTRACT | `REMAINING-AGENT-006.md`; `tests/test_remaining_durable_subagents.py` directly covers SQLite lineage/checkpoint CAS, restart resume, durable cancellation, and orphan recovery. |
 | AGENT-007 | PROVEN-CONTRACT | `WP5-AGENT-003.md`, `WP5-SUBAGENT-001.md`; role/depth/count/concurrency budget foundations are tested, but full enforcement integration is open. |
-| AGENT-008 | MISSING | Explicit isolated workspace assignment and enforcement are not evidenced. |
-| AGENT-009 | MISSING | Structured delegation/result integration is not evidenced. |
+| AGENT-008 | PROVEN-CONTRACT | `REMAINING-AGENT-004-008-009.md`; `tests/test_remaining_agent_004_008_009.py` directly covers read/write workspace containment and parent-context isolation. |
+| AGENT-009 | PROVEN-CONTRACT | `REMAINING-AGENT-004-008-009.md`; `tests/test_remaining_agent_004_008_009.py` directly covers port-backed delegation, accepted events, bounded result evidence, and lineage validation. |
 | AGENT-010 | MISSING | Explorer/architect/editor/reviewer workflow integration is not evidenced. |
 
 ### JOB
@@ -154,9 +156,9 @@ not create ledger records or checkboxes.
 |---|---|---|
 | TOOL-001 | PROVEN-CONTRACT | `CROSSCUT-TOOL-001-005.md`; `tests/test_crosscutting_tool_gateway.py` verifies one gateway pipeline. |
 | TOOL-002 | PROVEN-CONTRACT | Same gateway evidence verifies schema, scope, permission, approval, deadline, cancellation, redaction, and receipt order. |
-| TOOL-003 | PARTIAL | Typed scope/policy exists, but complete resource-aware path/host/resource matching across all adapters is not proven. |
+| TOOL-003 | PROVEN-CONTRACT | `REMAINING-TOOL-003-005.md`; `tests/test_remaining_tool_policy.py` directly covers bounded path/host/resource/preset/workspace/authority matching and fail-closed decisions. |
 | TOOL-004 | PROVEN-CONTRACT | Gateway tests cover allow/deny/approval modes; session/project persistence is not proven. |
-| TOOL-005 | PARTIAL | Startup authority boundary is represented, but independent runtime authority wiring is not proven. |
+| TOOL-005 | PROVEN-CONTRACT | `REMAINING-TOOL-003-005.md`; `tests/test_remaining_tool_policy.py` directly covers independent immutable startup authorities and fail-closed authority requirements. |
 | TOOL-006 | MISSING | Generated MCP/OpenAI/CLI/client catalogs are not evidenced. |
 | TOOL-007 | PROVEN-CONTRACT | Gateway receipt/redaction tests prove the contract; durable audit storage is not proven. |
 
@@ -165,10 +167,10 @@ not create ledger records or checkboxes.
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
 | EXEC-001 | PROVEN-CONTRACT | `REMAINING-EXEC-001-006.md`; shared world bindings and `tests/test_remaining_execution_world.py`. |
-| EXEC-002 | PARTIAL | The world-kind contract distinguishes container/read-only worlds, but a default guarded container implementation is not evidenced. |
+| EXEC-002 | PROVEN-CONTRACT | `REMAINING-EXEC-002-005.md`; `tests/test_remaining_execution_world_defaults.py` directly covers the guarded container default, image identity, no-host-fallback behavior, and fail-closed operations. |
 | EXEC-003 | PROVEN-CONTRACT | Remaining execution tests cover terminal/job lifecycle, reconnection, bounded reads, and watermarks; a concrete persistent terminal adapter remains open. |
 | EXEC-004 | PROVEN-CONTRACT | Remaining execution evidence covers digest-bound spill references and bounded output. Durable spill store wiring remains open. |
-| EXEC-005 | PARTIAL | Remote world identity/boundary is represented, but a configured remote worker implementation is not evidenced. |
+| EXEC-005 | PROVEN-CONTRACT | `REMAINING-EXEC-002-005.md`; `tests/test_remaining_execution_world_defaults.py` directly covers HTTPS endpoint, worker identity, capability matching, cleanup, and fail-closed remote operations. |
 | EXEC-006 | PROVEN-CONTRACT | Isolation truth labels and fail-closed mismatch behavior are directly tested. |
 
 ### MEM
@@ -208,7 +210,7 @@ not create ledger records or checkboxes.
 | MODEL-004 | PROVEN-CONTRACT | `WP7-MODEL-001.md`; measured calibration profiles and `tests/test_wp7_calibration.py`. |
 | MODEL-005 | PROVEN-CONTRACT | `WP7-MODEL-002.md`; capability profiles and routing tests. |
 | MODEL-006 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; `ModelParameters` preserves total and active MoE parameter counts for separate residency/compute truth. |
-| MODEL-007 | MISSING | Controlled escalation after uncertainty/verifier failure is not evidenced. |
+| MODEL-007 | PROVEN-CONTRACT | `REMAINING-MODEL-007.md`; `tests/test_remaining_model_007.py` directly covers uncertainty/verifier triggers, request-scoped routes, bounds, provenance, outcomes, and event emission. |
 | MODEL-008 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; `RoleBudgetBook` provides independent immutable-by-snapshot role budgets. Full caller enforcement remains open. |
 | MODEL-009 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; routability requires explicit `ready` or `degraded` provider health. |
 | MODEL-010 | PROVEN-CONTRACT | `REMAINING-MODEL-001-010.md`; `NpuBoundary` separates detection, runtime availability, and provider binding. |
@@ -234,8 +236,8 @@ not create ledger records or checkboxes.
 | DATA-002 | PROVEN-CONTRACT | Cross-domain transaction-neutral/outbox boundary is documented and tested; production coordination remains open. |
 | DATA-003 | PROVEN-CONTRACT | Outbox staging/value immutability tests directly cover the contract. |
 | DATA-004 | PROVEN-CONTRACT | CAS revision behavior is directly tested and reused by workflow/job foundations. |
-| DATA-005 | MISSING | Crash-safe migration rehearsal and backup verification are not evidenced. |
-| DATA-006 | MISSING | Epoch-2 adoption and temporary schema cleanup are not evidenced. |
+| DATA-005 | PROVEN-CONTRACT | `REMAINING-DATA-005-006.md`; `tests/test_remaining_data_005_006.py` directly covers disposable crash rehearsal, backup/restore proof, fault boundaries, and source immutability. |
+| DATA-006 | PROVEN-CONTRACT | `REMAINING-DATA-005-006.md`; `tests/test_remaining_data_005_006.py` directly covers read-only epoch-2 adoption, receipt validation, and temporary-schema detection. |
 | DATA-007 | PROVEN-CONTRACT | `CROSSCUT-DATA-007-ATTACH.md`; immutable artifact manifests/spill metadata and `tests/test_crosscutting_artifacts.py`. |
 
 ### OPS
@@ -246,7 +248,7 @@ not create ledger records or checkboxes.
 | OPS-002 | PROVEN-CONTRACT | Same evidence covers structured tracing and redact-before-export. |
 | OPS-003 | PROVEN-CONTRACT | Same evidence covers liveness/readiness/dependency health states. |
 | OPS-004 | PROVEN-CONTRACT | `WP9-OPS-004-005.md`; startup reconciliation classifications and `tests/test_wp9_reconciliation.py`. Durable repair execution remains open. |
-| OPS-005 | PARTIAL | Graceful-drain intent/deadline contracts are tested, but actual admission stop and settling are not proven. |
+| OPS-005 | PROVEN-CONTRACT | `REMAINING-OPS-005.md`; `tests/test_remaining_graceful_drain.py` and `tests/test_remaining_admission_gate.py` directly cover ordered drain barriers, admission stop, settling, cleanup truth, and deadline failure. |
 | OPS-006 | PROVEN-CONTRACT | Bounded cardinality and redacted telemetry export are tested. |
 
 ### SEC
@@ -255,10 +257,10 @@ not create ledger records or checkboxes.
 |---|---|---|
 | SEC-001 | PROVEN-CONTRACT | `WP9-SEC-001-002.md`; scoped credential handles, expiry/revocation, and `tests/test_wp9_credential_egress.py`. |
 | SEC-002 | PROVEN-CONTRACT | Same evidence covers protocol/host/network restrictions and redirect-hop checks. |
-| SEC-003 | PARTIAL | `WP9-SEC-003-006.md`; path/archive validation exists, but OS-level race resistance is explicitly not claimed. |
+| SEC-003 | PROVEN-CONTRACT | `REMAINING-SEC-003.md`; `tests/test_remaining_race_resistance.py` directly covers truthful platform capability, symlink/escape rejection, bounded targets, and fail-closed Windows behavior. |
 | SEC-004 | PROVEN-CONTRACT | Archive bounds, expansion ratios, links, and path checks are tested. |
-| SEC-005 | PARTIAL | Extension provenance/quarantine exists in `CROSSCUT-EXT-001-005.md`, but SBOM/signature inventory is not complete. |
-| SEC-006 | PARTIAL | Untrusted-boundary concepts exist, but end-to-end prompt-injection provenance labels are not evidenced. |
+| SEC-005 | PROVEN-CONTRACT | `REMAINING-SEC-005.md`; `tests/test_remaining_extension_provenance.py` directly covers signature/trust records, deterministic SBOM identity, tamper detection, and quarantine admission. |
+| SEC-006 | PROVEN-CONTRACT | `REMAINING-SEC-006.md`; `tests/test_remaining_prompt_provenance.py` directly covers untrusted labels, request binding, redacted events, replay, tamper detection, and fail-closed malformed input. |
 | SEC-007 | PROVEN-CONTRACT | `WP9-SEC-007-008-UPDATE.md`; bounded secret scanning and redaction tests. |
 | SEC-008 | PROVEN-CONTRACT | Same evidence covers bounded decoder fuzz-harness behavior. |
 | SEC-009 | MISSING | Same-user recovery and audit-file boundary claims are not sufficiently evidenced. |
@@ -282,20 +284,20 @@ not create ledger records or checkboxes.
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
 | UPDATE-001 | PARTIAL | `WP9-SEC-007-008-UPDATE.md` provides signed activation foundations, not the complete bounded updates domain/TUF state. |
-| UPDATE-002 | MISSING | Cross-platform helper-process activation is not evidenced. |
-| UPDATE-003 | MISSING | Exact sealed-runtime dependency contract verification is not evidenced. |
-| UPDATE-004 | PARTIAL | Signed activation retains a prior route, but atomic platform activation and standalone recovery are not proven. |
+| UPDATE-002 | PROVEN-CONTRACT | `REMAINING-UPDATE-002-004.md`; `tests/test_remaining_update_002_004.py` directly covers platform-neutral helper activation requests without platform-specific execution. |
+| UPDATE-003 | PROVEN-CONTRACT | `REMAINING-UPDATE-002-004.md`; `tests/test_remaining_update_002_004.py` directly covers exact sealed dependency equality, missing/extra entries, and digest tampering. |
+| UPDATE-004 | PROVEN-CONTRACT | `REMAINING-UPDATE-002-004.md`; `tests/test_remaining_update_002_004.py` directly covers atomic activation rollback, standalone recovery evidence, and explicit incomplete recovery. |
 | UPDATE-005 | MISSING | Signed release evidence package/SBOM/test publication is not evidenced. |
 
 ### DOC
 
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
-| DOC-001 | PARTIAL | `docs/architecture/README.md` and this audit improve indexing, but an authoritative complete map is not yet demonstrated. |
-| DOC-002 | MISSING | Superseded-document labels across SPEC-5/runbook/older active-looking documents are not fully audited. |
-| DOC-003 | MISSING | One globally unique ADR namespace is not evidenced. |
-| DOC-004 | MISSING | The required focused contract-document set is not evidenced as complete/current. |
-| DOC-005 | MISSING | Generated tool/command/event/configuration references are not evidenced. |
+| DOC-001 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers the authority index and deterministic architecture map. |
+| DOC-002 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers historical/superseded labeling authority. |
+| DOC-003 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers the ADR namespace rule. |
+| DOC-004 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers the focused contract inventory. |
+| DOC-005 | PROVEN-CONTRACT | `REMAINING-DOC-001-007.md`; `tests/test_remaining_doc_001_005.py` directly covers generated command/tool/event/configuration references and freshness. |
 | DOC-006 | PARTIAL | The evidence ledger and this audit establish process, but no requirement has a verified ledger record in this baseline. |
 | DOC-007 | PARTIAL | Several evidence docs correctly state limitations, but a complete stale-promise sweep is still required. |
 
