@@ -27,6 +27,47 @@ def _require_text(value: str, field: str) -> None:
         raise ValueError(f"{field} must be non-empty")
 
 
+def _sealed_mapping(value: Mapping[str, str], field: str) -> tuple[tuple[str, str], ...]:
+    """Normalize a dependency contract without allowing ambiguous entries."""
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(f"{field} must be a non-empty mapping")
+    rows: list[tuple[str, str]] = []
+    for name, version in value.items():
+        _require_text(name, f"{field} name")
+        _require_text(version, f"{field} value")
+        rows.append((str(name), str(version)))
+    return tuple(sorted(rows))
+
+
+@dataclass(frozen=True, slots=True)
+class SealedRuntimeContract:
+    """Canonical, immutable dependency contract for a release."""
+
+    dependencies: tuple[tuple[str, str], ...]
+    digest: str
+
+    @classmethod
+    def seal(cls, dependencies: Mapping[str, str]) -> "SealedRuntimeContract":
+        rows = _sealed_mapping(dependencies, "runtime dependencies")
+        return cls(rows, _digest(rows))
+
+    @classmethod
+    def from_manifest(cls, dependencies: tuple[tuple[str, str], ...]) -> "SealedRuntimeContract":
+        rows = tuple(sorted((str(name), str(version)) for name, version in dependencies))
+        if not rows or any(not name or not version for name, version in rows):
+            raise ValueError("manifest runtime contract must be non-empty")
+        if len({name for name, _ in rows}) != len(rows):
+            raise ValueError("manifest runtime contract contains duplicate dependencies")
+        return cls(rows, _digest(rows))
+
+    def verify_exact(self, observed: Mapping[str, str]) -> None:
+        actual = _sealed_mapping(observed, "observed runtime dependencies")
+        if actual != self.dependencies:
+            raise ValueError("exact sealed runtime dependency contract mismatch")
+        if _digest(self.dependencies) != self.digest:
+            raise ValueError("sealed runtime dependency contract digest mismatch")
+
+
 @dataclass(frozen=True, slots=True)
 class SignedReleaseManifest:
     release_id: str
@@ -161,9 +202,7 @@ class ReleaseEvidencePackage:
         if not verifier(self.manifest.signing_bytes(), self.manifest.signature, self.manifest.signer):
             raise ValueError("release manifest signature rejected")
         if expected_runtime_contract is not None:
-            actual = dict(self.manifest.runtime_contract)
-            if actual != {str(key): str(value) for key, value in expected_runtime_contract.items()}:
-                raise ValueError("sealed runtime contract mismatch")
+            SealedRuntimeContract.from_manifest(self.manifest.runtime_contract).verify_exact(expected_runtime_contract)
         if any(item.failed for item in self.tests):
             raise ValueError("release contains failed test evidence")
         if not self.rollback.tested:
@@ -177,6 +216,12 @@ class PlatformActivationHelper(Protocol):
     def rollback(self, request: "ActivationRequest") -> None: ...
 
 
+class RecoveryEvidenceSink(Protocol):
+    """Independent recorder for activation recovery evidence."""
+
+    def record(self, evidence: "StandaloneRecoveryEvidence") -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ActivationRequest:
     platform: str
@@ -184,12 +229,48 @@ class ActivationRequest:
     target_release: str
     release_evidence_digest: str
     helper_nonce: str
+    helper_argv: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.platform not in {"linux", "windows", "macos"}:
             raise ValueError("unsupported activation platform")
         for value, field in ((self.current_release, "current_release"), (self.target_release, "target_release"), (self.release_evidence_digest, "release_evidence_digest"), (self.helper_nonce, "helper_nonce")):
             _require_text(value, field)
+        if self.helper_argv and any(not isinstance(item, str) or not item for item in self.helper_argv):
+            raise ValueError("helper_argv must contain non-empty strings")
+
+
+@dataclass(frozen=True, slots=True)
+class StandaloneRecoveryEvidence:
+    """Proof that recovery was attempted outside the failed release."""
+
+    platform: str
+    previous_release: str
+    failed_release: str
+    helper_rollback_attempted: bool
+    pointer_restore_attempted: bool
+    pointer_restored: bool
+    error_types: tuple[str, ...] = ()
+
+    @property
+    def digest(self) -> str:
+        return _digest({
+            "platform": self.platform,
+            "previous_release": self.previous_release,
+            "failed_release": self.failed_release,
+            "helper_rollback_attempted": self.helper_rollback_attempted,
+            "pointer_restore_attempted": self.pointer_restore_attempted,
+            "pointer_restored": self.pointer_restored,
+            "error_types": self.error_types,
+        })
+
+
+class ActivationRecoveryError(RuntimeError):
+    """Activation failed and its independent recovery proof is incomplete."""
+
+    def __init__(self, evidence: StandaloneRecoveryEvidence) -> None:
+        super().__init__("activation failed and independent recovery was incomplete")
+        self.evidence = evidence
 
 
 class ReleasePointer(Protocol):
@@ -200,9 +281,15 @@ class ReleasePointer(Protocol):
 class AtomicReleaseActivator:
     """Coordinate helper activation and rollback from the known-good route."""
 
-    def __init__(self, pointer: ReleasePointer, helper: PlatformActivationHelper) -> None:
+    def __init__(self, pointer: ReleasePointer, helper: PlatformActivationHelper, evidence_sink: RecoveryEvidenceSink | None = None) -> None:
         self._pointer = pointer
         self._helper = helper
+        self._evidence_sink = evidence_sink
+        self._recovery: list[StandaloneRecoveryEvidence] = []
+
+    @property
+    def recovery_evidence(self) -> tuple[StandaloneRecoveryEvidence, ...]:
+        return tuple(self._recovery)
 
     def activate(self, request: ActivationRequest) -> str:
         current = self._pointer.current()
@@ -221,15 +308,36 @@ class AtomicReleaseActivator:
                 request.current_release,
                 request.release_evidence_digest,
                 request.helper_nonce,
+                request.helper_argv,
             )
-            self._helper.rollback(rollback_request)
-            self._pointer.commit(current)
+            errors: list[str] = []
+            try:
+                self._helper.rollback(rollback_request)
+            except Exception as recovery_error:
+                errors.append(type(recovery_error).__name__)
+            pointer_restored = False
+            try:
+                self._pointer.commit(current)
+                pointer_restored = self._pointer.current() == current
+            except Exception as recovery_error:
+                errors.append(type(recovery_error).__name__)
+            evidence = StandaloneRecoveryEvidence(
+                request.platform, current, request.target_release, True, True,
+                pointer_restored, tuple(errors),
+            )
+            self._recovery.append(evidence)
+            if self._evidence_sink is not None:
+                self._evidence_sink.record(evidence)
+            if not pointer_restored:
+                raise ActivationRecoveryError(evidence) from None
             raise
         return request.target_release
 
 
 __all__ = [
     "ActivationRequest", "AtomicReleaseActivator", "MigrationRequirement",
+    "ActivationRecoveryError", "RecoveryEvidenceSink", "SealedRuntimeContract",
+    "StandaloneRecoveryEvidence",
     "PlatformActivationHelper", "ReleaseEvidencePackage", "ReleasePointer",
     "RollbackCompatibility", "SbomComponent", "SignedReleaseManifest",
     "TestEvidence",
