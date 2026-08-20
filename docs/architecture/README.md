@@ -388,6 +388,12 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Seventieth Slice: `WP1-ONE-HUNDRED-SEVENTIETH-SLICE.md` —
   moved pure model-tag parameter parsing into the packaged domain boundary
   while preserving the root hardware compatibility export.
+- WP1 One-Hundred-Seventy-First Slice: `WP1-ONE-HUNDRED-SEVENTY-FIRST-SLICE.md` —
+  moved the environment-backed approximate-location consent policy into the
+  platform boundary while preserving the root server compatibility delegate.
 - WP1 One-Hundred-Sixty-Ninth Slice: `WP1-ONE-HUNDRED-SIXTY-NINTH-SLICE.md` —
   moved the import-time running-source commit probe into the platform version
   boundary while preserving the root server compatibility delegate.
+- WP1 One-Hundred-Seventy-Second Slice: `WP1-ONE-HUNDRED-SEVENTY-SECOND-SLICE.md` —
+  moved pure model parameter-band, fit, and Q4 footprint policy into the
+  packaged model-sizing domain boundary while preserving hardware exports.

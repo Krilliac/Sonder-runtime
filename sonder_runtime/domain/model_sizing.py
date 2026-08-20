@@ -15,6 +15,66 @@ _DENSE_TAG_RE = re.compile(
     r"(?<![0-9a-z])([0-9]+(?:\.[0-9]+)?)b(?![0-9a-z])"
 )
 
+# Parameter-count bands describe the model itself, independently of the host
+# capacity bands used by the hardware recommender.  Keeping this ladder here
+# lets callers answer both "how fast will it decode?" and "how much memory do
+# its weights need?" without importing the hardware probe module.
+_PARAM_BANDS = (
+    (5.0, "3-4B"),
+    (13.0, "7B"),
+    (40.0, "13-34B"),
+    (float("inf"), "70B+"),
+)
+_BAND_ORDER = tuple(label for _ceiling, label in _PARAM_BANDS)
+_Q4_GB_PER_BILLION = 0.62
+
+
+def _band_for_parameter_count(value: float, ladder) -> str:
+    for ceiling, label in ladder:
+        if value < ceiling:
+            return label
+    return ladder[-1][1]
+
+
+def decode_band(active_params_b) -> str | None:
+    """Return the model band associated with its active parameter count."""
+    try:
+        active = float(active_params_b)
+    except (TypeError, ValueError):
+        return None
+    if active <= 0:
+        return None
+    return _band_for_parameter_count(active, _PARAM_BANDS)
+
+
+def memory_band(total_params_b) -> str | None:
+    """Return the resident-memory class associated with total parameters."""
+    try:
+        total = float(total_params_b)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return _band_for_parameter_count(total, _PARAM_BANDS)
+
+
+def band_fits(model_band: str, capacity_band: str) -> bool | None:
+    """Whether a model band fits inside a host capacity band."""
+    if model_band not in _BAND_ORDER or capacity_band not in _BAND_ORDER:
+        return None
+    return _BAND_ORDER.index(model_band) <= _BAND_ORDER.index(capacity_band)
+
+
+def estimated_footprint_gb(total_params_b) -> float | None:
+    """Estimate Q4-class resident weight size in GB for planning purposes."""
+    try:
+        total = float(total_params_b)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return round(total * _Q4_GB_PER_BILLION, 1)
+
 
 def params_from_model_tag(tag) -> tuple[float, float] | None:
     """Return ``(total_params_b, active_params_b)`` from an Ollama tag.
