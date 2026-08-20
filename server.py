@@ -850,6 +850,7 @@ from sonder_runtime.adapters.admin_formatting import _format_account
 from sonder_runtime.adapters.inspection_executor import _format_file_result
 from sonder_runtime.adapters.task_formatting import _format_checklist, _format_task
 from sonder_runtime.adapters.context_formatting import format_context_health
+from sonder_runtime.domain.health_formatting import health_bar as _health_bar
 from sonder_runtime.adapters.observability.activity_formatting import _format_activity_status
 from sonder_runtime.adapters.observability.distillation_formatting import (
     _drain_backlog_text,
@@ -7048,12 +7049,6 @@ def _rough_token_count(text) -> int:
 def _rough_token_count_from_chars(count) -> int:
     count = max(0, int(count or 0))
     return max(1, (count + 3) // 4) if count else 0
-
-
-def _health_bar(percent, width=18) -> str:
-    pct = max(0.0, min(1.0, float(percent or 0.0)))
-    filled = int(round(pct * width))
-    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
 
 def context_health_data(session: str = "", project: str = "") -> dict:
