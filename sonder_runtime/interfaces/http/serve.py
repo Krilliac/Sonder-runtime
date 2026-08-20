@@ -62,6 +62,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
     ModelRequestFacade,
 )
 from sonder_runtime.domain.common.errors import DependencyUnavailable
+from sonder_runtime.adapters.model_transport import ModelCallError
 
 
 _LEGACY_RUNTIME = None
@@ -98,7 +99,18 @@ class _InjectedLegacyRuntime:
     """Compatibility namespace delegating every access to the injected port."""
 
     def __getattr__(self, name):
+        # Exception types are part of the adapter's import-time compatibility
+        # surface; they must remain available before bootstrap injection.
+        if name == "ModelCallError":
+            return ModelCallError
         return getattr(_legacy_runtime(), name)
+
+    def __setattr__(self, name, value):
+        """Forward test/runtime patch points without owning legacy state."""
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        setattr(_legacy_runtime(), name, value)
 
 
 # Keep the established route implementation readable while making every
@@ -3945,12 +3957,39 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             try:
-                normalized = facade.normalize(path, req)
+                facade_payload = dict(req)
+                if model_route.operation == "chat.completions":
+                    # Preserve the established adapter validation vocabulary
+                    # before the provider-neutral facade normalizes the same
+                    # envelope.
+                    _validate_chat_messages(facade_payload.get("messages"))
+                if "model" not in facade_payload:
+                    facade_payload["model"] = "sonder"
+                # The established chat adapter treats JSON null as the
+                # omitted non-streaming default; preserve that compatibility
+                # while the provider-neutral facade accepts strict booleans.
+                if facade_payload.get("stream", False) is None:
+                    facade_payload["stream"] = False
+                normalized = facade.normalize(path, facade_payload)
+            except HTTPRequestError as error:
+                record_early_chat_metric("invalid_messages")
+                self._send_json_payload(
+                    {"error": {"message": error.message, "type": error.error_type}},
+                    status=error.status,
+                )
+                return
             except ModelFacadeError as error:
                 if model_route.operation == "chat.completions":
                     record_early_chat_metric("invalid_request")
+                message = str(error)
+                # Preserve the established HTTP adapter error vocabulary while
+                # the root-free facade remains free to use its own taxonomy.
+                if message == "model must be a non-empty string":
+                    message = "model must be a string"
+                elif message == "messages must be a non-empty array":
+                    message = "messages must be an array"
                 self._send_json_payload(
-                    {"error": {"message": str(error), "type": error.error_type}},
+                    {"error": {"message": message, "type": "invalid_request"}},
                     status=error.status,
                 )
                 return
