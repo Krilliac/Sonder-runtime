@@ -93,6 +93,9 @@ from sonder_runtime.platform.environment_options import (
 from sonder_runtime.platform.location_consent import (
     location_consent as _location_consent,
 )
+from sonder_runtime.platform.reasoning_policy import (
+    exposure_enabled as _reasoning_exposure_enabled_policy,
+)
 from sonder_runtime.platform.version import (
     running_source_commit_at_import as _running_source_commit,
 )
@@ -462,9 +465,7 @@ def reasoning_exposure_enabled() -> bool:
     model for its thinking at all. With it off nothing is captured, so there is
     nothing for either surface to show.
     """
-    return os.environ.get("SONDER_EXPOSE_REASONING", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return _reasoning_exposure_enabled_policy()
 
 
 def private_cot_opt_in_enabled() -> bool:

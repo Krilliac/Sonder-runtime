@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform import unsafe_lab_policy
+from sonder_runtime.platform.config_environment import env_bool, env_int
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -297,20 +298,10 @@ def _apply_section(current, section_name: str, raw: dict, errors: list[str]):
     return replace(current, **updates) if updates else current
 
 
-def _env_bool(value: str) -> bool:
-    return value.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _env_int(name: str, env: dict[str, str], current: int, errors: list[str]) -> int:
-    """Read one compatibility integer without letting malformed env bypass TOML."""
-    raw = env.get(name, "").strip()
-    if not raw:
-        return current
-    try:
-        return int(raw)
-    except ValueError:
-        errors.append(f"{name} is not an integer")
-        return current
+# Private aliases preserve the existing monkeypatch/import surface while the
+# implementation lives in the dedicated configuration-environment boundary.
+_env_bool = env_bool
+_env_int = env_int
 
 
 def _apply_environment(
