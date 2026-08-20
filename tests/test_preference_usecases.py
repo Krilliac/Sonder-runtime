@@ -11,6 +11,7 @@ from sonder_runtime.adapters.preference_adapters import (
     LegacyPreferenceRepository,
     NullPreferenceEventSink,
 )
+from sonder_runtime.adapters.preference_codec import PreferenceCodecAdapter
 from sonder_runtime.application.ports.tool_executor import ToolResult
 from sonder_runtime.application.preferences import (
     PreferenceService,
@@ -237,6 +238,10 @@ def test_legacy_codec_resolves_the_injected_live_module_identity():
     assert codec.key("raw") == "key"
     assert codec.format([]) == "formatted"
     assert NullPreferenceEventSink().changed("learned", 1) is None
+
+
+def test_preference_codec_has_canonical_owner_and_legacy_identity():
+    assert LegacyPreferenceCodec is PreferenceCodecAdapter
 
 
 def test_server_mcp_signatures_docstrings_and_policies_are_unchanged():

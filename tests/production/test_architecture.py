@@ -444,6 +444,16 @@ def test_preference_use_case_depends_only_on_narrow_application_ports():
     assert "checklist_" not in adapter
 
 
+def test_preference_codec_is_composed_from_its_canonical_adapter():
+    from sonder_runtime.adapters.preference_adapters import LegacyPreferenceCodec
+    from sonder_runtime.adapters.preference_codec import PreferenceCodecAdapter
+    from sonder_runtime.bootstrap.app import build_application
+
+    assert LegacyPreferenceCodec is PreferenceCodecAdapter
+    application = build_application(preference_module_provider=lambda: None)
+    assert type(application.preferences._codec) is PreferenceCodecAdapter
+
+
 def test_domain_modules_are_pure():
     # Importing domain modules must not touch the environment, filesystem,
     # or network. The AST checker covers imports; here we prove the

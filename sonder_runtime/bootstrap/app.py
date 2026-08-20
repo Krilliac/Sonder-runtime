@@ -23,10 +23,10 @@ from ..adapters.inspection_executor import LegacyInspectionExecutor
 from ..adapters.backup_gateway import LegacyBackupGateway
 from ..adapters.recall_gateway import LegacyRecallGateway
 from ..adapters.preference_adapters import (
-    LegacyPreferenceCodec,
     LegacyPreferenceRepository,
     NullPreferenceEventSink,
 )
+from ..adapters.preference_codec import PreferenceCodecAdapter
 from ..adapters.workflow_adapters import LegacyLoopRunner, LegacyWorkflowRepository
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.ollama.gateway import OllamaGateway
@@ -133,7 +133,7 @@ def build_application(
         ),
         preferences=PreferenceService(
             LegacyPreferenceRepository(preference_connection_factory),
-            LegacyPreferenceCodec(preference_module_provider),
+            PreferenceCodecAdapter(preference_module_provider),
             NullPreferenceEventSink(),
         ),
         workflows=WorkflowService(LegacyWorkflowRepository(), LegacyLoopRunner()),
