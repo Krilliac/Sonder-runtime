@@ -33,7 +33,7 @@ and the report rolls those up::
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from sonder_runtime.adapters.config_validation import (
     validated_config_check as _validated_config_check,
@@ -41,6 +41,10 @@ from sonder_runtime.adapters.config_validation import (
 from sonder_runtime.domain.doctor_result import normalize_result as _normalize_result
 from sonder_runtime.domain.doctor_result import skipped as _skipped_result
 from sonder_runtime.domain.doctor_status import coerce_status as _coerce_status
+from sonder_runtime.domain.doctor_specs import (
+    CheckCallable,
+    iter_specs as _iter_specs,
+)
 
 # Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
 # is simply absent should not make an otherwise-healthy runtime look sick.
@@ -64,42 +68,6 @@ _SEVERITY_TO_STATUS = {0: STATUS_OK, 1: STATUS_WARN, 2: STATUS_FAIL}
 #   * a (status, detail) tuple
 #   * a mapping with at least "status" and optionally "name"/"detail"
 # or it may raise -- a raised exception is captured as a ``fail`` entry.
-CheckCallable = Callable[[], Any]
-
-
-def _iter_specs(
-    checks: Mapping[str, CheckCallable] | Iterable[Any],
-) -> list[tuple[str, CheckCallable]]:
-    """Normalize a heterogeneous check registry into ordered (name, fn) pairs.
-
-    Accepts, in rough order of convenience:
-
-    * a mapping ``{name: callable}`` (insertion order preserved),
-    * an iterable of ``(name, callable)`` pairs,
-    * an iterable of bare callables (name taken from ``.name`` or ``__name__``).
-    """
-    specs: list[tuple[str, CheckCallable]] = []
-    if isinstance(checks, Mapping):
-        for name, fn in checks.items():
-            specs.append((str(name), fn))
-        return specs
-    for index, item in enumerate(checks):
-        if isinstance(item, tuple) and len(item) == 2:
-            name, fn = item
-            specs.append((str(name), fn))
-        elif callable(item):
-            name = getattr(item, "name", None) or getattr(
-                item, "__name__", None
-            )
-            specs.append((str(name or "check_%d" % index), item))
-        else:
-            raise TypeError(
-                "check spec must be a (name, callable) pair or a callable, "
-                "got %r" % (item,)
-            )
-    return specs
-
-
 def run_doctor(
     checks: Mapping[str, CheckCallable] | Iterable[Any] | None = None,
 ) -> dict:
