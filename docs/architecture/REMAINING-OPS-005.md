@@ -22,3 +22,8 @@ exception, or deadline expiry produces an incomplete result and preserves the
 unsettled evidence for the caller/supervisor.
 
 Coverage is in `tests/test_remaining_graceful_drain.py`.
+
+`RuntimeAdmissionGate` is the concrete runtime-owned admission barrier. It is
+thread-safe, idempotently records the first stop reason, counts accepted work,
+and rejects new work after the drain begins. Coverage is in
+`tests/test_remaining_admission_gate.py`.
