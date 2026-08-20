@@ -206,6 +206,7 @@ from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
 from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
+from sonder_runtime.domain.tier_names import valid_tier_names as _valid_tier_names_policy
 from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_after_seconds
 from sonder_runtime.domain.cancellation_policy import (
     cancellation_requested as _cancel_requested,
@@ -334,7 +335,7 @@ def available_tiers(include_disabled=False):
 
 
 def _valid_tier_names():
-    return ", ".join(available_tiers())
+    return _valid_tier_names_policy(available_tiers())
 
 
 def discovered_models():

@@ -434,3 +434,9 @@ newer ADR explicitly supersedes them.
 - WP1 One-Hundred-Eighty-Third Slice: `WP1-ONE-HUNDRED-EIGHTY-THIRD-SLICE.md` —
   moved pure chat code-gate target selection into the packaged domain boundary
   while preserving the root server compatibility delegate.
+- WP1 One-Hundred-Eighty-Sixth Slice: `WP1-ONE-HUNDRED-EIGHTY-SIXTH-SLICE.md` —
+  moved pure integrated-versus-discrete accelerator classification into the
+  packaged platform boundary while preserving the root hardware delegate.
+- WP1 One-Hundred-Eighty-Fifth Slice: `WP1-ONE-HUNDRED-EIGHTY-FIFTH-SLICE.md` —
+  moved pure valid-tier-name presentation into the packaged domain boundary
+  while preserving the root server compatibility delegate.
