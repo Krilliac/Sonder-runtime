@@ -99,9 +99,10 @@ def deduplicate_context(
     """
     if not 0.0 <= semantic_threshold <= 1.0:
         raise ValueError("semantic_threshold must be between 0 and 1")
-    ordered = tuple(sorted(records, key=lambda item: (item.ordinal, item.item_id)))
-    if any(not isinstance(item, ContextRecord) for item in ordered):
+    candidates = tuple(records)
+    if any(not isinstance(item, ContextRecord) for item in candidates):
         raise TypeError("records must contain ContextRecord values")
+    ordered = tuple(sorted(candidates, key=lambda item: (item.ordinal, item.item_id)))
     retained: list[ContextRecord] = []
     removed: list[ContextRecord] = []
     provenance: list[DedupProvenance] = []
@@ -215,9 +216,12 @@ def build_replay_manifest(
     """Capture the ordered, exact section inputs needed to reproduce a request."""
     if not request_id or not model:
         raise ValueError("request_id and model must be non-empty")
-    if len({record.item_id for record in records}) != len(tuple(records)):
+    candidates = tuple(records)
+    if any(not isinstance(record, ContextRecord) for record in candidates):
+        raise TypeError("records must contain ContextRecord values")
+    if len({record.item_id for record in candidates}) != len(candidates):
         raise ValueError("replay records must have unique item_id values")
-    sections = tuple(ReplaySection(r.item_id, r.section, r.content_digest, r.source, r.ordinal) for r in records)
+    sections = tuple(ReplaySection(r.item_id, r.section, r.content_digest, r.source, r.ordinal) for r in candidates)
     safe_metadata = copy.deepcopy(dict(metadata or {}))
     material = {"request_id": request_id, "model": model, "sections": [section.__dict__ for section in sections], "prefix_key": prefix_key, "metadata": safe_metadata}
     return ReplayManifest(request_id, model, sections, prefix_key, MappingProxyType(safe_metadata), _digest(material))
