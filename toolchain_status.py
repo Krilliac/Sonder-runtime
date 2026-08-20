@@ -29,13 +29,8 @@ def _available_path(name: str, refresh: bool) -> str:
 
 
 def _safe_output(text: str) -> str:
-    # Version commands should be tiny, but retain a hard presentation bound and
-    # redact any accidental credentials emitted by a local wrapper.
-    text = (text or "").strip()
-    text = sonder_logging.Redactor().redact(text)
-    if len(text) > MAX_OUTPUT_CHARS:
-        return text[:MAX_OUTPUT_CHARS] + "\n[output truncated]"
-    return text
+    """Compatibility delegate for packaged toolchain-output policy."""
+    return toolchain_policy.safe_output(text, max_chars=MAX_OUTPUT_CHARS)
 
 
 def _terminate_process_tree(proc) -> None:
