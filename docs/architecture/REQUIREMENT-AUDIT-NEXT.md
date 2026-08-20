@@ -2,7 +2,7 @@
 
 Date: 2026-08-20  
 Audited branch: `agent/wp1-execution-status`  
-Audit baseline: current branch HEAD `105b431` before this refresh commit
+Audit baseline: current branch HEAD `3579215` before this refresh commit
 Scope: SESSION/LOOP/SEAM/CTX/REPO/SKILL/AGENT/JOB/TOOL/EXEC/MEM/EVAL/MODEL/API/DATA/OPS/SEC/TRAIN/UPDATE/DOC
 
 ## Decision summary
@@ -11,8 +11,8 @@ This is an evidence audit, not a formal checklist update. The master
 specification and its formal checkboxes were not edited.
 
 - Requested scope: **163 IDs** across 19 families.
-- Refresh promotions: **26** rows gained direct focused-test and evidence-document support since the prior audit.
-- Current classification: **135 PROVEN-CONTRACT / 17 PARTIAL / 11 MISSING**.
+- Refresh promotions: **14** rows gained direct focused-test and evidence-document support since the prior audit.
+- Current classification: **149 PROVEN-CONTRACT / 11 PARTIAL / 3 MISSING**.
 - Formal master-spec checkboxes: **0/250 checked**.
 - Formal evidence ledger: **204 latest records; all 204 are `planned`**;
   none are `verified`.
@@ -43,10 +43,10 @@ not create ledger records or checkboxes.
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
 | SESSION-001 | PROVEN-CONTRACT | `WP2-SESSION-001.md`; `sonder_runtime/domain/common/ids.py`; `tests/test_domain_ids.py`. |
-| SESSION-002 | PARTIAL | `WP2-SESSION-002-008.md`; repository foundation exists, but durable append-only persistence and integrated callers are not proven. |
+| SESSION-002 | PROVEN-CONTRACT | `REMAINING-SESSION-002-006.md`; `tests/test_remaining_session_002_006.py` directly covers SQLite append-only capture and restart-visible event state. |
 | SESSION-003 | PROVEN-CONTRACT | `WP2-SESSION-003.md`; `sonder_runtime/domain/session/events.py`; `tests/test_session_event_schema.py`. |
-| SESSION-004 | PARTIAL | `WP2-SESSION-004-005.md`; replay envelope foundation exists, but complete model-visible capture is not proven. |
-| SESSION-005 | PARTIAL | `WP2-SESSION-004-005.md`; `tests/test_session_replay.py`; full request/transcript/UI/tool reconstruction is not proven. |
+| SESSION-004 | PROVEN-CONTRACT | `REMAINING-SESSION-002-006.md`; `tests/test_remaining_session_002_006.py` directly covers request, UI, tool, and model-visible event capture. |
+| SESSION-005 | PROVEN-CONTRACT | `REMAINING-SESSION-002-006.md`, `REMAINING-SESSION-008-SEAM-006.md`; focused tests directly cover deterministic replay, transcript/projection reconstruction, query, export, redaction, and integrity. |
 | SESSION-006 | PROVEN-CONTRACT | `WP2-SESSION-006.md`; `sonder_runtime/application/session/fork.py`; `tests/test_session_fork.py`. |
 | SESSION-007 | PROVEN-CONTRACT | `WP2-SESSION-007.md`; `sonder_runtime/application/session/repair.py`; `tests/test_session_repair.py`. |
 | SESSION-008 | PROVEN-CONTRACT | `REMAINING-SESSION-008.md`, `REMAINING-SESSION-008-SEAM-006.md`; `tests/test_remaining_session_query_export.py` directly covers bounded query, cursor binding, transcript, redaction, export, and integrity behavior. |
@@ -75,7 +75,7 @@ not create ledger records or checkboxes.
 | SEAM-003 | PROVEN-CONTRACT | `WP3-SEAM-003.md`; filesystem port and `tests/test_filesystem_port_wp3.py`. Caller/provider migration remains unproved. |
 | SEAM-004 | PROVEN-CONTRACT | `WP3-SEAM-004.md`; execution-world port and `tests/test_execution_world_port.py`. Concrete adapter unification remains unproved. |
 | SEAM-005 | PROVEN-CONTRACT | `WP3-SEAM-005.md`; sandbox port and `tests/test_sandbox_provider_port.py`. A real sandbox security claim is not made. |
-| SEAM-006 | MISSING | No complete integrated SessionRepository/SessionQueryEngine seam with bounded query/export evidence was found. |
+| SEAM-006 | PROVEN-CONTRACT | `REMAINING-SESSION-008-SEAM-006.md`; `tests/test_remaining_session_query_export.py` directly covers the bounded SessionRepository/SessionQueryEngine query and export seam. |
 | SEAM-007 | PROVEN-CONTRACT | `WP3-SEAM-007.md`; compaction port and `tests/test_wp3_seam007_compaction.py`. |
 | SEAM-008 | PROVEN-CONTRACT | `WP3-SEAM-008.md`; skill registry contract and `tests/test_skill_registry.py`. |
 | SEAM-009 | PROVEN-CONTRACT | `WP3-SEAM-009.md`; provider-neutral child contract exists, but a production provider is not proven. |
@@ -133,7 +133,7 @@ not create ledger records or checkboxes.
 | AGENT-002 | PROVEN-CONTRACT | `WP5-AGENT-002.md`; Workbench/review adapters and `tests/test_wp5_workbench_review.py`. |
 | AGENT-003 | PROVEN-CONTRACT | `WP5-AGENT-003.md`; roles/presets/budgets and `tests/test_wp5_roles_presets_budgets.py`. |
 | AGENT-004 | PROVEN-CONTRACT | `REMAINING-AGENT-004-008-009.md`; `tests/test_remaining_agent_004_008_009.py` directly covers the typed built-in preset catalog, including `researcher`. |
-| AGENT-005 | MISSING | Durable parent/child lineage persistence and operator exposure are not evidenced. |
+| AGENT-005 | PROVEN-CONTRACT | `REMAINING-AGENT-005-JOB-002-004.md`; `tests/test_remaining_agent_005_job_integration.py` directly covers restart-persistent lineage and bounded read-only descendant/operator queries. |
 | AGENT-006 | PROVEN-CONTRACT | `REMAINING-AGENT-006.md`; `tests/test_remaining_durable_subagents.py` directly covers SQLite lineage/checkpoint CAS, restart resume, durable cancellation, and orphan recovery. |
 | AGENT-007 | PROVEN-CONTRACT | `WP5-AGENT-003.md`, `WP5-SUBAGENT-001.md`; role/depth/count/concurrency budget foundations are tested, but full enforcement integration is open. |
 | AGENT-008 | PROVEN-CONTRACT | `REMAINING-AGENT-004-008-009.md`; `tests/test_remaining_agent_004_008_009.py` directly covers read/write workspace containment and parent-context isolation. |
@@ -145,8 +145,8 @@ not create ledger records or checkboxes.
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
 | JOB-001 | PROVEN-CONTRACT | `WP5-JOB-001.md`; typed dependency-ordered generic jobs and `tests/test_wp5_generic_jobs.py`. |
-| JOB-002 | PARTIAL | `REMAINING-EXEC-001-006.md`; lifecycle/output control exists, but one durable registry across shell/terminal/workflow is not proven. |
-| JOB-003 | PARTIAL | `WP5-WORKFLOW-001.md`, `REMAINING-EXEC-001-006.md`; recovery contracts are tested, but durable production reconciliation is open. |
+| JOB-002 | PROVEN-CONTRACT | `REMAINING-AGENT-005-JOB-002-004.md`; `tests/test_remaining_agent_005_job_integration.py` directly covers durable start/list/poll/stream linkage and the SQLite registry boundary. |
+| JOB-003 | PROVEN-CONTRACT | `REMAINING-AGENT-005-JOB-002-004.md`; `tests/test_remaining_agent_005_job_integration.py` directly covers restart reconciliation, orphan recovery, and truthful incomplete-cleanup handling. |
 | JOB-004 | PARTIAL | `REMAINING-EXEC-001-006.md`; termination intent/lifecycle is covered, but full process-tree containment is not proven. |
 | JOB-005 | PROVEN-CONTRACT | `REMAINING-EXEC-001-006.md`; bounded pages, cursors, watermarks, truncation, and spill references are tested. Durable integration remains open. |
 
@@ -159,7 +159,7 @@ not create ledger records or checkboxes.
 | TOOL-003 | PROVEN-CONTRACT | `REMAINING-TOOL-003-005.md`; `tests/test_remaining_tool_policy.py` directly covers bounded path/host/resource/preset/workspace/authority matching and fail-closed decisions. |
 | TOOL-004 | PROVEN-CONTRACT | Gateway tests cover allow/deny/approval modes; session/project persistence is not proven. |
 | TOOL-005 | PROVEN-CONTRACT | `REMAINING-TOOL-003-005.md`; `tests/test_remaining_tool_policy.py` directly covers independent immutable startup authorities and fail-closed authority requirements. |
-| TOOL-006 | MISSING | Generated MCP/OpenAI/CLI/client catalogs are not evidenced. |
+| TOOL-006 | PROVEN-CONTRACT | `REMAINING-TOOL-006-API-007-008.md`, `REMAINING-DOC-001-007.md`; focused catalog/artifact/freshness tests directly cover MCP/OpenAI/CLI/client schemas, permissions, conformance fixtures, documentation projection, and CI drift rejection. |
 | TOOL-007 | PROVEN-CONTRACT | Gateway receipt/redaction tests prove the contract; durable audit storage is not proven. |
 
 ### EXEC
@@ -225,8 +225,8 @@ not create ledger records or checkboxes.
 | API-004 | PROVEN-CONTRACT | `WP8-API-004.md`; OpenAI compatibility mapping and focused tests. |
 | API-005 | PROVEN-CONTRACT | `WP8-API-005.md`; bounded editor/agent envelopes and safe rule exchange tests. |
 | API-006 | PROVEN-CONTRACT | `WP8-API-006.md`; operator control-plane snapshot and focused tests. |
-| API-007 | MISSING | Flutter reconnect/resume and mobile parity are not evidenced. |
-| API-008 | MISSING | Generated runtime-derived client/SDK schema catalogs are not evidenced. |
+| API-007 | PROVEN-CONTRACT | `REMAINING-API-007-008.md`, `REMAINING-TOOL-006-API-007-008.md`; `tests/test_remaining_client_schema.py` and `tests/test_mobile_parity_wire.py` directly cover provider-neutral mobile reconnect, bounded resume, snapshots, continuation, and fail-closed validation. |
+| API-008 | PROVEN-CONTRACT | `REMAINING-API-007-008.md`, `REMAINING-TOOL-006-API-007-008.md`; `tests/test_remaining_client_schema.py` directly cover runtime-derived client/SDK projections, digest freshness, and schema refresh before replay. |
 
 ### DATA
 
@@ -270,13 +270,13 @@ not create ledger records or checkboxes.
 | ID | Finding | Current evidence or missing proof |
 |---|---|---|
 | TRAIN-001 | PROVEN-CONTRACT | `WP7-TRAIN-001-007.md`; reproducible manifest identity and `tests/test_wp7_training_catalog.py`. |
-| TRAIN-002 | MISSING | Exact qualified training dependency lock is not evidenced. |
-| TRAIN-003 | MISSING | Dataset privacy/license/source/deduplication validation is not evidenced. |
-| TRAIN-004 | PARTIAL | Promotion/evaluation gates exist, but a training-specific behavior/regression/latency/memory gate is not proven. |
+| TRAIN-002 | PROVEN-CONTRACT | `REMAINING-TRAIN-002-003-004-008.md`; `tests/test_remaining_training_002_003_004_008.py` directly cover exact dependency records, missing/extra/duplicate/mismatch rejection, and environment binding. |
+| TRAIN-003 | PROVEN-CONTRACT | `REMAINING-TRAIN-002-003-004-008.md`; `tests/test_remaining_training_002_003_004_008.py` directly cover privacy, source/license, deduplication, contamination, and train/eval separation gates. |
+| TRAIN-004 | PROVEN-CONTRACT | `REMAINING-TRAIN-002-003-004-008.md`; `tests/test_remaining_training_002_003_004_008.py` directly cover behavior, regression, latency, memory, context, and tool-use evaluation gates. |
 | TRAIN-005 | PROVEN-CONTRACT | `WP7-TRAIN-005-009.md`; immutable deployment artifact identity and health-gated activation. |
 | TRAIN-006 | PROVEN-CONTRACT | Attended deployment service behavior is tested. Durable active-route integration remains open. |
 | TRAIN-007 | PROVEN-CONTRACT | Adapter catalog identity/task/project/personalization shape is tested. |
-| TRAIN-008 | MISSING | Cheap-learning-first orchestration policy is not evidenced. |
+| TRAIN-008 | PROVEN-CONTRACT | `REMAINING-TRAIN-002-003-004-008.md`; `tests/test_remaining_training_002_003_004_008.py` directly cover ordered cheap-learning methods, first-reliable selection, and weight-training fallback. |
 | TRAIN-009 | PROVEN-CONTRACT | Explicit rollback and prior-route retention are tested. |
 
 ### UPDATE
