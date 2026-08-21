@@ -59,6 +59,28 @@ def test_make_directory(executor, tmp_path):
     assert (tmp_path / "sub" / "dir").is_dir()
 
 
+def test_read_only_workbench_tools_use_packaged_guards(executor, tmp_path):
+    (tmp_path / "notes.txt").write_text("needle\nsecond line\n", encoding="utf-8")
+    (tmp_path / "script.py").write_text("print('ok')\n", encoding="utf-8")
+
+    found = executor.execute(ToolCall("file_find", {"query": "notes.txt"}), _ctx())
+    ranged = executor.execute(
+        ToolCall("file_read_range", {"path": "notes.txt", "start_line": 2, "end_line": 2}),
+        _ctx(),
+    )
+    searched = executor.execute(
+        ToolCall("text_search", {"query": "needle", "root": "."}), _ctx()
+    )
+    scripts = executor.execute(
+        ToolCall("script_search", {"query": "script.py", "root": "."}), _ctx()
+    )
+
+    assert found.ok and "notes.txt" in found.output
+    assert ranged.ok and "second line" in ranged.output
+    assert searched.ok and "needle" in searched.output
+    assert scripts.ok and "script.py" in scripts.output
+
+
 def test_guard_rejection_surfaces_as_not_ok(executor):
     # Escaping the workspace root must fail closed as ok=False, not raise.
     result = executor.execute(

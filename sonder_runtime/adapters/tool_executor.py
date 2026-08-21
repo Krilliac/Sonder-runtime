@@ -7,6 +7,8 @@ only maps their results into the application port's stable result shape.
 """
 from __future__ import annotations
 
+import json
+
 from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
 
@@ -29,6 +31,21 @@ class ToolExecutorAdapter:
                 output="operation cancelled",
             )
         try:
+            if call.tool == "file_find":
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
+
+                res = file_ops.find_files(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool == "file_read_range":
+                import sonder_runtime.adapters.filesystem.workbench as workbench
+
+                res = workbench.read_line_range(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool in {"directory_tree", "text_search", "script_search", "program_search"}:
+                import sonder_runtime.adapters.filesystem.workbench as workbench
+
+                res = getattr(workbench, call.tool)(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "run_program":
                 import sonder_runtime.adapters.filesystem.workbench as workbench
 
