@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 LEGACY_ERROR_PREFIX = "ERROR:"
+_TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def cloud_allowed(environment) -> bool:
+    """Return whether an explicit hosted/cloud opt-in is present."""
+    return str(environment.get("SONDER_ALLOW_CLOUD", "")).strip().lower() in _TRUE
 
 
 def has_legacy_error_prefix(value: object) -> bool:
