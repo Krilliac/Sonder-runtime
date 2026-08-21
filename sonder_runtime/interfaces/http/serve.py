@@ -64,6 +64,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
 )
 from sonder_runtime.domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.execution.world_control import OutputWatermark
 
 
 _LEGACY_RUNTIME = None
@@ -211,6 +212,66 @@ def _job_cancel_id(path):
         return None
     job_id = urllib.parse.unquote(encoded)
     return job_id if job_id and "/" not in job_id else None
+
+
+_JOB_STREAM_DEFAULT_EVENTS = 64
+_JOB_STREAM_MAX_EVENTS = 256
+_JOB_STREAM_DEFAULT_BYTES = 16 * 1024
+_JOB_STREAM_MAX_BYTES = 64 * 1024
+_JOB_STREAM_MAX_AFTER = (1 << 63) - 1
+
+
+def _job_subroute_id(path, suffix):
+    prefix = "/v1/jobs/"
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    encoded = path[len(prefix):-len(suffix)]
+    if not encoded or "/" in encoded:
+        return None
+    job_id = urllib.parse.unquote(encoded)
+    return job_id if job_id and "/" not in job_id else None
+
+
+def _job_stream_query(raw_query):
+    query = urllib.parse.parse_qs(raw_query, keep_blank_values=True)
+
+    def bounded(name, default, lower, upper):
+        values = query.get(name)
+        if not values:
+            return default
+        if len(values) != 1 or not values[0]:
+            raise ValueError(f"{name} must be an integer between {lower} and {upper}")
+        try:
+            value = int(values[0])
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{name} must be an integer between {lower} and {upper}"
+            ) from None
+        if value < lower or value > upper:
+            raise ValueError(f"{name} must be an integer between {lower} and {upper}")
+        return value
+
+    return (
+        bounded("after", 0, 0, _JOB_STREAM_MAX_AFTER),
+        bounded("max_events", _JOB_STREAM_DEFAULT_EVENTS, 1, _JOB_STREAM_MAX_EVENTS),
+        bounded("max_bytes", _JOB_STREAM_DEFAULT_BYTES, 1, _JOB_STREAM_MAX_BYTES),
+    )
+
+
+def _job_output_event_payload(event):
+    spill = event.spill
+    return {
+        "sequence": event.watermark.sequence,
+        "stream": event.stream.value,
+        "data": event.data,
+        "spill": None if spill is None else {
+            "digest": spill.digest,
+            "preview": spill.preview,
+            "size": spill.size,
+            "mime_type": spill.mime_type,
+            "owner_id": spill.owner_id,
+        },
+    }
 
 
 def _local_log_dashboard_allowed(peer: str) -> bool:
@@ -3526,7 +3587,62 @@ class Handler(BaseHTTPRequestHandler):
                 return
             from sonder_runtime.bootstrap.app import default_app
 
-            service = default_app().job_service()
+            application = default_app()
+            stream_job_id = _job_subroute_id(path, "/stream")
+            result_job_id = _job_subroute_id(path, "/result")
+            if stream_job_id is not None:
+                try:
+                    after, max_events, max_bytes = _job_stream_query(
+                        urllib.parse.urlsplit(self.path).query
+                    )
+                except ValueError as error:
+                    self._send_json_payload(
+                        {"error": {"message": str(error), "type": "invalid_request"}},
+                        status=400,
+                    )
+                    return
+                try:
+                    page = application.job_registry().stream(
+                        stream_job_id,
+                        after=OutputWatermark(after),
+                        max_events=max_events,
+                        max_bytes=max_bytes,
+                    )
+                except KeyError:
+                    self._send_not_found()
+                    return
+                self._send_json_payload({
+                    "object": "job_output",
+                    "job_id": stream_job_id,
+                    "events": [_job_output_event_payload(event) for event in page.events],
+                    "next_watermark": page.next_watermark.sequence,
+                    "has_more": page.has_more,
+                    "truncated": page.truncated,
+                })
+                return
+            if result_job_id is not None:
+                try:
+                    record = application.job_registry().collect(result_job_id)
+                except KeyError:
+                    self._send_not_found()
+                    return
+                except ValueError as error:
+                    self._send_json_payload(
+                        {"error": {"message": str(error), "type": "conflict"}},
+                        status=409,
+                    )
+                    return
+                self._send_json_payload({
+                    "object": "job_result",
+                    "job_id": result_job_id,
+                    "status": record.status.value,
+                    "result": record.result,
+                    "error": record.error,
+                    "job": _job_record_payload(record),
+                })
+                return
+
+            service = application.job_service()
             if path == "/v1/jobs":
                 query = urllib.parse.parse_qs(
                     urllib.parse.urlsplit(self.path).query,

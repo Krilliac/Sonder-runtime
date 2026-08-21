@@ -196,6 +196,79 @@ def test_admin_job_cancel_surface_validates_reason_and_bounds_response(
     bootstrap_app.reset_for_tests()
 
 
+def test_admin_job_stream_surface_serializes_events_and_bounds_cursor(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.execution.world_control import OutputStream
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "jobs-stream.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-stream", "shell", "op-stream", "idem-stream"))
+    registry.append_output("job-stream", OutputStream.STDOUT, "hello")
+    registry.append_output("job-stream", OutputStream.STDERR, "warning")
+
+    status, body, _ = _get(
+        http_server, "/v1/jobs/job-stream/stream?after=0&max_events=1&max_bytes=5"
+    )
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "job_output"
+    assert payload["job_id"] == "job-stream"
+    assert payload["events"] == [{
+        "sequence": 1,
+        "stream": "stdout",
+        "data": "hello",
+        "spill": None,
+    }]
+    assert payload["next_watermark"] == 1
+    assert payload["has_more"] is True
+
+    status, body, _ = _get(http_server, "/v1/jobs/job-stream/stream?after=1")
+    assert status == 200
+    assert json.loads(body)["events"][0]["stream"] == "stderr"
+
+    status, body, _ = _get(
+        http_server, "/v1/jobs/job-stream/stream?max_events=257"
+    )
+    assert status == 400
+    assert "max_events must be an integer" in json.loads(body)["error"]["message"]
+    bootstrap_app.reset_for_tests()
+
+
+def test_admin_job_result_surface_distinguishes_missing_nonterminal_and_terminal(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.ports.jobs import JobIdentity, JobStatus
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "jobs-result.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-result", "shell", "op-result", "idem-result"))
+
+    status, _, _ = _get(http_server, "/v1/jobs/missing/result")
+    assert status == 404
+    status, body, _ = _get(http_server, "/v1/jobs/job-result/result")
+    assert status == 409
+    assert json.loads(body)["error"]["type"] == "conflict"
+
+    registry.transition("job-result", JobStatus.SUCCEEDED, result={"answer": 42})
+    status, body, _ = _get(http_server, "/v1/jobs/job-result/result")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "job_result"
+    assert payload["result"] == {"answer": 42}
+    assert payload["job"]["status"] == "succeeded"
+    bootstrap_app.reset_for_tests()
+
+
 def test_ready_reflects_ollama_outage_without_false_success(http_server):
     # Hermetic env points Ollama at a closed port: readiness must be 503
     # with the dependency named, while liveness stays 200.
