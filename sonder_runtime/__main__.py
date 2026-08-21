@@ -590,6 +590,18 @@ def cmd_repl(args) -> int:
 
 
 def cmd_mcp(args) -> int:
+    if getattr(args, "native", False):
+        try:
+            config = _load_config(args)
+        except sonder_config.ConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        from sonder_runtime.bootstrap.app import build_application
+        from sonder_runtime.bootstrap.native_mcp import run_native_mcp
+        from sonder_runtime.adapters.security import unsafe_lab
+
+        unsafe_lab.require_startup()
+        return run_native_mcp(build_application(config=config))
     try:
         McpCommand(build_legacy_server_mcp_runtime()).execute(
             lambda: _export_runtime_environment(_load_config(args))
@@ -861,6 +873,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("mcp", help="run the MCP adapter")
     common(p)
+    p.add_argument(
+        "--native", action="store_true",
+        help="use the application-owned bounded MCP transport",
+    )
     p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("drain", help="request graceful drain")
