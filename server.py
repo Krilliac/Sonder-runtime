@@ -238,7 +238,7 @@ from sonder_runtime.adapters.model_error_details import (
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
-import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )

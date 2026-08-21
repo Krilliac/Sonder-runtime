@@ -126,7 +126,7 @@ REQUIRED_FILES = {
     "sonder_runtime/application/preflight/use_cases.py",
     "sonder_runtime/adapters/model_transport.py",
     "sonder_runtime/adapters/runtime_policy.py",
-    "sonder_runtime/adapters/ollama/endpoint.py",
+    "sonder_runtime/adapters/inference/ollama_endpoint.py",
     "sonder_runtime/adapters/embedding_cache.py",
     "sonder_runtime/adapters/accelerators/npu/contract.py",
     "sonder_runtime/adapters/accelerators/npu/manifest.py",

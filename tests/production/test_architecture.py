@@ -371,6 +371,7 @@ def test_checker_detects_a_violation(tmp_path):
         "sonder_runtime\\adapters\\legacy_model_gateway.py",
         "sonder_runtime\\adapters\\ollama\\gateway.py",
         "sonder_runtime\\adapters\\openai_compat\\gateway.py",
+        "sonder_runtime\\adapters\\ollama\\endpoint.py",
     ],
 )
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):

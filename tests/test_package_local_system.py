@@ -115,7 +115,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "media_assets.py" in entries
     assert "sonder_runtime/adapters/model_transport.py" in entries
     assert "ollama_endpoint.py" not in entries
-    assert "sonder_runtime/adapters/ollama/endpoint.py" in entries
+    assert "sonder_runtime/adapters/inference/ollama_endpoint.py" in entries
     assert "sonder_runtime/adapters/embedding_cache.py" in entries
     assert "sonder_runtime/adapters/embeddings.py" in entries
     assert "sonder_runtime/adapters/accelerators/npu/contract.py" in entries

@@ -158,6 +158,7 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("sonder_runtime/adapters/legacy_model_gateway.py"),
     Path("sonder_runtime/adapters/ollama/gateway.py"),
     Path("sonder_runtime/adapters/openai_compat/gateway.py"),
+    Path("sonder_runtime/adapters/ollama/endpoint.py"),
 })
 
 # Applied migrations are immutable historical artifacts. They may retain an

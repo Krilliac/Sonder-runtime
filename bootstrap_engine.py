@@ -17,7 +17,7 @@ from pathlib import Path
 
 import engine_bundle
 import adaptive_training
-import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.platform import system_profile
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 
-import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 import server
 
 

@@ -42,11 +42,8 @@ from ...platform import context_policy
 from ...platform.metrics import default_registry
 from .telemetry import from_ollama
 from ..model_transport import ModelCallError
-# Endpoint policy remains shared with embeddings. Resolve it dynamically so the
-# temporary old-path gateway alias can point here without creating an import
-# cycle through the ``ollama`` package.
 ollama_endpoint = importlib.import_module(
-    "sonder_runtime.adapters.ollama.endpoint"
+    "sonder_runtime.adapters.inference.ollama_endpoint"
 )
 from ...domain.common.errors import (
     Cancelled,
@@ -239,9 +236,9 @@ class OllamaGateway:
     ) -> Sequence[Embedding]:
         provider = self._embedding_provider
         if provider is None:
-            import sonder_runtime.adapters.embeddings as embeddings
-
-            provider = embeddings
+            provider = importlib.import_module(
+                "sonder_runtime.adapters.embeddings"
+            )
 
         _enforce_local_endpoint(getattr(provider, "BASE", ollama_endpoint.normalize()), context)
         results = []
