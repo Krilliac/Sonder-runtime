@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 205,
+      "file_count": 206,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -237,6 +237,7 @@
         "sonder_runtime/adapters/unit_of_work.py",
         "sonder_runtime/adapters/updates/__init__.py",
         "sonder_runtime/adapters/updates/activation_journal.py",
+        "sonder_runtime/adapters/updates/control_plane.py",
         "sonder_runtime/adapters/updates/engine.py",
         "sonder_runtime/adapters/updates/service.py",
         "sonder_runtime/adapters/vision_input.py",

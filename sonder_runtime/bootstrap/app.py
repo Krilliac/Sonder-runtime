@@ -543,9 +543,10 @@ def build_application(
 
     def update_section():
         try:
-            from ..adapters.updates.engine import UpdateManager
-
-            status = UpdateManager().status()
+            read_update_status = importlib.import_module(
+                "sonder_runtime.adapters.updates.control_plane"
+            ).read_update_status
+            status = read_update_status()
         except Exception:
             return unavailable_section("updates")()
         return ({
