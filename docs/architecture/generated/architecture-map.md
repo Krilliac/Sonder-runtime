@@ -13,7 +13,7 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 | `application` | 257 |
 | `bootstrap` | 14 |
 | `domain` | 104 |
-| `interfaces` | 29 |
+| `interfaces` | 31 |
 | `platform` | 33 |
 
 ## Composition roots

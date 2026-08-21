@@ -649,10 +649,12 @@
       ]
     },
     {
-      "file_count": 29,
+      "file_count": 31,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
+        "sonder_runtime/interfaces/a2a/__init__.py",
+        "sonder_runtime/interfaces/a2a/jsonrpc.py",
         "sonder_runtime/interfaces/cli/__init__.py",
         "sonder_runtime/interfaces/cli/commands.py",
         "sonder_runtime/interfaces/cli/extensions.py",
