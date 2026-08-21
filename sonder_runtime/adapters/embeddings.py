@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import sonder_runtime.adapters.embedding_cache as embed_cache
-import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc

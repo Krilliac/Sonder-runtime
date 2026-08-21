@@ -7,6 +7,7 @@ the root ``server`` module.
 from __future__ import annotations
 
 import time
+import importlib
 
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
@@ -65,9 +66,9 @@ class InjectedModelGateway:
     def embed(self, texts, context: OperationContext):
         provider = self._embedding_provider
         if provider is None:
-            import sonder_runtime.adapters.embeddings as embeddings
-
-            provider = embeddings.embed
+            provider = importlib.import_module(
+                "sonder_runtime.adapters.embeddings"
+            ).embed
 
         results = []
         for text in texts:

@@ -5,7 +5,7 @@ import pytest
 
 from sonder_runtime.adapters import model_transport
 import server
-from sonder_runtime.adapters.ollama import endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest

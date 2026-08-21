@@ -28,7 +28,7 @@ from pathlib import Path
 
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 import promotion_eval
-import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 from sonder_runtime.platform import system_profile
 import sonder_paths

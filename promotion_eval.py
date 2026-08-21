@@ -16,7 +16,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
-import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 
 
 SUITE_VERSION = "sql-promotion-v2"

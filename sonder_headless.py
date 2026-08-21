@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 import engine_bundle
-import sonder_runtime.adapters.ollama.endpoint as ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 import unsafe_lab
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 import sonder_health
