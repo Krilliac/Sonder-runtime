@@ -355,6 +355,21 @@ def get_action(conn, action_id):
     ).fetchone())
 
 
+def list_actions(conn, limit=100):
+    """Return bounded approval/action summaries in newest-update order."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise QueueValidation("limit must be an integer") from exc
+    if not 1 <= limit <= MAX_TOTAL_ACTIONS:
+        raise QueueValidation("limit is outside the bounded action read range")
+    rows = conn.execute(
+        "SELECT * FROM queued_actions ORDER BY updated DESC, id ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return tuple(_action(row) for row in rows)
+
+
 def propose(conn, request: ActionRequest) -> ActionRecord:
     """Create or idempotently replay one immutable proposed request."""
     if not isinstance(request, ActionRequest):

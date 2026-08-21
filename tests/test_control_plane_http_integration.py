@@ -126,7 +126,8 @@ def test_default_application_graph_serves_control_plane(monkeypatch, tmp_path):
         with urllib.request.urlopen(url, timeout=10) as response:
             payload = json.loads(response.read())
         assert response.status == 200
-        assert payload["snapshot"]["sections"]["plans"]["records"][0]["available"] is False
+        assert payload["snapshot"]["sections"]["plans"]["records"] == []
+        assert payload["snapshot"]["sections"]["context"]["records"][0]["available"] is False
         assert payload["snapshot"]["sections"]["health"]["count"] >= 1
     finally:
         httpd.shutdown()
