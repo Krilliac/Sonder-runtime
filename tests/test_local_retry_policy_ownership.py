@@ -2,6 +2,22 @@ import server
 from sonder_runtime.platform import local_retry_policy
 
 
+def test_server_production_paths_do_not_call_local_retry_compatibility_wrappers():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"_local_model_retries", "_local_retry_delay"}
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in names
+    ]
+    assert calls == []
+
+
 def test_server_keeps_compatibility_wrappers_for_local_retry_policy():
     assert server._local_model_retries() == local_retry_policy.local_model_retries()
     assert server._local_retry_delay(2) == local_retry_policy.retry_delay(2)
