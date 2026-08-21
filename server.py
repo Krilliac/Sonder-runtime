@@ -3747,7 +3747,7 @@ def _post_model(
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
     max_attempts = (
-        1 if cloud or remote_endpoint else 1 + _local_model_retries()
+        1 if cloud or remote_endpoint else 1 + _local_model_retries_policy()
     )
 
     # Bumped by exactly one if a classified context overflow earns a compaction
@@ -3785,7 +3785,7 @@ def _post_model(
             # Ollama can report a refusal in-band on a 200. That is the same
             # failure surface as an HTTP error body, so it gets classified too
             # rather than being handed upward as an opaque success.
-            embedded_detail = "" if compaction_spent else _embedded_model_error(result)
+            embedded_detail = "" if compaction_spent else _embedded_model_error_policy(result)
             if not embedded_detail:
                 return result, attempt
         except ModelCallError as error:
@@ -3914,7 +3914,7 @@ def _post_model(
 
         if cloud or not failure.transient or attempt >= max_attempts:
             raise failure
-        delay = _local_retry_delay(attempt)
+        delay = _local_retry_delay_policy(attempt)
         remaining = deadline - time.monotonic()
         if remaining < delay + 1.0:
             raise failure
@@ -21950,8 +21950,8 @@ def diagnostics() -> str:
         "  loopback model retry: %d transient retry(s), %dms base delay; "
         "remote/cloud retries off"
         % (
-            _local_model_retries(),
-            int(_local_retry_delay(1) * 1000),
+            _local_model_retries_policy(),
+            int(_local_retry_delay_policy(1) * 1000),
         )
     )
     try:
@@ -22093,7 +22093,7 @@ def status() -> str:
         f"Resident in Ollama now: {', '.join(loaded) if loaded else '(none loaded)'}",
         f"local keep_alive: {KEEP_ALIVE}",
         "loopback retry: %d transient retry(s), %dms base delay; remote/cloud retries off" % (
-            _local_model_retries(), int(_local_retry_delay(1) * 1000),
+            _local_model_retries_policy(), int(_local_retry_delay_policy(1) * 1000),
         ),
         "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
             **_platform_local_runtime_summary(
