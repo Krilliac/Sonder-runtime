@@ -621,6 +621,9 @@ def cmd_repl(args) -> int:
 
 def cmd_mcp(args) -> int:
     if getattr(args, "native", False):
+        from sonder_runtime.adapters.security import unsafe_lab
+
+        unsafe_lab.require_startup()
         try:
             config = _load_config(args)
         except sonder_config.ConfigError as exc:
@@ -628,9 +631,9 @@ def cmd_mcp(args) -> int:
             return 2
         from sonder_runtime.bootstrap.app import build_application
         from sonder_runtime.bootstrap.native_mcp import run_native_mcp
-        from sonder_runtime.adapters.security import unsafe_lab
 
-        unsafe_lab.require_startup()
+        _configure_typed_home(config)
+        _export_runtime_environment(config, include_typed_runtime=False)
         return run_native_mcp(build_application(config=config))
     try:
         McpCommand(build_legacy_server_mcp_runtime()).execute(
