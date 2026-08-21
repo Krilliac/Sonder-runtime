@@ -19,6 +19,8 @@ The implementation is deliberately split across two persistence paths:
   invariant. Ordinary `migrate` and `serve` do not silently perform adoption.
   `serve` now applies the epoch gate before migration or listener binding and
   directs pre-epoch homes to this explicit command.
+  The gate checks the complete adopted database set, so partial epoch-2 state
+  cannot pass startup by stamping only `memory.db`.
 
 The bridge migration has an explicit optional `step_hook` used only by the
 rehearsal. Normal runtime calls leave it unset, so the production migration

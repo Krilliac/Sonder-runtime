@@ -10,14 +10,12 @@ from typing import Mapping
 
 from sonder_runtime.adapters.persistence.migrations import status_read_only
 from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+    EPOCH2_DATABASES,
     check_epoch,
     require_epoch_2,
 )
 
 
-EPOCH2_DATABASES = (
-    "memory.db", "automation.db", "operations.db", "selfmod.db", "training.db",
-)
 KNOWN_MIGRATION_STORES = MappingProxyType({
     "memory.db": "memory", "operations.db": "operations", "updates.db": "updates",
     "autopilot.db": "autopilot", "fleet.db": "fleet",

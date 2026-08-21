@@ -34,6 +34,9 @@ from ....domain.common.errors import MigrationRequired
 
 
 EPOCH = 2
+EPOCH2_DATABASES = (
+    "memory.db", "automation.db", "operations.db", "selfmod.db", "training.db",
+)
 
 
 @dataclass
@@ -67,14 +70,16 @@ def check_epoch(db_path: Path) -> int | None:
 
 
 def require_epoch_2(sonder_home: Path) -> None:
-    """Called by the final runtime at startup.  Fails if not epoch 2."""
+    """Fail closed unless every adopted domain database is at epoch 2."""
     memory_db = sonder_home / "memory.db"
     if not memory_db.exists():
         return  # Fresh install — will create epoch 2 directly
-    epoch = check_epoch(memory_db)
-    if epoch is None or epoch < EPOCH:
+    epochs = {name: check_epoch(sonder_home / name) for name in EPOCH2_DATABASES}
+    invalid = tuple(name for name, epoch in epochs.items() if epoch != EPOCH)
+    if invalid:
         raise MigrationRequired(
-            "This state predates the SPEC-5 schema epoch. "
+            "State is not fully adopted at the SPEC-5 schema epoch "
+            f"(invalid databases: {', '.join(invalid)}). "
             "Run the designated bridge release/migration before upgrading."
         )
 
