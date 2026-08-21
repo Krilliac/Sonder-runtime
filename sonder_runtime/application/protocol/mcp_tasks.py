@@ -11,7 +11,15 @@ from enum import Enum
 import json
 
 from ..ports.jobs import JobRecord, JobStatus
-from ...domain.common.errors import InvalidInput
+from ...domain.common.errors import InvalidInput, NotFound
+
+
+class McpTaskInvalidInput(InvalidInput):
+    """Protocol-owned invalid MCP Tasks request."""
+
+
+class McpTaskNotFound(NotFound):
+    """Protocol-owned missing MCP task."""
 
 
 class McpTaskStatus(str, Enum):
@@ -122,28 +130,36 @@ class McpTaskHandler:
         self._poll_after_ms = poll_after_ms
 
     def __call__(self, method: str, params: dict[str, object]) -> dict[str, object]:
-        if method not in {"tasks/get", "tasks/update", "tasks/cancel"}:
-            raise InvalidInput("unsupported MCP Tasks method")
-        if not isinstance(params, dict):
-            raise InvalidInput("MCP Tasks parameters must be an object")
-        task_id = params.get("taskId")
-        if not isinstance(task_id, str) or not task_id.strip():
-            raise InvalidInput("taskId is required")
+        try:
+            if method not in {"tasks/get", "tasks/update", "tasks/cancel"}:
+                raise InvalidInput("unsupported MCP Tasks method")
+            if not isinstance(params, dict):
+                raise InvalidInput("MCP Tasks parameters must be an object")
+            task_id = params.get("taskId")
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise InvalidInput("taskId is required")
 
-        if method == "tasks/cancel":
-            reason = params.get("reason", "cancelled")
-            if not isinstance(reason, str) or not reason.strip():
-                raise InvalidInput("cancel reason must be a non-empty string")
-            records = tuple(self._jobs.cancel(task_id, reason=reason))
-            record = records[-1] if records else self._jobs.get(task_id)
-        else:
-            record = self._jobs.get(task_id)
-        return project_job(
-            record,
-            input_required=params.get("inputRequired", False),
-            expires_at=params.get("expiresAt"),
-            poll_after_ms=self._poll_after_ms,
-        ).to_dict()
+            if method == "tasks/cancel":
+                reason = params.get("reason", "cancelled")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise InvalidInput("cancel reason must be a non-empty string")
+                records = tuple(self._jobs.cancel(task_id, reason=reason))
+                record = records[-1] if records else self._jobs.get(task_id)
+            else:
+                record = self._jobs.get(task_id)
+            return project_job(
+                record,
+                input_required=params.get("inputRequired", False),
+                expires_at=params.get("expiresAt"),
+                poll_after_ms=self._poll_after_ms,
+            ).to_dict()
+        except NotFound as exc:
+            raise McpTaskNotFound(str(exc)) from exc
+        except InvalidInput as exc:
+            raise McpTaskInvalidInput(str(exc)) from exc
 
 
-__all__ = ["McpTaskHandler", "McpTaskStatus", "McpTaskView", "project_job"]
+__all__ = [
+    "McpTaskHandler", "McpTaskInvalidInput", "McpTaskNotFound",
+    "McpTaskStatus", "McpTaskView", "project_job",
+]
