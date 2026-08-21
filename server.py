@@ -60,7 +60,7 @@ import compiler_cache
 import request_cache
 import isolated_runner
 from sonder_runtime.adapters.web import live_reload
-import system_profile
+from sonder_runtime.platform import system_profile
 import emotion_vectors
 import preference_learning
 from sonder_runtime.adapters import process_liveness
@@ -69,7 +69,7 @@ import local_service_probe as local_probe
 import web_intents
 import self_heal
 import grounding
-import sonder_paths
+from sonder_runtime.platform import paths as sonder_paths
 import harness_tools
 import memory_quality
 import learning_health
@@ -124,7 +124,7 @@ import sqlite_mutate as sqlite_mutate_module
 import symbol_index
 import git_history
 import archive_create as archive_create_tool
-import context_policy
+from sonder_runtime.platform import context_policy
 import command_registry
 import adaptive_training
 import selfmod
@@ -271,7 +271,7 @@ import project_scaffold
 from sonder_runtime.platform import environment_probe
 import toolchain_status as toolchain_status_module
 import sonder_hardware
-import sonder_logging
+from sonder_runtime.platform import logging as sonder_logging
 import tool_capabilities
 import git_tools
 import sonder_runtime.adapters.evaluation_history_store as eval_history
