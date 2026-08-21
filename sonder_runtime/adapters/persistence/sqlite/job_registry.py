@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 from threading import Lock
 from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
 
 from sonder_runtime.application.execution.world_control import (
     BoundedOutputBuffer, OutputPage, OutputStream, OutputWatermark, SpillReference,
@@ -18,7 +19,9 @@ from sonder_runtime.application.jobs.durable_registry import (
 from sonder_runtime.application.operations.startup_reconciliation import (
     DrainAction, DrainPlan, RecordKind, StartupObservation, build_drain_plan,
 )
-from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus, TERMINAL_JOB_STATUSES
+from sonder_runtime.application.ports.jobs import (
+    JobClaim, JobIdentity, JobRecord, JobStatus, TERMINAL_JOB_STATUSES,
+)
 
 
 _DDL = """
@@ -28,7 +31,9 @@ CREATE TABLE IF NOT EXISTS durable_job (
     status TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL, result_json TEXT, error TEXT NOT NULL,
     process_id INTEGER, process_group_id INTEGER, output_next INTEGER NOT NULL DEFAULT 1,
-    output_dropped_before INTEGER NOT NULL DEFAULT 0
+    output_dropped_before INTEGER NOT NULL DEFAULT 0,
+    worker_id TEXT,
+    lease_until TEXT
 );
 CREATE INDEX IF NOT EXISTS durable_job_parent ON durable_job(parent_job_id);
 CREATE INDEX IF NOT EXISTS durable_job_operation ON durable_job(operation_id);
@@ -76,6 +81,13 @@ class SQLiteDurableJobRegistry:
         with self._connect() as connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.executescript(_DDL)
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(durable_job)")
+            }
+            if "worker_id" not in columns:
+                connection.execute("ALTER TABLE durable_job ADD COLUMN worker_id TEXT")
+            if "lease_until" not in columns:
+                connection.execute("ALTER TABLE durable_job ADD COLUMN lease_until TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self._path), timeout=5.0)
@@ -96,7 +108,7 @@ class SQLiteDurableJobRegistry:
         return connection.execute(
             "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
             "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
-            "output_dropped_before FROM durable_job WHERE job_id=?", (job_id,)
+            "output_dropped_before,worker_id,lease_until FROM durable_job WHERE job_id=?", (job_id,)
         ).fetchone()
 
     def start(self, identity: JobIdentity, *, parent_job_id: str | None = None,
@@ -134,6 +146,12 @@ class SQLiteDurableJobRegistry:
                 raise ValueError(f"job {identity.job_id!r} already exists") from exc
         return JobRecord(identity, JobStatus.PENDING, 0, now, now)
 
+    def create(self, identity: JobIdentity, *, metadata: dict[str, Any] | None = None) -> JobRecord:
+        """Satisfy the persistence-neutral JobRegistry creation port."""
+        if metadata is not None and not isinstance(metadata, dict):
+            raise TypeError("metadata must be a dict when provided")
+        return self.start(identity)
+
     def poll(self, job_id: str) -> JobRecord:
         with self._connect() as connection:
             record = self._record(self._row(connection, job_id))
@@ -162,7 +180,7 @@ class SQLiteDurableJobRegistry:
             rows = connection.execute(
                 "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
                 "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
-                "output_dropped_before FROM durable_job WHERE " + " AND ".join(clauses) +
+                "output_dropped_before,worker_id,lease_until FROM durable_job WHERE " + " AND ".join(clauses) +
                 " ORDER BY rowid LIMIT ?", (*args, limit)
             ).fetchall()
         return tuple(self._record(row) for row in rows if row is not None)  # type: ignore[misc]
@@ -174,7 +192,7 @@ class SQLiteDurableJobRegistry:
             rows = connection.execute(
                 "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
                 "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
-                "output_dropped_before FROM durable_job ORDER BY rowid LIMIT ?", (limit,)
+                "output_dropped_before,worker_id,lease_until FROM durable_job ORDER BY rowid LIMIT ?", (limit,)
             ).fetchall()
         return tuple(self._record(row) for row in rows if row is not None)  # type: ignore[misc]
 
@@ -270,6 +288,100 @@ class SQLiteDurableJobRegistry:
                  job_id, current.revision),
             )
             return self._record(self._row(connection, job_id))  # type: ignore[return-value]
+
+    @staticmethod
+    def _lease_until(now: str, lease_seconds: int) -> str:
+        value = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return (value + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _lease_active(value: str | None, now: str) -> bool:
+        if not value:
+            return False
+        current = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry > current
+
+    def claim(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> JobClaim | None:
+        """Durably claim a non-terminal job for one worker."""
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ValueError("worker_id must be non-empty")
+        if isinstance(lease_seconds, bool) or lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            current = self._record(row)
+            if current is None:
+                return None
+            now = self._clock()
+            if current.is_terminal or (row[16] and self._lease_active(row[17], now)):
+                return None
+            until = self._lease_until(now, lease_seconds)
+            changed = connection.execute(
+                "UPDATE durable_job SET status=?,revision=?,updated_at=?,worker_id=?,lease_until=? "
+                "WHERE job_id=? AND revision=?",
+                (JobStatus.CLAIMED.value, current.revision + 1, now, worker_id, until,
+                 job_id, current.revision),
+            ).rowcount
+            return JobClaim(job_id, worker_id, until, current.revision + 1) if changed == 1 else None
+
+    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> bool:
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ValueError("worker_id must be non-empty")
+        if isinstance(lease_seconds, bool) or lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            current = self._record(row)
+            if current is None or current.is_terminal:
+                return False
+            now = self._clock()
+            if row[16] != worker_id or not self._lease_active(row[17], now):
+                return False
+            until = self._lease_until(now, lease_seconds)
+            changed = connection.execute(
+                "UPDATE durable_job SET status=?,revision=?,updated_at=?,lease_until=? "
+                "WHERE job_id=? AND revision=? AND worker_id=?",
+                (JobStatus.RUNNING.value, current.revision + 1, now, until,
+                 job_id, current.revision, worker_id),
+            ).rowcount
+            return changed == 1
+
+    def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None,
+               error: str = "") -> JobRecord | None:
+        if not isinstance(status, JobStatus):
+            raise TypeError("status must be a JobStatus")
+        if status not in TERMINAL_JOB_STATUSES:
+            raise ValueError("finish status must be terminal")
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ValueError("worker_id must be non-empty")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            current = self._record(row)
+            if current is None or current.is_terminal:
+                return current
+            now = self._clock()
+            if row[16] != worker_id or not self._lease_active(row[17], now):
+                return None
+            if status is JobStatus.SUCCEEDED and error:
+                raise ValueError("successful jobs cannot carry an error")
+            changed = connection.execute(
+                "UPDATE durable_job SET status=?,revision=?,updated_at=?,result_json=?,error=?,"
+                "worker_id=NULL,lease_until=NULL WHERE job_id=? AND revision=? AND worker_id=?",
+                (status.value, current.revision + 1, now,
+                 None if result is None else _json(result), error,
+                 job_id, current.revision, worker_id),
+            ).rowcount
+            return self._record(self._row(connection, job_id)) if changed == 1 else None
 
     def cancel(self, job_id: str, *, reason: str = "cancelled") -> tuple[JobRecord, ...]:
         if not reason.strip():
