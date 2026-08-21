@@ -17,10 +17,15 @@ validates their JSON schemas before execution. Each call gets a fresh MCP
 `OperationContext`, and executor results retain bounded error and evidence
 fields.
 
+The native catalog also includes four guarded mutation tools: `file_copy`,
+`file_move`, `file_batch_write`, and `file_delete`. These use the packaged
+transfer, transactional batch, and explicit-delete-confirmation adapters;
+they do not accept legacy authentication tokens on the native surface.
+
 The historical server MCP catalog remains the default compatibility path until
 catalog parity and complete application-service coverage are proven. The
 legacy catalog currently contains 204 registered tools; the native catalog
-therefore covers 16 names and does not claim full parity, API-003, or TOOL-001
+therefore covers 20 names and does not claim full parity, API-003, or TOOL-001
 completion.
 
 ## Evidence

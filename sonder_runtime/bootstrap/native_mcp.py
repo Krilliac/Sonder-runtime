@@ -50,12 +50,38 @@ _NATIVE_TOOLS = (
         }, "required": ["path", "old", "new"], "additionalProperties": False},
     ),
     ToolDescriptor(
+        "file_batch_write", "Transactionally create or overwrite bounded files",
+        {"type": "object", "properties": {
+            "operations": {"type": "array"}, "operations_json": {"type": "string"},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_copy", "Copy one bounded binary-safe file",
+        {"type": "object", "properties": {
+            "source": _PATH, "destination": _PATH, "overwrite": _BOOL, "extra_roots": _ROOT,
+        }, "required": ["source", "destination"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_delete", "Delete a guarded path only after explicit confirmation",
+        {"type": "object", "properties": {
+            "path": _PATH, "recursive": _BOOL, "dry_run": _BOOL,
+            "confirm": {"type": "string"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "file_find", "Find files under allowed roots",
         {"type": "object", "properties": {
             "query": {"type": "string"}, "root": {"type": "string"},
             "max_results": _INT, "extra_roots": _ROOT,
             "include_ignored": _BOOL,
         }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_move", "Move one bounded binary-safe file",
+        {"type": "object", "properties": {
+            "source": _PATH, "destination": _PATH, "overwrite": _BOOL, "extra_roots": _ROOT,
+        }, "required": ["source", "destination"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "file_read", "Read a UTF-8-ish text file inside allowed roots",
