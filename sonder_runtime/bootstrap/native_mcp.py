@@ -168,6 +168,57 @@ _NATIVE_TOOLS = (
     ),
 )
 
+_INSPECTION_TOOLS = (
+    ToolDescriptor(
+        "archive_list", "Inspect a bounded archive without extracting it",
+        {"type": "object", "properties": {"path": _PATH},
+         "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "data_inspect", "Inspect a bounded data file",
+        {"type": "object", "properties": {"path": _PATH},
+         "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "data_query", "Run a bounded read-only data query",
+        {"type": "object", "properties": {"path": _PATH, "sql": {"type": "string"}},
+         "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "dependency_inventory", "Inventory bounded project dependencies",
+        {"type": "object", "properties": {"path": {"type": "string"}},
+         "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "directory_digest", "Digest a bounded directory manifest",
+        {"type": "object", "properties": {"path": {"type": "string"}},
+         "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_digest", "Digest a bounded file",
+        {"type": "object", "properties": {"path": _PATH},
+         "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "log_inspect", "Inspect a bounded log file",
+        {"type": "object", "properties": {"path": _PATH},
+         "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "project_detect", "Detect project manifests and commands",
+        {"type": "object", "properties": {"path": {"type": "string"}},
+         "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "workspace_compare", "Compare two bounded workspaces",
+        {"type": "object", "properties": {
+            "left": _PATH, "right": _PATH,
+        }, "required": ["left", "right"], "additionalProperties": False},
+    ),
+)
+_NATIVE_TOOLS += _INSPECTION_TOOLS
+_INSPECTION_NAMES = frozenset(item.name for item in _INSPECTION_TOOLS)
+
 
 _LEGACY_ALIASES = {
     "directory_tree": "directory_tree",
@@ -222,9 +273,14 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             workspace_roots=roots,
             timeout_seconds=60.0,
         )
-        result = application.tool_executor.execute(
-            ToolCall(tool=canonical_name, arguments=canonical_arguments), context
-        )
+        if canonical_name in _INSPECTION_NAMES:
+            result = application.inspections.inspect(
+                canonical_name, canonical_arguments, context
+            )
+        else:
+            result = application.tool_executor.execute(
+                ToolCall(tool=canonical_name, arguments=canonical_arguments), context
+            )
         return {
             "output": result.output,
             "isError": not result.ok,

@@ -25,13 +25,22 @@ def _app():
     return type("App", (), {"config": _Config(), "tool_executor": _Executor()})()
 
 
+class _Inspections:
+    def inspect(self, name, arguments, context):
+        from sonder_runtime.application.ports.tool_executor import ToolResult
+        assert context.source == "mcp"
+        return ToolResult(ok=True, output=name + ":inspection", evidence={"args": arguments})
+
+
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
-        "directory_create", "directory_tree", "edit_file", "file_batch_write", "file_copy",
-        "file_delete", "file_find", "file_move", "file_read", "file_read_range",
-        "file_write", "json_patch", "make_directory", "program_search", "read_file",
+        "archive_list", "data_inspect", "data_query", "dependency_inventory",
+        "directory_create", "directory_digest", "directory_tree", "edit_file",
+        "file_batch_write", "file_copy", "file_delete", "file_digest", "file_find",
+        "file_move", "file_read", "file_read_range", "file_write", "json_patch",
+        "log_inspect", "make_directory", "program_search", "project_detect", "read_file",
         "run_program", "run_script", "script_search", "text_patch", "text_search",
-        "workspace_run", "write_file",
+        "workspace_compare", "workspace_run", "write_file",
     ]
 
 
@@ -101,6 +110,26 @@ def test_native_schema_rejects_unknown_arguments_as_protocol_error():
     )
     row = [json.loads(line) for line in output.getvalue().splitlines()][1]
     assert row["error"]["code"] == -32602
+
+
+def test_native_read_only_inspection_routes_through_application_service():
+    app = _app()
+    app.inspections = _Inspections()
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "file_digest", "arguments": {"path": "x.txt"}},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        app, input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    row = [json.loads(line) for line in output.getvalue().splitlines()][1]
+    assert row["result"]["output"] == "file_digest:inspection"
 
 
 def test_native_entrypoint_fences_safety_before_configuration(monkeypatch):
