@@ -524,6 +524,40 @@ def build_application(
             "updated": record.updated,
         } for record in records)
 
+    def context_section():
+        assembly = context_planning.last_good()
+        if assembly is None:
+            return unavailable_section("context")()
+        return ({
+            "available": True,
+            "model": assembly.plan.model,
+            "input_budget_tokens": assembly.plan.input_budget_tokens,
+            "selected_tokens": assembly.selected_tokens,
+            "sections": {
+                name: len(selection.selected)
+                for name, selection in assembly.selections.items()
+            },
+            "has_prefix_manifest": assembly.prefix is not None,
+            "has_replay_manifest": assembly.replay is not None,
+        },)
+
+    def update_section():
+        try:
+            from ..adapters.updates.engine import UpdateManager
+
+            status = UpdateManager().status()
+        except Exception:
+            return unavailable_section("updates")()
+        return ({
+            "available": True,
+            "running_version": status.get("running_version", ""),
+            "running_commit": status.get("running_commit", ""),
+            "platform": status.get("platform", ""),
+            "plan_count": len(status.get("plans", ())),
+            "has_active_release": status.get("active_release") is not None,
+            "has_previous_release": status.get("previous_release") is not None,
+        },)
+
     def agent_section():
         return tuple({
             "name": registration.name,
@@ -561,12 +595,12 @@ def build_application(
         "jobs": job_section,
         "agents": agent_section,
         "model_hardware": provider_section,
-        "context": unavailable_section("context"),
+        "context": context_section,
         "memory_explanations": unavailable_section("memory_explanations"),
         "extensions": extension_section,
         "training": unavailable_section("training"),
         "selfmod": unavailable_section("selfmod"),
-        "updates": unavailable_section("updates"),
+        "updates": update_section,
         "health": provider_section,
         "startup_authorities": unavailable_section("startup_authorities"),
     })
