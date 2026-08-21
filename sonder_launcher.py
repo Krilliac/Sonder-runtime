@@ -29,7 +29,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import sonder_health
+from sonder_runtime.domain import launcher_health as sonder_health
 import command_recovery
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 from sonder_runtime.adapters.launcher_idempotency import (
@@ -49,7 +49,7 @@ from sonder_runtime.application.lifecycle import (
     _CONTEXT_SIZE,
     normalize_context_size,
 )
-from sonder_paths import state_path
+from sonder_runtime.platform.paths import state_path
 
 
 ROOT = Path(__file__).resolve().parent
