@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.persistence.session_repository import SQLiteSessionRepository
+from ..adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
 from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
@@ -47,6 +48,7 @@ from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
 from ..application.ports.session_repository import SessionRepository
+from ..application.ports.jobs import JobRegistry
 from ..application.ports.process_probe import ProcessProbe
 from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.ports.tool_executor import ToolExecutor
@@ -75,6 +77,7 @@ class Application:
     preferences: PreferenceService
     workflows: WorkflowService
     session_repository: Callable[[], SessionRepository]
+    job_registry: Callable[[], JobRegistry]
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -103,6 +106,7 @@ def build_application(
     # domain taxonomy. Backend is Ollama by default, selectable via env.
     gateway = build_model_gateway()
     session_repository: SQLiteSessionRepository | None = None
+    job_registry: SQLiteDurableJobRegistry | None = None
 
     def get_session_repository() -> SessionRepository:
         nonlocal session_repository
@@ -113,6 +117,16 @@ def build_application(
                 state_path("sessions.db", "SONDER_SESSIONS_DB")
             )
         return session_repository
+
+    def get_job_registry() -> JobRegistry:
+        nonlocal job_registry
+        if job_registry is None:
+            from ..platform.paths import state_path
+
+            job_registry = SQLiteDurableJobRegistry(
+                state_path("jobs.db", "SONDER_JOBS_DB")
+            )
+        return job_registry
 
     return Application(
         profile=profile,
@@ -142,6 +156,7 @@ def build_application(
         ),
         workflows=WorkflowService(WorkflowRepositoryAdapter(), LoopRunnerAdapter()),
         session_repository=get_session_repository,
+        job_registry=get_job_registry,
     )
 
 
