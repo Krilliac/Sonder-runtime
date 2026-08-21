@@ -62,7 +62,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
 )
-from sonder_runtime.domain.common.errors import DependencyUnavailable, NotFound
+from sonder_runtime.domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
 from sonder_runtime.adapters.model_transport import ModelCallError
 
 
@@ -122,6 +122,7 @@ DEFAULT_PORT = 11435
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
+_MAX_JOB_CANCEL_REASON = 256
 
 
 class _DuplicateJsonObjectKey(ValueError):
@@ -198,6 +199,18 @@ def _job_record_payload(record):
         "result": record.result,
         "error": record.error,
     }
+
+
+def _job_cancel_id(path):
+    prefix = "/v1/jobs/"
+    suffix = "/cancel"
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    encoded = path[len(prefix):-len(suffix)]
+    if not encoded or "/" in encoded:
+        return None
+    job_id = urllib.parse.unquote(encoded)
+    return job_id if job_id and "/" not in job_id else None
 
 
 def _local_log_dashboard_allowed(peer: str) -> bool:
@@ -4034,6 +4047,60 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        job_id = _job_cancel_id(path)
+        if job_id is not None:
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            reason = req.get("reason")
+            if (
+                set(req) != {"reason"}
+                or not isinstance(reason, str)
+                or not reason.strip()
+                or len(reason) > _MAX_JOB_CANCEL_REASON
+            ):
+                self._send_json_payload(
+                    {"error": {
+                        "message": "reason must be a non-empty string of at most 256 characters",
+                        "type": "invalid_request",
+                    }},
+                    status=400,
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+
+            service = default_app().job_service()
+            try:
+                records = service.cancel(job_id, reason)
+            except NotFound:
+                self._send_not_found()
+                return
+            except InvalidInput as error:
+                self._send_json_payload(
+                    {"error": {"message": str(error), "type": "invalid_request"}},
+                    status=400,
+                )
+                return
+            if not records:
+                self._send_not_found()
+                return
+            self._send_json_payload({
+                "object": "job_cancel",
+                "job": _job_record_payload(records[0]),
+                "cancelled_count": len(records),
+            })
+            return
         model_route = _MODEL_REQUEST_FACADE.route(path)
         if model_route is not None:
             if not context["authorized"]:

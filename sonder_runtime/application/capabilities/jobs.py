@@ -34,6 +34,21 @@ class JobRegistryService:
             raise InvalidInput("limit must be positive")
         return self._port.list(include_terminal=include_terminal, limit=limit)
 
+    def cancel(self, job_id: str, reason: str = "cancelled") -> tuple[JobRecord, ...]:
+        """Cancel through the durable adapter's optional capability."""
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise InvalidInput("job_id is required")
+        if not isinstance(reason, str) or not reason.strip():
+            raise InvalidInput("cancellation reason is required")
+        cancel = getattr(self._port, "cancel", None)
+        if not callable(cancel):
+            raise InvalidInput("job cancellation is not supported")
+        try:
+            records = cancel(job_id, reason=reason)
+        except KeyError as exc:
+            raise NotFound(f"job {job_id!r} not found") from exc
+        return tuple(records)
+
     def claim(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> JobClaim:
         if not worker_id.strip() or lease_seconds <= 0:
             raise InvalidInput("worker_id is required and lease_seconds must be positive")

@@ -76,6 +76,17 @@ class FakeJobs:
         self.claims.clear()
         return stale
 
+    def cancel(self, job_id, *, reason="cancelled"):
+        if job_id not in self.jobs:
+            raise KeyError(job_id)
+        current = self.jobs[job_id]
+        cancelled = JobRecord(
+            current.identity, JobStatus.CANCELLED, current.revision + 1,
+            error=reason,
+        )
+        self.jobs[job_id] = cancelled
+        return (cancelled,)
+
 
 class FakeCheckpoints:
     def __init__(self):
@@ -118,6 +129,19 @@ def test_finish_rejects_nonterminal_state_and_invalid_limits():
         registry.finish("job-1", "worker-a", JobStatus.RUNNING)
     with pytest.raises(InvalidInput):
         registry.list(limit=0)
+
+
+def test_cancel_delegates_to_durable_capability_and_validates_reason():
+    store = FakeJobs()
+    registry = JobRegistryService(store)
+    registry.create(identity())
+
+    cancelled = registry.cancel("job-1", "operator requested cancellation")
+
+    assert cancelled[0].status is JobStatus.CANCELLED
+    assert cancelled[0].error == "operator requested cancellation"
+    with pytest.raises(InvalidInput):
+        registry.cancel("job-1", "")
 
 
 def test_workflow_resume_and_checkpoint_are_monotonic_and_restart_safe():
