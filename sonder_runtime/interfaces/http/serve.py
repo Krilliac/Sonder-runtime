@@ -60,7 +60,10 @@ from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
-from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import dispatch_a2a_jsonrpc_route
+from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
+    build_application_a2a_handler,
+    dispatch_a2a_jsonrpc_route,
+)
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_route
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
@@ -4500,9 +4503,15 @@ class Handler(BaseHTTPRequestHandler):
                     status=403,
                 )
                 return
-            result = dispatch_a2a_jsonrpc_route(
-                _A2A_REQUEST_HANDLER, "POST", path, req,
+            from sonder_runtime.bootstrap.app import default_app
+
+            application = default_app()
+            handler = _A2A_REQUEST_HANDLER or build_application_a2a_handler(
+                application,
+                base_url=os.environ.get("SONDER_A2A_BASE_URL", "").strip(),
+                card_facade=_A2A_AGENT_CARD_FACADE,
             )
+            result = dispatch_a2a_jsonrpc_route(handler, "POST", path, req)
             if result is None:
                 self._send_not_found()
                 return
