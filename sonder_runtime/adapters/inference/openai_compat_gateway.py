@@ -49,6 +49,10 @@ from ...domain.common.errors import (
     InternalFailure,
     InvalidInput,
 )
+from ...domain.chat_template_policy import (
+    ChatTemplateOptionsError,
+    normalize_chat_template_options,
+)
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _DEFAULT_TIMEOUT = 300
@@ -135,6 +139,12 @@ class OpenAICompatibleGateway:
             "stream": False,
             "temperature": float(options.get("temperature", 0.2)),
         }
+        try:
+            template_kwargs = normalize_chat_template_options(options)
+        except ChatTemplateOptionsError as exc:
+            raise InvalidInput(str(exc)) from exc
+        if template_kwargs:
+            payload["chat_template_kwargs"] = template_kwargs
         if "num_predict" in options:
             payload["max_tokens"] = int(options["num_predict"])
 

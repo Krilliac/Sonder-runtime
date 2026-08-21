@@ -62,6 +62,43 @@ def test_generate_shapes_request_and_parses_response():
     assert seen["payload"]["messages"][-1]["content"] == "hi"
 
 
+def test_reasoning_effort_is_nested_for_chat_template_servers():
+    captured = {}
+
+    def transport(url, payload, headers, timeout):
+        captured["payload"] = payload
+        return _chat_response("concise")
+
+    OpenAICompatibleGateway(_local_cfg(), transport=transport).generate(
+        ModelRequest(
+            prompt="hi",
+            tier="code",
+            options={"reasoning_effort": "HIGH", "chat_template_kwargs": {"foo": "bar"}},
+        ),
+        _ctx(),
+    )
+    assert captured["payload"]["chat_template_kwargs"] == {
+        "foo": "bar", "reasoning_effort": "high"
+    }
+    assert "reasoning_effort" not in captured["payload"]
+
+
+def test_conflicting_template_reasoning_effort_is_rejected():
+    gw = OpenAICompatibleGateway(_local_cfg(), transport=lambda *args: _chat_response("x"))
+    with pytest.raises(InvalidInput, match="disagree"):
+        gw.generate(
+            ModelRequest(
+                prompt="hi",
+                tier="code",
+                options={
+                    "reasoning_effort": "low",
+                    "chat_template_kwargs": {"reasoning_effort": "high"},
+                },
+            ),
+            _ctx(),
+        )
+
+
 def test_generate_preserves_llama_cpp_timing_extension():
     def transport(*args):
         response = _chat_response("measured")
