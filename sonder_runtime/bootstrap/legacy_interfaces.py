@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from .legacy_root import runtime as legacy_runtime
+from .legacy_root import runtime as legacy_runtime, runtime_proxy
 
 
 def configure_legacy_interfaces(runtime: ModuleType | None = None) -> None:
@@ -15,7 +15,7 @@ def configure_legacy_interfaces(runtime: ModuleType | None = None) -> None:
     from sonder_runtime.interfaces.http import serve
     from sonder_runtime.interfaces.repl import repl
 
-    runtime = runtime or legacy_runtime()
+    runtime = runtime or runtime_proxy()
     serve.configure_legacy_runtime(runtime)
     repl.configure_legacy_runtime(runtime)
 

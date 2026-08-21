@@ -31,3 +31,21 @@ def test_legacy_model_module_has_no_eager_root_import():
         / "legacy_model.py"
     ).read_text(encoding="utf-8")
     assert "from .legacy_root import" not in source.split("def configure", 1)[0]
+
+
+def test_interface_compatibility_configuration_is_lazy():
+    root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys; "
+        "from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces; "
+        "configure_legacy_interfaces(); "
+        "print('server' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "False"
