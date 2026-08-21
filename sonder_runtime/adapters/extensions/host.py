@@ -22,6 +22,12 @@ import subprocess
 import threading
 from typing import Any, Mapping, Sequence
 
+from .memory_limits import (
+    ExtensionMemoryLimitError,
+    MemoryLimiter,
+    NativeExtensionMemoryLimiter,
+)
+
 
 class ExtensionHostError(RuntimeError):
     """Base error for a failed extension-host lifecycle or protocol exchange."""
@@ -58,6 +64,7 @@ class ExtensionHostLimits:
     max_output_bytes: int = 64 * 1024
     max_restarts: int = 2
     max_crashes: int = 3
+    memory_limit_bytes: int | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -75,6 +82,12 @@ class ExtensionHostLimits:
                 raise ValueError(f"{name} must be a non-negative integer")
         if self.max_output_bytes < 2:
             raise ValueError("max_output_bytes must allow a JSON line and newline")
+        if self.memory_limit_bytes is not None and (
+            isinstance(self.memory_limit_bytes, bool)
+            or not isinstance(self.memory_limit_bytes, int)
+            or self.memory_limit_bytes <= 0
+        ):
+            raise ValueError("memory_limit_bytes must be a positive integer when set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +111,7 @@ class ExtensionHost:
         cwd: str | os.PathLike[str] | None = None,
         env: Mapping[str, str] | None = None,
         popen=subprocess.Popen,
+        memory_limiter: MemoryLimiter | None = None,
     ) -> None:
         if not argv or any(not isinstance(item, str) or not item for item in argv):
             raise ValueError("extension host argv must contain non-empty strings")
@@ -111,7 +125,9 @@ class ExtensionHost:
         self._cwd = Path(cwd) if cwd is not None else None
         self._env = dict(env) if env is not None else None
         self._popen = popen
+        self._memory_limiter = memory_limiter or NativeExtensionMemoryLimiter()
         self._process: subprocess.Popen[bytes] | None = None
+        self._memory_token = None
         self._launches = 0
         self._restarts = 0
         self._crashes = 0
@@ -166,9 +182,9 @@ class ExtensionHost:
         """Terminate and reap the child, if running."""
         with self._lock:
             process = self._process
-            self._process = None
             if process is not None:
                 self._discard_process(process)
+                self._process = None
 
     def _launch_ready(self, *, recovery: bool) -> None:
         if recovery:
@@ -186,10 +202,14 @@ class ExtensionHost:
         self._process = process
         self._launches += 1
         try:
+            if self._limits.memory_limit_bytes is not None:
+                self._memory_token = self._memory_limiter.apply(
+                    process, self._limits.memory_limit_bytes
+                )
             ready = self._read_json(process, self._limits.startup_timeout_seconds)
             if ready != {"type": "ready"}:
                 raise ExtensionHostProtocolError("extension startup response must be {type: ready}")
-        except ExtensionHostError:
+        except (ExtensionHostError, ExtensionMemoryLimitError):
             self._discard_process(process)
             self._process = None
             if process.returncode not in (None, 0):
@@ -273,8 +293,14 @@ class ExtensionHost:
             raise ExtensionHostProtocolError("extension response must be a JSON object")
         return value
 
-    @staticmethod
-    def _discard_process(process: subprocess.Popen[bytes]) -> None:
+    def _discard_process(self, process: subprocess.Popen[bytes]) -> None:
+        token = self._memory_token if self._process is process else None
+        if token is not None:
+            self._memory_token = None
+            try:
+                token.close()
+            except Exception:
+                pass
         if process.poll() is None:
             try:
                 process.terminate()

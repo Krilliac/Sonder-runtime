@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 206,
+      "file_count": 207,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -96,6 +96,7 @@
         "sonder_runtime/adapters/execution_tools/__init__.py",
         "sonder_runtime/adapters/execution_tools/code_runner.py",
         "sonder_runtime/adapters/extensions/host.py",
+        "sonder_runtime/adapters/extensions/memory_limits.py",
         "sonder_runtime/adapters/external_mcp.py",
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
