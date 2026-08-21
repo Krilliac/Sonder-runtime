@@ -25,6 +25,7 @@ class ProcessState(enum.Enum):
     DRAINING = "draining"
     STOPPING = "stopping"
     FAILED = "failed"
+    RECOVERY_REQUIRED = "recovery_required"
 
 
 class DependencyState(enum.Enum):
@@ -41,6 +42,9 @@ _ALLOWED: dict[ProcessState, frozenset[ProcessState]] = {
         {ProcessState.MIGRATING, ProcessState.FAILED}
     ),
     ProcessState.MIGRATING: frozenset(
+        {ProcessState.READY, ProcessState.RECOVERY_REQUIRED, ProcessState.FAILED}
+    ),
+    ProcessState.RECOVERY_REQUIRED: frozenset(
         {ProcessState.READY, ProcessState.FAILED}
     ),
     ProcessState.READY: frozenset(

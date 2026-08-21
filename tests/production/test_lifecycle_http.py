@@ -90,7 +90,7 @@ def test_startup_reconciliation_failure_does_not_publish_ready(monkeypatch):
 
     with pytest.raises(RuntimeError, match="reconcile failed"):
         lifecycle.startup()
-    assert lifecycle.tracker.snapshot().process.value == "migrating"
+    assert lifecycle.tracker.snapshot().process.value == "recovery_required"
 
 
 def test_version_reports_build(http_server):
