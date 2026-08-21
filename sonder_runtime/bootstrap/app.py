@@ -54,6 +54,7 @@ from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.ports.tool_executor import ToolExecutor
 from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
+from ..platform.config import SonderConfig
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -78,6 +79,7 @@ class Application:
     workflows: WorkflowService
     session_repository: Callable[[], SessionRepository]
     job_registry: Callable[[], JobRegistry]
+    config: SonderConfig | None = None
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -87,6 +89,7 @@ _build_model_gateway = build_model_gateway
 def build_application(
     profile: str = "workstation-local",
     *,
+    config: SonderConfig | None = None,
     preference_connection_factory: ConnectionFactory | None = None,
     preference_module_provider: PreferenceModuleProvider | None = None,
 ) -> Application:
@@ -96,6 +99,10 @@ def build_application(
     bounded contexts, their services join this graph; until then the
     legacy adapters wrap the root modules.
     """
+    if config is not None:
+        if not isinstance(config, SonderConfig):
+            raise TypeError("config must be a SonderConfig when provided")
+        profile = config.profile
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
     # SPEC-3 Phase 3: bind the transitional provider only at composition time.
@@ -157,16 +164,41 @@ def build_application(
         workflows=WorkflowService(WorkflowRepositoryAdapter(), LoopRunnerAdapter()),
         session_repository=get_session_repository,
         job_registry=get_job_registry,
+        config=config,
     )
 
 
-_application_lifecycle = ApplicationLifecycle(lambda: build_application())
+_default_config: SonderConfig | None = None
 
 
-def default_app() -> Application:
+def _build_default_application() -> Application:
+    if _default_config is None:
+        return build_application()
+    return build_application(config=_default_config)
+
+
+_application_lifecycle = ApplicationLifecycle(_build_default_application)
+
+
+def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
-    return _application_lifecycle.get()
+    global _default_config
+    if config is not None:
+        if not isinstance(config, SonderConfig):
+            raise TypeError("config must be a SonderConfig when provided")
+        if _default_config is not config:
+            # Explicit entrypoint configuration is startup authority.  Reset
+            # the lazy compatibility cache so repeated in-process CLI calls
+            # cannot retain a prior command's config object.
+            _default_config = config
+            _application_lifecycle.reset()
+    application = _application_lifecycle.get()
+    if config is not None and application.config is not config:
+        raise RuntimeError("default application was already built without this config")
+    return application
 
 
 def reset_for_tests() -> None:
+    global _default_config
+    _default_config = None
     _application_lifecycle.reset()
