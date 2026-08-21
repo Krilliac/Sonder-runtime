@@ -31,5 +31,17 @@ URL validation, and unsupported-state rejection. This is not a claim of a live
 A2A server, remote transport, authentication, streaming, or artifact
 interoperability.
 
+The HTTP boundary now includes an administrator-authenticated discovery
+facade at `/.well-known/agent-card.json`. It is enabled only when the host
+explicitly configures `SONDER_A2A_BASE_URL`; otherwise the route returns an
+explicit unavailable response rather than advertising an endpoint that is not
+actually deployed. The facade publishes registrations and card digest only.
+
+Evidence: `sonder_runtime/interfaces/http/facades/a2a.py`,
+`sonder_runtime/interfaces/http/serve.py`, and
+`tests/test_a2a_http_facade.py`. Live HTTP coverage remains limited to the
+existing handler authentication suite; no remote A2A interoperability is
+claimed.
+
 References: <https://github.com/a2aproject/A2A/blob/main/docs/specification.md>
 and <https://github.com/a2aproject/A2A/blob/main/docs/topics/agent-discovery.md>.

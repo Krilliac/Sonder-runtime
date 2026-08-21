@@ -59,6 +59,7 @@ from . import authority_contract as tool_contract
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
+from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http.facades.model_request import (
@@ -143,6 +144,7 @@ CONFIGURED_PORT = DEFAULT_PORT
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _CONTROL_PLANE_FACADE = ControlPlaneFacade()
+_A2A_AGENT_CARD_FACADE = A2AAgentCardFacade()
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
 _SESSION_FACADE = None
 _CONTROL_PLANE_SERVICE = None
@@ -3959,6 +3961,45 @@ class Handler(BaseHTTPRequestHandler):
                 _CONTROL_PLANE_SERVICE,
                 captured_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             )
+            self._send_json_payload(payload, status=status)
+            return
+        if _A2A_AGENT_CARD_FACADE.route(path) is not None:
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            base_url = os.environ.get("SONDER_A2A_BASE_URL", "").strip()
+            if not base_url:
+                self._send_json_payload(
+                    {"error": "a2a_discovery_unavailable"}, status=503
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+
+            application = default_app()
+            registry_factory = application.agent_registry
+            if registry_factory is None:
+                self._send_json_payload(
+                    {"error": "a2a_discovery_unavailable"}, status=503
+                )
+                return
+            card = _A2A_AGENT_CARD_FACADE.card(
+                registry_factory().registrations,
+                base_url=base_url,
+            )
+            route = _A2A_AGENT_CARD_FACADE.route(path)
+            status, payload = route.render(card)
             self._send_json_payload(payload, status=status)
             return
         if path == "/v1/sonder/status":
