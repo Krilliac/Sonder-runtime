@@ -60,6 +60,39 @@ def test_live_is_unauthenticated_and_minimal(http_server):
     assert json.loads(body) == {"status": "alive"}
 
 
+def test_startup_reconciles_before_publishing_ready(monkeypatch):
+    events = []
+    lifecycle = sonder_lifecycle.RuntimeLifecycle(
+        startup_reconciler=lambda: events.append(
+            lifecycle.tracker.snapshot().process.value
+        ) or 3,
+    )
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.persistence.migrations.migrate_all",
+        lambda: events.append("migrated") or {},
+    )
+
+    lifecycle.startup()
+
+    assert events == ["migrated", "migrating"]
+    assert lifecycle._startup_reconciled == 3
+    assert lifecycle.tracker.snapshot().process.value == "ready"
+
+
+def test_startup_reconciliation_failure_does_not_publish_ready(monkeypatch):
+    lifecycle = sonder_lifecycle.RuntimeLifecycle(
+        startup_reconciler=lambda: (_ for _ in ()).throw(RuntimeError("reconcile failed")),
+    )
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.persistence.migrations.migrate_all",
+        lambda: {},
+    )
+
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        lifecycle.startup()
+    assert lifecycle.tracker.snapshot().process.value == "migrating"
+
+
 def test_version_reports_build(http_server):
     status, body, _ = _get(http_server, "/version")
     assert status == 200
