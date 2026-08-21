@@ -35,4 +35,6 @@ def test_default_composition_exposes_real_and_explicitly_unavailable_sections(
         "reason": "owning application port is not composed",
         "section": "context",
     }]
+    assert payload["sections"]["memory_explanations"]["count"] == 8
+    assert "content" not in str(payload["sections"]["memory_explanations"])
     assert payload["sections"]["health"]["count"] >= 1

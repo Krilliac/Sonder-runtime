@@ -242,9 +242,9 @@
     },
     {
       "checked": false,
-      "claim": "The default control-plane graph reports published training-provider health when a training backend is composed and otherwise preserves an explicit unavailable state.",
+      "claim": "The default control-plane graph exposes the typed memory policy matrix as bounded explanations without exposing memory content, identifiers, or recall results.",
       "requirement_id": "API-006",
-      "revision": 11,
+      "revision": 12,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "6cf242d9b5b383ab78fb6d878cb99162761ba6b98c4236df2c4626e8f67c489e",
+    "ledger_sha256": "0c9d0e16f98ed7c1c48519e0c00f986ee00c50e2c4d39696879a1a275234d8c0",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
