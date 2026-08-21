@@ -2,7 +2,7 @@
 
 Date: 2026-08-20  
 Audited branch: `agent/wp1-execution-status`  
-Audit baseline: current branch HEAD `b016bd7` (2026-08-20 refresh)
+Audit baseline: current branch HEAD `eccba89` (2026-08-20 refresh)
 Scope: SESSION/LOOP/SEAM/CTX/REPO/SKILL/AGENT/JOB/TOOL/EXEC/MEM/EVAL/MODEL/API/DATA/OPS/SEC/TRAIN/UPDATE/DOC
 
 ## Decision summary
