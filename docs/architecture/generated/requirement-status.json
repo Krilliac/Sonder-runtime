@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 45,
-      "planned": 159
+      "implemented_unverified": 47,
+      "planned": 157
     },
     "total": 204,
     "verified": 0
@@ -138,10 +138,10 @@
   "requirements": [
     {
       "checked": false,
-      "claim": "Unified registry.",
+      "claim": "The packaged runtime exposes one lazy typed agent-registry boundary without importing or initializing the root master_orchestrator during composition.",
       "requirement_id": "AGENT-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -306,10 +306,10 @@
     },
     {
       "checked": false,
-      "claim": "Thin interfaces.",
+      "claim": "The remaining command, slash-menu, and permission-policy callers use packaged compatibility boundaries rather than importing root implementation modules directly.",
       "requirement_id": "ARCH-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "5131d737be7ccc2fea097646f6e065aafb9dcc46a0b858223dc01f772b6e174b",
+    "ledger_sha256": "44d621025632b82e27c53a75a6093898412a5164f9f9368f7ebc9627136360c2",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

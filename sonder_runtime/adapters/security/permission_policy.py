@@ -37,6 +37,22 @@ class PermissionPolicyProvider:
     def mode_label(self, mode: str) -> str:
         return _engine().MODE_LABELS.get(mode, mode)
 
+    # These are deliberately methods on the application-facing provider,
+    # rather than constants imported by interfaces.  The root module remains
+    # a compatibility engine, while production callers depend on the port's
+    # vocabulary and can no longer reach into its module namespace.
+    def gate_control_tools(self) -> frozenset[str]:
+        return _engine().GATE_CONTROL_TOOLS
+
+    def allow_action(self) -> str:
+        return _engine().ALLOW
+
+    def ask_action(self) -> str:
+        return _engine().ASK
+
+    def deny_action(self) -> str:
+        return _engine().DENY
+
 
 permission_policy = PermissionPolicyProvider()
 

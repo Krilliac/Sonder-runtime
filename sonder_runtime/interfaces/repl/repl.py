@@ -27,10 +27,11 @@ from sonder_runtime.adapters.web import live_reload
 from sonder_runtime.adapters.web import listener_probe
 from sonder_runtime.platform import debug_dump
 from sonder_runtime.adapters.repl_services import (
-    code_improve, command_router, consult as consult_flow, tier_router,
+    code_improve, consult as consult_flow, tier_router,
 )
+from sonder_runtime.interfaces.repl import command_router
 from sonder_runtime.adapters.command_catalog import command_catalog
-from sonder_runtime.adapters.security.permission_policy import permission_policy as permission_modes
+from sonder_runtime.adapters.security.permission_policy import permission_policy
 from sonder_runtime.adapters.repl_services import project_scaffold
 from sonder_runtime.adapters.optional_slash_menu import load_optional_slash_menu
 from sonder_runtime.interfaces.repl.facades import (
@@ -201,7 +202,10 @@ def _clear_terminal_scrollback(stream=None):
 # Aliased, not restated: the MCP protocol entry point exempts the same names
 # for the same reason, and two hand-kept copies of a security-relevant set is
 # how one of them silently stops matching the other.
-GATE_EXEMPT_TOOLS = permission_modes.GATE_CONTROL_TOOLS
+# Compatibility alias retained for callers that inspect the console surface.
+# The provider owns the lookup; the interface does not import the legacy
+# permission_modes module or consult the set during dispatch.
+GATE_EXEMPT_TOOLS = permission_policy.gate_control_tools()
 
 
 def _console_has_operator():
@@ -321,17 +325,16 @@ def _gate_tools(tools, label):
         # *for a person at a console*, and `permission_modes` owns which
         # exemptions that kind of caller carries. Four surfaces kept their own
         # copy of the check and the fifth was written without it.
-        decision = permission_modes.decide_for_caller(
+        decision = permission_policy.decide_for_caller(
             tool, interactive=interactive, gate_control_exempt=True,
         )
         if decision is None:
             continue
-        if decision.action == permission_modes.DENY:
+        if decision.action == permission_policy.deny_action():
             return False, "refused %s: %s (mode: %s)" % (
-                label, decision.reason, permission_modes.MODE_LABELS.get(
-                    decision.mode, decision.mode),
+                label, decision.reason, permission_policy.mode_label(decision.mode),
             )
-        if decision.action != permission_modes.ASK:
+        if decision.action != permission_policy.ask_action():
             continue
         if worst is None or _severity(decision.risk) < _severity(worst.risk):
             worst = decision

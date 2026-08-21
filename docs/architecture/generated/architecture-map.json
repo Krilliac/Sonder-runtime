@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 199,
+      "file_count": 200,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -162,6 +162,7 @@
         "sonder_runtime/adapters/openai_compat/__init__.py",
         "sonder_runtime/adapters/operations_event_sink.py",
         "sonder_runtime/adapters/optional_slash_menu.py",
+        "sonder_runtime/adapters/optional_slash_menu_impl.py",
         "sonder_runtime/adapters/pdf_risk.py",
         "sonder_runtime/adapters/persistence/__init__.py",
         "sonder_runtime/adapters/persistence/autopilot_repository.py",
@@ -606,7 +607,7 @@
       ]
     },
     {
-      "file_count": 23,
+      "file_count": 24,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -628,6 +629,7 @@
         "sonder_runtime/interfaces/mcp/handlers.py",
         "sonder_runtime/interfaces/mcp/transport.py",
         "sonder_runtime/interfaces/repl/__init__.py",
+        "sonder_runtime/interfaces/repl/command_router.py",
         "sonder_runtime/interfaces/repl/facades/__init__.py",
         "sonder_runtime/interfaces/repl/facades/status_model.py",
         "sonder_runtime/interfaces/repl/handler.py",
