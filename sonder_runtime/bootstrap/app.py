@@ -419,9 +419,15 @@ def build_application(
             )
 
             def host_factory(definition, directory):
+                host_limits = definition.limits
+                if host_limits is not None and hasattr(host_limits, "memory_limit_bytes"):
+                    from ..adapters.extensions.host import ExtensionHostLimits
+                    host_limits = ExtensionHostLimits(
+                        memory_limit_bytes=host_limits.memory_limit_bytes
+                    )
                 return ExtensionHost(
                     definition.argv,
-                    limits=definition.limits,
+                    limits=host_limits,
                     cwd=directory,
                     env=dict(definition.environment),
                 )

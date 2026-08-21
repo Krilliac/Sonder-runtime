@@ -9,6 +9,7 @@ import json
 import pytest
 
 from sonder_runtime.application.extensions.experiments import (
+    ExperimentLimits,
     ExperimentStartupDenied,
     ExperimentState,
 )
@@ -116,6 +117,25 @@ def test_live_application_extension_registry_persists_and_rehydrates_manifest(
         # unverified installation into an executable healthy extension.
         assert restored.enabled is False
     finally:
+        bootstrap_app.reset_for_tests()
+
+
+def test_production_experiment_limit_reaches_native_host_boundary():
+    bootstrap_app.reset_for_tests()
+    application = bootstrap_app.build_application(
+        extension_startup_authority=lambda _definition: True,
+    )
+    authority = ExtensionAuthority("operator", frozenset({"define", "start", "stop"}))
+    try:
+        defined = application.extension_facade().define(
+            "limited", _server(), authority=authority,
+            limits=ExperimentLimits(256 * 1024 * 1024),
+        )
+        assert defined.state == ExperimentState.DEFINED
+        assert application.extension_facade().start("limited", authority).state == ExperimentState.RUNNING
+        assert application.extension_facade().stop("limited", authority).state == ExperimentState.STOPPED
+    finally:
+        application.experiment_manager().close()
         bootstrap_app.reset_for_tests()
 
 
