@@ -17,6 +17,7 @@ from sonder_runtime.application.extensions.registry import ExtensionHealthState,
 from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.bootstrap import app as bootstrap_app
 from sonder_runtime.domain.extensions.manifest import ExtensionHealth, ExtensionIdentity, ExtensionManifest
+from sonder_runtime.domain.extensions.artifact import ExtensionArtifactReceipt
 
 
 def _manifest(version="1.0.0", crash_limit=2):
@@ -46,6 +47,20 @@ def test_sqlite_registry_state_survives_reconstruction_and_retains_quarantine(tm
     assert restored_record.health_state is ExtensionHealthState.QUARANTINED
     assert restored_record.enabled is False
     assert restored_record.crash_count == 1
+
+
+def test_sqlite_registry_persists_verified_artifact_receipt(tmp_path):
+    manifest = _manifest()
+    repository = SQLiteExtensionStateRepository(tmp_path / "extensions.db")
+    registry = ExtensionRegistry(provenance=_trusted(manifest), repository=repository)
+    receipt = ExtensionArtifactReceipt(
+        "C:/staging/worker.pkg", sha256(b"artifact").hexdigest(), 8,
+        "https://example.test/worker.pkg",
+    )
+    registry.install_verified(manifest, receipt, scope="global", signatures_verified=True)
+    restored = ExtensionRegistry(provenance=_trusted(manifest), repository=repository)
+    record = restored.get(manifest.extension_id, scope="global")
+    assert record.artifact == receipt
 
 
 def test_production_composition_uses_durable_fail_closed_registry(tmp_path, monkeypatch):

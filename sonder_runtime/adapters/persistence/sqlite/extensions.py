@@ -13,6 +13,7 @@ from ....domain.extensions.manifest import (
     CleanupPolicy, ExtensionDependency, ExtensionHealth, ExtensionIdentity,
     ExtensionManifest, ExtensionResources, HealthMode,
 )
+from ....domain.extensions.artifact import ExtensionArtifactReceipt
 
 
 _DDL = """CREATE TABLE IF NOT EXISTS extension_registry_state (
@@ -39,6 +40,12 @@ def _record(record: ExtensionInstallRecord) -> dict[str, Any]:
         "version": record.version, "manifest_digest": record.manifest_digest, "enabled": record.enabled,
         "health_state": record.health_state.value, "health_reasons": list(record.health_reasons),
         "crash_count": record.crash_count,
+        "artifact": None if record.artifact is None else {
+            "path": record.artifact.path,
+            "artifact_digest": record.artifact.artifact_digest,
+            "byte_count": record.artifact.byte_count,
+            "source": record.artifact.source,
+        },
         "manifest": {"identity": {"name": manifest.identity.name, "publisher": manifest.identity.publisher},
                      "version": manifest.version, "protocol": manifest.protocol,
                      "dependencies": [{"name": x.name, "version": x.version, "required": x.required} for x in manifest.dependencies],
@@ -62,10 +69,15 @@ def _decode(value: str) -> ExtensionInstallRecord:
         quarantine["cleanup_action"], quarantine["retain_state"],
     )
     manifest = _manifest(data["manifest"])
+    artifact_data = data.get("artifact")
+    artifact = None if artifact_data is None else ExtensionArtifactReceipt(
+        artifact_data["path"], artifact_data["artifact_digest"],
+        artifact_data["byte_count"], artifact_data.get("source", ""),
+    )
     return ExtensionInstallRecord(
         data["extension_id"], ExtensionScope(data["scope"]), data["project_id"], data["version"],
         data["manifest_digest"], manifest, data["enabled"], ExtensionHealthState(data["health_state"]),
-        tuple(data["health_reasons"]), decision, data["crash_count"],
+        tuple(data["health_reasons"]), decision, data["crash_count"], artifact,
     )
 
 
@@ -87,6 +99,8 @@ def _validate_record(record: ExtensionInstallRecord) -> None:
         raise ValueError("extension state counters are invalid")
     if record.quarantine is not None and record.quarantine.extension_id != record.extension_id:
         raise ValueError("extension state quarantine identity mismatch")
+    if record.artifact is not None and not record.artifact.verified:
+        raise ValueError("extension state contains an unverified artifact")
 
 
 class SQLiteExtensionStateRepository:

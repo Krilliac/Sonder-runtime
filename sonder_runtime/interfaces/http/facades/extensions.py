@@ -87,6 +87,11 @@ def _record(record) -> dict[str, object]:
         },
         "crash_count": record.crash_count,
         "resources": {"memory_limit_bytes": record.manifest.resources.memory_limit_bytes},
+        "artifact": None if record.artifact is None else {
+            "artifact_digest": record.artifact.artifact_digest,
+            "byte_count": record.artifact.byte_count,
+            "source": record.artifact.source,
+        },
     }
 
 

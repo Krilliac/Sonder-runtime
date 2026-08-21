@@ -18,6 +18,7 @@ from sonder_runtime.application.extensions.registry import (
     ExtensionScope,
 )
 from sonder_runtime.domain.extensions.manifest import ExtensionHealth, ExtensionIdentity, ExtensionManifest
+from sonder_runtime.domain.extensions.artifact import ExtensionArtifactReceipt
 
 
 def _hash(value: str) -> str:
@@ -78,6 +79,22 @@ def test_missing_provenance_fails_closed_and_diagnostic_is_deterministic():
     diagnostic = registry.repair_diagnostics()[0]
     assert diagnostic.codes == ("provenance-missing",)
     assert diagnostic.recommended_action == "review-provenance"
+
+
+def test_verified_artifact_admission_binds_digest_and_rejects_tampering():
+    manifest = _manifest()
+    registry = _registry(manifest)
+    receipt = ExtensionArtifactReceipt("C:/staging/search.pkg", _hash("artifact"), 8, "https://example.test/search.pkg")
+    installed = registry.install_verified(
+        manifest, receipt, scope="global", signatures_verified=True,
+    )
+    assert installed.artifact == receipt
+    with pytest.raises(ExtensionRegistryError, match="artifact digest"):
+        registry.install_verified(
+            _manifest(version="1.2.4"),
+            ExtensionArtifactReceipt("C:/staging/search-new.pkg", _hash("wrong"), 5),
+            scope="global", signatures_verified=True,
+        )
 
 
 def test_disable_enable_and_quarantine_from_repeated_crash():

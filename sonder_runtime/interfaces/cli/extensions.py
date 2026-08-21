@@ -93,6 +93,7 @@ class ExtensionCommand:
                             "health_reasons": list(record.health_reasons),
                             "crash_count": record.crash_count,
                             "memory_limit_bytes": record.manifest.resources.memory_limit_bytes,
+                            "artifact_digest": None if record.artifact is None else record.artifact.artifact_digest,
                         }
                         for record in health.snapshot.records
                     ],
