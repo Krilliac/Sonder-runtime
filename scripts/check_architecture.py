@@ -54,7 +54,7 @@ UPDATE_ENGINE_PATH = "sonder_runtime/adapters/updates/engine.py"
 VERSION_PLATFORM_PATH = "sonder_runtime/platform/version.py"
 HTTP_SERVE_PATH = "sonder_runtime/interfaces/http/serve.py"
 HTTP_SERVE_ROOT_MODULES = frozenset({
-    "admin_auth", "code_runner", "command_catalog", "debug_dump", "feedback",
+    "admin_auth", "code_runner", "command_catalog", "feedback",
     "grounding", "intents", "permission_modes",
     "served_action_receipts", "server",
     "tool_contract", "training_tasks", "unsafe_lab",
@@ -62,7 +62,7 @@ HTTP_SERVE_ROOT_MODULES = frozenset({
 REPL_PATH = "sonder_runtime/interfaces/repl/repl.py"
 REPL_ROOT_MODULES = frozenset({
     "server", "grounding", "code_runner", "training_tasks", "intents",
-    "web_intents", "feedback", "personas", "debug_dump",
+    "web_intents", "feedback", "personas",
     "consult", "tier_router", "code_improve", "command_router",
     "command_catalog", "permission_modes", "project_scaffold", "slash_menu",
     "sonder_headless",

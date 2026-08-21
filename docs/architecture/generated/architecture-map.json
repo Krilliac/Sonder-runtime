@@ -529,7 +529,7 @@
       ]
     },
     {
-      "file_count": 32,
+      "file_count": 33,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -539,6 +539,7 @@
         "sonder_runtime/platform/config_environment.py",
         "sonder_runtime/platform/context_policy.py",
         "sonder_runtime/platform/context_selection.py",
+        "sonder_runtime/platform/debug_dump.py",
         "sonder_runtime/platform/deployment_auth.py",
         "sonder_runtime/platform/environment_options.py",
         "sonder_runtime/platform/environment_probe.py",

@@ -129,7 +129,7 @@ import command_registry
 import adaptive_training
 import selfmod
 import permission_rules
-import debug_dump
+from sonder_runtime.platform import debug_dump
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.model_inventory_formatting import (
     inventory_model_name as _inventory_model_name,
