@@ -40,13 +40,9 @@ def test_build_application_requires_known_profile():
 
 def test_composition_root_uses_canonical_system_clock_adapter():
     from sonder_runtime.adapters.system_clock import SystemClock
-    from sonder_runtime.adapters import strangler_services
-
     application = bootstrap_app.build_application()
 
     assert type(application.clock) is SystemClock
-    assert not hasattr(strangler_services, "SystemClock")
-    assert not hasattr(strangler_services, "LegacyAutomationRepository")
 
 
 def test_composition_root_uses_canonical_evaluation_history_adapter():

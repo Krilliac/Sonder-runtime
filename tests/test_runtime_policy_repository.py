@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from sonder_runtime.adapters import runtime_policy
 from sonder_runtime.adapters.runtime_policy_repository import RuntimePolicyRepository
-from sonder_runtime.adapters import strangler_services
+from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter
 
 
 def test_policy_repository_is_owned_by_named_adapter_module():
     assert RuntimePolicyRepository.__module__ == (
         "sonder_runtime.adapters.runtime_policy_repository"
     )
-    assert not hasattr(strangler_services, "LegacyPolicyRepository")
 
 
 def test_policy_repository_preserves_load_and_update_forwarding(monkeypatch):
@@ -58,5 +57,5 @@ def test_policy_repository_preserves_load_and_update_forwarding(monkeypatch):
 
 
 def test_unit_of_work_uses_canonical_policy_repository():
-    unit_of_work = strangler_services.LegacyUnitOfWork()
+    unit_of_work = UnitOfWorkAdapter()
     assert isinstance(unit_of_work.policy, RuntimePolicyRepository)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sonder_runtime.adapters.strangler_services import LegacyUnitOfWork
+from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter as LegacyUnitOfWork
 from sonder_runtime.platform import paths
 
 

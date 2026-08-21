@@ -4,8 +4,8 @@ import pytest
 
 import server
 import sonder_runtime.adapters.embeddings as embeddings
-from sonder_runtime.adapters.strangler_services import LegacyModelGateway
-from sonder_runtime.adapters.strangler_services import (
+from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
+from sonder_runtime.adapters.legacy_model_gateway import (
     LegacyModelGateway as CompatibilityGateway,
 )
 from sonder_runtime.application.context import local_owner_context

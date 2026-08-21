@@ -1,7 +1,7 @@
 import pytest
 
 import server
-from sonder_runtime.adapters.strangler_services import LegacyModelGateway
+from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.domain.common.errors import Cancelled, DeadlineExceeded
