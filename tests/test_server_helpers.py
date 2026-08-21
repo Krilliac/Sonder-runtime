@@ -3309,11 +3309,11 @@ def test_offload_context_window_follows_the_context_policy(monkeypatch):
     search because the file was 32x its window."""
     seen = {}
 
-    def fake_options(temperature, num_predict, num_ctx):
+    def fake_options(temperature, num_predict, num_ctx, **_kwargs):
         seen["num_ctx"] = num_ctx
         return {}
 
-    monkeypatch.setattr(server, "_local_model_options", fake_options)
+    monkeypatch.setattr(server, "_platform_local_model_options", fake_options)
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
     monkeypatch.setattr(
         server, "_serve_target", lambda tier, strict=None: (None, False, False, None),
@@ -3329,7 +3329,7 @@ def test_offload_context_window_follows_the_context_policy(monkeypatch):
     # was 8192, which stopped being the default once the window started being
     # sized from the KV cache type, so the test failed on every machine
     # running a quantised KV cache and passed everywhere else.
-    assert "num_ctx" in seen, "offload never consulted _local_model_options"
+    assert "num_ctx" in seen, "offload never consulted the packaged option policy"
     assert seen["num_ctx"] == server.context_policy.native()
     # An explicit value still wins over the policy default.
     assert server.context_policy.native(4096) == 4096
