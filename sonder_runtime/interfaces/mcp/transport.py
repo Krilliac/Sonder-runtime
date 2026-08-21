@@ -232,6 +232,8 @@ class StdioMcpTransport:
             if len(json.dumps(arguments, separators=(",", ":")).encode("utf-8")) > self._limits.max_arguments_bytes:
                 raise McpTransportError("tool arguments exceed max_arguments_bytes")
             value = self._handler(name, arguments) if callable(self._handler) else self._handler.handle(name, arguments)
+            if self._negotiation is not None and self._negotiation.agreed_version != "2.0":
+                return self._standard_tool_result(value)
             return dict(value) if isinstance(value, Mapping) else {"output": value}
         if method == "sonder/subscribe":
             event = params.get("event")
@@ -253,6 +255,20 @@ class StdioMcpTransport:
     @staticmethod
     def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+    @staticmethod
+    def _standard_tool_result(value: Any) -> dict[str, Any]:
+        """Render standard MCP CallToolResult without changing legacy 2.0."""
+        if isinstance(value, Mapping) and "content" in value:
+            return dict(value)
+        structured = dict(value) if isinstance(value, Mapping) else {"value": value}
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps(structured, ensure_ascii=False, separators=(",", ":")),
+            }],
+            "structuredContent": structured,
+        }
 
     def _write(self, value: Mapping[str, Any]) -> None:
         encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=True)

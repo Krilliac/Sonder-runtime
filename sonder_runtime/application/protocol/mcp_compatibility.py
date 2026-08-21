@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 
+# Newest-first standard handshake versions, with the historical 2.0 contract
+# retained for existing local clients.
+SUPPORTED_MCP_PROTOCOL_VERSIONS = (
+    "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2.0",
+)
+
+
 class McpNegotiationError(ValueError):
     """Raised when a client advertises an unsupported or invalid contract."""
 
@@ -50,7 +57,7 @@ class McpCompatibility:
         self,
         *,
         server_version: str = "2.0",
-        supported_versions: tuple[str, ...] = ("2.0",),
+        supported_versions: tuple[str, ...] = SUPPORTED_MCP_PROTOCOL_VERSIONS,
         legacy_contracts: tuple[LegacyMcpContract, ...] = (),
         capabilities: tuple[str, ...] = (),
     ) -> None:
