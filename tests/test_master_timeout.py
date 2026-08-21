@@ -3,6 +3,21 @@ import server
 from sonder_runtime.domain.master_timeout import master_timeout
 
 
+def test_server_production_paths_do_not_call_master_timeout_compatibility_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_master_timeout"
+    ]
+    assert calls == []
+
+
 def test_server_retains_master_timeout_compatibility_delegate():
     assert server._master_timeout_policy is master_timeout
 

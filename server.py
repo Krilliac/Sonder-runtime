@@ -8407,7 +8407,12 @@ def master_orchestrate(
             # interactions. This guarantees a drifted result cannot later be
             # promoted through record_outcome, even after a restart.
             learn=learn and not protected_objectives,
-            timeout=_master_timeout("SONDER_MASTER_AGENT_TIMEOUT", 150),
+            timeout=_master_timeout_policy(
+                os.environ.get("SONDER_MASTER_AGENT_TIMEOUT", "150"),
+                150,
+                15,
+                TIMEOUT,
+            ),
         )
     )
     if mode in ("inline", "master"):
@@ -8438,7 +8443,12 @@ def master_orchestrate(
             audit_fn=_orchestrator_worker(
                 audit_tier,
                 learn=False,
-                timeout=_master_timeout("SONDER_MASTER_AUDIT_TIMEOUT", 120),
+                timeout=_master_timeout_policy(
+                    os.environ.get("SONDER_MASTER_AUDIT_TIMEOUT", "120"),
+                    120,
+                    15,
+                    TIMEOUT,
+                ),
             ),
             agents=agents,
             metadata={
