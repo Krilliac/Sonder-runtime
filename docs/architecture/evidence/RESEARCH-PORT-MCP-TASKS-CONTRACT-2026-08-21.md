@@ -5,7 +5,9 @@
 Sonder now has an application-level MCP Tasks-shaped projection over its
 durable `JobRecord` identity. It provides a reconnectable `taskId`, revision,
 status, timestamps, bounded polling advice, and explicit input-required state.
-It does not add a background poller, transport route, or second job store.
+It does not add a background poller or second job store. The bounded stdio
+MCP transport now exposes an injected task-handler seam for `tasks/get`,
+`tasks/cancel`, and `tasks/update` after explicit capability negotiation.
 
 ## Mapping and boundaries
 
@@ -31,8 +33,10 @@ not invented until a concrete durable input port exists.
 - Existing durable owner: `sonder_runtime/application/ports/jobs.py`
 
 Focused verification covers reconnect metadata, terminal mapping, explicit
-input-required behavior, content non-disclosure, and bounds. This is a
-contract/projection port, not a claim that an MCP Tasks transport or external
-server interoperability test is complete.
+input-required behavior, content non-disclosure, bounds, negotiated task
+dispatch, and fail-closed behavior without negotiation. The native catalog
+does not currently create asynchronous tasks, so this remains an injected
+transport seam rather than a claim of native task creation or external server
+interoperability.
 
 Reference: <https://modelcontextprotocol.io/extensions/tasks/overview>

@@ -153,3 +153,40 @@ def test_standard_handshake_wraps_tool_output_in_call_tool_result_shape():
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert rows[1]["result"]["structuredContent"] == {"output": {"echo": "x"}}
     assert rows[1]["result"]["content"][0]["type"] == "text"
+
+
+def test_negotiated_mcp_tasks_dispatch_through_injected_handler():
+    calls = []
+    output = io.StringIO()
+    transport = StdioMcpTransport(
+        io.StringIO("\n".join(json.dumps(line) for line in [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersions": ["2.0"], "capabilities": {"tasks": {}}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tasks/get",
+             "params": {"taskId": "job-1"}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tasks/cancel",
+             "params": {"taskId": "job-1"}},
+        ]) + "\n"), output,
+        compatibility=McpCompatibility(supported_versions=("2.0",), capabilities=("tasks",)),
+        tool_catalog=(), tool_handler=lambda *_: {},
+        task_handler=lambda method, params: calls.append((method, params)) or {"status": "working"},
+    )
+    assert transport.serve() == 3
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[0]["result"]["capabilities"] == {"tasks": {}}
+    assert rows[1]["result"] == {"status": "working"}
+    assert calls == [("tasks/get", {"taskId": "job-1"}), ("tasks/cancel", {"taskId": "job-1"})]
+
+
+def test_mcp_tasks_fail_closed_without_negotiation_or_handler():
+    transport, output = _transport([{
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersions": ["2.0"], "capabilities": {}},
+    }, {
+        "jsonrpc": "2.0", "id": 2, "method": "tasks/get",
+        "params": {"taskId": "job-1"},
+    }])
+    transport.serve()
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["error"]["code"] == -32602
+    assert "not negotiated" in rows[1]["error"]["message"]
