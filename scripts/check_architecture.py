@@ -103,8 +103,10 @@ IO_MODULES = {"urllib", "socket", "http", "ftplib", "smtplib"}
 
 COMPATIBILITY_ROOT_MODULES = {
     "archive_create": Path("archive_create.py"),
+    "artifact_grounding": Path("artifact_grounding.py"),
     "code_runner": Path("code_runner.py"),
     "command_catalog": Path("command_catalog.py"),
+    "fanout_store": Path("fanout_store.py"),
     "learning_health": Path("learning_health.py"),
     "memory_store": Path("memory_store.py"),
     "autopilot_store": Path("autopilot_store.py"),

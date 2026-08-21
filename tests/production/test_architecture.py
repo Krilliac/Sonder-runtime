@@ -62,6 +62,9 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     assert module.COMPATIBILITY_ROOT_MODULES["command_catalog"] == Path(
         "command_catalog.py"
     )
+    assert module.COMPATIBILITY_ROOT_MODULES["fanout_store"] == Path(
+        "fanout_store.py"
+    )
     assert module.COMPATIBILITY_ROOT_MODULES["learning_health"] == Path(
         "learning_health.py"
     )
