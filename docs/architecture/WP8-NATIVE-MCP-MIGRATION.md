@@ -24,6 +24,11 @@ application inspection port: `archive_list`, `data_inspect`, `data_query`,
 `InspectionService`/`InspectionExecutorAdapter`, preserving the existing
 read-only policy and evidence shape rather than duplicating inspection logic.
 
+The metadata-only `image_inspect` tool is routed through the packaged
+filesystem workbench as well. It reports bounded header metadata and a digest;
+it makes no visual-semantic or model-routing claim. `vision_analyze` remains a
+separate local-model policy surface.
+
 The native catalog also includes four guarded mutation tools: `file_copy`,
 `file_move`, `file_batch_write`, and `file_delete`. These use the packaged
 transfer, transactional batch, and explicit-delete-confirmation adapters;
@@ -39,7 +44,7 @@ legacy server surface.
 The historical server MCP catalog remains the default compatibility path until
 catalog parity and complete application-service coverage are proven. The
 legacy catalog currently contains 204 registered tools; the native catalog
-therefore covers 31 names and does not claim full parity, API-003, or TOOL-001
+therefore covers 32 names and does not claim full parity, API-003, or TOOL-001
 completion.
 
 ## Evidence

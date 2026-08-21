@@ -37,8 +37,8 @@ def test_native_catalog_is_bounded_and_deterministic():
         "archive_list", "data_inspect", "data_query", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file",
         "file_batch_write", "file_copy", "file_delete", "file_digest", "file_find",
-        "file_move", "file_read", "file_read_range", "file_write", "json_patch",
-        "log_inspect", "make_directory", "program_search", "project_detect", "read_file",
+        "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
+        "json_patch", "log_inspect", "make_directory", "program_search", "project_detect", "read_file",
         "run_program", "run_script", "script_search", "text_patch", "text_search",
         "workspace_compare", "workspace_run", "write_file",
     ]

@@ -113,6 +113,11 @@ _NATIVE_TOOLS = (
         }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
+        "image_inspect", "Inspect bounded image metadata and hash",
+        {"type": "object", "properties": {"path": _PATH, "extra_roots": _ROOT},
+         "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root", {"type": "object"},
     ),
     ToolDescriptor(
