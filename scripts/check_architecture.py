@@ -55,7 +55,7 @@ VERSION_PLATFORM_PATH = "sonder_runtime/platform/version.py"
 HTTP_SERVE_PATH = "sonder_runtime/interfaces/http/serve.py"
 HTTP_SERVE_ROOT_MODULES = frozenset({
     "admin_auth", "code_runner", "command_catalog", "feedback",
-    "grounding", "intents", "permission_modes",
+    "grounding", "intents",
     "served_action_receipts", "server",
     "training_tasks", "unsafe_lab",
 })
