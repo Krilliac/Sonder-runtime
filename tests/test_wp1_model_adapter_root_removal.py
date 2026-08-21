@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from sonder_runtime.adapters.inference.injected import InjectedModelGateway
-from sonder_runtime.adapters.ollama.gateway import OllamaGateway
+from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.ports.model_target import ModelTarget
@@ -35,7 +35,7 @@ def test_model_adapters_have_no_direct_server_import():
         ROOT / "sonder_runtime" / "adapters" / "inference" / "injected.py"
     )
     assert not _imports_root_server(
-        ROOT / "sonder_runtime" / "adapters" / "ollama" / "gateway.py"
+        ROOT / "sonder_runtime" / "adapters" / "inference" / "ollama_gateway.py"
     )
 
 

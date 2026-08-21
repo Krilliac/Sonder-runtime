@@ -104,7 +104,7 @@ def test_summarizer_survives_gateway_failure(monkeypatch):
 
 def test_bootstrap_graph_exposes_chat_over_gateway():
     from sonder_runtime.bootstrap import app as bootstrap_app
-    from sonder_runtime.adapters.ollama.gateway import OllamaGateway
+    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 
     bootstrap_app.reset_for_tests()
     application = bootstrap_app.build_application()

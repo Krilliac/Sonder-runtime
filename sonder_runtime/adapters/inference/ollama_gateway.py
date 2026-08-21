@@ -17,6 +17,7 @@ Acceptance properties (SPEC-3 Phase 3):
 from __future__ import annotations
 
 import ipaddress
+import importlib
 import math
 import time
 import urllib.parse
@@ -39,9 +40,14 @@ from ...application.ports.model_target import (
 )
 from ...platform import context_policy
 from ...platform.metrics import default_registry
-from ..inference.telemetry import from_ollama
+from .telemetry import from_ollama
 from ..model_transport import ModelCallError
-from . import endpoint as ollama_endpoint
+# Endpoint policy remains shared with embeddings. Resolve it dynamically so the
+# temporary old-path gateway alias can point here without creating an import
+# cycle through the ``ollama`` package.
+ollama_endpoint = importlib.import_module(
+    "sonder_runtime.adapters.ollama.endpoint"
+)
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,

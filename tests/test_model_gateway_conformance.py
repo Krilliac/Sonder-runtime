@@ -16,8 +16,8 @@ import sonder_runtime.adapters.embeddings as embeddings
 import server
 from sonder_runtime.adapters.ollama import endpoint as ollama_endpoint
 from sonder_runtime.adapters.inference.injected import InjectedModelGateway
-from sonder_runtime.adapters.ollama.gateway import OllamaGateway
-from sonder_runtime.adapters.openai_compat.gateway import (
+from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+from sonder_runtime.adapters.inference.openai_compat_gateway import (
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
 )

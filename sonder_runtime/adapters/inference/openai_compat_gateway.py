@@ -40,7 +40,7 @@ from ...application.ports.model_gateway import (
     require_model_text,
 )
 from ...platform.metrics import default_registry
-from ..inference.telemetry import from_openai_compatible
+from .telemetry import from_openai_compatible
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
