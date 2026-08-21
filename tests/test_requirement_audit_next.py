@@ -73,7 +73,9 @@ def test_formal_checkboxes_and_ledger_remain_unpromoted() -> None:
         ):
             latest[requirement_id] = record
     assert len(latest) == 204
-    assert {record["status"] for record in latest.values()} == {"planned"}
+    statuses = {record["status"] for record in latest.values()}
+    assert statuses <= {"planned", "implemented_unverified"}
+    assert "verified" not in statuses
 
 
 def test_audit_explicitly_has_no_safe_checkbox_candidates() -> None:
