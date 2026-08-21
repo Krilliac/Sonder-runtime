@@ -222,20 +222,29 @@ class RuntimeLifecycle:
     # -- startup / shutdown ------------------------------------------------
 
     @staticmethod
-    def _reconcile_durable_jobs() -> int:
+    def _reconcile_startup_records() -> int:
         from sonder_runtime.adapters.persistence.sqlite.job_registry import (
             SQLiteDurableJobRegistry,
         )
+        from sonder_runtime.adapters.persistence.autopilot_repository import (
+            AutopilotRepository,
+        )
+        from sonder_runtime.adapters.persistence import fleet_store
         from sonder_runtime.platform.paths import state_path
 
+        now_epoch = time.time()
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_epoch))
         registry = SQLiteDurableJobRegistry(
             state_path("jobs.db", "SONDER_JOBS_DB")
         )
-        return registry.reconcile()
+        jobs = registry.reconcile(now=now_iso)
+        autopilot = AutopilotRepository().reconcile_stale_runs(now_epoch)
+        fleet = fleet_store.reconcile_stale_owners(now=now_epoch)
+        return jobs + autopilot + int(fleet.get("interrupted", 0))
 
     def reconcile_startup(self) -> int:
         """Reconcile durable work before the process can publish READY."""
-        reconciler = self._startup_reconciler or self._reconcile_durable_jobs
+        reconciler = self._startup_reconciler or self._reconcile_startup_records
         return int(reconciler())
 
     def startup(self, *, run_migrations: bool = True) -> None:
