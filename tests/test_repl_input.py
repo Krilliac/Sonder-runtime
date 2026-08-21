@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-import sonder_headless
+from sonder_runtime.adapters.web import listener_probe
 import server
 import sonder_runtime.interfaces.repl.repl as sonder_repl
 import command_catalog
@@ -390,9 +390,9 @@ def test_terminal_endpoint_link_stays_plain_when_ansi_is_disabled(monkeypatch):
 
 def test_startup_banner_normalizes_wildcard_bind_for_dashboard_link(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    monkeypatch.setattr(sonder_headless, "DEFAULT_HOST", "0.0.0.0")
-    monkeypatch.setattr(sonder_headless, "DEFAULT_PORT", 11435)
-    monkeypatch.setattr(sonder_headless, "port_open", lambda *_args: True)
+    monkeypatch.setattr(listener_probe, "DEFAULT_HOST", "0.0.0.0")
+    monkeypatch.setattr(listener_probe, "DEFAULT_PORT", 11435)
+    monkeypatch.setattr(listener_probe, "port_open", lambda *_args: True)
 
     banner = sonder_repl._startup_banner(None, "coder", "default")
 
