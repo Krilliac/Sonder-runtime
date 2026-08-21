@@ -221,9 +221,9 @@
     },
     {
       "checked": false,
-      "claim": "A separately launched MCP provider crosses an explicit declared, negotiated, bounded stdio subprocess boundary with deadline/cancellation and truthful cleanup receipts.",
+      "claim": "The native MCP composition exposes negotiated durable task get, update, and cancellation dispatch through the application job service while preserving bounded protocol errors and redacted task views.",
       "requirement_id": "API-003",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "0c9d0e16f98ed7c1c48519e0c00f986ee00c50e2c4d39696879a1a275234d8c0",
+    "ledger_sha256": "8387572d4cab438f36090fbb362c685c4046f6f7b9167395aadb3407a3c9ca02",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
