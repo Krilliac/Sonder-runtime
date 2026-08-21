@@ -227,7 +227,15 @@ class RuntimeLifecycle:
             import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
             sonder_migrations.migrate_all()
-        self._startup_reconciled = self.reconcile_startup()
+        try:
+            self._startup_reconciled = self.reconcile_startup()
+        except Exception as exc:
+            self.tracker.transition(
+                ProcessState.RECOVERY_REQUIRED,
+                f"startup reconciliation failed: {type(exc).__name__}",
+            )
+            self.metrics.process_state.set(_state_number(self.tracker))
+            raise
         self.tracker.transition(ProcessState.READY, "startup complete")
         self.metrics.process_state.set(_state_number(self.tracker))
         self.tracker.add_listener(

@@ -18,6 +18,9 @@ def test_application_projection_preserves_all_process_state_numbers():
         tracker = packaged_state.ServiceStateTracker()
         if expected_state is packaged_state.ProcessState.MIGRATING:
             tracker.transition(expected_state)
+        elif expected_state is packaged_state.ProcessState.RECOVERY_REQUIRED:
+            tracker.transition(packaged_state.ProcessState.MIGRATING)
+            tracker.transition(expected_state)
         elif expected_state is packaged_state.ProcessState.READY:
             tracker.transition(packaged_state.ProcessState.MIGRATING)
             tracker.transition(expected_state)

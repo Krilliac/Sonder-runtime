@@ -30,6 +30,7 @@ def process_state_number(tracker) -> int:
         "draining": 4,
         "stopping": 5,
         "failed": 6,
+        "recovery_required": 7,
     }[process.value]
 
 
