@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 143,
-      "planned": 61
+      "implemented_unverified": 163,
+      "planned": 41
     },
     "total": 204,
     "verified": 0
@@ -145,66 +145,66 @@
     },
     {
       "checked": false,
-      "claim": "Migrate existing modes.",
+      "claim": "Existing agent modes are represented through the unified agent composition boundary.",
       "requirement_id": "AGENT-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Presets.",
+      "claim": "Agent presets provide typed role and budget selection.",
       "requirement_id": "AGENT-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Built-ins.",
+      "claim": "Built-in agent roles and dispatch integration are explicit and tested.",
       "requirement_id": "AGENT-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Durable lineage.",
+      "claim": "Delegated work carries durable parent-child lineage.",
       "requirement_id": "AGENT-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Continuable children.",
+      "claim": "Child agents expose continuable durable state.",
       "requirement_id": "AGENT-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Budgets.",
+      "claim": "Agent budgets are admitted and enforced at the application boundary.",
       "requirement_id": "AGENT-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Isolated workspaces.",
+      "claim": "Delegated workspaces are isolated and bounded by parent context.",
       "requirement_id": "AGENT-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Structured delegation.",
+      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence.",
       "requirement_id": "AGENT-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Architect/editor/reviewer.",
+      "claim": "Architect, editor, and reviewer roles are represented in the workbench review boundary.",
       "requirement_id": "AGENT-010",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1377,31 +1377,31 @@
     },
     {
       "checked": false,
-      "claim": "Registry.",
+      "claim": "Skills are registered through a validated application registry.",
       "requirement_id": "SKILL-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Progressive disclosure.",
+      "claim": "Skill discovery supports deterministic index, metadata, and content levels.",
       "requirement_id": "SKILL-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Live refresh.",
+      "claim": "Skill refresh is explicitly composed with plugin manifest updates.",
       "requirement_id": "SKILL-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Trust and policy.",
+      "claim": "Skill trust and policy decisions are preserved as explicit registry facts.",
       "requirement_id": "SKILL-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1412,10 +1412,10 @@
     },
     {
       "checked": false,
-      "claim": "Procedural promotion.",
+      "claim": "Procedural skill publication validates and records promotion evidence.",
       "requirement_id": "SKILL-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1468,31 +1468,31 @@
     },
     {
       "checked": false,
-      "claim": "Reproducible manifest.",
+      "claim": "Training artifacts carry reproducible manifests and digests.",
       "requirement_id": "TRAIN-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Qualified lock.",
+      "claim": "Training qualification produces an explicit qualified lock.",
       "requirement_id": "TRAIN-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Dataset provenance.",
+      "claim": "Training datasets retain provenance and validation metadata.",
       "requirement_id": "TRAIN-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Evaluation gate.",
+      "claim": "Training activation is gated by evaluation and qualification outcomes.",
       "requirement_id": "TRAIN-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1510,17 +1510,17 @@
     },
     {
       "checked": false,
-      "claim": "Adapter catalog.",
+      "claim": "Training adapters are cataloged with deterministic compatibility checks.",
       "requirement_id": "TRAIN-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Cheap learning first.",
+      "claim": "Training routes prefer cheap bounded learning paths before expensive activation.",
       "requirement_id": "TRAIN-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "45b71d3fdcf972de3bd0c50b9ab14c1caa85076f80e77dd9c76777cf03b41404",
+    "ledger_sha256": "aef25a14f8ca9231cf1f04e8aed7a101eaa10165f06b6b4b91c37dcb2e88a71d",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }
