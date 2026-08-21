@@ -55,6 +55,26 @@ def test_composition_root_uses_canonical_evaluation_history_adapter():
     assert type(application.evaluation_history._reader) is EvaluationHistoryReaderAdapter
 
 
+def test_composition_root_exposes_lazy_cached_durable_session_repository(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "sessions.db"
+    monkeypatch.setenv("SONDER_SESSIONS_DB", str(database))
+    application = bootstrap_app.build_application()
+
+    assert not database.exists()
+    first = application.session_repository()
+    second = application.session_repository()
+
+    from sonder_runtime.adapters.persistence.session_repository import (
+        SQLiteSessionRepository,
+    )
+
+    assert isinstance(first, SQLiteSessionRepository)
+    assert first is second
+    assert database.exists()
+
+
 def test_importing_bootstrap_has_no_side_effects(tmp_path, monkeypatch):
     # The composition root builds lazily: constructing the graph must not
     # create the policy file; only first use does.

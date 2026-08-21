@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
+from ..adapters.persistence.session_repository import SQLiteSessionRepository
 from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
@@ -45,6 +46,7 @@ from ..application.ports.preferences import (
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
+from ..application.ports.session_repository import SessionRepository
 from ..application.ports.process_probe import ProcessProbe
 from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.ports.tool_executor import ToolExecutor
@@ -72,6 +74,7 @@ class Application:
     evaluation_history: EvaluationHistoryService
     preferences: PreferenceService
     workflows: WorkflowService
+    session_repository: Callable[[], SessionRepository]
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -99,6 +102,18 @@ def build_application(
     # enforced against the OperationContext, driver errors mapped into the
     # domain taxonomy. Backend is Ollama by default, selectable via env.
     gateway = build_model_gateway()
+    session_repository: SQLiteSessionRepository | None = None
+
+    def get_session_repository() -> SessionRepository:
+        nonlocal session_repository
+        if session_repository is None:
+            from ..platform.paths import state_path
+
+            session_repository = SQLiteSessionRepository(
+                state_path("sessions.db", "SONDER_SESSIONS_DB")
+            )
+        return session_repository
+
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
@@ -126,6 +141,7 @@ def build_application(
             NullPreferenceEventSink(),
         ),
         workflows=WorkflowService(WorkflowRepositoryAdapter(), LoopRunnerAdapter()),
+        session_repository=get_session_repository,
     )
 
 

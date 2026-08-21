@@ -55,7 +55,7 @@ import sonder_runtime.platform.paths as runtime_paths
 import sonder_runtime.adapters.secrets as sonder_secrets
 import served_action_receipts
 import tool_contract
-import unsafe_lab
+from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
