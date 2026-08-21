@@ -31,6 +31,7 @@ from sonder_runtime.adapters.repl_services import (
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters.security.permission_policy import permission_policy as permission_modes
 from sonder_runtime.adapters.repl_services import project_scaffold
+from sonder_runtime.adapters.optional_slash_menu import load_optional_slash_menu
 from sonder_runtime.interfaces.repl.facades import (
     ContextHealthFacade,
     ExecutionStatusFacade,
@@ -38,12 +39,9 @@ from sonder_runtime.interfaces.repl.facades import (
     ModelSelectionFacade,
 )
 
-try:
-    # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
-    # non-Windows, dumb terminal) the REPL falls back to plain input().
-    import slash_menu
-except ImportError:  # pragma: no cover - the REPL must never hard-depend on it
-    slash_menu = None
+# Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
+# non-Windows, dumb terminal) the REPL falls back to plain input().
+slash_menu = load_optional_slash_menu()
 
 CURRENT_TOKEN = ""
 REPL_HISTORY_LIMIT = 200
