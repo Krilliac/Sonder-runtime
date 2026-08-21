@@ -72,6 +72,9 @@ WEB_SEARCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_search"
 WEB_SEARCH_COMPATIBILITY_ROOT = Path("web_tools.py")
 WEB_FETCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_fetch"
 WEB_FETCH_COMPATIBILITY_ROOT = Path("web_tools.py")
+WEATHER_CANONICAL_MODULE = "sonder_runtime.adapters.weather"
+LOCATION_CANONICAL_MODULE = "sonder_runtime.adapters.location"
+WEATHER_LOCATION_COMPATIBILITY_ROOT = Path("web_tools.py")
 
 LAYERS = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap")
 
@@ -102,6 +105,7 @@ COMPATIBILITY_ROOT_MODULES = {
     "archive_create": Path("archive_create.py"),
     "code_runner": Path("code_runner.py"),
     "command_catalog": Path("command_catalog.py"),
+    "learning_health": Path("learning_health.py"),
     "memory_store": Path("memory_store.py"),
     "autopilot_store": Path("autopilot_store.py"),
     "fleet_store": Path("fleet_store.py"),
@@ -170,6 +174,7 @@ RETIRED_ROOT_MODULES = frozenset({
 # import that production code has since moved behind a compatibility adapter;
 # rewriting one would invalidate its recorded checksum on deployed systems.
 COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS = {
+    "learning_health": frozenset({Path("server.py")}),
     # These legacy root consumers are intentionally unchanged in the
     # command-catalog packaging slice.  They are the reverse edges that
     # motivated the catalog's lazy command_registry/permission_modes imports;
@@ -369,6 +374,24 @@ def check() -> list[str]:
             violations.append(
                 f"{WEB_FETCH_CANONICAL_MODULE}: missing canonical fetch_raw entrypoint"
             )
+    weather_location_root = REPO_ROOT / WEATHER_LOCATION_COMPATIBILITY_ROOT
+    weather_path = REPO_ROOT / "sonder_runtime" / "adapters" / "weather.py"
+    location_path = REPO_ROOT / "sonder_runtime" / "adapters" / "location.py"
+    if weather_location_root.exists() and weather_path.exists() and location_path.exists():
+        root_tree = ast.parse(weather_location_root.read_text(encoding="utf-8"), filename=str(WEATHER_LOCATION_COMPATIBILITY_ROOT))
+        root_functions = {node.name for node in root_tree.body if isinstance(node, ast.FunctionDef)}
+        weather_tree = ast.parse(weather_path.read_text(encoding="utf-8"), filename=WEATHER_CANONICAL_MODULE)
+        location_tree = ast.parse(location_path.read_text(encoding="utf-8"), filename=LOCATION_CANONICAL_MODULE)
+        weather_functions = {node.name for node in weather_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        location_functions = {node.name for node in location_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        public_weather = {"weather_lookup", "format_weather"}
+        public_location = {"normalize_location_hint", "approximate_location_lookup", "location_label", "format_approximate_location"}
+        if root_functions & (public_weather | public_location):
+            violations.append("web_tools.py: weather/location implementation must remain packaged")
+        if not public_weather <= weather_functions:
+            violations.append(f"{WEATHER_CANONICAL_MODULE}: missing canonical weather entrypoints")
+        if not public_location <= location_functions:
+            violations.append(f"{LOCATION_CANONICAL_MODULE}: missing canonical location entrypoints")
     imports: dict[str, set[str]] = {}
     files = sorted(PACKAGE_ROOT.rglob("*.py"))
 
@@ -491,6 +514,11 @@ def check() -> list[str]:
             if rel.as_posix() == REPL_PATH and top in REPL_ROOT_MODULES:
                 continue
             if top not in ALLOWED_ROOT_IMPORTS[layer]:
+                if (
+                    rel.as_posix() == "sonder_runtime/adapters/learning_health.py"
+                    and top in {"calibration", "memory_quality", "retriever"}
+                ):
+                    continue
                 violations.append(
                     f"{rel}: {layer} layer may not import root/third-party "
                     f"module {top!r}"

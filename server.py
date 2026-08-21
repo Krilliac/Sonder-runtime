@@ -161,6 +161,11 @@ from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
+from sonder_runtime.application.context_health import (
+    ContextHealthService,
+    ContextHealthSettings,
+    ContextMemorySnapshot,
+)
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.runtime_identity import (
     runtime_identity_block as _runtime_identity_block,
@@ -6683,94 +6688,69 @@ def context_health_data(session: str = "", project: str = "") -> dict:
     plus the recent turns that Sonder keeps in the prompt.
     """
     _maybe_live_reload()
-    session_id = _resolve_session(session)
-    project_id = _resolve_project(project)
-    conn = _open_db()
-    try:
-        scoped_turns = (
-            memory_store.session_turns_for_project(conn, session_id, project_id)
-            if session_id else []
-        )
-        turns = [
-            (row["task"], row["response"])
-            for row in scoped_turns[-MAX_TURNS:]
-        ]
-        session_row = memory_store.get_session(conn, session_id) if session_id else None
-        summary_row = (
-            memory_store.get_session_project_summary(conn, session_id, project_id)
-            if session_id else {}
-        )
-        summary = summary_row.get("summary") or ""
-        turn_count = len(scoped_turns)
-        session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        lesson_count = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
-        fact_count = (
-            memory_store.count_facts(conn, project_id) if project_id else
-            conn.execute("SELECT COUNT(*) FROM facts WHERE project IS NULL").fetchone()[0]
-        )
-        preference_count = conn.execute(
-            "SELECT COUNT(*) FROM preferences WHERE enabled=1"
-        ).fetchone()[0]
-        interaction_count = memory_store.count_interactions(conn)
-        outcome_count = conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
-        summarized_through = summary_row.get("summarized_through") or ""
-        updated_ts = (session_row or {}).get("updated_ts") or ""
-        title = (session_row or {}).get("title") or ""
-        live_chars = sum(len(task or "") + len(response or "") for task, response in turns)
-        summary_tokens = _rough_token_count(summary)
-        live_tokens = _rough_token_count_from_chars(live_chars)
-        estimated_tokens = summary_tokens + live_tokens
-    finally:
-        conn.close()
 
-    policy = context_policy.policy(SESSION_NUM_CTX)
-    context_limit = max(1, int(policy["requested"] or 1))
-    context_ratio = min(1.0, estimated_tokens / context_limit)
-    live_turn_count = len(turns)
-    turn_ratio = min(1.0, live_turn_count / max(1, int(MAX_TURNS or 1)))
-    if context_ratio >= 0.90:
-        status_label = "hot"
-    elif context_ratio >= 0.70:
-        status_label = "warm"
-    else:
-        status_label = "healthy"
-    memory_items = lesson_count + fact_count + preference_count + outcome_count
-    memory_ratio = min(1.0, memory_items / 1000.0)
-    return {
-        "session": session_id or "none",
-        "project": project_id or "none",
-        "title": title,
-        "status": status_label,
-        "context_limit": context_limit,
-        "native_context_limit": policy["native"],
-        "native_context_max": policy["native_max"],
-        "virtual_context_max": policy["virtual_max"],
-        "context_mode": policy["mode"],
-        "virtual_context": policy["virtual"],
-        "estimated_tokens": estimated_tokens,
-        "context_percent": round(context_ratio * 100.0, 1),
-        "context_bar": _health_bar(context_ratio),
-        "live_turns": live_turn_count,
-        "max_live_turns": MAX_TURNS,
-        "total_turns": turn_count,
-        "turn_percent": round(turn_ratio * 100.0, 1),
-        "turn_bar": _health_bar(turn_ratio),
-        "summary_tokens": summary_tokens,
-        "live_tokens": live_tokens,
-        "summary_chars": len(summary),
-        "summarized_through": summarized_through,
-        "updated_ts": updated_ts,
-        "sessions": session_count,
-        "lessons": lesson_count,
-        "facts": fact_count,
-        "preferences": preference_count,
-        "interactions": interaction_count,
-        "outcomes": outcome_count,
-        "memory_percent": round(memory_ratio * 100.0, 1),
-        "memory_bar": _health_bar(memory_ratio),
-        "db_path": _DB_PATH,
-        "state_home": str(sonder_paths.default_home()),
-    }
+    class _Identity:
+        session = staticmethod(_resolve_session)
+        project = staticmethod(_resolve_project)
+
+    class _Repository:
+        @staticmethod
+        def snapshot(session_id, project_id, limit):
+            conn = _open_db()
+            try:
+                scoped_turns = (
+                    memory_store.session_turns_for_project(conn, session_id, project_id)
+                    if session_id else []
+                )
+                selected = scoped_turns[-limit:] if limit else []
+                turns = tuple(
+                    (row["task"], row["response"])
+                    for row in selected
+                )
+                session_row = memory_store.get_session(conn, session_id) if session_id else None
+                summary_row = (
+                    memory_store.get_session_project_summary(conn, session_id, project_id)
+                    if session_id else {}
+                )
+                return ContextMemorySnapshot(
+                    turns=turns,
+                    total_turns=len(scoped_turns),
+                    title=(session_row or {}).get("title") or "",
+                    summary=summary_row.get("summary") or "",
+                    summarized_through=summary_row.get("summarized_through") or "",
+                    updated_ts=(session_row or {}).get("updated_ts") or "",
+                    sessions=conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
+                    lessons=conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0],
+                    facts=(
+                        memory_store.count_facts(conn, project_id) if project_id else
+                        conn.execute("SELECT COUNT(*) FROM facts WHERE project IS NULL").fetchone()[0]
+                    ),
+                    preferences=conn.execute(
+                        "SELECT COUNT(*) FROM preferences WHERE enabled=1"
+                    ).fetchone()[0],
+                    interactions=memory_store.count_interactions(conn),
+                    outcomes=conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0],
+                )
+            finally:
+                conn.close()
+
+    class _Metrics:
+        tokens = staticmethod(_rough_token_count)
+        tokens_from_chars = staticmethod(_rough_token_count_from_chars)
+        bar = staticmethod(_health_bar)
+
+    return ContextHealthService(
+        identity=_Identity(),
+        repository=_Repository(),
+        policy=context_policy,
+        metrics=_Metrics(),
+        settings=ContextHealthSettings(
+            requested_context=SESSION_NUM_CTX,
+            max_turns=MAX_TURNS,
+            db_path=_DB_PATH,
+            state_home=str(sonder_paths.default_home()),
+        ),
+    ).snapshot(session=session, project=project)
 
 
 @mcp.tool()

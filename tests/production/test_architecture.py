@@ -62,6 +62,9 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     assert module.COMPATIBILITY_ROOT_MODULES["command_catalog"] == Path(
         "command_catalog.py"
     )
+    assert module.COMPATIBILITY_ROOT_MODULES["learning_health"] == Path(
+        "learning_health.py"
+    )
     assert "model_transport" not in module.ROOT_LEGACY_MODULES
     assert "runtime_policy" not in module.ROOT_LEGACY_MODULES
     assert "eval_history" not in module.ROOT_LEGACY_MODULES
@@ -85,6 +88,13 @@ def test_web_fetch_ownership_is_packaged():
     module = _architecture_module()
     assert module.WEB_FETCH_CANONICAL_MODULE == "sonder_runtime.adapters.web_fetch"
     assert module.WEB_FETCH_COMPATIBILITY_ROOT == Path("web_tools.py")
+
+
+def test_weather_and_location_ownership_is_packaged():
+    module = _architecture_module()
+    assert module.WEATHER_CANONICAL_MODULE == "sonder_runtime.adapters.weather"
+    assert module.LOCATION_CANONICAL_MODULE == "sonder_runtime.adapters.location"
+    assert module.WEATHER_LOCATION_COMPATIBILITY_ROOT == Path("web_tools.py")
 
 
 def test_unsafe_lab_stateful_owner_is_security_adapter(monkeypatch):
@@ -280,6 +290,7 @@ def test_applied_memory_baseline_remains_byte_for_byte_immutable():
             Path("reloadable_mcp.py"),
             Path("slash_menu.py"),
         }),
+        "learning_health": frozenset({Path("server.py")}),
         "memory_store": frozenset({immutable_baseline}),
         "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
         "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),

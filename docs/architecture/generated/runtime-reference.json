@@ -8947,7 +8947,7 @@
     "events": 43,
     "tools": 204
   },
-  "digest": "366a732c85b92a3bce1c3c2c520a80dcd1fd95ffbd352bb3c97a6f9c0b1ff187",
+  "digest": "1014b71fccec9c0f43cec079a3af1563f81b8f2784516a13530b637e9f5eebb1",
   "events": [
     {
       "name": "session.started",
@@ -9418,7 +9418,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "d26b904c8c86c76971801e9d34448e3fc85fbaa99b4dc07552d026b024cbbe63",
+    "server.py": "ca599cc4507f785ae31677da936b50b7c56c25842bf4e2ab5f5001b675bd8163",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "e0584a36de498ef047a901197aab26a57a9b3caeb91117756424ed30350fac4c"

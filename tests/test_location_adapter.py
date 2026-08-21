@@ -14,11 +14,11 @@ def test_location_requires_both_consents():
 
 
 def test_location_durable_result_contains_no_raw_ip(monkeypatch):
-    monkeypatch.setattr(location, "_web_tools", lambda: type("Web", (), {
-        "approximate_location_lookup": staticmethod(lambda: {"city": "Chicago", "country": "US", "ip": "203.0.113.7"}),
-        "location_label": staticmethod(lambda value: "Chicago, US"),
-        "format_approximate_location": staticmethod(lambda value: "Approximate location: Chicago, US\nRaw IP: not retained or displayed."),
-    })())
+    monkeypatch.setattr(location, "approximate_location_lookup", lambda: {
+        "city": "Chicago", "country": "US", "ip": "203.0.113.7",
+    })
+    monkeypatch.setattr(location, "location_label", lambda value: "Chicago, US")
+    monkeypatch.setattr(location, "format_approximate_location", lambda value: "Approximate location: Chicago, US\nRaw IP: not retained or displayed.")
     result = location.lookup(
         consent=True,
         context=local_owner_context(correlation_id="location", cloud_allowed=True),
