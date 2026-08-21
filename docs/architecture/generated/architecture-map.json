@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 203,
+      "file_count": 205,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -184,8 +184,10 @@
         "sonder_runtime/adapters/persistence/sqlite/__init__.py",
         "sonder_runtime/adapters/persistence/sqlite/automation.py",
         "sonder_runtime/adapters/persistence/sqlite/bridge_migration.py",
+        "sonder_runtime/adapters/persistence/sqlite/cas.py",
         "sonder_runtime/adapters/persistence/sqlite/cross_domain.py",
         "sonder_runtime/adapters/persistence/sqlite/extensions.py",
+        "sonder_runtime/adapters/persistence/sqlite/graph.py",
         "sonder_runtime/adapters/persistence/sqlite/job_registry.py",
         "sonder_runtime/adapters/persistence/sqlite/loop_state.py",
         "sonder_runtime/adapters/persistence/sqlite/memory.py",
@@ -252,7 +254,7 @@
       ]
     },
     {
-      "file_count": 241,
+      "file_count": 247,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -324,7 +326,9 @@
         "sonder_runtime/application/jobs/generic_jobs.py",
         "sonder_runtime/application/jobs/session_lifecycle.py",
         "sonder_runtime/application/lifecycle.py",
+        "sonder_runtime/application/loop/__init__.py",
         "sonder_runtime/application/loop/durable_control.py",
+        "sonder_runtime/application/loop/facade.py",
         "sonder_runtime/application/loop/process_cleanup.py",
         "sonder_runtime/application/loop/transport_retry.py",
         "sonder_runtime/application/loop_contract.py",
@@ -351,6 +355,7 @@
         "sonder_runtime/application/output_stream/accumulator.py",
         "sonder_runtime/application/persistence/cross_domain.py",
         "sonder_runtime/application/persistence/domain_ownership.py",
+        "sonder_runtime/application/persistence/facade.py",
         "sonder_runtime/application/persistence/migration_safety.py",
         "sonder_runtime/application/persistence/outbox_cas.py",
         "sonder_runtime/application/plugin_manifest.py",
@@ -381,6 +386,7 @@
         "sonder_runtime/application/ports/preferences.py",
         "sonder_runtime/application/ports/preflight.py",
         "sonder_runtime/application/ports/process_probe.py",
+        "sonder_runtime/application/ports/protocol.py",
         "sonder_runtime/application/ports/recall.py",
         "sonder_runtime/application/ports/repl_services.py",
         "sonder_runtime/application/ports/repositories.py",
@@ -408,6 +414,8 @@
         "sonder_runtime/application/protocol/__init__.py",
         "sonder_runtime/application/protocol/client_schema.py",
         "sonder_runtime/application/protocol/editor_interop.py",
+        "sonder_runtime/application/protocol/events.py",
+        "sonder_runtime/application/protocol/facade.py",
         "sonder_runtime/application/protocol/mcp_compatibility.py",
         "sonder_runtime/application/protocol/mobile_parity.py",
         "sonder_runtime/application/protocol/openai_compatibility.py",

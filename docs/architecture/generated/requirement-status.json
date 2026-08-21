@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 117,
-      "planned": 87
+      "implemented_unverified": 143,
+      "planned": 61
     },
     "total": 204,
     "verified": 0
@@ -208,17 +208,17 @@
     },
     {
       "checked": false,
-      "claim": "Shared event vocabulary.",
+      "claim": "Protocol application composition exposes one typed event vocabulary for protocol-facing surfaces.",
       "requirement_id": "API-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Resumable streams.",
+      "claim": "Resumable streams validate event identity, payloads, and monotonic watermarks at the protocol boundary.",
       "requirement_id": "API-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -229,38 +229,38 @@
     },
     {
       "checked": false,
-      "claim": "OpenAI compatibility.",
+      "claim": "OpenAI compatibility remains composed behind the provider-neutral protocol facade.",
       "requirement_id": "API-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Editor/agent interoperability.",
+      "claim": "Editor/client interoperability contracts share the typed protocol schema and authorization boundary.",
       "requirement_id": "API-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Operator control plane.",
+      "claim": "Protocol reconnect and event publication remain explicit application operations with fail-closed authorization.",
       "requirement_id": "API-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Mobile parity.",
+      "claim": "Mobile/client parity and bounded reconnect use the shared typed protocol graph.",
       "requirement_id": "API-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Schema generation.",
+      "claim": "Client schema generation is composed from the catalog through the protocol facade.",
       "requirement_id": "API-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -530,52 +530,52 @@
     },
     {
       "checked": false,
-      "claim": "Per-domain SQLite.",
+      "claim": "Persistence composition models per-domain SQLite ownership through a typed graph facade.",
       "requirement_id": "DATA-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "No cross-database transactions.",
+      "claim": "The persistence facade rejects cross-database transaction claims rather than implying distributed atomicity.",
       "requirement_id": "DATA-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Transactional outbox.",
+      "claim": "Typed record and outbox writes share one caller-owned SQLite transaction.",
       "requirement_id": "DATA-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Compare-and-set.",
+      "claim": "Revision compare-and-set is enforced by the SQLite persistence adapter.",
       "requirement_id": "DATA-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Crash-safe migration.",
+      "claim": "Migration and ownership operations remain explicit typed persistence boundaries with fail-closed validation.",
       "requirement_id": "DATA-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Epoch adoption.",
+      "claim": "Epoch/adoption coordination remains represented by explicit persistence graph and CAS seams.",
       "requirement_id": "DATA-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Immutable artifact hashes.",
+      "claim": "Immutable artifact manifests use deterministic canonical hashes at the persistence boundary.",
       "requirement_id": "DATA-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -817,59 +817,59 @@
     },
     {
       "checked": false,
-      "claim": "Turn contract.",
+      "claim": "The loop facade composes typed turn admission and lifecycle state.",
       "requirement_id": "LOOP-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Step contract.",
+      "claim": "Turn steps have typed open, transition, retry, completion, and reconciliation contracts.",
       "requirement_id": "LOOP-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Interception events.",
+      "claim": "Interception and ephemeral live events are separated from durable session facts.",
       "requirement_id": "LOOP-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Durable versus live.",
+      "claim": "The loop facade preserves an explicit durable/live event distinction and validates durable JSON facts.",
       "requirement_id": "LOOP-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Steering.",
+      "claim": "Steering commands are ordered, deduplicated, and applied through the loop facade.",
       "requirement_id": "LOOP-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Cancellation tree.",
+      "claim": "Loop cancellation binds child cleanup to a typed cancellation tree and reports cleanup conformance.",
       "requirement_id": "LOOP-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Bounded retries.",
+      "claim": "Transport retries are bounded and fenced to loop cancellation and idempotency evidence.",
       "requirement_id": "LOOP-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Idempotency.",
+      "claim": "Retry execution and durable facts retain explicit operation identity for idempotent behavior.",
       "requirement_id": "LOOP-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1342,17 +1342,17 @@
     },
     {
       "checked": false,
-      "claim": "Forking.",
+      "claim": "The loop/session facade exposes bounded fork operations through canonical continuity service contracts.",
       "requirement_id": "SESSION-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Resume and repair.",
+      "claim": "Resume and repair are exposed through the continuity boundary with fail-closed sequence verification.",
       "requirement_id": "SESSION-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1363,17 +1363,17 @@
     },
     {
       "checked": false,
-      "claim": "Projection checkpoints.",
+      "claim": "Projection checkpoints are exposed through the typed session continuity facade.",
       "requirement_id": "SESSION-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Retention/privacy.",
+      "claim": "Retention candidates and execution remain behind the bounded privacy-aware continuity boundary.",
       "requirement_id": "SESSION-010",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "2e2875bee2b5f8e6e84eab184ec25e5132d420af93ff1c94a87c43a4f6ab4f5b",
+    "ledger_sha256": "45b71d3fdcf972de3bd0c50b9ab14c1caa85076f80e77dd9c76777cf03b41404",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }
