@@ -242,9 +242,9 @@
     },
     {
       "checked": false,
-      "claim": "The production HTTP handler serves an authenticated, provider-backed control-plane snapshot when explicitly composed and returns a bounded unavailable response when composition is absent or fails.",
+      "claim": "The composition root preserves an explicitly supplied complete control-plane provider service and the production HTTP handler consumes that same service boundary.",
       "requirement_id": "API-006",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "ab8a7adbb47b627ec15e0a0d6a64f50d5243316e1b7174c0cfd365e638008536",
+    "ledger_sha256": "0d957409669944742db905ef2806af6fb37a7adcaf83b2fadad6ac22672c4b74",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
