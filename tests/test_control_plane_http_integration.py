@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer
 
 from sonder_runtime.application.control_plane import (
@@ -39,6 +40,63 @@ def test_production_handler_serves_control_plane_snapshot(monkeypatch):
         assert response.status == 200
         assert payload["snapshot"]["sections"]["health"]["count"] == 1
         assert len(payload["digest"]) == 64
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_production_handler_rejects_non_admin_control_plane_access(monkeypatch):
+    monkeypatch.setattr(
+        serve.Handler,
+        "_request_auth_context",
+        lambda _self: {
+            "mode": "account",
+            "authorized": True,
+            "api_key": False,
+            "account": {"username": "user", "role": "member"},
+        },
+    )
+    monkeypatch.setattr(serve, "_CONTROL_PLANE_SERVICE", ControlPlaneSnapshotService(_providers()))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/v1/admin/control-plane"
+        try:
+            urllib.request.urlopen(url, timeout=10)
+        except urllib.error.HTTPError as error:
+            assert error.code == 403
+        else:
+            raise AssertionError("non-admin request unexpectedly succeeded")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_production_handler_fails_closed_when_service_is_absent(monkeypatch):
+    monkeypatch.setattr(
+        serve.Handler,
+        "_request_auth_context",
+        lambda _self: {
+            "mode": "account",
+            "authorized": True,
+            "api_key": False,
+            "account": {"username": "operator", "role": "admin"},
+        },
+    )
+    monkeypatch.setattr(serve, "_CONTROL_PLANE_SERVICE", None)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/v1/admin/control-plane"
+        try:
+            urllib.request.urlopen(url, timeout=10)
+        except urllib.error.HTTPError as error:
+            assert error.code == 503
+            assert json.loads(error.read()) == {"error": "control_plane_unavailable"}
+        else:
+            raise AssertionError("absent control-plane service unexpectedly succeeded")
     finally:
         httpd.shutdown()
         httpd.server_close()
