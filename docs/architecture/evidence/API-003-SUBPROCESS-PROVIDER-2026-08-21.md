@@ -24,6 +24,13 @@ is still partial because separately deployed provider acceptance, including its
 external process packaging and interoperability matrix, is not available in
 this repository. The master requirement/checklist was not edited.
 
+The installed official MCP Python SDK was also exercised against the
+separately launched fixture. It negotiated protocol `2025-11-25`, listed the
+fixture's `echo` and `hang` tools, and completed a structured `echo` call. This
+confirms client-library interoperability at the local stdio boundary; it does
+not promote the evidence to a packaged external-provider acceptance claim.
+
 ```text
 python -m pytest -q tests/test_api003_subprocess_provider.py tests/test_mcp_stdio_transport.py
+python -m pytest -q tests/test_api003_official_mcp_sdk.py
 ```
