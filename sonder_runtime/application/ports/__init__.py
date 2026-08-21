@@ -8,6 +8,18 @@ driver exceptions.
 from .backup import BackupGateway, BackupPath, BackupResultView
 from .archive_create import ArchiveCreateGateway, ArchiveCreateRequest
 from .clock import Clock
+from .training import (
+    JournalEvent,
+    ManifestEvidence,
+    ManifestVerifierPort,
+    OllamaPolicyPort,
+    TrainingDeploymentPort,
+    TrainingJournalPort,
+    TrainingLaunchRequest,
+    TrainingLaunchResult,
+    TrainingLockPort,
+    TrainingProcessPort,
+)
 from .event_sink import EventSink
 from .model_gateway import (
     Embedding,
@@ -135,6 +147,16 @@ __all__ = [
     "BackupResultView",
     "ChecklistEventPort",
     "Clock",
+    "JournalEvent",
+    "ManifestEvidence",
+    "ManifestVerifierPort",
+    "OllamaPolicyPort",
+    "TrainingDeploymentPort",
+    "TrainingJournalPort",
+    "TrainingLaunchRequest",
+    "TrainingLaunchResult",
+    "TrainingLockPort",
+    "TrainingProcessPort",
     "Embedding",
     "EventSink",
     "InferenceTelemetry",

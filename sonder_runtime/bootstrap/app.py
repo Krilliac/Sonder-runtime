@@ -43,6 +43,7 @@ from ..adapters.inference.ollama_vision import OllamaVisionGateway
 from ..adapters.vision_input import FileVisionInputProvider
 from ..adapters.application_lifecycle import ApplicationLifecycle
 from ..adapters.extensions.host import ExtensionHost
+from ..adapters.persistence.sqlite.extensions import SQLiteExtensionStateRepository
 from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
 from ..application.vision import VisionService
@@ -54,6 +55,7 @@ from ..application.extensions.experiments import (
     StartupAuthority,
 )
 from ..application.extensions.registry import ExtensionRegistry
+from ..application.extensions.provenance_inventory import ProvenanceInventory
 from ..application.selfmod.selfmod_service import GuardedLegacySelfmodService
 from ..application.extensions.facade import ExtensionApplicationFacade
 from ..application.backup import BackupService
@@ -166,6 +168,7 @@ def build_application(
     embedding_provider=None,
     training_backend=None,
     update_activator=None,
+    extension_provenance: ProvenanceInventory | None = None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -372,7 +375,11 @@ def build_application(
     def get_extension_registry() -> ExtensionRegistry:
         nonlocal extension_registry
         if extension_registry is None:
-            extension_registry = ExtensionRegistry()
+            from ..platform.paths import state_path
+            extension_registry = ExtensionRegistry(
+                provenance=extension_provenance or ProvenanceInventory.build([]),
+                repository=SQLiteExtensionStateRepository(state_path("extensions.db", "SONDER_EXTENSIONS_DB")),
+            )
         return extension_registry
 
     def get_experiment_manager() -> EphemeralExperimentManager:

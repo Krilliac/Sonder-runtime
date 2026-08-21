@@ -59,3 +59,9 @@ class QuarantineRegistry:
 
     def crash_count(self, extension_id: str) -> int:
         return self._crashes.get(extension_id, 0)
+
+    def restore_crash_count(self, extension_id: str, count: int) -> None:
+        """Restore durable crash evidence without weakening its monotonicity."""
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("crash count must be a non-negative integer")
+        self._crashes[extension_id] = max(self._crashes.get(extension_id, 0), count)

@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 198,
+      "file_count": 199,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -183,6 +183,7 @@
         "sonder_runtime/adapters/persistence/sqlite/automation.py",
         "sonder_runtime/adapters/persistence/sqlite/bridge_migration.py",
         "sonder_runtime/adapters/persistence/sqlite/cross_domain.py",
+        "sonder_runtime/adapters/persistence/sqlite/extensions.py",
         "sonder_runtime/adapters/persistence/sqlite/job_registry.py",
         "sonder_runtime/adapters/persistence/sqlite/loop_state.py",
         "sonder_runtime/adapters/persistence/sqlite/memory.py",
@@ -247,7 +248,7 @@
       ]
     },
     {
-      "file_count": 224,
+      "file_count": 227,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -358,6 +359,7 @@
         "sonder_runtime/application/ports/event_sink.py",
         "sonder_runtime/application/ports/execution_tools.py",
         "sonder_runtime/application/ports/execution_world.py",
+        "sonder_runtime/application/ports/extensions.py",
         "sonder_runtime/application/ports/filesystem.py",
         "sonder_runtime/application/ports/jobs.py",
         "sonder_runtime/application/ports/model_bootstrap.py",
@@ -380,6 +382,7 @@
         "sonder_runtime/application/ports/tool_execution.py",
         "sonder_runtime/application/ports/tool_executor.py",
         "sonder_runtime/application/ports/tool_registry.py",
+        "sonder_runtime/application/ports/training.py",
         "sonder_runtime/application/ports/vision_gateway.py",
         "sonder_runtime/application/ports/web.py",
         "sonder_runtime/application/ports/workflows.py",
@@ -456,6 +459,7 @@
         "sonder_runtime/application/tools/typed_gateway.py",
         "sonder_runtime/application/training/__init__.py",
         "sonder_runtime/application/training/adapter_catalog.py",
+        "sonder_runtime/application/training/attended_execution.py",
         "sonder_runtime/application/training/deployment_rollback.py",
         "sonder_runtime/application/training/hardware_planning.py",
         "sonder_runtime/application/training/qualification.py",

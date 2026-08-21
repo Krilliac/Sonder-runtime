@@ -6,7 +6,11 @@ import json
 import sys
 from typing import Sequence, TextIO
 
-from ...application.extensions.facade import ExtensionApplicationFacade, ExtensionAuthority
+from ...application.extensions.facade import (
+    ExtensionApplicationFacade,
+    ExtensionAuthority,
+    build_extension_manifest,
+)
 from ...application.extensions.experiments import ExperimentError
 
 
@@ -42,6 +46,17 @@ class ExtensionCommand:
         parser.add_argument("--actor", help="documentation only; authority is injected by the caller")
         sub = parser.add_subparsers(dest="command", required=True)
         sub.add_parser("health")
+        for name in ("disable", "enable", "repair"):
+            command = sub.add_parser(name)
+            command.add_argument("extension_id")
+            command.add_argument("--scope", choices=("global", "project"), default="global")
+            command.add_argument("--project-id")
+        update = sub.add_parser("update")
+        update.add_argument("extension_id")
+        update.add_argument("version")
+        update.add_argument("--protocol", default="extension-v1")
+        update.add_argument("--scope", choices=("global", "project"), default="global")
+        update.add_argument("--project-id")
         inspect = sub.add_parser("inspect")
         inspect.add_argument("experiment_id")
         define = sub.add_parser("define")
@@ -92,6 +107,26 @@ class ExtensionCommand:
                 ))
             elif args.command == "inspect":
                 result = _snapshot(self._facade.inspect(args.experiment_id, authority))
+            elif args.command in ("disable", "enable", "repair"):
+                record = getattr(self._facade, args.command)(
+                    args.extension_id, scope=args.scope, project_id=args.project_id, authority=authority,
+                )
+                result = {"object": f"extension_{args.command}", "extension_id": record.extension_id,
+                          "health_state": record.health_state.value, "enabled": record.enabled,
+                          "crash_count": record.crash_count}
+            elif args.command == "update":
+                if args.extension_id.count(".") != 1:
+                    raise ValueError("extension_id must be publisher.name")
+                publisher, name = args.extension_id.split(".")
+                record = self._facade.update(
+                    build_extension_manifest(
+                        args.extension_id, args.version, args.protocol,
+                    ),
+                    scope=args.scope, project_id=args.project_id, authority=authority,
+                )
+                result = {"object": "extension_update", "extension_id": record.extension_id,
+                          "version": record.version, "health_state": record.health_state.value,
+                          "enabled": record.enabled}
             else:
                 result = _snapshot(getattr(self._facade, args.command)(args.experiment_id, authority))
             out.write(json.dumps(result, sort_keys=True) + "\n")

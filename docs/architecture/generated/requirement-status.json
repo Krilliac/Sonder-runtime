@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 34,
-      "planned": 170
+      "implemented_unverified": 39,
+      "planned": 165
     },
     "total": 204,
     "verified": 0
@@ -222,9 +222,9 @@
     },
     {
       "checked": false,
-      "claim": "MCP.",
+      "claim": "A separately launched MCP provider crosses an explicit declared, negotiated, bounded stdio subprocess boundary with deadline/cancellation and truthful cleanup receipts.",
       "requirement_id": "API-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -292,17 +292,17 @@
     },
     {
       "checked": false,
-      "claim": "Application ports.",
+      "claim": "Application ports define the attended adaptive-training side-effect boundary.",
       "requirement_id": "ARCH-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Adapter ownership.",
+      "claim": "Training infrastructure failures remain behind typed process, lock, journal, policy, and deployment ports.",
       "requirement_id": "ARCH-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -348,9 +348,9 @@
     },
     {
       "checked": false,
-      "claim": "Split oversized modules.",
+      "claim": "Adaptive-training lifecycle sequencing is isolated from the oversized legacy root module.",
       "requirement_id": "ARCH-013",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -747,30 +747,30 @@
     },
     {
       "checked": false,
-      "claim": "Isolation.",
+      "claim": "Bounded child-process extension isolation is composed for live experiments and retains startup/call deadlines, output limits, restart budgets, crash budgets, and no-replay behavior.",
       "requirement_id": "EXT-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Quarantine.",
+      "claim": "Durable extension registry state preserves fail-closed admission, quarantine, disable, update, repair diagnostics, and crash evidence across reconstruction.",
       "requirement_id": "EXT-004",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Inventory.",
+      "claim": "The live application composition publishes a durable, bounded extension inventory with manifest digest validation and repair visibility.",
       "requirement_id": "EXT-005",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Ephemeral experiments.",
+      "claim": "Ephemeral extension experiments use the bounded child host through live composition while remaining explicitly authorized and non-durable.",
       "requirement_id": "EXT-006",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1496,17 +1496,17 @@
     },
     {
       "checked": false,
-      "claim": "Immutable deployment.",
+      "claim": "Attended training execution carries immutable manifest and adapter evidence into a typed deployment seam.",
       "requirement_id": "TRAIN-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Deployment service.",
+      "claim": "Only an attended execution request may cross the training deployment port, after process and evidence gates.",
       "requirement_id": "TRAIN-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1524,10 +1524,10 @@
     },
     {
       "checked": false,
-      "claim": "Rollback.",
+      "claim": "Activation failure attempts policy restoration and attended rollback, with recovery-required journal evidence when restoration fails.",
       "requirement_id": "TRAIN-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "453077b7d385b5070453c9321c39b3f8f35427be4f9af9af56f3c0efe9afbe24",
+    "ledger_sha256": "d0502bee994ba7f88c80d2bb5a8c66ac6c11c4294185a781ac37afaba894807a",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }
