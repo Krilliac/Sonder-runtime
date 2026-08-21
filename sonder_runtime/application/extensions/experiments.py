@@ -179,6 +179,13 @@ class EphemeralExperimentManager:
             stats=experiment.host.stats if experiment.host is not None else None,
         )
 
+    def snapshot(self) -> tuple[ExperimentSnapshot, ...]:
+        """Return bounded operator-visible experiment state in stable order."""
+        return tuple(
+            self.inspect(experiment_id)
+            for experiment_id in sorted(self._experiments)
+        )
+
     def start(self, experiment_id: str) -> ExperimentSnapshot:
         experiment = self._get(experiment_id)
         if experiment.state != ExperimentState.DEFINED:

@@ -559,6 +559,25 @@ def build_application(
             "has_previous_release": status.get("previous_release") is not None,
         },)
 
+    def selfmod_section():
+        rows = get_selfmod_service().list_runs(limit=64)
+        return tuple({
+            "run_id": row.get("id", ""),
+            "phase": row.get("phase", ""),
+            "objective": str(row.get("objective", ""))[:256],
+            "approved": bool(row.get("approval_given", False)),
+            "tests_passed": bool(row.get("tests_passed", False)),
+        } for row in rows)
+
+    def startup_authority_section():
+        experiments = get_experiment_manager().snapshot()
+        return ({
+            "authority": "extension_startup",
+            "configured": True,
+            "experiment_count": len(experiments),
+            "running_count": sum(1 for item in experiments if item.state == "running"),
+        },)
+
     def agent_section():
         return tuple({
             "name": registration.name,
@@ -600,10 +619,10 @@ def build_application(
         "memory_explanations": unavailable_section("memory_explanations"),
         "extensions": extension_section,
         "training": unavailable_section("training"),
-        "selfmod": unavailable_section("selfmod"),
+        "selfmod": selfmod_section,
         "updates": update_section,
         "health": provider_section,
-        "startup_authorities": unavailable_section("startup_authorities"),
+        "startup_authorities": startup_authority_section,
     })
 
     return Application(
