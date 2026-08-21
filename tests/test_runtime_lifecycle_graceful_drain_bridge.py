@@ -42,7 +42,11 @@ def _coordinator():
     )
 
 
-def test_unconfigured_bridge_is_truthfully_incomplete_and_legacy_surface_remains():
+def test_unconfigured_bridge_is_truthfully_incomplete_and_legacy_surface_remains(monkeypatch):
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.web.lifecycle._build_production_graceful_drain_bridge",
+        lambda _lifecycle: None,
+    )
     lifecycle = RuntimeLifecycle()
 
     result = lifecycle.drain_gracefully("not wired")
@@ -50,6 +54,18 @@ def test_unconfigured_bridge_is_truthfully_incomplete_and_legacy_surface_remains
     assert result.stage is DrainStage.INCOMPLETE
     assert not result.clean
     assert "bridge is not configured" in result.errors[0]
+
+
+def test_default_production_bridge_is_complete_after_startup_without_jobs(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    lifecycle = RuntimeLifecycle(startup_reconciler=lambda: 0)
+    lifecycle.startup(run_migrations=False)
+
+    result = lifecycle.drain_gracefully("default bridge")
+
+    assert result.clean
+    assert result.stage is DrainStage.COMPLETE
+    assert lifecycle.coordinator.cancellation.cancelled
 
 
 def test_injected_bridge_runs_graceful_coordinator_and_observation_provider():
@@ -78,3 +94,14 @@ def test_injected_bridge_failure_is_truthful_and_does_not_raise():
     assert result.stage is DrainStage.INCOMPLETE
     assert not result.clean
     assert result.errors == ("graceful drain bridge: RuntimeError",)
+
+
+def test_legacy_drain_surface_uses_production_bridge_and_stops_cleanly(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    lifecycle = RuntimeLifecycle(startup_reconciler=lambda: 0)
+    lifecycle.startup(run_migrations=False)
+
+    assert lifecycle.drain("admin request") is True
+    assert lifecycle.tracker.snapshot().process.value == "stopping"

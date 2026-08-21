@@ -38,6 +38,7 @@ from sonder_runtime.application.operations.graceful_drain import (
     GracefulDrainResult,
 )
 from sonder_runtime.application.operations.startup_reconciliation import (
+    RecordKind,
     StartupObservation,
     build_drain_plan,
 )
@@ -54,6 +55,172 @@ BLOCKING_MAINTENANCE_LOCKS = ("update", "restore", "migration")
 
 _AUTH_BUCKET_CAPACITY = 10
 _AUTH_BUCKET_REFILL_PER_SECOND = 0.5  # one new attempt every 2s after burst
+
+
+class LifecycleAdmissionBridge:
+    """Adapt the existing shutdown admission state to OPS-005."""
+
+    def __init__(self, coordinator: ShutdownCoordinator, tracker: ServiceStateTracker) -> None:
+        self._coordinator = coordinator
+        self._tracker = tracker
+
+    def stop_admission(self, reason: str) -> bool:
+        if not isinstance(reason, str) or not reason.strip():
+            return False
+        with self._coordinator._lock:
+            if self._coordinator._draining.is_set():
+                return True
+            self._coordinator._draining.set()
+        self._coordinator.cancellation.cancel()
+        try:
+            self._tracker.transition(ProcessState.DRAINING, reason)
+        except Exception:
+            return False
+        return True
+
+
+class LifecycleDescendantBridge:
+    """Cancel cooperators and settle the lifecycle's counted mutations."""
+
+    def __init__(self, coordinator: ShutdownCoordinator) -> None:
+        self._coordinator = coordinator
+
+    def cancel_descendants(self, reason: str) -> bool:
+        del reason
+        self._coordinator.cancellation.cancel()
+        return self._coordinator.cancellation.cancelled
+
+    def settle_descendants(self, deadline_monotonic: float) -> bool:
+        with self._coordinator._idle:
+            while self._coordinator._active_mutations > 0:
+                remaining = deadline_monotonic - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._coordinator._idle.wait(min(remaining, 0.5))
+            return True
+
+
+class LifecycleDeadlineBridge:
+    """Record the deadline notice through the lifecycle audit surface."""
+
+    def __init__(self, lifecycle: "RuntimeLifecycle") -> None:
+        self._lifecycle = lifecycle
+        self.last_notice = None
+
+    def announce_deadline(self, notice) -> bool:
+        self.last_notice = notice
+        self._lifecycle.record_event(
+            component="lifecycle",
+            event_code="DRAIN_DEADLINE_ANNOUNCED",
+            summary=notice.reason,
+            detail={
+                "deadline_monotonic": notice.deadline_monotonic,
+                "timeout_seconds": notice.timeout_seconds,
+            },
+        )
+        return True
+
+
+class LifecycleFlushBridge:
+    """Run the flush hooks registered on the existing shutdown coordinator."""
+
+    def __init__(self, coordinator: ShutdownCoordinator) -> None:
+        self._coordinator = coordinator
+
+    def __call__(self, remaining_seconds: float) -> bool:
+        del remaining_seconds
+        for hook in tuple(self._coordinator._flush_hooks):
+            try:
+                hook()
+            except Exception:
+                return False
+        return True
+
+
+class LifecycleCleanupBridge:
+    """Prove the lifecycle has no counted mutation left to clean up."""
+
+    def __init__(self, coordinator: ShutdownCoordinator) -> None:
+        self._coordinator = coordinator
+
+    def __call__(self, remaining_seconds: float) -> bool:
+        del remaining_seconds
+        return (
+            self._coordinator.cancellation.cancelled
+            and self._coordinator.active_mutations == 0
+        )
+
+
+class DurableJobObservationSource:
+    """Bounded durable job observations with unknown owner liveness."""
+
+    def __init__(self, registry_factory: Callable[[], object], *, max_records: int = 101) -> None:
+        if max_records < 1:
+            raise ValueError("max_records must be positive")
+        self._registry_factory = registry_factory
+        self._max_records = max_records
+
+    def __call__(self) -> tuple[StartupObservation, ...]:
+        registry = self._registry_factory()
+        records = registry.all(limit=self._max_records)
+        observations = []
+        for record in records:
+            view = registry.view(record.identity.job_id)
+            observations.append(StartupObservation(
+                RecordKind.JOB,
+                record.identity.job_id,
+                record.status.value,
+                # The registry view intentionally does not expose owner
+                # liveness. Unknown is safer than claiming a process orphan.
+                owner_alive=None,
+                checkpoint_available=record.status.value in {"paused", "interrupted"},
+                retryable=record.status.value in {"pending", "paused", "interrupted"},
+                process_id=view.process_id,
+                process_group_id=view.process_group_id,
+            ))
+        return tuple(observations)
+
+
+class ProductionGracefulDrainBridge:
+    """Production OPS-005 component bundle backed by existing lifecycle state."""
+
+    def __init__(
+        self,
+        lifecycle: "RuntimeLifecycle",
+        observation_source: DurableJobObservationSource,
+        process_tree,
+    ) -> None:
+        self.observations = observation_source
+        self.coordinator = GracefulDrainCoordinator(
+            admission=LifecycleAdmissionBridge(lifecycle.coordinator, lifecycle.tracker),
+            descendants=LifecycleDescendantBridge(lifecycle.coordinator),
+            deadline_communicator=LifecycleDeadlineBridge(lifecycle),
+            flush=LifecycleFlushBridge(lifecycle.coordinator),
+            cleanup=LifecycleCleanupBridge(lifecycle.coordinator),
+            process_tree=process_tree,
+        )
+
+
+def _build_production_graceful_drain_bridge(lifecycle: "RuntimeLifecycle"):
+    """Build the production bridge only when all adapter imports are present."""
+    try:
+        from sonder_runtime.adapters.persistence.sqlite.job_registry import (
+            SQLiteDurableJobRegistry,
+        )
+        from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
+        from sonder_runtime.platform.paths import state_path
+    except Exception:
+        return None
+
+    def registry_factory():
+        return SQLiteDurableJobRegistry(state_path("jobs.db", "SONDER_JOBS_DB"))
+
+    source = DurableJobObservationSource(registry_factory)
+    return ProductionGracefulDrainBridge(
+        lifecycle,
+        source,
+        ProcessTreeSupervisor(),
+    )
 
 
 class AdmissionRejected(Exception):
@@ -189,6 +356,15 @@ class RuntimeLifecycle:
         self._startup_reconciled = 0
         self._graceful_drain_coordinator = graceful_drain_coordinator
         self._graceful_drain_observations = graceful_drain_observations
+        self._drain_lock = threading.Lock()
+        if (
+            self._graceful_drain_coordinator is None
+            and self._graceful_drain_observations is None
+        ):
+            bridge = _build_production_graceful_drain_bridge(self)
+            if bridge is not None:
+                self._graceful_drain_coordinator = bridge.coordinator
+                self._graceful_drain_observations = bridge.observations
 
     # -- operations store (lazy, never fatal) ------------------------------
 
@@ -271,7 +447,7 @@ class RuntimeLifecycle:
         self.tracker.add_listener(
             lambda snap: self.metrics.process_state.set(_state_number(self.tracker))
         )
-        self.coordinator.install_signal_handlers()
+        self.coordinator.install_signal_handlers(self.drain)
         self.record_event(
             component="lifecycle",
             event_code="PROCESS_READY",
@@ -328,12 +504,28 @@ class RuntimeLifecycle:
         self._probe_stop.set()
 
     def drain(self, reason: str = "drain requested") -> bool:
+        if not self._drain_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._drain_locked(reason)
+        finally:
+            self._drain_lock.release()
+
+    def _drain_locked(self, reason: str) -> bool:
         self.record_event(
             component="lifecycle",
             event_code="DRAIN_REQUESTED",
             summary=reason,
         )
         sd_notify("STOPPING=1")
+        if self._graceful_drain_coordinator is not None:
+            result = self.drain_gracefully(reason)
+            if result.clean:
+                try:
+                    self.tracker.transition(ProcessState.STOPPING, "drain complete")
+                except Exception:
+                    pass
+            return result.clean
         clean = self.coordinator.drain(reason=reason)
         self.stop_probe()
         return clean
@@ -345,14 +537,7 @@ class RuntimeLifecycle:
         deadline_seconds: float | None = None,
         observations: Iterable[StartupObservation] | None = None,
     ) -> GracefulDrainResult:
-        """Run the explicit OPS-005 bridge when a coordinator is injected.
-
-        The legacy ``drain() -> bool`` surface remains backed by
-        ``ShutdownCoordinator``.  A complete application-level drain requires
-        an injected coordinator assembled with admission, descendant,
-        deadline, flush, cleanup, and process-tree components; silently
-        approximating those protocols here would over-report shutdown safety.
-        """
+        """Run the explicit OPS-005 bridge and report its barriers truthfully."""
         request = GracefulDrainRequest(
             reason=reason,
             deadline_seconds=(

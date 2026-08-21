@@ -20,6 +20,7 @@ class ShutdownCoordinator:
         self._cancellation = CancellationToken()
         self._flush_hooks: list = []
         self._interrupted_hooks: list = []
+        self._signal_drain = self.drain
 
     def begin_mutation(self) -> bool:
         with self._lock:
@@ -53,7 +54,9 @@ class ShutdownCoordinator:
     def add_interrupted_hook(self, hook) -> None:
         self._interrupted_hooks.append(hook)
 
-    def install_signal_handlers(self) -> None:
+    def install_signal_handlers(self, drain_callback=None) -> None:
+        if drain_callback is not None:
+            self._signal_drain = drain_callback
         for signum in (signal.SIGTERM, signal.SIGINT):
             try:
                 signal.signal(signum, self._on_signal)
@@ -62,7 +65,12 @@ class ShutdownCoordinator:
 
     def _on_signal(self, signum, frame) -> None:
         del frame
-        threading.Thread(target=self.drain, kwargs={"reason": f"signal {signal.Signals(signum).name}"}, daemon=True, name="sonder-drain").start()
+        threading.Thread(
+            target=self._signal_drain,
+            kwargs={"reason": f"signal {signal.Signals(signum).name}"},
+            daemon=True,
+            name="sonder-drain",
+        ).start()
 
     def drain(self, *, reason: str = "shutdown requested") -> bool:
         with self._lock:
