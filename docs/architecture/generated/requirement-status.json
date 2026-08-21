@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 47,
-      "planned": 157
+      "implemented_unverified": 70,
+      "planned": 134
     },
     "total": 204,
     "verified": 0
@@ -628,66 +628,66 @@
     },
     {
       "checked": false,
-      "claim": "First-class evaluation domain.",
+      "claim": "Evaluation is exposed as a provider-neutral application service rather than a transport or evaluator implementation.",
       "requirement_id": "EVAL-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Suites.",
+      "claim": "The evaluation service accepts bounded repository/tool/memory corpus coverage through the typed inventory port.",
       "requirement_id": "EVAL-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Metrics.",
+      "claim": "Evaluation suite and result metrics remain typed and provider-neutral at the application boundary.",
       "requirement_id": "EVAL-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Dimensions.",
+      "claim": "Versioned evaluation dimensions and suite identity are composed through an immutable catalog boundary.",
       "requirement_id": "EVAL-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Trajectory replay.",
+      "claim": "The application evaluation service exposes deterministic trajectory replay through an injected evaluator.",
       "requirement_id": "EVAL-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Divergence.",
+      "claim": "Replay and proposal result contracts preserve divergence and provenance evidence at the application boundary.",
       "requirement_id": "EVAL-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Promotion gates.",
+      "claim": "Promotion evidence requires explicit gates, replay equivalence, holdout success, rollback reference, and provenance before attended promotion.",
       "requirement_id": "EVAL-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Shadow/canary.",
+      "claim": "The evaluation service composes explicit shadow and canary observation transitions before promotion.",
       "requirement_id": "EVAL-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Proposal lifecycle.",
+      "claim": "Proposal creation, submission, evaluation, approval, promotion, rejection, withdrawal, and attended rollback are exposed through one typed service.",
       "requirement_id": "EVAL-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -873,59 +873,59 @@
     },
     {
       "checked": false,
-      "claim": "Memory classes.",
+      "claim": "The live application memory facade composes typed memory policy, recall, outcomes, and procedural learning classes.",
       "requirement_id": "MEM-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Per-class policy.",
+      "claim": "Memory reads and writes cross explicit typed policy decisions before application services perform them.",
       "requirement_id": "MEM-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Evidence-backed experience.",
+      "claim": "The facade preserves evidence-backed typed memory and procedural-promotion candidates without fabricating support.",
       "requirement_id": "MEM-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Temporal truth.",
+      "claim": "Outcome recording uses the existing typed source and interaction identity boundary for temporal learning truth.",
       "requirement_id": "MEM-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Retrieval explanation.",
+      "claim": "Recall remains behind the application facade and bounded recall service instead of transport handlers reaching into storage.",
       "requirement_id": "MEM-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Vector-space identity.",
+      "claim": "The memory facade preserves the existing provider-neutral recall identity and scoped unit-of-work boundary.",
       "requirement_id": "MEM-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Quality evaluation.",
+      "claim": "Typed retrieval evaluation and bounded policy decisions remain available from the live memory application boundary.",
       "requirement_id": "MEM-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Procedural skill promotion.",
+      "claim": "Procedural promotion candidates are exposed through the memory facade with evidence and age/contradiction policy preserved.",
       "requirement_id": "MEM-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -999,45 +999,45 @@
     },
     {
       "checked": false,
-      "claim": "Operation context.",
+      "claim": "Live HTTP requests can receive one typed operation context carrying correlation, principal, authority, deadline, and cancellation state.",
       "requirement_id": "OPS-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Structured tracing.",
+      "claim": "Live HTTP chat operations emit bounded redacted typed trace records without making request handling depend on telemetry.",
       "requirement_id": "OPS-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Health model.",
+      "claim": "The live lifecycle projects typed readiness, dependency, drain, recovery, admission, and bounded telemetry state into its health snapshot.",
       "requirement_id": "OPS-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Startup reconciliation.",
+      "claim": "The live lifecycle retains the typed startup-reconciliation and recovery boundary used by durable state adapters.",
       "requirement_id": "OPS-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Graceful drain.",
+      "claim": "Graceful drain shares a fail-closed runtime admission gate with live HTTP mutation admission and retains bounded cleanup truth.",
       "requirement_id": "OPS-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Bounded telemetry.",
+      "claim": "Live operation telemetry is bounded, redacted, and exposed only as a local diagnostic snapshot.",
       "requirement_id": "OPS-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "44d621025632b82e27c53a75a6093898412a5164f9f9368f7ebc9627136360c2",
+    "ledger_sha256": "019ba06fe818541e9224794d6756ac5ce061996e171a28ffe45081d67ae6fa21",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

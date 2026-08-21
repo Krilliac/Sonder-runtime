@@ -3302,6 +3302,7 @@ class Handler(BaseHTTPRequestHandler):
         # requests. A correlation ID is a request receipt, never a socket
         # receipt, so discard the prior request's cached value first.
         self._correlation_id = ""
+        self._operation_context = None
         self._request_started = time.monotonic()
         self._request_body_consumed = False
         if self._reject_disallowed_origin():
@@ -3596,6 +3597,23 @@ class Handler(BaseHTTPRequestHandler):
         lifecycle.metrics.request_duration_seconds.labels(
             route="/v1/chat/completions"
         ).observe(max(0.0, time.monotonic() - started))
+        try:
+            operation_context = getattr(self, "_operation_context", None)
+            if operation_context is None:
+                operation_context = lifecycle.operation_context(
+                    self._correlation(), None,
+                )
+            lifecycle.trace_operation(
+                operation_context,
+                operation="http.chat_completion",
+                status="ok" if result == "ok" else "error",
+                duration_ms=max(0.0, (time.monotonic() - started) * 1000.0),
+                labels={"result": result},
+            )
+        except Exception:
+            # Telemetry remains bounded and non-authoritative; request handling
+            # must not become dependent on its optional inspection surface.
+            pass
 
     def _read_json(self):
         # HTTP framing must be unambiguous before this handler reads a body.
@@ -4345,6 +4363,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        self._operation_context = sonder_lifecycle.get().operation_context(
+            self._correlation(), context,
+        )
         if _is_extension_route(path):
             if not context["authorized"]:
                 self._send_auth_error()

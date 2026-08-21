@@ -13,6 +13,7 @@ import time
 
 import sonder_runtime.adapters.process_liveness as process_liveness
 from sonder_runtime.domain.memory import rules as memory_rules
+from sonder_runtime.adapters.persistence.sqlite.outbox import OUTBOX_DDL
 
 
 _ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
@@ -493,7 +494,7 @@ def _migrate(conn):
 # Bump when _migrate()/post-migration indexes gain a step that _SCHEMA's own
 # text does not change.
 # Schema-text edits are picked up automatically -- see _schema_stamp().
-_MIGRATION_REVISION = 4
+_MIGRATION_REVISION = 5
 
 
 def _schema_stamp():
@@ -529,7 +530,7 @@ def init_db(conn):
     try:
         # executescript commits any existing transaction first, so begin the
         # write lock inside the script before any schema snapshot/migration.
-        conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA)
+        conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA + OUTBOX_DDL)
         _migrate(conn)
         # Indexes reference migrated columns, so they must come after _migrate.
         conn.execute(

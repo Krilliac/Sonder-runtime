@@ -305,6 +305,28 @@ def test_health_reports_state_dependencies_schemas(http_server):
     assert "ollama" in payload["dependencies"]
     assert "operations" in payload["schemas"]
     assert "build" in payload
+    assert payload["typed_health"]["states"]
+    assert payload["admission"]["accepting"] is True
+    assert payload["telemetry"]["export"] == "disabled"
+
+
+def test_live_lifecycle_creates_typed_context_and_bounded_trace():
+    lifecycle = sonder_lifecycle.RuntimeLifecycle()
+    context = lifecycle.operation_context(
+        "req-typed", {"account": {"username": "alice", "role": "developer"}},
+    )
+
+    assert context.source == "http"
+    assert context.principal_id == "alice"
+    record = lifecycle.trace_operation(
+        context,
+        operation="test.operation",
+        status="ok",
+        duration_ms=1.5,
+        labels={"result": "ok"},
+    )
+    assert record.redaction_applied is True
+    assert lifecycle.telemetry_snapshot()["retained"] == 1
 
 
 def test_metrics_endpoint_renders(http_server):

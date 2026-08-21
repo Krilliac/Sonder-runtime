@@ -37,6 +37,13 @@ class UnitOfWorkAdapter:
         self.memory = MemoryRepositoryAdapter(self._conn)
         return self
 
+    @property
+    def connection(self):
+        """Expose the caller-owned connection only to application ports."""
+        if self._conn is None:
+            raise RuntimeError("unit of work is not active")
+        return self._conn
+
     def commit(self) -> None:
         if self._conn is not None:
             self._conn.commit()
@@ -56,4 +63,3 @@ class UnitOfWorkAdapter:
                 self._conn.close()
                 self._conn = None
                 self.memory = None
-

@@ -141,6 +141,7 @@ class UnitOfWork(Protocol):
     automation: AutomationRepository
     policy: PolicyRepository
     events: EventSink
+    connection: object
 
     def __enter__(self) -> "UnitOfWork": ...
 

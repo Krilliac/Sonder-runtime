@@ -26,16 +26,28 @@ import threading
 import time
 import urllib.request
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterable
 
 from sonder_runtime.platform import version as sonder_version
 from sonder_runtime.platform.config import SonderConfig
 from sonder_runtime.application.lifecycle import process_state_number
+from sonder_runtime.application.context import OperationContext, local_owner_context
+from sonder_runtime.application.operations.admission_gate import (
+    AdmissionClosed,
+    RuntimeAdmissionGate,
+)
 from sonder_runtime.application.operations.graceful_drain import (
     DrainStage,
     GracefulDrainCoordinator,
     GracefulDrainRequest,
     GracefulDrainResult,
+)
+from sonder_runtime.application.operations.tracing_health import (
+    BoundedTracer,
+    HealthSnapshot,
+    TraceRecord,
+    health_snapshot,
 )
 from sonder_runtime.application.operations.startup_reconciliation import (
     RecordKind,
@@ -57,16 +69,52 @@ _AUTH_BUCKET_CAPACITY = 10
 _AUTH_BUCKET_REFILL_PER_SECOND = 0.5  # one new attempt every 2s after burst
 
 
+class _BoundedTraceBuffer:
+    """Process-local trace sink; it never exports or persists request content."""
+
+    def __init__(self, maximum: int = 256) -> None:
+        self._records = deque(maxlen=maximum)
+        self._lock = threading.Lock()
+
+    def export(self, record: TraceRecord) -> None:
+        with self._lock:
+            self._records.append(record)
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            records = tuple(self._records)
+        return {
+            "retained": len(records),
+            "max_records": self._records.maxlen,
+            "export": "disabled",
+            "records": tuple(
+                {
+                    "trace_id": item.trace_id,
+                    "span_id": item.span_id,
+                    "operation": item.operation,
+                    "status": item.status,
+                    "duration_ms": item.duration_ms,
+                    "labels": dict(item.labels),
+                    "redaction_applied": item.redaction_applied,
+                }
+                for item in records
+            ),
+        }
+
+
 class LifecycleAdmissionBridge:
     """Adapt the existing shutdown admission state to OPS-005."""
 
-    def __init__(self, coordinator: ShutdownCoordinator, tracker: ServiceStateTracker) -> None:
+    def __init__(self, coordinator: ShutdownCoordinator, tracker: ServiceStateTracker,
+                 admission: RuntimeAdmissionGate) -> None:
         self._coordinator = coordinator
         self._tracker = tracker
+        self._admission = admission
 
     def stop_admission(self, reason: str) -> bool:
         if not isinstance(reason, str) or not reason.strip():
             return False
+        self._admission.stop_admission(reason)
         with self._coordinator._lock:
             if self._coordinator._draining.is_set():
                 return True
@@ -192,7 +240,9 @@ class ProductionGracefulDrainBridge:
     ) -> None:
         self.observations = observation_source
         self.coordinator = GracefulDrainCoordinator(
-            admission=LifecycleAdmissionBridge(lifecycle.coordinator, lifecycle.tracker),
+            admission=LifecycleAdmissionBridge(
+                lifecycle.coordinator, lifecycle.tracker, lifecycle.admission,
+            ),
             descendants=LifecycleDescendantBridge(lifecycle.coordinator),
             deadline_communicator=LifecycleDeadlineBridge(lifecycle),
             flush=LifecycleFlushBridge(lifecycle.coordinator),
@@ -291,6 +341,9 @@ class RuntimeLifecycle:
 
         self.tracker = ServiceStateTracker()
         self.tracker.register_dependency("ollama", required=True)
+        self.admission = RuntimeAdmissionGate()
+        self._trace_buffer = _BoundedTraceBuffer()
+        self.tracer = BoundedTracer(self._trace_buffer)
         self.coordinator = ShutdownCoordinator(
             self.tracker, drain_deadline_seconds=drain_deadline_seconds
         )
@@ -398,6 +451,49 @@ class RuntimeLifecycle:
             store.record_event(**kwargs)
         except Exception:
             pass
+
+    def operation_context(
+        self, correlation_id: str, auth_context: dict | None = None,
+        *, timeout_seconds: float = 30.0,
+    ) -> OperationContext:
+        """Create the typed context carried by the live HTTP boundary."""
+        auth = auth_context or {}
+        account = auth.get("account") or {}
+        role = account.get("role") if isinstance(account, dict) else None
+        auth_level = role if role in {"user", "developer", "admin"} else "local"
+        principal = account.get("username") if isinstance(account, dict) else None
+        context = local_owner_context(
+            correlation_id=correlation_id,
+            source="http",
+            auth_level=auth_level,
+            timeout_seconds=timeout_seconds,
+            cancellation=self.coordinator.cancellation,
+        )
+        if principal:
+            return OperationContext(
+                correlation_id=context.correlation_id,
+                principal_id=str(principal),
+                auth_level=context.auth_level,
+                source=context.source,
+                deadline_monotonic=context.deadline_monotonic,
+                cancellation=context.cancellation,
+            )
+        return context
+
+    def trace_operation(
+        self, context: OperationContext, *, operation: str, status: str,
+        duration_ms: float, labels: dict[str, object] | None = None,
+    ) -> TraceRecord:
+        return self.tracer.emit(
+            context,
+            operation=operation,
+            status=status,
+            duration_ms=duration_ms,
+            labels=labels,
+        )
+
+    def telemetry_snapshot(self) -> dict[str, object]:
+        return self._trace_buffer.snapshot()
 
     # -- startup / shutdown ------------------------------------------------
 
@@ -652,6 +748,12 @@ class RuntimeLifecycle:
 
             def __enter__(self):
                 if mutating:
+                    try:
+                        lifecycle.admission.admit()
+                    except AdmissionClosed as exc:
+                        raise AdmissionRejected(
+                            503, "DRAINING", str(exc), retryable=True,
+                        ) from exc
                     blocked = lifecycle.blocking_maintenance()
                     if blocked:
                         raise AdmissionRejected(
@@ -840,6 +942,25 @@ class RuntimeLifecycle:
         payload["operations_store"] = (
             "unavailable" if self._ops_failed else "ok"
         )
+        ready, ready_reason = self.tracker.ready_for_traffic()
+        typed_health: HealthSnapshot = health_snapshot(
+            live=snapshot.process not in {ProcessState.FAILED, ProcessState.STOPPING},
+            ready=ready,
+            dependencies={dep.name: dep.state.value for dep in snapshot.dependencies},
+            degraded=snapshot.process is ProcessState.DEGRADED,
+            draining=self.coordinator.draining,
+            recovery_required=snapshot.process is ProcessState.RECOVERY_REQUIRED,
+            detail=ready_reason,
+        )
+        payload["typed_health"] = typed_health.as_dict()
+        admission = self.admission.snapshot()
+        payload["admission"] = {
+            "accepting": admission.accepting,
+            "stop_reason": admission.stop_reason,
+            "accepted": admission.accepted,
+            "rejected": admission.rejected,
+        }
+        payload["telemetry"] = self.telemetry_snapshot()
         try:
             import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
