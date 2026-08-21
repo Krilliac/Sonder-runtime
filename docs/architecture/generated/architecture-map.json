@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 147,
+      "file_count": 148,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -190,6 +190,7 @@
         "sonder_runtime/adapters/updates/service.py",
         "sonder_runtime/adapters/web/__init__.py",
         "sonder_runtime/adapters/web/lifecycle.py",
+        "sonder_runtime/adapters/web/live_reload.py",
         "sonder_runtime/adapters/workflow_adapters.py",
         "sonder_runtime/adapters/workflow_loop_runner.py",
         "sonder_runtime/adapters/workflow_repository.py"

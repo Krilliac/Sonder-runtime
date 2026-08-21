@@ -59,7 +59,7 @@ import code_runner
 import compiler_cache
 import request_cache
 import isolated_runner
-import live_reload
+from sonder_runtime.adapters.web import live_reload
 import system_profile
 import emotion_vectors
 import preference_learning

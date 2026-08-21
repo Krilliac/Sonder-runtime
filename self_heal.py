@@ -4,7 +4,7 @@ import os
 import time
 
 import emotion_vectors
-import live_reload
+from sonder_runtime.adapters.web import live_reload
 import sonder_runtime.adapters.memory_store as memory_store
 import store_integrity
 from sonder_runtime.platform import system_profile

@@ -26,7 +26,7 @@ import intents
 import web_intents
 import feedback
 import personas
-import live_reload
+from sonder_runtime.adapters.web import live_reload
 import debug_dump
 import consult as consult_flow
 import tier_router

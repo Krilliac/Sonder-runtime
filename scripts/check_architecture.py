@@ -55,14 +55,14 @@ VERSION_PLATFORM_PATH = "sonder_runtime/platform/version.py"
 HTTP_SERVE_PATH = "sonder_runtime/interfaces/http/serve.py"
 HTTP_SERVE_ROOT_MODULES = frozenset({
     "admin_auth", "code_runner", "command_catalog", "debug_dump", "feedback",
-    "grounding", "intents", "live_reload", "permission_modes",
+    "grounding", "intents", "permission_modes",
     "served_action_receipts", "server",
     "tool_contract", "training_tasks", "unsafe_lab",
 })
 REPL_PATH = "sonder_runtime/interfaces/repl/repl.py"
 REPL_ROOT_MODULES = frozenset({
     "server", "grounding", "code_runner", "training_tasks", "intents",
-    "web_intents", "feedback", "personas", "live_reload", "debug_dump",
+    "web_intents", "feedback", "personas", "debug_dump",
     "consult", "tier_router", "code_improve", "command_router",
     "command_catalog", "permission_modes", "project_scaffold", "slash_menu",
     "sonder_headless",

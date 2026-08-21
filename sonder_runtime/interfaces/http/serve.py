@@ -45,7 +45,7 @@ import code_runner
 import training_tasks
 import intents
 import feedback
-import live_reload
+from sonder_runtime.adapters.web import live_reload
 import debug_dump
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.launcher_health import token_is_configured
