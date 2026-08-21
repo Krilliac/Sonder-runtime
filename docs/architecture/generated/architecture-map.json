@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 202,
+      "file_count": 203,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -219,6 +219,7 @@
         "sonder_runtime/adapters/secrets.py",
         "sonder_runtime/adapters/security/__init__.py",
         "sonder_runtime/adapters/security/account_auth.py",
+        "sonder_runtime/adapters/security/credential_provider.py",
         "sonder_runtime/adapters/security/permission_policy.py",
         "sonder_runtime/adapters/security/recovery_evidence.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
@@ -251,7 +252,7 @@
       ]
     },
     {
-      "file_count": 236,
+      "file_count": 241,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -306,6 +307,7 @@
         "sonder_runtime/application/evaluation_history/use_cases.py",
         "sonder_runtime/application/execution/__init__.py",
         "sonder_runtime/application/execution/containment.py",
+        "sonder_runtime/application/execution/facade.py",
         "sonder_runtime/application/execution/process_jobs.py",
         "sonder_runtime/application/execution/tool_service.py",
         "sonder_runtime/application/execution/world_control.py",
@@ -393,6 +395,7 @@
         "sonder_runtime/application/ports/tool_executor.py",
         "sonder_runtime/application/ports/tool_registry.py",
         "sonder_runtime/application/ports/training.py",
+        "sonder_runtime/application/ports/updates.py",
         "sonder_runtime/application/ports/vision_gateway.py",
         "sonder_runtime/application/ports/web.py",
         "sonder_runtime/application/ports/workflows.py",
@@ -463,8 +466,10 @@
         "sonder_runtime/application/subagents/durable_continuation.py",
         "sonder_runtime/application/tasks/__init__.py",
         "sonder_runtime/application/tasks/use_cases.py",
+        "sonder_runtime/application/tools/__init__.py",
         "sonder_runtime/application/tools/audit.py",
         "sonder_runtime/application/tools/catalog_artifacts.py",
+        "sonder_runtime/application/tools/facade.py",
         "sonder_runtime/application/tools/gateway_contract.py",
         "sonder_runtime/application/tools/generated_catalogs.py",
         "sonder_runtime/application/tools/resource_policy.py",
@@ -479,6 +484,7 @@
         "sonder_runtime/application/training/training_service.py",
         "sonder_runtime/application/updates/__init__.py",
         "sonder_runtime/application/updates/activation.py",
+        "sonder_runtime/application/updates/application_service.py",
         "sonder_runtime/application/updates/bounded_state.py",
         "sonder_runtime/application/updates/durable_activation.py",
         "sonder_runtime/application/updates/publication.py",

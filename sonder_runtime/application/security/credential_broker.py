@@ -25,7 +25,12 @@ class CredentialBroker:
         self._secrets: dict[str, tuple[CredentialHandle, str, str]] = {}
 
     def issue(self, *, issuer: str, secret: str, hosts: tuple[str, ...], header_name: str = "Authorization", protocols: tuple[str, ...] = ("https",), expires_at: datetime | None = None) -> CredentialHandle:
-        if not secret or not header_name or "\r" in header_name or "\n" in header_name:
+        if (
+            not secret
+            or any(char in secret for char in "\r\n\x00")
+            or not header_name
+            or any(char in header_name for char in "\r\n\x00:")
+        ):
             raise ValueError("credential secret and safe header name are required")
         handle = CredentialHandle.mint(issuer, hosts, protocols, expires_at)
         self._secrets[handle.value] = (handle, header_name, secret)

@@ -13,6 +13,9 @@ from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
 from ..application.context_integration import ContextPlanningFacade
 from ..application.model_gateway import ModelGatewayFacade
+from ..application.execution.facade import ExecutionApplicationFacade
+from ..application.ports.tool_registry import InMemoryToolRegistry
+from ..application.tools.facade import ToolApplicationFacade
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,8 @@ class Runtime:
     # orchestrator module.
     agent_registry: Callable[[], UnifiedAgentRegistryService]
     context_planning: ContextPlanningFacade | None = None
+    execution: ExecutionApplicationFacade | None = None
+    tools: ToolApplicationFacade | None = None
 
     @property
     def model_gateway_facade(self) -> ModelGatewayFacade:
@@ -51,6 +56,10 @@ def build_runtime(
 
     gateway: ModelGateway = build_model_gateway(backend=config.model_backend)
     model_routes = ModelGatewayFacade(gateway)
+    # This graph is intentionally inert until a host supplies provider
+    # adapters.  Its policy and executor defaults remain fail-closed.
+    execution = ExecutionApplicationFacade.local()
+    tools = ToolApplicationFacade.compose(InMemoryToolRegistry())
 
     agent_registry: UnifiedAgentRegistryService | None = None
 
@@ -70,4 +79,6 @@ def build_runtime(
         clock=SystemClock(),
         agent_registry=get_agent_registry,
         context_planning=ContextPlanningFacade(),
+        execution=execution,
+        tools=tools,
     )

@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 97,
-      "planned": 107
+      "implemented_unverified": 117,
+      "planned": 87
     },
     "total": 204,
     "verified": 0
@@ -691,45 +691,45 @@
     },
     {
       "checked": false,
-      "claim": "Shared execution world.",
+      "claim": "Execution exposes one typed application facade for world binding, containment, jobs, and output handling.",
       "requirement_id": "EXEC-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Container default.",
+      "claim": "Execution containment and world policy remain explicit injected boundaries with fail-closed defaults.",
       "requirement_id": "EXEC-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Persistent terminal.",
+      "claim": "Persistent terminal and process-world seams are exposed through the typed execution facade.",
       "requirement_id": "EXEC-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Spill store.",
+      "claim": "Execution output and spill references remain bounded injected services rather than unbounded in-memory text.",
       "requirement_id": "EXEC-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Remote execution.",
+      "claim": "Remote execution is represented only as an explicit provider seam and is not silently enabled.",
       "requirement_id": "EXEC-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Isolation claims.",
+      "claim": "Execution isolation claims are carried by typed containment/world policy rather than inferred from a process call.",
       "requirement_id": "EXEC-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1202,17 +1202,17 @@
     },
     {
       "checked": false,
-      "claim": "Credential broker.",
+      "claim": "Credential acquisition and release cross an opaque-handle provider boundary and fail closed when no provider is configured.",
       "requirement_id": "SEC-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Egress policy.",
+      "claim": "Credential authorization is re-evaluated for concrete URLs and released after requests, with unsafe header values rejected.",
       "requirement_id": "SEC-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1419,52 +1419,52 @@
     },
     {
       "checked": false,
-      "claim": "One gateway.",
+      "claim": "The typed tool facade is the provider-neutral gateway boundary for tool execution.",
       "requirement_id": "TOOL-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Pipeline.",
+      "claim": "Tool execution composes schema, scope, policy, approval, deadline/cancellation, redaction, and receipt stages.",
       "requirement_id": "TOOL-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Resource-aware policy.",
+      "claim": "Resource-aware tool policy remains an explicit fail-closed application decision.",
       "requirement_id": "TOOL-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Decisions.",
+      "claim": "Tool decisions and approvals are represented as typed outcomes with explicit effects and resources.",
       "requirement_id": "TOOL-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Immutable startup authorities.",
+      "claim": "Tool startup authorities and executor availability remain explicit; absent authorities fail closed.",
       "requirement_id": "TOOL-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Generated catalogs.",
+      "claim": "Tool catalogs and generated artifact projections remain behind typed application catalog boundaries.",
       "requirement_id": "TOOL-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Receipts.",
+      "claim": "Tool receipts preserve requester, resource, effect, world, redaction, digest, and truthful completion fields.",
       "requirement_id": "TOOL-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1531,43 +1531,43 @@
     },
     {
       "checked": false,
-      "claim": "Bounded updates domain.",
+      "claim": "Updates have one provider-neutral application service for bounded state and release evidence.",
       "requirement_id": "UPDATE-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Platform activation.",
+      "claim": "Platform activation remains behind an injected typed activator and explicit authority boundary.",
       "requirement_id": "UPDATE-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Runtime contract.",
+      "claim": "Runtime-contract and signed-release evidence are checked before update activation can proceed.",
       "requirement_id": "UPDATE-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Atomic activation.",
+      "claim": "Update activation and rollback remain atomic, durable, and fail closed through injected state/activation ports.",
       "requirement_id": "UPDATE-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Signed release evidence.",
+      "claim": "Release evidence and verified backup are required inputs to the update application service.",
       "requirement_id": "UPDATE-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     }
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "f053aaefdb071757a15aab150f9cd2714fcbbd4da8f1aeca69ee7e8947684890",
+    "ledger_sha256": "2e2875bee2b5f8e6e84eab184ec25e5132d420af93ff1c94a87c43a4f6ab4f5b",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

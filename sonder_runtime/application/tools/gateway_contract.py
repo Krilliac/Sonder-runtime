@@ -8,6 +8,8 @@ must not perform provider, network, filesystem, or process I/O here.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -60,6 +62,7 @@ class ToolGatewayRequest:
     approval_token: str | None = None
     session_id: str | None = None
     project_id: str | None = None
+    execution_world: str = ""
 
     def __post_init__(self) -> None:
         if not self.request_id.strip() or not self.tool_name.strip():
@@ -71,6 +74,8 @@ class ToolGatewayRequest:
         for name, value in (("session_id", self.session_id), ("project_id", self.project_id)):
             if value is not None and not value.strip():
                 raise InvalidInput(f"{name} must be non-empty when supplied")
+        if not isinstance(self.execution_world, str):
+            raise InvalidInput("execution_world must be text")
 
 
 class CancellationSignal(Protocol):
@@ -96,6 +101,14 @@ class ToolInvoker(Protocol):
 
 class OutputRedactor(Protocol):
     def redact(self, tool_name: str, output: Any) -> Any: ...
+
+
+@dataclass(frozen=True)
+class RedactedOutput:
+    """Output plus an honest indication that redaction actually occurred."""
+
+    value: Any
+    applied: bool
 
 
 class ReceiptSink(Protocol):
@@ -128,6 +141,15 @@ class ToolReceipt:
     duration_ms: int = 0
     redaction_applied: bool = True
     approval_required: bool = False
+    requester_id: str = ""
+    argument_digest: str = ""
+    result_digest: str = ""
+    execution_world: str = ""
+    schema_version: str = "tool-receipt-v1"
+    policy_match: str = ""
+    resource: Mapping[str, Any] = field(default_factory=dict)
+    effects: tuple[str, ...] = ()
+    model: str = ""
 
 
 class ToolGateway:
@@ -197,7 +219,17 @@ class ToolGateway:
         self._check_control(request)
         result = self._invoker.invoke(request)
         self._check_control(request)
-        safe_output = self._redactor.redact(request.tool_name, result.output)
+        redacted = self._redactor.redact(request.tool_name, result.output)
+        if isinstance(redacted, RedactedOutput):
+            safe_output, redaction_applied = redacted.value, redacted.applied
+        else:
+            safe_output, redaction_applied = redacted, True
+        argument_digest = hashlib.sha256(
+            json.dumps(dict(request.arguments), sort_keys=True, default=str, separators=(",", ":")).encode()
+        ).hexdigest()
+        result_digest = hashlib.sha256(
+            json.dumps(safe_output, sort_keys=True, default=str, separators=(",", ":")).encode()
+        ).hexdigest()
         receipt = ToolReceipt(
             request_id=request.request_id,
             tool_name=request.tool_name,
@@ -206,7 +238,17 @@ class ToolGateway:
             error_code=result.error_code,
             error=result.error,
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+            redaction_applied=redaction_applied,
             approval_required=request.permission.approval is ApprovalMode.REQUIRED,
+            requester_id=request.scope.principal_id,
+            argument_digest=argument_digest,
+            result_digest=result_digest,
+            execution_world=getattr(request, "execution_world", ""),
+            resource={
+                "principal_id": request.scope.principal_id,
+                "workspace_roots": tuple(request.scope.workspace_roots),
+            },
+            effects=tuple(sorted(request.permission.effects)),
         )
         if self._audit is not None:
             self._audit.append(request, receipt)
@@ -223,6 +265,7 @@ class ToolGateway:
 
 __all__ = [
     "ApprovalGate", "ApprovalMode", "CancellationSignal", "OutputRedactor",
+    "RedactedOutput",
     "PermissionEvaluator", "ReceiptSink", "SchemaValidator", "ToolGateway",
     "ToolAuditRepository",
     "ToolGatewayRequest", "ToolInvocationOutput", "ToolInvoker", "ToolPermission",
