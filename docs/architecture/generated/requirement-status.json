@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 70,
-      "planned": 134
+      "implemented_unverified": 97,
+      "planned": 107
     },
     "total": 204,
     "verified": 0
@@ -460,73 +460,73 @@
     },
     {
       "checked": false,
-      "claim": "One planner.",
+      "claim": "The live application and runtime graphs expose one provider-neutral context-planning facade.",
       "requirement_id": "CTX-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Section budgets.",
+      "claim": "Context assembly applies typed section budgets and a bounded model input budget.",
       "requirement_id": "CTX-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Priority and eviction.",
+      "claim": "Priority selection and eviction are composed through the typed context selection policy.",
       "requirement_id": "CTX-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Deduplication.",
+      "claim": "Context records are deduplicated before prefix and replay manifests are built.",
       "requirement_id": "CTX-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Explainability.",
+      "claim": "Context selection returns explainable typed selections rather than opaque concatenated text.",
       "requirement_id": "CTX-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Last-good snapshots.",
+      "claim": "Complete context assemblies publish an isolated last-good snapshot for bounded recovery.",
       "requirement_id": "CTX-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Overflow recovery.",
+      "claim": "The context facade exposes bounded overflow preparation and recovery without provider calls.",
       "requirement_id": "CTX-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Hardware-aware native context.",
+      "claim": "Measured context capability can reduce the requested window without inventing hardware facts.",
       "requirement_id": "CTX-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Prefix caching.",
+      "claim": "Stable prefix manifests and cache keys are composed from canonical retained context records.",
       "requirement_id": "CTX-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Request replay.",
+      "claim": "Request replay manifests bind request identity, model, retained records, prefix key, and bounded metadata.",
       "requirement_id": "CTX-010",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -929,73 +929,73 @@
     },
     {
       "checked": false,
-      "claim": "One gateway.",
+      "claim": "The runtime graph composes one provider-neutral model gateway facade over the typed transport gateway.",
       "requirement_id": "MODEL-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Pure route planner.",
+      "claim": "Model route health and logical role selection are owned by typed application contracts.",
       "requirement_id": "MODEL-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Logical roles.",
+      "claim": "The model facade exposes stable logical-role route bindings rather than transport-specific role names.",
       "requirement_id": "MODEL-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Calibration profiles.",
+      "claim": "Provider health publication is explicit and newly composed providers remain UNKNOWN until evidence is published.",
       "requirement_id": "MODEL-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Capability profiles.",
+      "claim": "Capability routing remains an injected typed policy seam at the model facade.",
       "requirement_id": "MODEL-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "MoE correctness.",
+      "claim": "Model gateway composition preserves provider-neutral request/response contracts and local fail-closed behavior.",
       "requirement_id": "MODEL-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Controlled escalation.",
+      "claim": "Controlled escalation and capability routing remain explicit application policy seams rather than implicit provider fallback.",
       "requirement_id": "MODEL-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Separate role budgets.",
+      "claim": "Logical roles and gateway contracts provide separate budget/routing ownership points for model callers.",
       "requirement_id": "MODEL-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Provider health.",
+      "claim": "Provider health snapshots are stable, typed, and available through the model facade.",
       "requirement_id": "MODEL-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "NPU boundary.",
+      "claim": "The model facade leaves NPU/accelerator selection behind the typed capability-routing boundary.",
       "requirement_id": "MODEL-010",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1041,52 +1041,52 @@
     },
     {
       "checked": false,
-      "claim": "Incremental symbol index.",
+      "claim": "Repository intelligence exposes bounded incremental index deltas through an application facade.",
       "requirement_id": "REPO-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Language baseline.",
+      "claim": "The facade preserves typed language/file evidence records and ranked repository map contracts.",
       "requirement_id": "REPO-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Ranked repository map.",
+      "claim": "Repository map queries return bounded ranked projections through the CLI inspection boundary.",
       "requirement_id": "REPO-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "LSP integration.",
+      "claim": "Multi-root repository navigation accepts provider-neutral injected LSP ports.",
       "requirement_id": "REPO-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Evidence revisions.",
+      "claim": "Repository navigation evidence and revisions remain typed at the application boundary.",
       "requirement_id": "REPO-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Progressive expansion.",
+      "claim": "Progressive evidence expansion is exposed as a bounded application operation.",
       "requirement_id": "REPO-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Multi-root.",
+      "claim": "The repository facade preserves multi-root ownership and navigation provider isolation.",
       "requirement_id": "REPO-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "019ba06fe818541e9224794d6756ac5ce061996e171a28ffe45081d67ae6fa21",
+    "ledger_sha256": "f053aaefdb071757a15aab150f9cd2714fcbbd4da8f1aeca69ee7e8947684890",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

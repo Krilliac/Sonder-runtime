@@ -245,6 +245,11 @@ class ModelGatewayContract:
                 ProviderHealth(provider_id, ProviderState.UNKNOWN, datetime.now(timezone.utc)),
             )
 
+    @property
+    def providers(self) -> tuple[str, ...]:
+        """Published provider identities, without exposing mutable state."""
+        return tuple(sorted(self._providers))
+
     def publish_health(self, snapshot: ProviderHealth) -> None:
         if snapshot.provider_id not in self._providers:
             raise InvalidInput(f"unknown provider {snapshot.provider_id!r}")

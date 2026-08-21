@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import sys
 import uuid
+import json
 from typing import Any, TextIO
 
 from ...application.context import local_owner_context
 from ...application.errors import SonderError
+from ...application.ports.repository_intelligence import RepositoryIntelligencePort
 
 
 def _make_context(source: str = "repl"):
@@ -69,4 +71,42 @@ class OutcomeCommand:
             out.write(f"error: {e.code} {e}\n")
             return 1
         out.write(f"score: {score}\n")
+        return 0
+
+
+class RepositoryMapCommand:
+    """Inspect the bounded ranked repository map through an injected facade."""
+
+    def __init__(self, repository_intelligence: RepositoryIntelligencePort) -> None:
+        self._repository_intelligence = repository_intelligence
+
+    def run(self, query: str = "", *, token_budget: int = 2000, out: TextIO = sys.stdout) -> int:
+        try:
+            result = self._repository_intelligence.ranked_map(query, token_budget=token_budget)
+        except (ValueError, TypeError, SonderError) as error:
+            out.write(f"error: {error}\n")
+            return 1
+        payload = {
+            "object": "repository_map",
+            "generation": self._repository_intelligence.generation,
+            "query": result.query,
+            "token_budget": result.token_budget,
+            "total_tokens": result.total_tokens,
+            "entries": [
+                {
+                    "symbol_id": entry.record.symbol_id,
+                    "name": entry.record.name,
+                    "kind": entry.record.kind,
+                    "language": entry.record.language,
+                    "path": entry.record.file_path,
+                    "line": entry.record.line,
+                    "score": entry.score,
+                    "relation_hits": list(entry.relation_hits),
+                    "sha256": entry.record.evidence.sha256,
+                    "git_revision": entry.record.evidence.git_revision,
+                }
+                for entry in result.entries
+            ],
+        }
+        out.write(json.dumps(payload, sort_keys=True) + "\n")
         return 0

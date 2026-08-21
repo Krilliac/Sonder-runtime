@@ -917,7 +917,7 @@ def console_tools() -> dict:
     branches. Commands that front no tool (``/help``, ``/trace``, ``/exit``)
     are simply absent, and are not gated.
     """
-    import server  # lazy: server imports this module for /help
+    server = importlib.import_module("server")  # lazy compatibility edge
 
     names = _registered_tool_names(server)
     merged: dict = {}
@@ -992,7 +992,7 @@ def http_slash_tools() -> dict:
     attributing it nothing would have left those ten as ungated as the chain
     was -- they inherit ``control_command``'s own branch of the same name.
     """
-    import server  # lazy: server imports this module for /help
+    server = importlib.import_module("server")  # lazy compatibility edge
 
     names = _registered_tool_names(server)
     delegated = _branch_tool_calls("server.py", "control_command", names)
@@ -1248,7 +1248,7 @@ def _summarize(text: str) -> str:
 @functools.lru_cache(maxsize=1)
 def catalog() -> tuple[CatalogCommand, ...]:
     """Every reachable command: native slash commands plus every MCP tool."""
-    import server  # lazy: server imports this module for /help
+    server = importlib.import_module("server")  # lazy compatibility edge
 
     commands: list[Command] = []
     claimed: set[str] = set()

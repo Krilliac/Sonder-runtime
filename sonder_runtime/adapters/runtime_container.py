@@ -11,6 +11,8 @@ from ..adapters.persistence.fleet_registry import FleetStoreRegistryAdapter
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
+from ..application.context_integration import ContextPlanningFacade
+from ..application.model_gateway import ModelGatewayFacade
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,7 @@ class Runtime:
     config: RuntimeConfig
     capabilities: RuntimeCapabilities
     model_gateway: ModelGateway
+    model_routes: ModelGatewayFacade
     events: EventSink
     clock: Clock
     # Fleet persistence and its owner lease are deliberately lazy.  The
@@ -27,6 +30,12 @@ class Runtime:
     # commands without opening the fleet store or importing the legacy root
     # orchestrator module.
     agent_registry: Callable[[], UnifiedAgentRegistryService]
+    context_planning: ContextPlanningFacade | None = None
+
+    @property
+    def model_gateway_facade(self) -> ModelGatewayFacade:
+        """Provider-neutral route/health view of the transport gateway."""
+        return self.model_routes
 
 
 def build_runtime(
@@ -38,14 +47,10 @@ def build_runtime(
     from .system_clock import SystemClock
     from .local_observability import LocalObservabilitySink
 
-    if config.model_backend in ("openai", "openai-compatible", "llamacpp", "vllm"):
-        from .inference.openai_compat import OpenAICompatibleGateway
+    from .inference.model_gateway_factory import build_model_gateway
 
-        gateway: ModelGateway = OpenAICompatibleGateway()
-    else:
-        from .inference.ollama import OllamaGateway
-
-        gateway = OllamaGateway()
+    gateway: ModelGateway = build_model_gateway(backend=config.model_backend)
+    model_routes = ModelGatewayFacade(gateway)
 
     agent_registry: UnifiedAgentRegistryService | None = None
 
@@ -60,7 +65,9 @@ def build_runtime(
         config=config,
         capabilities=capabilities,
         model_gateway=gateway,
+        model_routes=model_routes,
         events=LocalObservabilitySink(LoggingEventSink()),
         clock=SystemClock(),
         agent_registry=get_agent_registry,
+        context_planning=ContextPlanningFacade(),
     )

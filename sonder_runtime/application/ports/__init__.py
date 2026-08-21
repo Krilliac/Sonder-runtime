@@ -46,6 +46,7 @@ from .repositories import (
     UnitOfWork,
 )
 from .tool_executor import ToolCall, ToolExecutor, ToolResult
+from .repository_intelligence import RepositoryIntelligencePort
 from .task_state import ChecklistEventPort, TaskRepository
 from .workflows import LoopRunner, WorkflowRepository
 from .artifact_store import (
@@ -183,6 +184,7 @@ __all__ = [
     "ToolCall",
     "ToolExecutor",
     "ToolResult",
+    "RepositoryIntelligencePort",
     "TaskRepository",
     "UnitOfWork",
     "LoopRunner",

@@ -17,15 +17,21 @@ _OPENAI_COMPATIBLE_BACKENDS = frozenset(
 )
 
 
-def build_model_gateway(*, target_resolver=None, generate_factory=None, embedding_provider=None) -> ModelGateway:
+def build_model_gateway(
+    *, target_resolver=None, generate_factory=None, embedding_provider=None,
+    backend: str | None = None,
+) -> ModelGateway:
     """Construct the configured model gateway.
 
     Ollama remains the default.  OpenAI-compatible aliases opt into the
     packaged OpenAI-compatible transport, whose own consent boundary remains
     authoritative for endpoint access.
     """
-    backend = os.environ.get("SONDER_MODEL_BACKEND", "ollama").strip().lower()
-    if backend in _OPENAI_COMPATIBLE_BACKENDS:
+    selected_backend = (
+        os.environ.get("SONDER_MODEL_BACKEND", "ollama")
+        if backend is None else backend
+    ).strip().lower()
+    if selected_backend in _OPENAI_COMPATIBLE_BACKENDS:
         from .inference.openai_compat_gateway import OpenAICompatibleGateway
 
         return OpenAICompatibleGateway()
