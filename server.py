@@ -12280,7 +12280,11 @@ def vision_analyze(
             extra_roots=extra_roots, timeout=timeout,
         )
     except ModelCallError as exc:
-        rendered = _format_model_call_error(exc)
+        rendered = _format_runtime_model_call_error_policy(
+            exc,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
         _record_direct_tool("vision_analyze", args, ok=False, started=started, summary=exc.kind)
         return rendered
     except Exception as exc:
@@ -22094,7 +22098,11 @@ def status() -> str:
         tags = _inventory_rows_policy(_get("/api/tags"), "/api/tags")
         ps = _inventory_rows_policy(_get("/api/ps"), "/api/ps")
     except ModelCallError as error:
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
     except urllib.error.URLError as e:
         return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
 
