@@ -45,9 +45,7 @@ from sonder_runtime.adapters.command_completion import (
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
-import training_tasks
-import intents
-import feedback
+from sonder_runtime.adapters.content_services import feedback, intents, training_tasks
 from sonder_runtime.adapters.web import live_reload
 from sonder_runtime.platform import debug_dump
 from sonder_runtime.domain import launcher_health as sonder_health

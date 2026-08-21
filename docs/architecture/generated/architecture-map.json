@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 152,
+      "file_count": 153,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -72,6 +72,7 @@
         "sonder_runtime/adapters/command_parsing.py",
         "sonder_runtime/adapters/command_surface.py",
         "sonder_runtime/adapters/config_validation.py",
+        "sonder_runtime/adapters/content_services.py",
         "sonder_runtime/adapters/context_formatting.py",
         "sonder_runtime/adapters/embedding_cache.py",
         "sonder_runtime/adapters/embeddings.py",
@@ -201,7 +202,7 @@
       ]
     },
     {
-      "file_count": 186,
+      "file_count": 187,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -286,6 +287,7 @@
         "sonder_runtime/application/ports/clock.py",
         "sonder_runtime/application/ports/command_catalog.py",
         "sonder_runtime/application/ports/compaction.py",
+        "sonder_runtime/application/ports/content_services.py",
         "sonder_runtime/application/ports/evaluation_history.py",
         "sonder_runtime/application/ports/event_sink.py",
         "sonder_runtime/application/ports/execution_tools.py",
