@@ -45,6 +45,28 @@ def test_server_core_model_paths_do_not_call_root_error_wrapper():
         )
 
 
+def test_server_status_and_vision_paths_do_not_call_root_error_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"vision_analyze", "status"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_format_model_call_error"
+            for node in ast.walk(function)
+        )
+
+
 def test_model_error_formatter_preserves_http_retry_hint():
     error = SimpleNamespace(
         kind="http", cloud=True, status=503, attempts=2,
