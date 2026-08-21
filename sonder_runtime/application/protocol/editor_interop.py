@@ -126,6 +126,24 @@ class ImplementationInfo:
             "capabilities": sorted(self.capabilities),
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ImplementationInfo":
+        """Decode peer metadata without accepting extension-shaped fields."""
+        if not isinstance(value, Mapping) or set(value) != {"name", "version", "capabilities"}:
+            raise EditorInteropError("implementation metadata has missing or unknown fields")
+        capabilities = value["capabilities"]
+        if not isinstance(capabilities, (list, tuple, set, frozenset)):
+            raise EditorInteropError("implementation capabilities must be a sequence")
+        if any(not isinstance(item, str) for item in capabilities):
+            raise EditorInteropError("implementation capabilities must be strings")
+        return cls(str(value["name"]), str(value["version"]), frozenset(capabilities))
+
+    def negotiate(self, peer: "ImplementationInfo") -> frozenset[str]:
+        """Return capabilities explicitly advertised by both peers."""
+        if not isinstance(peer, ImplementationInfo):
+            raise TypeError("peer must be ImplementationInfo")
+        return frozenset(self.capabilities & peer.capabilities)
+
 
 @dataclass(frozen=True)
 class CancellationRequest:
