@@ -16331,7 +16331,11 @@ def _agent_negative_claim_review(
                 raise
             return {
                 "decision": "error",
-                "reason": _format_model_call_error(error),
+                "reason": _format_runtime_model_call_error_policy(
+                    error,
+                    endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+                    display=_ollama_display(),
+                ),
                 "tool": "",
                 "args": {},
             }
@@ -19265,6 +19269,13 @@ def _agent_turn(
     Tools include code execution, memory search, workflows, diagnostics, and
     public web search/fetch/weather when allow_web=True and web tools are on.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     _maybe_live_reload()
     unsafe = unsafe_lab.active()
     if unsafe:
@@ -19808,7 +19819,7 @@ def _agent_turn(
                         checklist_id, checklist_states,
                         "model request failed before a valid tool decision", 1,
                     )
-                return _early_exit(_format_model_call_error(decision_error))
+                return _early_exit(render_model_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
                     checklist_id, checklist_states,
@@ -20367,7 +20378,7 @@ def _agent_turn(
                         "model request failed during final synthesis",
                         active_item,
                     )
-                return _early_exit(_format_model_call_error(final_error))
+                return _early_exit(render_model_error(final_error))
             if auto_checklist:
                 active_item = 3 if validation_attempted else 2 if mutated else 1
                 _agent_checklist_fail(
