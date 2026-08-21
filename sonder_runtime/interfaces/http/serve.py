@@ -561,6 +561,8 @@ def configure_typed_config(config) -> None:
     global HTTP_SESSION_STATE_OWNER_LIMIT, TRAIN_MAX_N
 
     server_config = config.server
+    from sonder_runtime.adapters.web import listener_probe
+    listener_probe.configure_typed_config(config)
     CONFIGURED_PORT = server_config.port
     API_KEY = config.secrets.api_key
     AUTH_SECRET = config.secrets.auth_secret
