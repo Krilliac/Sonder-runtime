@@ -11,7 +11,8 @@ bounded restart/crash recovery. Protocol failures are translated into typed
 host errors and failed calls are not replayed. A requested `memory_limit_bytes`
 is applied before the startup handshake through
 `NativeExtensionMemoryLimiter`: Windows uses a Job Object process-memory cap
-with kill-on-close, while unsupported platforms fail closed. The limiter is
+with kill-on-close; Linux uses `resource.prlimit` for a hard address-space
+cap; platforms without a native adapter still fail closed. The limiter is
 injectable so the lifecycle contract is tested without relying on process RSS.
 The extension manifest also carries an optional typed, digest-bound
 `resources.memory_limit_bytes` budget, and application/CLI/HTTP paths preserve
@@ -36,7 +37,8 @@ composition acceptance slice: `tests/production/test_extension_composition.py`
 installs through the live application graph, reopens the SQLite-backed
 registry through a fresh graph, rechecks the manifest digest, and preserves
 the explicit disabled/unverified state when provenance is absent. Native
-memory limiting is proven at the host seam, the declared budget is persisted,
+memory limiting is proven at the host seam on the available Windows runtime
+and through a deterministic POSIX adapter test; the declared budget is persisted,
 and a trusted persisted installation is exercised through the native host in
 `test_persisted_healthy_installation_reaches_native_experiment_host`. The full
 platform matrix remains unverified. Artifact verification evidence is now

@@ -1,6 +1,7 @@
 """EXT-003 native memory-limit contract tests."""
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,10 +50,31 @@ def test_requested_limit_is_applied_before_ready_and_closed_with_process():
 
 
 def test_native_limiter_is_truthfully_unsupported_off_windows():
-    if sys.platform == "win32":
-        pytest.skip("Windows has the native Job Object adapter")
+    if sys.platform != "win32":
+        pytest.skip("The host platform has a native POSIX adapter")
     with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported"):
-        NativeExtensionMemoryLimiter().apply(object(), 1024)
+        NativeExtensionMemoryLimiter(
+            os_module=SimpleNamespace(name="plan9"), platform_name="plan9"
+        ).apply(object(), 1024)
+
+
+def test_posix_native_limiter_applies_hard_address_space_limit():
+    calls = []
+
+    class FakeResource:
+        RLIMIT_AS = 9
+
+        @staticmethod
+        def prlimit(pid, resource, limits):
+            calls.append((pid, resource, limits))
+
+    token = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix"),
+        resource_module=FakeResource,
+        platform_name="posix",
+    ).apply(SimpleNamespace(pid=1234), 1024)
+    assert calls == [(1234, 9, (1024, 1024))]
+    token.close()
 
 
 def test_windows_native_limiter_attaches_to_live_extension():

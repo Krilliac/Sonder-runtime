@@ -1,10 +1,10 @@
 """Native memory limits for extension child processes.
 
 The adapter deliberately exposes only enforcement, not RSS sampling.  A
-requested limit either gets attached to the child before it is admitted to
-the extension protocol, or startup fails.  Windows uses a Job Object process
-memory limit; other platforms are explicit unsupported until a native
-enforcement adapter is added.
+ requested limit either gets attached to the child before it is admitted to
+ the extension protocol, or startup fails.  Windows uses a Job Object process
+ memory limit. Linux uses ``resource.prlimit`` for a hard address-space limit;
+ platforms without a native adapter remain explicitly unsupported.
 """
 from __future__ import annotations
 
@@ -39,15 +39,54 @@ class _WindowsJobToken:
             self._close_handle(handle)
 
 
+class _PosixLimitToken:
+    """The child owns the prlimit after application; there is no parent handle."""
+
+    def close(self) -> None:
+        return None
+
+
 class NativeExtensionMemoryLimiter:
     """Apply an OS-owned hard limit to one extension process."""
 
+    def __init__(self, *, os_module=os, resource_module=None, platform_name=None) -> None:
+        self._os = os_module
+        self._resource = resource_module
+        self._platform_name = platform_name if platform_name is not None else os_module.name
+
     def apply(self, process: object, limit_bytes: int) -> MemoryLimitToken:
-        if os.name != "nt":
+        if self._platform_name == "nt":
+            return self._apply_windows(process, limit_bytes)
+        if self._platform_name == "posix":
+            return self._apply_posix(process, limit_bytes)
+        raise ExtensionMemoryLimitUnsupported(
+            "native extension memory enforcement is unsupported on this platform"
+        )
+
+    def _apply_posix(self, process: object, limit_bytes: int) -> MemoryLimitToken:
+        resource = self._resource
+        if resource is None:
+            try:
+                import resource as resource_module
+            except ImportError as exc:
+                raise ExtensionMemoryLimitUnsupported(
+                    "native extension memory enforcement is unsupported on this platform"
+                ) from exc
+            resource = resource_module
+        prlimit = getattr(resource, "prlimit", None)
+        rlimit_as = getattr(resource, "RLIMIT_AS", None)
+        pid = getattr(process, "pid", None)
+        if prlimit is None or rlimit_as is None or not isinstance(pid, int):
             raise ExtensionMemoryLimitUnsupported(
-                "native extension memory enforcement is unsupported on this platform"
+                "native POSIX address-space enforcement is unavailable"
             )
-        return self._apply_windows(process, limit_bytes)
+        try:
+            prlimit(pid, rlimit_as, (limit_bytes, limit_bytes))
+        except (OSError, ValueError) as exc:
+            raise ExtensionMemoryLimitError(
+                f"setting native POSIX memory limit failed: {exc}"
+            ) from exc
+        return _PosixLimitToken()
 
     @staticmethod
     def _apply_windows(process: object, limit_bytes: int) -> MemoryLimitToken:
