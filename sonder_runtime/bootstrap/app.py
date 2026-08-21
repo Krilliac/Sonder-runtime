@@ -541,6 +541,28 @@ def build_application(
             "has_replay_manifest": assembly.replay is not None,
         },)
 
+    def memory_explanation_section():
+        return tuple({
+            "memory_class": memory_class.value,
+            "write_min_confidence": policy.write_min_confidence,
+            "write_requires_provenance": policy.write_requires_provenance,
+            "write_requires_evidence_or_confirmation": (
+                policy.write_requires_explicit_or_evidence
+            ),
+            "retrieval_enabled": policy.retrieval_enabled,
+            "retrieval_requires_scope": policy.retrieval_requires_scope,
+            "default_max_age_seconds": (
+                policy.default_max_age.total_seconds()
+                if policy.default_max_age is not None else None
+            ),
+            "promotion_enabled": policy.promotion_enabled,
+            "export_allowed": policy.export_allowed,
+            "deletion_allowed": policy.deletion_allowed,
+            "private_by_default": policy.private_by_default,
+        } for memory_class, policy in sorted(
+            memory_facade.policy.policies.items(), key=lambda item: item[0].value
+        ))
+
     def update_section():
         try:
             read_update_status = importlib.import_module(
@@ -577,6 +599,11 @@ def build_application(
             "experiment_count": len(experiments),
             "running_count": sum(1 for item in experiments if item.state == "running"),
         },)
+
+    memory_facade = MemoryLearningFacade(
+        UnitOfWorkAdapter,
+        recall_service=RecallService(LegacyRecallGateway()),
+    )
 
     def agent_section():
         return tuple({
@@ -632,7 +659,7 @@ def build_application(
         "agents": agent_section,
         "model_hardware": provider_section,
         "context": context_section,
-        "memory_explanations": unavailable_section("memory_explanations"),
+        "memory_explanations": memory_explanation_section,
         "extensions": extension_section,
         "training": training_section,
         "selfmod": selfmod_section,
@@ -672,10 +699,7 @@ def build_application(
         backup=BackupService(LegacyBackupGateway()),
         inspections=InspectionService(InspectionExecutorAdapter()),
         recall=RecallService(LegacyRecallGateway()),
-        memory=MemoryLearningFacade(
-            UnitOfWorkAdapter,
-            recall_service=RecallService(LegacyRecallGateway()),
-        ),
+        memory=memory_facade,
         evaluation_history=EvaluationHistoryService(
             EvaluationHistoryReaderAdapter()
         ),
