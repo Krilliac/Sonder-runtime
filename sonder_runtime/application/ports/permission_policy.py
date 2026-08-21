@@ -1,0 +1,16 @@
+"""Port for callers that need the runtime permission policy."""
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+
+class PermissionPolicy(Protocol):
+    def decide_for_caller(self, tool_name: str, *, interactive: bool,
+                          gate_control_exempt: bool) -> Any: ...
+    def set_mode(self, name: str) -> str: ...
+    def modes(self) -> tuple[str, ...]: ...
+    def is_durable_authority_tool(self, name: str) -> bool: ...
+    def mode_label(self, mode: str) -> str: ...
+
+
+__all__ = ["PermissionPolicy"]

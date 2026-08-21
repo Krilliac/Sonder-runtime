@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import permission_modes
+from sonder_runtime.adapters.security.permission_policy import permission_policy
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
 from sonder_runtime.adapters.command_completion import (
@@ -1801,7 +1801,7 @@ def _http_tool_refusal(tools, label, context=None):
                 # explicit allow rule). Returning the generic unbound message
                 # here would replace actionable text with a role demand that
                 # even an admin cannot satisfy on this path.
-                if str(tool or "").lstrip("/") in permission_modes.DURABLE_AUTHORITY_TOOLS:
+                if permission_policy.is_durable_authority_tool(tool):
                     pass
                 elif not _admin_authorized(context):
                     return (
@@ -1812,15 +1812,15 @@ def _http_tool_refusal(tools, label, context=None):
                 authority_error = _system_operation_authority_error(operation, context)
                 if authority_error:
                     return "refused %s: %s" % (label, authority_error)
-        decision = permission_modes.decide_for_caller(
+        decision = permission_policy.decide_for_caller(
             tool, interactive=False, gate_control_exempt=True,
         )
         if decision is None:
             continue
-        if decision.action == permission_modes.DENY:
+        if decision.action == "deny":
             return "refused %s: %s (mode: %s)" % (
                 label, decision.reason,
-                permission_modes.MODE_LABELS.get(decision.mode, decision.mode),
+                permission_policy.mode_label(decision.mode),
             )
     return ""
 
@@ -3866,7 +3866,7 @@ class Handler(BaseHTTPRequestHandler):
             wanted = str(req.get("mode") or "").strip()
         if not wanted:
             self._send_json_payload(
-                {"error": "mode is required", "modes": list(permission_modes.MODES)},
+                {"error": "mode is required", "modes": list(permission_policy.modes())},
                 status=400,
             )
             return
@@ -3875,11 +3875,11 @@ class Handler(BaseHTTPRequestHandler):
                 context,
                 self.headers.get("Idempotency-Key", ""),
                 "permission-mode\0%s" % wanted,
-                lambda: permission_modes.set_mode(wanted),
+                lambda: permission_policy.set_mode(wanted),
             )
         except ValueError as exc:
             self._send_json_payload(
-                {"error": str(exc), "modes": list(permission_modes.MODES)},
+                {"error": str(exc), "modes": list(permission_policy.modes())},
                 status=400,
             )
             return
