@@ -430,3 +430,16 @@ class LocalObservabilitySink:
                     "delegate_delivery_attestation": "unavailable",
                 },
             }
+
+    def trace_projection(self, limit: int = 256):
+        """Return a bounded export-neutral projection of retained events.
+
+        The application projection receives only this sink's already-redacted
+        event view. It never receives the delegate's raw event arguments and
+        does not enable export or delivery.
+        """
+        from sonder_runtime.application.observability.trace_projection import (
+            project_trace,
+        )
+
+        return project_trace(self.recent_events(limit=limit))
