@@ -8,25 +8,31 @@ Added a standard-library-only JSON-lines process boundary for extension code
 at `sonder_runtime/adapters/extensions/host.py`. The host owns child-process
 lifetime and enforces startup and call deadlines, per-line output bounds, and
 bounded restart/crash recovery. Protocol failures are translated into typed
-host errors and failed calls are not replayed.
+host errors and failed calls are not replayed. A requested `memory_limit_bytes`
+is applied before the startup handshake through
+`NativeExtensionMemoryLimiter`: Windows uses a Job Object process-memory cap
+with kill-on-close, while unsupported platforms fail closed. The limiter is
+injectable so the lifecycle contract is tested without relying on process RSS.
 
 ## Verification
 
 Command:
 
-`python -m pytest -q tests/test_extension_host.py --basetemp .pytest-extension-host-final`
+`python -m pytest -q tests/test_extension_host.py tests/test_extension_memory_limits.py --basetemp C:\\Users\\Nathan\\Documents\\Codex\\pytest-extension-memory-1`
 
-Result: **6 passed**. Also passed `python -m compileall -q sonder_runtime tests`,
+Result: **9 passed, 1 skipped** (the unsupported-platform branch is skipped on
+Windows; the live Windows Job Object attachment test is exercised there).
+Also passed `python -m compileall -q sonder_runtime tests`,
 `python scripts/check_architecture.py`, and `git diff --check`.
 
 ## Limitations
 
-This is a bounded process/protocol slice, not a claim that the complete
-EXT-003 requirement is verified. The current host does not enforce a native
-memory limit. Manifest admission and production registry wiring now have a
+This is a bounded process/protocol and native-limit slice, not a claim that the
+complete EXT-003 requirement is verified. Manifest admission and production registry wiring now have a
 composition acceptance slice: `tests/production/test_extension_composition.py`
 installs through the live application graph, reopens the SQLite-backed
 registry through a fresh graph, rechecks the manifest digest, and preserves
 the explicit disabled/unverified state when provenance is absent. Native
-memory limiting and actual extension execution through a persisted
-installation remain unverified.
+memory limiting is proven at the host seam, but actual extension execution
+through a persisted installation and the full platform matrix remain
+unverified.
