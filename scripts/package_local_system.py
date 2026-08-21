@@ -184,7 +184,6 @@ REQUIRED_FILES = {
     "sonder_runtime/adapters/updates/service.py",
     "sonder_runtime/adapters/web/lifecycle.py",
     "sonder_runtime/adapters/updates/engine.py",
-    "sonder_runtime/adapters/workflow_adapters.py",
     "sonder_runtime/adapters/system_clock.py",
     "sonder_runtime/adapters/logging_event_sink.py",
     "sonder_runtime/adapters/task_store.py",
