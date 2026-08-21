@@ -49,3 +49,21 @@ def test_interface_compatibility_configuration_is_lazy():
         text=True,
     )
     assert result.stdout.strip() == "False"
+
+
+def test_mcp_runtime_factory_is_lazy():
+    root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys; "
+        "from sonder_runtime.bootstrap.legacy_mcp import build_legacy_server_mcp_runtime; "
+        "build_legacy_server_mcp_runtime(); "
+        "print('server' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "False"
