@@ -54,7 +54,7 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 import sonder_runtime.adapters.secrets as sonder_secrets
 from sonder_runtime.adapters.persistence import served_action_receipts
-import tool_contract
+from . import authority_contract as tool_contract
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.model_request import (
@@ -1100,6 +1100,15 @@ SYSTEM_OPERATION_TOOLS = {
 }
 
 
+def _http_system_operation_for(tool):
+    return tool_contract.system_operation_for(
+        tool,
+        operation_tools=SYSTEM_OPERATION_TOOLS,
+        operator_tools=getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ()),
+        canonicalize=getattr(server, "_canonical_agent_tool_name", None),
+    )
+
+
 def _system_operation_authority_error(operation, context):
     """Return a role-boundary refusal, or "" when this caller may proceed."""
     required = SYSTEM_OPERATION_ROLES.get(str(operation or ""))
@@ -1744,7 +1753,7 @@ def _loop_global_operation_refusal(actions_json, context=None):
         if not isinstance(action, dict):
             continue
         action_type = str(action.get("type") or action.get("action") or "").strip().lower()
-        operation = tool_contract.system_operation_for(
+        operation = _http_system_operation_for(
             server._loop_action_tool(action_type)
         )
         if not operation:
@@ -1783,7 +1792,7 @@ def _http_tool_refusal(tools, label, context=None):
         memory_error = _account_global_memory_refusal(tool, context)
         if memory_error:
             return "refused %s: %s" % (label, memory_error)
-        operation = tool_contract.system_operation_for(tool)
+        operation = _http_system_operation_for(tool)
         if operation and context is not None:
             if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
                 # Durable-authority tools are already refused non-interactively
@@ -2831,7 +2840,7 @@ def _served_command_visible(command, context=None):
 
     tool = str(getattr(command, "tool", "") or "")
     if tool:
-        operation = tool_contract.system_operation_for(tool)
+        operation = _http_system_operation_for(tool)
         if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
             return _admin_authorized(context)
         if operation and _system_operation_authority_error(operation, context):

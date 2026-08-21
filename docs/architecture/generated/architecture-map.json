@@ -505,7 +505,7 @@
       ]
     },
     {
-      "file_count": 18,
+      "file_count": 19,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -513,6 +513,7 @@
         "sonder_runtime/interfaces/cli/commands.py",
         "sonder_runtime/interfaces/cli/headless.py",
         "sonder_runtime/interfaces/http/__init__.py",
+        "sonder_runtime/interfaces/http/authority_contract.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
         "sonder_runtime/interfaces/http/facades/model_request.py",
