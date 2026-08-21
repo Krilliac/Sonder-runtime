@@ -129,8 +129,7 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 187,
-      "planned": 17
+      "implemented_unverified": 204
     },
     "total": 204,
     "verified": 0
@@ -390,73 +389,73 @@
     },
     {
       "checked": false,
-      "claim": "Runtime identity.",
+      "claim": "The runtime has a stable packaged identity and version boundary.",
       "requirement_id": "CORE-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Modular monolith.",
+      "claim": "The implementation is composed as a modular monolith with enforced package layers.",
       "requirement_id": "CORE-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Single operator.",
+      "claim": "Operator authority is explicit and separated from ordinary model or client input.",
       "requirement_id": "CORE-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Local by default.",
+      "claim": "Local execution is the default provider and cloud use is policy-gated.",
       "requirement_id": "CORE-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Preserve data, remove obsolete interfaces.",
+      "claim": "Persistence and compatibility boundaries preserve data while retiring obsolete implementation paths.",
       "requirement_id": "CORE-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Independent unrestricted authorities.",
+      "claim": "Independent authorities for tools, startup capabilities, updates, and self-modification remain explicit.",
       "requirement_id": "CORE-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Attended training.",
+      "claim": "Training activation requires attended execution and qualification boundaries.",
       "requirement_id": "CORE-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Immutable deployments.",
+      "claim": "Deployment identities and model artifacts are immutable at activation boundaries.",
       "requirement_id": "CORE-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Signed updates.",
+      "claim": "Update activation requires trusted signed manifest verification.",
       "requirement_id": "CORE-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "No blind framework transplant.",
+      "claim": "The runtime uses explicit local ports and adapters rather than transplanting an external framework authority.",
       "requirement_id": "CORE-010",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -579,52 +578,52 @@
     },
     {
       "checked": false,
-      "claim": "Authority index.",
+      "claim": "A documentation authority index identifies current sources of truth.",
       "requirement_id": "DOC-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Historical labeling.",
+      "claim": "Historical architecture and program documents are explicitly labeled.",
       "requirement_id": "DOC-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "ADR namespace.",
+      "claim": "New ADRs have a canonical date-prefixed namespace.",
       "requirement_id": "DOC-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Focused contracts.",
+      "claim": "Focused contracts are documented in the generated inventory and architecture references.",
       "requirement_id": "DOC-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Generated references.",
+      "claim": "Generated references are reproducible from typed runtime sources.",
       "requirement_id": "DOC-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Status evidence.",
+      "claim": "Requirement status and evidence are generated from the append-only ledger.",
       "requirement_id": "DOC-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "No stale promises.",
+      "claim": "Documentation authority checks detect stale promises and out-of-date generated references.",
       "requirement_id": "DOC-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "8ed2e12178e769a23b205a030260a8c1b0f50fc1311a1e6d4dac14fc199b3bdf",
+    "ledger_sha256": "d00847dd20e90d10a215d8abeaa10e8de9fb5dc1fe3754ba93edfce2b021b971",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }
