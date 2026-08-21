@@ -58,10 +58,13 @@ interoperability now have an authenticated `/a2a` dispatcher seam in
 truthfully unavailable until composition has a base URL and application-owned
 job/agent services. The default handler exposes bounded `GetTask`,
 `ListTasks`, `CancelTask`, and `GetExtendedAgentCard` views over existing
-application ports; it does not synthesize `SendMessage` admission. This
-prevents an unauthenticated or unconfigured endpoint from exposing local task
-state. Route contract evidence is in `tests/test_a2a_http_jsonrpc.py`; cross-
-implementation remote interoperability remains outside this slice.
+application ports. When the composed application also exposes `ChatService`,
+`SendMessage` admits only bounded text-only user messages through a
+deterministic idempotent durable job, an explicit local-owner HTTP context,
+and the existing typed chat service; multimodal, remote, and background
+delegation are not claimed. Route contract evidence is in
+`tests/test_a2a_http_jsonrpc.py`; cross-implementation remote interoperability
+remains outside this slice.
 
 References: <https://github.com/a2aproject/A2A/blob/main/docs/specification.md>
 and <https://github.com/a2aproject/A2A/blob/main/docs/topics/agent-discovery.md>.
