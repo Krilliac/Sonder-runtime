@@ -22708,7 +22708,7 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
     # Cloud-only fanout must fail before catalog discovery, prompt sealing, or
     # receipt creation when the operator has not opted in. This avoids making
     # a privacy policy depend on the currently visible model catalog.
-    if scope == "cloud" and not cloud_allowed():
+    if scope == "cloud" and not _cloud_allowed_policy(os.environ):
         return {"scope": scope, "selected": [], "skipped": []}, ModelCallError(
             "configuration",
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
@@ -22759,7 +22759,7 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             })
             continue
         selected.append(name)
-    if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not cloud_allowed():
+    if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not _cloud_allowed_policy(os.environ):
         return {"selected": [], "skipped": skipped}, ModelCallError(
             "configuration",
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
@@ -23037,7 +23037,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
     try:
         run = fanout_store.create_run(
             marker, targets, request_owner=request_owner, request_role=request_role,
-            scope=plan["scope"], cloud_opt_in=cloud_allowed(),
+            scope=plan["scope"], cloud_opt_in=_cloud_allowed_policy(os.environ),
             limits=limits, execution_prompt_ciphertext=sealed,
         )
     except (OSError, ValueError) as exc:
@@ -23569,7 +23569,7 @@ def _execute_fanout_run(run_id):
         residency_reason = _fanout_dispatch_residency_reason(limits, model)
         if residency_reason:
             return row, "skipped", "", residency_reason, 0, None, {}
-        if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not cloud_allowed()):
+        if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ)):
             return row, "skipped", "", "cloud access disabled before execution", 0, None, {}
         exc = None
         generate = None
@@ -23588,7 +23588,7 @@ def _execute_fanout_run(run_id):
                     return True
                 return bool(
                     _is_cloud_model_name(model)
-                    and (not run.get("cloud_opt_in") or not cloud_allowed())
+                    and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ))
                 )
 
             generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
@@ -23635,7 +23635,7 @@ def _execute_fanout_run(run_id):
                 isinstance(caught, ModelCallError)
                 and caught.kind == "cancelled"
                 and _is_cloud_model_name(model)
-                and (not run.get("cloud_opt_in") or not cloud_allowed())
+                and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ))
             ):
                 return (
                     row,
