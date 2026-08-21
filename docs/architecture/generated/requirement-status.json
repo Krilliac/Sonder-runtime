@@ -242,9 +242,9 @@
     },
     {
       "checked": false,
-      "claim": "The default application graph serves the provider-backed control-plane snapshot through the production authenticated HTTP handler, with real health data and explicit unavailable-state records for uncomposed sections.",
+      "claim": "The default control-plane graph reads bounded task plans and approval/action states from their durable owners, redacts approval payloads, and preserves explicit unavailable states for sections without owning read ports.",
       "requirement_id": "API-006",
-      "revision": 7,
+      "revision": 8,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "f5bb606c7474a530d285b69d27d7733a82f3a7f5dc3aadc3fe855f325d81fc22",
+    "ledger_sha256": "4316f6d569848e22b242684c5455ea9553387680662e9e582c1c8a56e0762023",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }

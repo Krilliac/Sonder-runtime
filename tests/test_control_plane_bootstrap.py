@@ -29,9 +29,10 @@ def test_default_composition_exposes_real_and_explicitly_unavailable_sections(
     snapshot = application.control_plane_snapshot_service.snapshot(captured_at="now")
     payload = snapshot.as_dict()
     assert payload["sections"]["sessions"]["records"] == []
-    assert payload["sections"]["plans"]["records"] == [{
+    assert payload["sections"]["plans"]["records"] == []
+    assert payload["sections"]["context"]["records"] == [{
         "available": False,
         "reason": "owning application port is not composed",
-        "section": "plans",
+        "section": "context",
     }]
     assert payload["sections"]["health"]["count"] >= 1

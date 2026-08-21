@@ -28,7 +28,8 @@ These prove the application-level snapshot contract, provider-backed live
 assembly, and the production HTTP handler with explicit service injection.
 The default application graph still leaves the service unset unless its
 composition root supplies an override. Its built-in composition now exposes
-real bounded records for sessions, jobs, agents, provider health, extensions,
-and health, while unsupported areas carry explicit `available: false` records
-identifying the missing owning port. Provider failures still return a bounded
+real bounded records for sessions, plans/tasks, approvals, jobs, agents,
+provider health, extensions, and health, while unsupported areas carry
+explicit `available: false` records identifying the missing owning port.
+Approval payloads are intentionally excluded from the projection. Provider failures still return a bounded
 503 rather than inventing healthy data.

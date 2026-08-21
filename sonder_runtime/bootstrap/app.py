@@ -485,6 +485,45 @@ def build_application(
             "updated_at": record.updated_at,
         } for record in get_job_service().list(limit=1024))
 
+    def task_section():
+        import sonder_runtime.adapters.memory_store as memory_store
+
+        connection = memory_store.connect(runtime_paths.memory_db_path())
+        try:
+            rows = memory_store.list_tasks(
+                connection, limit=200, include_done=True,
+            )
+        finally:
+            connection.close()
+        return tuple({
+            "id": row.get("id", ""),
+            "title": row.get("title", ""),
+            "status": row.get("status", ""),
+            "priority": row.get("priority", 0),
+            "project": row.get("project", ""),
+            "owner": row.get("owner", ""),
+            "parent_id": row.get("parent_id", ""),
+        } for row in rows)
+
+    def approval_section():
+        from ..adapters.persistence import queued_actions
+
+        connection = queued_actions.connect()
+        try:
+            records = queued_actions.list_actions(connection, limit=256)
+        finally:
+            connection.close()
+        return tuple({
+            "approval_id": record.id,
+            "action_type": record.action_type,
+            "proposed_by": record.proposed_by.value,
+            "execution_scope": record.execution_scope,
+            "state": record.state.value,
+            "version": record.version,
+            "created": record.created,
+            "updated": record.updated,
+        } for record in records)
+
     def agent_section():
         return tuple({
             "name": registration.name,
@@ -517,8 +556,8 @@ def build_application(
 
     default_control_plane_service = control_plane_snapshot_service or ControlPlaneSnapshotService({
         "sessions": session_section,
-        "plans": unavailable_section("plans"),
-        "approvals": unavailable_section("approvals"),
+        "plans": task_section,
+        "approvals": approval_section,
         "jobs": job_section,
         "agents": agent_section,
         "model_hardware": provider_section,
