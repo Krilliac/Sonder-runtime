@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 from typing import Mapping, Protocol, Sequence
 
 from ...domain.selfmod.models import (
@@ -202,10 +203,12 @@ class GuardedLegacySelfmodService:
         self._unrestricted = bool(unrestricted)
         self._governance = SelfmodGovernance()
         self._lifecycle = VerificationLifecycle()
+        self._repository_roots: dict[str, str] = {}
 
     def create_plan(self, objective: str, repository_root: object, **kwargs: object) -> SelfmodIntegrationState:
         run = self._legacy.create_plan(objective, repository_root, **kwargs)
         run_id = _required_run_value(run, "id")
+        self._repository_roots[run_id] = str(repository_root)
         baseline = _required_run_value(run, "source_fingerprint")
         governance = self._governance.propose(
             run_id, str(run.get("objective") or objective), baseline,
@@ -225,13 +228,18 @@ class GuardedLegacySelfmodService:
         elif phase != "editing":
             raise InvalidInput(f"selfmod run {run_id!r} is not ready for preparation")
         if self._governance.get(run_id).phase.value == "proposed":
+            repository_root = str(run.get("repository_root") or self._repository_roots.get(run_id) or "")
+            if not repository_root.strip():
+                raise InvalidInput("selfmod run did not provide a repository root for isolation")
+            workspace_path = str(run.get("workspace_path") or "")
+            isolated = bool(workspace_path) and _is_distinct_path(workspace_path, repository_root)
             metadata = WorktreeMetadata(
-                str(run.get("workspace_path") or "workspace-unavailable"),
+                workspace_path or "workspace-unavailable",
                 str(run.get("branch_name") or f"selfmod/{run_id}"),
                 str(run.get("starting_commit") or "no-git-commit"),
-                isolated=bool(run.get("workspace_path")),
-                clean=True,
-                managed=bool(run.get("workspace_path")),
+                isolated=isolated,
+                clean=bool(run.get("workspace_clean", True)),
+                managed=isolated,
             )
             governance = self._governance.attach_worktree(run_id, metadata)
         else:
@@ -282,6 +290,12 @@ class GuardedLegacySelfmodService:
     def review(self, run_id: str, *, reviewer: str = "independent-selfmod-review") -> SelfmodIntegrationState:
         if self._unrestricted:
             run = self._legacy.review(run_id)
+            governance = self._governance.get(run_id)
+            if not governance.verifications:
+                governance = self._governance.mark_unrestricted_bypass(run_id, "verification")
+            if not governance.reproducer_evidence:
+                governance = self._governance.mark_unrestricted_bypass(run_id, "reproducer")
+            governance = self._governance.mark_unrestricted_bypass(run_id, "review")
             return self._state(run_id, legacy_run=run)
         governance = self._governance.get(run_id)
         lifecycle = self._lifecycle.get(run_id)
@@ -321,7 +335,17 @@ class GuardedLegacySelfmodService:
         )
         return SelfmodIntegrationState(run, governance, lifecycle)
 
-    def deploy(self, run_id: str, *, health_command: Sequence[str] | None = None, commit: bool = True) -> SelfmodIntegrationState:
+    def deploy(
+        self,
+        run_id: str,
+        *,
+        health_command: Sequence[str] | None = None,
+        commit: bool = True,
+        automatic_push: bool = False,
+        remote_push: bool = False,
+    ) -> SelfmodIntegrationState:
+        if automatic_push or remote_push:
+            raise Forbidden("automatic remote push is forbidden; deployment is local only")
         if self._unrestricted:
             run = self._legacy.deploy(run_id, health_command=health_command, commit=commit)
             return self._state(run_id, legacy_run=run)
@@ -351,6 +375,23 @@ class GuardedLegacySelfmodService:
                     run_id, ActivationRecord(f"{run_id}:activation", False, _receipt_digest(run), "legacy deployment failed before activation"),
                 )
             return SelfmodIntegrationState(run, governance, lifecycle)
+        if str(run.get("phase")) != "deployed":
+            # A legacy adapter that returns a non-deployed receipt without
+            # raising has not established activation.  Do not mint health or
+            # completion evidence from that ambiguous result.  The adapter is
+            # still asked to restore because it may have changed bytes before
+            # producing its malformed receipt.
+            try:
+                rollback_run = self._legacy.rollback(
+                    run_id, reason="ambiguous deployment receipt; fail-closed rollback"
+                )
+            except Exception as exc:
+                raise Forbidden("ambiguous deployment receipt and rollback failed") from exc
+            run = rollback_run
+            lifecycle = self._lifecycle.record_activation(
+                run_id, ActivationRecord(f"{run_id}:activation", False, _receipt_digest(run), "legacy deployment returned no deployed phase"),
+            )
+            raise Forbidden("deployment did not return a deployed phase")
         lifecycle = self._lifecycle.record_activation(
             run_id, ActivationRecord(f"{run_id}:activation", True, _receipt_digest(run), "legacy deployment completed"),
         )
@@ -390,6 +431,13 @@ def _required_run_value(run: Mapping[str, object], field: str) -> str:
 def _receipt_digest(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_distinct_path(candidate: str, repository: str) -> bool:
+    try:
+        return Path(candidate).resolve(strict=False) != Path(repository).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 __all__ = [

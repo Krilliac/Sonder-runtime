@@ -200,6 +200,35 @@ class SelfmodGovernance:
         self._candidates[candidate_id] = updated
         return updated
 
+    def mark_unrestricted_bypass(self, candidate_id: str, gate: str) -> CandidateRecord:
+        """Record a deliberately skipped gate without manufacturing evidence.
+
+        Unrestricted execution is an authority decision, not a verification
+        result.  Keeping the bypass in the candidate record makes the live
+        surface honest while still allowing an explicitly authorized repair
+        to proceed through its separate deployment path.
+        """
+        record = self._get(candidate_id)
+        if not record.unrestricted:
+            raise Forbidden("gate bypasses require unrestricted authority")
+        if gate not in {"isolation", "verification", "reproducer", "review"}:
+            raise GovernanceInputError(f"unknown bypassed gate: {gate}")
+        phase = record.phase
+        if gate == "verification":
+            self._require_phase(record, GovernancePhase.ISOLATED, GovernancePhase.VERIFIED)
+            phase = GovernancePhase.VERIFIED
+        elif gate == "review":
+            self._require_phase(record, GovernancePhase.VERIFIED, GovernancePhase.REVIEWED)
+            phase = GovernancePhase.REVIEWED
+        elif gate == "isolation":
+            self._require_phase(record, GovernancePhase.PROPOSED, GovernancePhase.ISOLATED)
+            phase = GovernancePhase.ISOLATED
+        else:
+            self._require_phase(record, GovernancePhase.ISOLATED, GovernancePhase.VERIFIED, GovernancePhase.REVIEWED)
+        updated = replace(record, phase=phase, bypassed_gates=_append_once(record.bypassed_gates, gate))
+        self._candidates[candidate_id] = updated
+        return updated
+
     def record_review(self, candidate_id: str, review: ReviewEvidence) -> CandidateRecord:
         record = self._get(candidate_id)
         self._require_phase(record, GovernancePhase.VERIFIED)

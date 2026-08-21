@@ -67,6 +67,26 @@ def _decode(value: str) -> ExtensionInstallRecord:
     )
 
 
+def _validate_record(record: ExtensionInstallRecord) -> None:
+    """Validate every duplicated/derived field before admitting a row."""
+    if record.extension_id != record.manifest.extension_id:
+        raise ValueError("extension state identity mismatch")
+    if record.version != record.manifest.version:
+        raise ValueError("extension state version mismatch")
+    if record.manifest_digest != record.manifest.digest():
+        raise ValueError("extension state manifest digest mismatch")
+    if record.scope.value == "global" and record.project_id is not None:
+        raise ValueError("global extension state cannot have a project_id")
+    if record.scope.value == "project" and (
+        not isinstance(record.project_id, str) or not record.project_id.strip()
+    ):
+        raise ValueError("project extension state requires a project_id")
+    if not isinstance(record.enabled, bool) or not isinstance(record.crash_count, int) or record.crash_count < 0:
+        raise ValueError("extension state counters are invalid")
+    if record.quarantine is not None and record.quarantine.extension_id != record.extension_id:
+        raise ValueError("extension state quarantine identity mismatch")
+
+
 class SQLiteExtensionStateRepository:
     """Bounded, transactional state store with fail-closed row validation."""
 
@@ -80,18 +100,22 @@ class SQLiteExtensionStateRepository:
 
     def load(self) -> tuple[ExtensionInstallRecord, ...]:
         with sqlite3.connect(str(self._path)) as connection:
-            rows = connection.execute("SELECT record_json FROM extension_registry_state ORDER BY slot").fetchall()
-        records = tuple(_decode(row[0]) for row in rows)
+            rows = connection.execute("SELECT slot, record_json FROM extension_registry_state ORDER BY slot").fetchall()
+        decoded = tuple((slot, _decode(record_json)) for slot, record_json in rows)
+        if any(slot != record.key[0] + ":" + record.key[1] + ":" + record.key[2] for slot, record in decoded):
+            raise ValueError("extension state slot identity mismatch")
+        records = tuple(record for _, record in decoded)
         if len(records) > self._max_records or len({record.key for record in records}) != len(records):
             raise ValueError("extension state is invalid or exceeds capacity")
         for record in records:
-            if record.manifest.digest() != record.manifest_digest or record.manifest.extension_id != record.extension_id:
-                raise ValueError("extension state manifest digest mismatch")
+            _validate_record(record)
         return records
 
     def save(self, records: Sequence[ExtensionInstallRecord]) -> None:
         if len(records) > self._max_records or len({record.key for record in records}) != len(records):
             raise ValueError("extension state exceeds capacity")
+        for record in records:
+            _validate_record(record)
         encoded = [(record.key[0] + ":" + record.key[1] + ":" + record.key[2], json.dumps(_record(record), sort_keys=True, separators=(",", ":"))) for record in records]
         with sqlite3.connect(str(self._path)) as connection:
             connection.execute("DELETE FROM extension_registry_state")

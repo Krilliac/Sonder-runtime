@@ -47,7 +47,9 @@ from ..adapters.persistence.sqlite.extensions import SQLiteExtensionStateReposit
 from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
 from ..application.vision import VisionService
-from ..application.session import SessionCaptureService, SessionCheckpointPrivacyService
+from ..application.session import (
+    SessionCaptureService, SessionCheckpointPrivacyService, SessionContinuityService,
+)
 from ..application.session.http_facade import HttpSessionFacade
 from ..application.compaction import SessionCompactionService
 from ..application.extensions.experiments import (
@@ -124,6 +126,7 @@ class Application:
     session_repository: Callable[[], SessionRepository]
     session_capture_service: Callable[[], SessionCaptureService]
     session_checkpoint_privacy_service: Callable[[], SessionCheckpointPrivacyService]
+    session_continuity_service: Callable[[], SessionContinuityService]
     session_http_facade: Callable[[], HttpSessionFacade]
     job_registry: Callable[[], JobRegistry]
     job_service: Callable[[], JobRegistryService]
@@ -248,6 +251,7 @@ def build_application(
     canonical_session_capture: SessionCaptureService | None = session_capture_service
     compaction_service: SessionCompactionService | None = None
     session_checkpoint_privacy: SessionCheckpointPrivacyService | None = None
+    session_continuity: SessionContinuityService | None = None
     session_http: HttpSessionFacade | None = None
     job_registry: SQLiteDurableJobRegistry | None = None
     job_service: JobRegistryService | None = None
@@ -309,9 +313,18 @@ def build_application(
         nonlocal session_http
         if session_http is None:
             session_http = HttpSessionFacade(
-                get_session_repository(), max_replay_events=1_000
+                get_session_repository(), max_replay_events=1_000,
+                continuity=get_session_continuity_service(),
             )
         return session_http
+
+    def get_session_continuity_service() -> SessionContinuityService:
+        nonlocal session_continuity
+        if session_continuity is None:
+            session_continuity = SessionContinuityService(
+                get_session_repository(), get_session_checkpoint_privacy_service(),
+            )
+        return session_continuity
 
     def get_job_service() -> JobRegistryService:
         nonlocal job_service, process_cleanup
@@ -475,6 +488,7 @@ def build_application(
         session_repository=get_session_repository,
         session_capture_service=get_session_capture_service,
         session_checkpoint_privacy_service=get_session_checkpoint_privacy_service,
+        session_continuity_service=get_session_continuity_service,
         session_http_facade=get_session_http_facade,
         compaction_service=get_compaction_service,
         job_registry=get_job_registry,

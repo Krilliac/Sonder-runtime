@@ -175,6 +175,7 @@ class ProvenanceInventory:
             "records": [
                 (item.extension_id, item.version, item.source, item.artifact_digest, item.manifest_digest,
                  item.signature.signer, item.signature.algorithm, item.signature.signature,
+                 item.signature.verified,
                  item.trust.source, item.trust.level.value, item.trust.basis, item.trust.issuer)
                 for item in ordered
             ],
@@ -205,6 +206,10 @@ class ExtensionProvenanceAdmission:
     def __init__(self, inventory: ProvenanceInventory, quarantine: QuarantineRegistry | None = None) -> None:
         self._inventory = inventory
         self._quarantine = quarantine or QuarantineRegistry()
+
+    @property
+    def inventory(self) -> ProvenanceInventory:
+        return self._inventory
 
     def evaluate(
         self,

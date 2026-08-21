@@ -248,7 +248,7 @@
       ]
     },
     {
-      "file_count": 227,
+      "file_count": 228,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -432,6 +432,7 @@
         "sonder_runtime/application/session/capture.py",
         "sonder_runtime/application/session/checkpoint_privacy.py",
         "sonder_runtime/application/session/checkpoints.py",
+        "sonder_runtime/application/session/continuity.py",
         "sonder_runtime/application/session/durable_replay.py",
         "sonder_runtime/application/session/fork.py",
         "sonder_runtime/application/session/http_facade.py",

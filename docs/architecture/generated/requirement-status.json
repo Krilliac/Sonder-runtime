@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 39,
-      "planned": 165
+      "implemented_unverified": 45,
+      "planned": 159
     },
     "total": 204,
     "verified": 0
@@ -733,17 +733,17 @@
     },
     {
       "checked": false,
-      "claim": "Extension boundary.",
+      "claim": "Bounded extension registry and explicit production facade exposure are composed; artifact discovery and execution promotion remain out of scope.",
       "requirement_id": "EXT-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Manifest.",
+      "claim": "Deterministic typed extension manifest identity/dependency validation and manifest-digest admission are implemented; cryptographic verification remains out of scope.",
       "requirement_id": "EXT-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1230,10 +1230,10 @@
     },
     {
       "checked": false,
-      "claim": "Extension provenance.",
+      "claim": "Bounded provenance/trust records, deterministic SBOM and inventory tamper detection, fail-closed empty trust inventory, and quarantine admission are implemented; cryptographic verification is not claimed.",
       "requirement_id": "SEC-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1272,10 +1272,10 @@
     },
     {
       "checked": false,
-      "claim": "Isolated candidate.",
+      "claim": "Isolated candidate execution is wired through the live typed selfmod bridge and rejects a candidate workspace that resolves to the live repository.",
       "requirement_id": "SELFMOD-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1293,17 +1293,17 @@
     },
     {
       "checked": false,
-      "claim": "Unrestricted truthfulness.",
+      "claim": "Unrestricted execution records skipped verification, reproducer, review, and isolation gates as explicit bypasses instead of fabricating evidence.",
       "requirement_id": "SELFMOD-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "No automatic push.",
+      "claim": "The live typed selfmod bridge refuses automatic or remote push requests before invoking legacy deployment; approved deployment intent remains local-only.",
       "requirement_id": "SELFMOD-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "d0502bee994ba7f88c80d2bb5a8c66ac6c11c4294185a781ac37afaba894807a",
+    "ledger_sha256": "5131d737be7ccc2fea097646f6e065aafb9dcc46a0b858223dc01f772b6e174b",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

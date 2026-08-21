@@ -99,6 +99,8 @@ class ExtensionCommand:
                     ],
                     "persistence": health.persistence,
                     "promotion": health.promotion,
+                    "provenance_digest": health.provenance_digest,
+                    "provenance_records": health.provenance_records,
                 }
             elif args.command == "define":
                 result = _snapshot(self._facade.define(

@@ -2,6 +2,7 @@ from sonder_runtime.application.extensions.quarantine import QuarantineReason, Q
 from sonder_runtime.domain.extensions.manifest import (
     CleanupPolicy, ExtensionDependency, ExtensionHealth, ExtensionIdentity, ExtensionManifest,
 )
+import pytest
 
 
 def _manifest(**overrides):
@@ -19,6 +20,22 @@ def test_manifest_is_typed_and_compatible_with_boundary():
     assert manifest.extension_id == "sonder.search"
     assert manifest.is_compatible(protocol="extension-v1", available_dependencies={"core"}, granted_permissions={"read"})
     assert manifest.from_plugin_manifest  # compatibility seam remains available
+
+
+def test_manifest_digest_is_order_stable_and_dependency_identity_is_bounded():
+    first = _manifest(
+        dependencies=(ExtensionDependency("zeta"), ExtensionDependency("alpha")),
+        permissions=("write", "read"),
+    )
+    second = _manifest(
+        dependencies=(ExtensionDependency("alpha"), ExtensionDependency("zeta")),
+        permissions=("read", "write"),
+    )
+    assert first.digest() == second.digest()
+    with pytest.raises(ValueError, match="dependencies must be unique"):
+        _manifest(dependencies=(ExtensionDependency("core"), ExtensionDependency("core")))
+    with pytest.raises(ValueError, match="cannot depend on itself"):
+        _manifest(dependencies=(ExtensionDependency("sonder.search"),))
 
 
 def test_incompatibility_is_quarantined_with_cleanup_metadata():

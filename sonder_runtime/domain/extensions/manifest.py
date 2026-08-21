@@ -81,8 +81,15 @@ class ExtensionManifest:
             raise ValueError("protocol must be a bounded identifier")
         if len(self.dependencies) > 64 or len(self.permissions) > 64:
             raise ValueError("manifest dependency and permission lists are bounded")
+        dependency_names = [item.name for item in self.dependencies]
+        if len(set(dependency_names)) != len(dependency_names):
+            raise ValueError("manifest dependencies must be unique")
+        if self.extension_id in dependency_names:
+            raise ValueError("manifest cannot depend on itself")
         if len(set(self.permissions)) != len(self.permissions) or any(not item for item in self.permissions):
             raise ValueError("permissions must be non-empty and unique")
+        if any(not _IDENTIFIER.fullmatch(item) for item in self.permissions):
+            raise ValueError("permissions must be bounded identifiers")
 
     @property
     def extension_id(self) -> str:
@@ -96,9 +103,9 @@ class ExtensionManifest:
             "protocol": self.protocol,
             "dependencies": [
                 {"name": item.name, "version": item.version, "required": item.required}
-                for item in self.dependencies
+                for item in sorted(self.dependencies, key=lambda dependency: (dependency.name, dependency.version, dependency.required))
             ],
-            "permissions": list(self.permissions),
+            "permissions": sorted(self.permissions),
             "health": {
                 "mode": self.health.mode.value,
                 "crash_limit": self.health.crash_limit,

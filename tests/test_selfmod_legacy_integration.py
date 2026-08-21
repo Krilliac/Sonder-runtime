@@ -166,6 +166,67 @@ def test_unrestricted_bridge_delegates_without_new_typed_gates() -> None:
     assert deployed.lifecycle.phase is LifecyclePhase.PROPOSED
 
 
+def test_unrestricted_bridge_reports_skipped_gates_without_fabricating_evidence() -> None:
+    legacy = LegacyDouble()
+    service = GuardedLegacySelfmodService(legacy, unrestricted=True)
+    service.create_plan("emergency change", "C:/repo")
+    service.prepare("selfmod-test-1")
+
+    reviewed = service.review("selfmod-test-1")
+
+    assert reviewed.governance.phase.value == "reviewed"
+    assert set(reviewed.governance.bypassed_gates) == {"verification", "reproducer", "review"}
+    assert reviewed.governance.verifications == ()
+    assert reviewed.governance.reproducer_evidence == ()
+
+
+def test_bridge_rejects_push_requests_before_legacy_deployment() -> None:
+    service, legacy = _prepared()
+
+    with pytest.raises(Forbidden, match="automatic remote push"):
+        service.deploy("selfmod-test-1", automatic_push=True)
+
+    assert not any(call[0] == "deploy" for call in legacy.calls)
+
+
+def test_prepare_rejects_a_candidate_workspace_that_is_the_live_repository() -> None:
+    class NonIsolatedLegacy(LegacyDouble):
+        def prepare_workspace(self, run_id):
+            self.phase = "editing"
+            return self._run(workspace_path="C:/repo")
+
+    legacy = NonIsolatedLegacy()
+    service = GuardedLegacySelfmodService(legacy)
+    state = service.create_plan("unsafe workspace", "C:/repo")
+    prepared = service.prepare(state.legacy_run["id"])
+
+    assert prepared.governance.phase.value == "rejected"
+    assert prepared.governance.rejection_reason == "isolated_managed_worktree_required"
+
+
+def test_ambiguous_legacy_deployment_receipt_fails_closed() -> None:
+    class AmbiguousLegacy(LegacyDouble):
+        def deploy(self, run_id, **kwargs):
+            self.calls.append(("deploy", kwargs))
+            self.phase = "approved"
+            return self._run()
+
+    legacy = AmbiguousLegacy()
+    service = GuardedLegacySelfmodService(legacy)
+    service.create_plan("bounded change", "C:/repo")
+    service.prepare("selfmod-test-1")
+    service.record_reproducer("selfmod-test-1", failure_evidence())
+    for kind in VerificationKind:
+        service.record_verification("selfmod-test-1", kind, ("python", "-c", "pass"))
+    service.review("selfmod-test-1")
+    service.approve("selfmod-test-1")
+
+    with pytest.raises(Forbidden, match="deployed phase"):
+        service.deploy("selfmod-test-1", health_command=("python", "-c", "pass"), commit=False)
+    assert any(call[0] == "deploy" for call in legacy.calls)
+    assert legacy.phase == "restored"
+
+
 def test_bootstrap_exposes_the_lazy_guarded_bridge_without_import_time_root_load() -> None:
     import sys
 
