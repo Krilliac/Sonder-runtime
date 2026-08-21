@@ -10,6 +10,7 @@ from sonder_runtime.application.control_plane import (
     CONTROL_PLANE_SECTIONS,
     ControlPlaneSnapshotService,
 )
+from sonder_runtime.bootstrap import app as bootstrap_app
 import sonder_runtime.interfaces.http.serve as serve
 
 
@@ -97,6 +98,36 @@ def test_production_handler_fails_closed_when_service_is_absent(monkeypatch):
             assert json.loads(error.read()) == {"error": "control_plane_unavailable"}
         else:
             raise AssertionError("absent control-plane service unexpectedly succeeded")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_default_application_graph_serves_control_plane(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_STATE_HOME", str(tmp_path))
+    bootstrap_app.reset_for_tests()
+    application = bootstrap_app.build_application()
+    monkeypatch.setattr(
+        serve.Handler,
+        "_request_auth_context",
+        lambda _self: {
+            "mode": "account",
+            "authorized": True,
+            "api_key": False,
+            "account": {"username": "operator", "role": "admin"},
+        },
+    )
+    monkeypatch.setattr(serve, "_CONTROL_PLANE_SERVICE", application.control_plane_snapshot_service)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/v1/admin/control-plane"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["snapshot"]["sections"]["plans"]["records"][0]["available"] is False
+        assert payload["snapshot"]["sections"]["health"]["count"] >= 1
     finally:
         httpd.shutdown()
         httpd.server_close()
