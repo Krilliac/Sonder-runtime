@@ -55,7 +55,7 @@ import reflection
 import sonder_runtime.adapters.embeddings as embeddings
 import personas
 import summarizer
-import code_runner
+from sonder_runtime.adapters.execution_tools import code_runner
 import compiler_cache
 import request_cache
 import isolated_runner
@@ -68,7 +68,7 @@ import web_tools
 import local_service_probe as local_probe
 import web_intents
 import self_heal
-import grounding
+from sonder_runtime.adapters.execution_tools import grounding
 from sonder_runtime.platform import paths as sonder_paths
 import harness_tools
 import memory_quality
