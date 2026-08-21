@@ -34,6 +34,24 @@ def _accumulator(*, limits=None, redactor=lambda value: value, events=None):
     ), sink
 
 
+def test_snapshot_has_stable_json_safe_projection():
+    stream, _ = _accumulator()
+    snapshot = stream.append(0, "hello", expected_revision=0).snapshot
+
+    assert snapshot.to_dict() == {
+        "stream_id": snapshot.stream_id.value,
+        "state": "open",
+        "revision": 1,
+        "next_sequence": 1,
+        "chunk_count": 1,
+        "total_bytes": 5,
+        "sha256": snapshot.sha256,
+        "preview": "hello",
+        "preview_truncated": False,
+        "failure_code": None,
+    }
+
+
 def test_chunks_are_monotonic_and_new_mutations_use_revision_cas():
     stream, _ = _accumulator()
 
