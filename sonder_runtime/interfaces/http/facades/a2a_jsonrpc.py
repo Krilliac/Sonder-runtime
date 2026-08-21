@@ -1,9 +1,14 @@
 """Authenticated HTTP presentation for the bounded A2A JSON-RPC seam."""
 from __future__ import annotations
 
+import hashlib
+import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from ....application.chat.handle_chat import ChatCommand
+from ....application.context import local_owner_context
+from ....application.ports.jobs import JobIdentity, JobStatus
 from ...a2a.jsonrpc import A2AJsonRpcTransport
 from .a2a import A2AAgentCardFacade
 
@@ -42,11 +47,13 @@ def build_application_a2a_handler(
     base_url: str,
     card_facade: A2AAgentCardFacade | None = None,
 ):
-    """Bind safe A2A reads/cancellation to existing application services.
+    """Bind bounded A2A task operations to existing application services.
 
-    Message admission is intentionally not synthesized here: without a
-    typed model-to-task admission service, ``SendMessage`` remains an explicit
-    unsupported operation rather than an untracked background request.
+    ``SendMessage`` is deliberately a synchronous, local-owner bridge.  It
+    admits text-only user messages, records the request in the durable job
+    registry, and invokes the existing typed chat service under an explicit
+    operation context.  It does not claim remote delegation, multimodal
+    support, or background execution.
     """
     if not isinstance(base_url, str) or not base_url.strip():
         return None
@@ -57,6 +64,8 @@ def build_application_a2a_handler(
     card_facade = card_facade or A2AAgentCardFacade()
 
     def task_payload(record):
+        if record is None:
+            raise ValueError("task not found")
         state = {
             "pending": "TASK_STATE_WORKING",
             "claimed": "TASK_STATE_WORKING",
@@ -71,13 +80,93 @@ def build_application_a2a_handler(
         if getattr(record, "error", ""):
             status["message"] = {"role": "ROLE_AGENT", "parts": [{"text": "task failed"}]}
         identity = record.identity
-        return {
+        task = {
             "id": identity.job_id,
             "contextId": identity.parent_session_id or "sonder-runtime",
             "status": status,
         }
+        result = getattr(record, "result", None)
+        if isinstance(result, Mapping) and isinstance(result.get("response_text"), str):
+            task["artifacts"] = [{
+                "artifactId": f"{identity.job_id}-response",
+                "parts": [{"text": result["response_text"]}],
+            }]
+        return task
+
+    def message_text(params):
+        message = params.get("message")
+        if not isinstance(message, Mapping):
+            raise ValueError("message is required")
+        if message.get("role", "ROLE_USER") not in {"ROLE_USER", "user"}:
+            raise ValueError("only user messages are accepted")
+        message_id = message.get("messageId")
+        if not isinstance(message_id, str) or not message_id.strip() or len(message_id) > 128:
+            raise ValueError("messageId must be a non-empty string of at most 128 characters")
+        parts = message.get("parts")
+        if not isinstance(parts, list) or not 1 <= len(parts) <= 32:
+            raise ValueError("message.parts must contain between 1 and 32 parts")
+        texts = []
+        for part in parts:
+            if not isinstance(part, Mapping) or set(part) != {"text"} or not isinstance(part["text"], str):
+                raise ValueError("only text message parts are supported")
+            texts.append(part["text"])
+        content = "".join(texts)
+        if not content.strip() or len(content) > 64_000:
+            raise ValueError("message text must be non-empty and at most 64000 characters")
+        return message_id, content
+
+    def send_message(params):
+        message_id, content = message_text(params)
+        chat = getattr(application, "chat", None)
+        if chat is None or not callable(getattr(chat, "complete", None)):
+            raise ValueError("A2A chat admission is not configured")
+        job_id = "a2a-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
+        service = jobs()
+        existing = service.get(job_id)
+        if existing is not None:
+            return {"task": task_payload(existing)}
+        identity = JobIdentity(
+            job_id=job_id,
+            kind="a2a.chat",
+            operation_id=message_id,
+            idempotency_key=message_id,
+        )
+        service.start(identity)
+        worker_id = f"a2a-http-{uuid.uuid4().hex}"
+        service.claim(job_id, worker_id, lease_seconds=300)
+        try:
+            result = chat.complete(
+                ChatCommand(content=content, tier="sonder"),
+                local_owner_context(
+                    correlation_id=message_id,
+                    source="http",
+                    auth_level="admin",
+                    timeout_seconds=300,
+                    cloud_allowed=False,
+                ),
+            )
+            record = service.finish(
+                job_id,
+                worker_id,
+                JobStatus.SUCCEEDED,
+                result={
+                    "response_text": result.response_text,
+                    "model": result.model,
+                    "tier": result.tier,
+                },
+            )
+        except Exception as error:
+            record = service.finish(
+                job_id,
+                worker_id,
+                JobStatus.FAILED,
+                error=f"{type(error).__name__}: {error}"[:1024],
+            )
+        return {"task": task_payload(record)}
 
     def handler(method, params):
+        if method == "SendMessage":
+            return send_message(params)
         if method == "GetExtendedAgentCard":
             card = card_facade.card(
                 registry_factory().registrations,

@@ -74,11 +74,83 @@ def test_default_application_handler_binds_durable_job_reads_and_cancel():
     assert "agentCard" in handler("GetExtendedAgentCard", {})
 
 
-def test_default_application_handler_does_not_synthesize_message_admission():
+def test_default_application_handler_requires_chat_admission_service():
     handler = build_application_a2a_handler(_Application(), base_url="https://sonder.test")
     try:
-        handler("SendMessage", {"message": {"parts": [{"text": "hello"}]}})
+        handler("SendMessage", {"message": {"messageId": "msg-unconfigured", "parts": [{"text": "hello"}]}})
     except ValueError as error:
         assert "not configured" in str(error)
     else:
-        raise AssertionError("SendMessage must remain explicitly unsupported")
+        raise AssertionError("SendMessage must require a configured chat service")
+
+
+class _ChatResult:
+    response_text = "hello from Sonder"
+    model = "test-model"
+    tier = "sonder"
+
+
+class _Chat:
+    def complete(self, command, context):
+        assert command.content == "hello"
+        assert context.source == "http"
+        assert context.auth_level == "admin"
+        return _ChatResult()
+
+
+class _AdmittingJobs(_Jobs):
+    def __init__(self):
+        self.records = {}
+
+    def start(self, identity):
+        record = JobRecord(identity, JobStatus.PENDING)
+        self.records[identity.job_id] = record
+        return record
+
+    def get(self, task_id):
+        return self.records.get(task_id)
+
+    def claim(self, job_id, worker_id, *, lease_seconds):
+        self.records[job_id] = JobRecord(self.records[job_id].identity, JobStatus.CLAIMED)
+        return object()
+
+    def finish(self, job_id, worker_id, status, *, result=None, error=""):
+        record = JobRecord(self.records[job_id].identity, status, result=result, error=error)
+        self.records[job_id] = record
+        return record
+
+
+class _AdmittingApplication(_Application):
+    def __init__(self):
+        self.jobs = _AdmittingJobs()
+        self.chat = _Chat()
+
+
+def test_default_application_handler_admits_bounded_text_message_as_durable_task():
+    application = _AdmittingApplication()
+    handler = build_application_a2a_handler(application, base_url="https://sonder.test")
+    params = {
+        "message": {
+            "messageId": "msg-1",
+            "role": "ROLE_USER",
+            "parts": [{"text": "hello"}],
+        }
+    }
+    first = handler("SendMessage", params)["task"]
+    second = handler("SendMessage", params)["task"]
+    assert first["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert first["artifacts"][0]["parts"][0]["text"] == "hello from Sonder"
+    assert second == first
+    assert len(application.jobs.records) == 1
+
+
+def test_default_application_handler_rejects_non_text_a2a_message():
+    handler = build_application_a2a_handler(_AdmittingApplication(), base_url="https://sonder.test")
+    try:
+        handler("SendMessage", {
+            "message": {"messageId": "msg-2", "parts": [{"data": "not-text"}]}
+        })
+    except ValueError as error:
+        assert "text message parts" in str(error)
+    else:
+        raise AssertionError("non-text A2A message must be rejected")
