@@ -5,20 +5,37 @@ They intentionally do not know about existing persistence stores.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ...domain.common.errors import ConcurrencyConflict, InvalidInput, NotFound
+from ..jobs.durable_registry import (
+    ProcessTreeCleanupContract,
+    ProcessTreeCleanupReceipt,
+    ProcessTreeCleanupRequest,
+)
 from ..ports.jobs import (
     JobClaim, JobIdentity, JobRecord, JobRegistry, JobStatus,
     WorkflowCheckpoint, WorkflowDefinition, WorkflowRepository, WorkflowResume,
 )
 
 
+@dataclass(frozen=True, slots=True)
+class JobCancellationResult:
+    """Cancellation plus the bounded process-cleanup proof, if requested."""
+
+    records: tuple[JobRecord, ...]
+    cleanup_receipts: tuple[ProcessTreeCleanupReceipt, ...] = ()
+    cleanup_completed: bool = False
+    detail: str = ""
+
+
 class JobRegistryService:
     """Validate requests and expose a single leased job lifecycle."""
 
-    def __init__(self, port: JobRegistry) -> None:
+    def __init__(self, port: JobRegistry, *, process_cleanup: ProcessTreeCleanupContract | None = None) -> None:
         self._port = port
+        self._process_cleanup = process_cleanup
 
     def create(self, identity: JobIdentity, *, metadata: dict[str, Any] | None = None) -> JobRecord:
         return self._port.create(identity, metadata=metadata)
@@ -48,6 +65,72 @@ class JobRegistryService:
         except KeyError as exc:
             raise NotFound(f"job {job_id!r} not found") from exc
         return tuple(records)
+
+    def cancel_with_cleanup(
+        self,
+        job_id: str,
+        reason: str = "cancelled",
+        *,
+        process_cleanup: ProcessTreeCleanupContract | None = None,
+        max_descendants: int = 64,
+    ) -> JobCancellationResult:
+        """Cancel descendants and request bounded cleanup for known processes.
+
+        The existing ``cancel`` contract remains unchanged. Cleanup is an
+        opt-in application capability: when no supervisor or process metadata
+        is available, the result explicitly remains incomplete rather than
+        claiming that an operating-system process tree was cleaned.
+        """
+        if isinstance(max_descendants, bool) or max_descendants < 1:
+            raise InvalidInput("max_descendants must be positive")
+        records = self.cancel(job_id, reason)
+        supervisor = process_cleanup if process_cleanup is not None else self._process_cleanup
+        if supervisor is None:
+            return JobCancellationResult(records, detail="process cleanup contract is not configured")
+
+        view = getattr(self._port, "view", None)
+        if not callable(view):
+            return JobCancellationResult(records, detail="job process metadata is not available")
+
+        receipts: list[ProcessTreeCleanupReceipt] = []
+        for record in records:
+            try:
+                metadata = view(record.identity.job_id)
+                process_id = getattr(metadata, "process_id", None)
+                if process_id is None:
+                    return JobCancellationResult(
+                        records, tuple(receipts), False,
+                        "job process metadata does not contain a process id",
+                    )
+                receipt = supervisor.cleanup(ProcessTreeCleanupRequest(
+                    record.identity.job_id,
+                    process_id,
+                    getattr(metadata, "process_group_id", None),
+                    max_descendants,
+                    reason,
+                ))
+                if not isinstance(receipt, ProcessTreeCleanupReceipt):
+                    return JobCancellationResult(
+                        records, tuple(receipts), False,
+                        "process cleanup returned an invalid receipt",
+                    )
+                if receipt.job_id != record.identity.job_id:
+                    return JobCancellationResult(
+                        records, tuple(receipts), False,
+                        "process cleanup receipt identified the wrong job",
+                    )
+                receipts.append(receipt)
+                if not receipt.complete:
+                    return JobCancellationResult(
+                        records, tuple(receipts), False,
+                        receipt.detail or "process-tree cleanup is incomplete",
+                    )
+            except Exception as exc:
+                return JobCancellationResult(
+                    records, tuple(receipts), False,
+                    f"process-tree cleanup failed: {type(exc).__name__}",
+                )
+        return JobCancellationResult(records, tuple(receipts), True)
 
     def claim(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> JobClaim:
         if not worker_id.strip() or lease_seconds <= 0:
@@ -115,4 +198,4 @@ class ResumableWorkflowEngine:
         return self._jobs.finish(job_id, worker_id, status, result=result, error=error)
 
 
-__all__ = ["JobRegistryService", "ResumableWorkflowEngine"]
+__all__ = ["JobCancellationResult", "JobRegistryService", "ResumableWorkflowEngine"]
