@@ -35,6 +35,7 @@ from ..adapters.model_gateway_factory import build_model_gateway
 from ..adapters.application_lifecycle import ApplicationLifecycle
 from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
+from ..application.session import SessionCaptureService
 from ..application.backup import BackupService
 from ..application.capabilities.jobs import JobRegistryService
 from ..application.evaluation_history import EvaluationHistoryService
@@ -94,6 +95,7 @@ def build_application(
     config: SonderConfig | None = None,
     preference_connection_factory: ConnectionFactory | None = None,
     preference_module_provider: PreferenceModuleProvider | None = None,
+    session_capture_service: SessionCaptureService | None = None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -150,7 +152,15 @@ def build_application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
         model_gateway=gateway,
-        chat=ChatService(gateway),
+        chat=ChatService(
+            gateway,
+            session_capture_service,
+            session_capture_factory=(
+                None
+                if session_capture_service is not None
+                else lambda: SessionCaptureService(get_session_repository())
+            ),
+        ),
         automation=AutopilotRepository(),
         # A UnitOfWork is per-transaction, so the graph exposes a factory, not
         # a singleton; each call opens and owns its own connection scope.
