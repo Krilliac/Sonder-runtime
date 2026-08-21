@@ -21,6 +21,10 @@ feature-shaped duplication.
 | PydanticAI | Typed dependency injection into prompts/tools/validators; durable execution integrations; streaming and MCP support | Existing composition-root injection and durable session ports cover the architecture. Keep this as a contract review target, not a new framework dependency. |
 | OpenAI Agents SDK | Runner-managed turns, sessions, guardrails, handoffs, and hierarchical traces covering generations, tools, handoffs, and custom events | Existing lifecycle hooks, approval envelopes, session events, and trajectory projection cover the primitives. Add no provider-specific runner; improve trace grouping only if a host needs cross-session workflow correlation. |
 | AutoGen Core / AgentChat | Event-driven standalone or distributed runtimes; explicit agent identity/lifecycle; teams with round-robin, selector, graph, swarm handoff, pause/resume, and reset semantics | Existing fanout and lifecycle hooks cover local coordination. Distributed identity and explicit pause/resume boundaries are the strongest future adapter candidates; avoid importing team-chat semantics into the core event model. |
+| Letta | Stateful agents with immutable recall history, editable in-context memory blocks, archival memory, skills, and background memory maintenance/dreaming | Existing memory classes, procedural promotion, session history, and skill registry cover the foundations. Add a bounded memory-maintenance projection only where it can remain evidence-backed and operator-visible; do not allow autonomous memory mutation to bypass provenance policy. |
+| CrewAI | Persisted/resumable flows with start/listen/router steps, streaming, unified memory, guardrails, and human-in-the-loop triggers | Existing jobs, workflows, lifecycle hooks, and memory ports cover the pieces. A typed task-ledger projection is a better seam than a CrewAI-compatible flow DSL. |
+| Browser Use | Session-oriented browser automation with explicit browser profiles, workspaces, long-running polling, and resumable result objects | Existing session/job/workspace boundaries are the right ownership seams. Any browser adapter must preserve credential/egress policy and never treat a browser profile as an implicit trust grant. |
+| Magentic-One / Magentic orchestration | A manager maintains a dynamic task ledger, delegates to specialists, tracks progress, and replans after errors | Existing goal/task stores and structured delegation are adjacent. Expose manager progress as durable task-ledger events before adding adaptive orchestration. |
 
 ## Priority order
 
@@ -34,6 +38,9 @@ feature-shaped duplication.
    cross a transport boundary without bypassing schema and bounded-value checks.
 5. Recipe/ACP adapters: defer ACP until a concrete host integration needs it;
    existing MCP and workflow contracts are the correct seams.
+6. Task-ledger projection: expose bounded manager goals, subgoals, ownership,
+   status, dependencies, and replanning evidence through existing durable task
+   and session surfaces.
 
 ## Sources
 
@@ -51,3 +58,8 @@ feature-shaped duplication.
 - OpenAI Agents SDK tracing: <https://openai.github.io/openai-agents-python/tracing/>
 - AutoGen runtime architecture: <https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/core-concepts/architecture.html>
 - AutoGen teams and termination: <https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/teams.html>
+- Letta memory documentation: <https://docs.letta.com/>
+- Letta memory and dreaming reference: <https://github.com/letta-ai/letta-docs-md/blob/main/configuration/memory/index.md>
+- CrewAI flows: <https://docs.crewai.com/index>
+- Browser Use agent sessions: <https://docs.browser-use.com/cloud/agent/quickstart>
+- Microsoft Magentic orchestration: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-orchestration/magentic>
