@@ -79,15 +79,7 @@ class SQLiteDurableJobRegistry:
         self._clock, self._max_events, self._max_bytes = clock, max_events, max_bytes
         self._lock = Lock()
         with self._connect() as connection:
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.executescript(_DDL)
-            columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(durable_job)")
-            }
-            if "worker_id" not in columns:
-                connection.execute("ALTER TABLE durable_job ADD COLUMN worker_id TEXT")
-            if "lease_until" not in columns:
-                connection.execute("ALTER TABLE durable_job ADD COLUMN lease_until TEXT")
+            initialize_schema(connection)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self._path), timeout=5.0)
@@ -461,4 +453,17 @@ class SQLiteDurableJobRegistry:
         return JobRecoveryReport(plan, tuple(receipts), tuple(interrupted))
 
 
-__all__ = ["JobRecoveryReport", "SQLiteDurableJobRegistry"]
+def initialize_schema(connection: sqlite3.Connection) -> None:
+    """Create or upgrade the durable-job schema on an existing connection."""
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.executescript(_DDL)
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(durable_job)")
+    }
+    if "worker_id" not in columns:
+        connection.execute("ALTER TABLE durable_job ADD COLUMN worker_id TEXT")
+    if "lease_until" not in columns:
+        connection.execute("ALTER TABLE durable_job ADD COLUMN lease_until TEXT")
+
+
+__all__ = ["JobRecoveryReport", "SQLiteDurableJobRegistry", "initialize_schema"]

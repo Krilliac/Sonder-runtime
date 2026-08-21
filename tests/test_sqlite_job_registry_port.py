@@ -1,5 +1,6 @@
 from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
 from sonder_runtime.application.ports.jobs import JobIdentity, JobStatus
+from sonder_runtime.adapters.persistence import migrations
 
 
 def _identity(job_id="job-1"):
@@ -52,3 +53,15 @@ def test_reconcile_matches_job_registry_port_and_marks_expired_leases(tmp_path):
     assert record is not None
     assert record.status is JobStatus.INTERRUPTED
     assert registry.reconcile(now=now[0]) == 0
+
+
+def test_jobs_store_uses_versioned_adoption_baseline(tmp_path):
+    database = tmp_path / "jobs.db"
+    SQLiteDurableJobRegistry(database).create(_identity())
+
+    before = migrations.status("jobs", str(database))
+    assert before.pending == ("0001_baseline",)
+
+    after = migrations.migrate_store("jobs", str(database))
+    assert after.current
+    assert after.applied == ("0001_baseline",)
