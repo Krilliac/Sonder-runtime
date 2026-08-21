@@ -38,3 +38,17 @@ def test_expired_lease_can_be_reclaimed_after_restart(tmp_path):
     assert recovered.worker_id == "worker-b"
     assert reopened.finish("job-1", "worker-a", JobStatus.FAILED, error="stale") is None
     assert reopened.finish("job-1", "worker-b", JobStatus.FAILED, error="recovered") is not None
+
+
+def test_reconcile_matches_job_registry_port_and_marks_expired_leases(tmp_path):
+    now = ["2026-08-20T12:00:00Z"]
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db", clock=lambda: now[0])
+    registry.create(_identity())
+    registry.claim("job-1", "worker-a", lease_seconds=1)
+
+    now[0] = "2026-08-20T12:00:02Z"
+    assert registry.reconcile(now=now[0]) == 1
+    record = registry.get("job-1")
+    assert record is not None
+    assert record.status is JobStatus.INTERRUPTED
+    assert registry.reconcile(now=now[0]) == 0
