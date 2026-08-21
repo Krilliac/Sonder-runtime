@@ -33,7 +33,7 @@ def format_model_call_error(error, *, target: str, display: str) -> str:
         )
     if error.kind == "cancelled":
         return _ERROR_PREFIX + " %s" % error.detail
-    return _ERROR_PREFIX + " contacting %s at %s%s: %s" % (
+    return "ERROR contacting %s at %s%s: %s" % (
         target, display, suffix, error.detail,
     )
 

@@ -143,7 +143,12 @@ def default_home() -> Path:
     configured = _configured_home()
     if configured is not None:
         return configured
-    override = os.environ.get("SONDER_HOME", "").strip()
+    # SONDER_STATE_HOME is the historical spelling retained for migrated
+    # local configurations.  An explicitly supplied alias wins over the
+    # process-wide default so a migrated test or launcher can isolate state.
+    override = os.environ.get("SONDER_STATE_HOME", "").strip() or os.environ.get(
+        "SONDER_HOME", ""
+    ).strip()
     if override:
         return Path(override).expanduser()
     system = platform.system()

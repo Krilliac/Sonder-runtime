@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import importlib
+import os
+from pathlib import Path
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.persistence.fleet_registry import FleetStoreRegistryAdapter
@@ -280,8 +282,11 @@ def build_application(
         if session_repository is None:
             from ..platform.paths import state_path
 
+            database = os.environ.get("SONDER_SESSIONS_DB", "").strip()
+            if not database:
+                database = state_path("sessions.db", "SONDER_SESSIONS_DB")
             session_repository = SQLiteSessionRepository(
-                state_path("sessions.db", "SONDER_SESSIONS_DB")
+                database
             )
         return session_repository
 
@@ -494,7 +499,12 @@ def build_application(
     def task_section():
         import sonder_runtime.adapters.memory_store as memory_store
 
-        connection = memory_store.connect(runtime_paths.memory_db_path())
+        state_home = os.environ.get("SONDER_STATE_HOME", "").strip()
+        database = (
+            str(Path(state_home).expanduser() / "memory.db")
+            if state_home else runtime_paths.memory_db_path()
+        )
+        connection = memory_store.connect(database)
         try:
             rows = memory_store.list_tasks(
                 connection, limit=200, include_done=True,
