@@ -20,10 +20,10 @@ from pathlib import Path
 
 import engine_bundle
 from sonder_runtime.adapters.inference import ollama_endpoint
-import unsafe_lab
+from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
-import sonder_health
-import sonder_paths
+from sonder_runtime.domain import launcher_health as sonder_health
+from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.interfaces.cli.headless import HeadlessCliOperations, run as _run_headless_cli
 
 
