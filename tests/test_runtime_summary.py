@@ -1,6 +1,21 @@
 from sonder_runtime.platform.runtime_summary import local_runtime_summary
 
 
+def test_server_production_paths_do_not_call_runtime_summary_compatibility_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_local_runtime_summary"
+    ]
+    assert calls == []
+
+
 def test_local_runtime_summary_projects_all_runtime_fields():
     assert local_runtime_summary(
         {

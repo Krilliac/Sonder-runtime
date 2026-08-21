@@ -21895,7 +21895,16 @@ def diagnostics() -> str:
             policy.get("path", runtime_policy.policy_path()),
         )
     )
-    runtime = _local_runtime_summary()
+    runtime = _platform_local_runtime_summary(
+        _platform_local_model_options(
+            0.2,
+            1,
+            SESSION_NUM_CTX,
+            native_context=context_policy.native,
+            environ=os.environ,
+        ),
+        _platform_requested_context(SESSION_NUM_CTX, default_value=SESSION_NUM_CTX),
+    )
     lines.append("  local runtime: threads=%s, gpu_layers=%s, batch=%s" % (
         runtime["num_thread"], runtime["num_gpu"], runtime["num_batch"]))
     lines.append(
@@ -22048,7 +22057,19 @@ def status() -> str:
             _local_model_retries(), int(_local_retry_delay(1) * 1000),
         ),
         "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
-            **_local_runtime_summary()
+            **_platform_local_runtime_summary(
+                _platform_local_model_options(
+                    0.2,
+                    1,
+                    SESSION_NUM_CTX,
+                    native_context=context_policy.native,
+                    environ=os.environ,
+                ),
+                _platform_requested_context(
+                    SESSION_NUM_CTX,
+                    default_value=SESSION_NUM_CTX,
+                ),
+            )
         ),
     ]
     mcp_state = mcp_runtime_data()
