@@ -1,6 +1,6 @@
 {
   "baseline_date": "2026-08-20",
-  "git_revision": "acd7f31",
+  "git_revision": "2a5ab22",
   "test_baseline": {
     "passed": 5076,
     "skipped": 38,
