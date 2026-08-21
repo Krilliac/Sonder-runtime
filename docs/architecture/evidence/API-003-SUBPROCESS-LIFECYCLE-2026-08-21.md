@@ -22,6 +22,14 @@ interoperability evidence for the local fixture only; it does not prove a
 separately deployed provider, production restart reconciliation, or full
 external ecosystem compatibility.
 
+The durable composition is additionally exercised by
+`tests/test_api003_restart_recovery.py`: a real sleeping subprocess is
+registered, ownership is reopened through a second SQLite registry instance,
+the persisted process identity is reconciled by the platform supervisor, and
+the job is marked `interrupted` only after a complete cleanup receipt. This
+proves a local Windows/POSIX restart rehearsal; release deployment and
+third-party provider restart behavior remain outside the claim.
+
 ```text
 python -m pytest -q tests/test_api003_subprocess_provider.py tests/test_api003_legacy_declaration.py tests/test_mcp_stdio_transport.py tests/test_process_termination_adapter.py
 ```
