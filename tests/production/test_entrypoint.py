@@ -438,8 +438,8 @@ def test_doctor_schema_check_uses_exact_cli_home(
     # unhealthy rather than pending.
     known = sum(
         len(sonder_migrations.discover_migrations(store))
-        for store in ("memory", "autopilot", "fleet", "operations",
-                      "queued_actions", "updates")
+            for store in ("memory", "autopilot", "fleet", "operations",
+                          "queued_actions", "updates", "jobs")
     )
     assert payload == {
         "overall": "fail",
@@ -447,7 +447,7 @@ def test_doctor_schema_check_uses_exact_cli_home(
             "name": "schemas",
             "status": "fail",
             "detail": (
-                "6 store(s); unhealthy history: modified=1 future=0; "
+                    "7 store(s); unhealthy history: modified=1 future=0; "
                 "pending=%d" % (known - 1)
             ),
         }],

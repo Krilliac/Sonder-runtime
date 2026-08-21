@@ -422,6 +422,33 @@ HTTP_SESSION_STATE_OWNER_LIMIT = max(1, min(
     HTTP_SESSION_STATE_LIMIT - 1,
     _env_int("SONDER_HTTP_SESSION_STATE_OWNER_LIMIT", 32),
 ))
+
+
+def configure_typed_config(config) -> None:
+    """Bind validated ``SonderConfig`` values at the HTTP boundary."""
+    global API_KEY, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
+    global TLS_TERMINATED_BY_PROXY, ALLOW_REGISTRATION, MAX_REQUEST_BYTES
+    global MAX_DISCARDED_BODY_BYTES, REQUEST_TIMEOUT_SECONDS
+    global STREAM_IDLE_TIMEOUT_SECONDS, HTTP_SESSION_STATE_LIMIT
+    global HTTP_SESSION_STATE_OWNER_LIMIT, TRAIN_MAX_N
+
+    server_config = config.server
+    API_KEY = config.secrets.api_key
+    HOST = server_config.host
+    REQUIRE_ACCOUNT = server_config.require_account
+    AUTH_MODE = server_config.auth_mode
+    CORS_ORIGINS = frozenset(server_config.cors_origins)
+    TLS_TERMINATED_BY_PROXY = server_config.tls_terminated_by_proxy
+    ALLOW_REGISTRATION = server_config.allow_registration
+    MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, server_config.max_request_bytes))
+    MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
+    REQUEST_TIMEOUT_SECONDS = max(5, server_config.request_timeout_seconds)
+    STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
+    HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
+    HTTP_SESSION_STATE_OWNER_LIMIT = max(
+        1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
+    )
+    TRAIN_MAX_N = max(1, server_config.train_max_n)
 _HTTP_SESSION_STATES = OrderedDict()
 _HTTP_SESSION_STATES_LOCK = threading.RLock()
 
@@ -4725,8 +4752,10 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
 
-def main():
-    port = DEFAULT_PORT
+def main(config=None):
+    if config is not None:
+        configure_typed_config(config)
+    port = DEFAULT_PORT if config is None else config.server.port
     if len(sys.argv) > 1:
         try:
             port = int(sys.argv[1])

@@ -552,7 +552,7 @@ def cmd_serve(args) -> int:
 
     configure_legacy_interfaces()
     sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
-    sonder_serve.main()
+    sonder_serve.main(config=config)
     return 0
 
 
