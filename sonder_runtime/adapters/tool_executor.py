@@ -31,6 +31,18 @@ class ToolExecutorAdapter:
                 output="operation cancelled",
             )
         try:
+            if call.tool == "json_patch":
+                import sonder_runtime.adapters.filesystem.json_patch as json_patch_tool
+
+                if "operations_json" in args and "operations" not in args:
+                    args["operations"] = args.pop("operations_json")
+                res = json_patch_tool.patch_json(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool == "text_patch":
+                import sonder_runtime.adapters.filesystem.text_patch as text_patch
+
+                res = text_patch.text_patch(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool in {"file_copy", "file_move"}:
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 

@@ -22,10 +22,17 @@ The native catalog also includes four guarded mutation tools: `file_copy`,
 transfer, transactional batch, and explicit-delete-confirmation adapters;
 they do not accept legacy authentication tokens on the native surface.
 
+The catalog now also exposes `json_patch` and `text_patch` through the typed
+executor. Their guarded implementations are packaged under
+`sonder_runtime/adapters/filesystem/`, preserving transactional reports and
+rollback behavior without adding a root-module import to the native path. The
+historical root modules remain only as compatibility entrypoints for the
+legacy server surface.
+
 The historical server MCP catalog remains the default compatibility path until
 catalog parity and complete application-service coverage are proven. The
 legacy catalog currently contains 204 registered tools; the native catalog
-therefore covers 20 names and does not claim full parity, API-003, or TOOL-001
+therefore covers 22 names and does not claim full parity, API-003, or TOOL-001
 completion.
 
 ## Evidence

@@ -1,6 +1,7 @@
 """SPEC-3: LegacyToolExecutor over guarded workbench / file_ops primitives."""
 from __future__ import annotations
 
+import json
 import shutil
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
@@ -104,6 +105,29 @@ def test_copy_move_batch_write_and_delete_preserve_guarded_contract(executor, tm
     assert batch.ok and (tmp_path / "batch.txt").read_text(encoding="utf-8") == "batch"
     assert preview.ok and preview.evidence["dry_run"] is True
     assert (tmp_path / "moved.txt").exists()
+
+
+def test_json_and_unified_text_patch_tools_preserve_transaction_reports(executor, tmp_path):
+    target = tmp_path / "data.json"
+    target.write_text('{"value": 1}\n', encoding="utf-8")
+    json_result = executor.execute(
+        ToolCall("json_patch", {
+            "path": "data.json",
+            "operations_json": '[{"op":"replace","path":"/value","value":2}]',
+            "mode": "apply",
+        }), _ctx()
+    )
+    patch_result = executor.execute(
+        ToolCall("text_patch", {
+            "root": ".",
+            "patch": "--- a/data.json\n+++ b/data.json\n@@ -1,3 +1,3 @@\n {\n-  \"value\": 2\n+  \"value\": 3\n }\n",
+            "apply": True,
+        }), _ctx()
+    )
+
+    assert json_result.ok and json.loads(json_result.output)["applied"] is True
+    assert patch_result.ok and json.loads(patch_result.output)["applied"] is True
+    assert json.loads(target.read_text(encoding="utf-8"))["value"] == 3
 
 
 def test_guard_rejection_surfaces_as_not_ok(executor):

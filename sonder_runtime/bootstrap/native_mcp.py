@@ -104,6 +104,15 @@ _NATIVE_TOOLS = (
         }, "required": ["path", "content"], "additionalProperties": False},
     ),
     ToolDescriptor(
+        "json_patch", "Preview or atomically apply a bounded JSON patch",
+        {"type": "object", "properties": {
+            "path": _PATH, "operations": {"type": "array"},
+            "operations_json": {"type": "string"},
+            "mode": {"type": "string", "enum": ["preview", "apply"]},
+            "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root", {"type": "object"},
     ),
     ToolDescriptor(
@@ -138,6 +147,13 @@ _NATIVE_TOOLS = (
             "timeout_seconds": {"type": "number"}, "include_hidden": _BOOL,
             "include_ignored": _BOOL, "extra_roots": _ROOT,
         }, "required": ["query"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "text_patch", "Preview or transactionally apply a bounded unified diff",
+        {"type": "object", "properties": {
+            "root": _PATH, "patch": {"type": "string", "minLength": 1},
+            "apply": _BOOL, "extra_roots": _ROOT,
+        }, "required": ["root", "patch"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "workspace_run", "Run a program as a bounded argv list",
