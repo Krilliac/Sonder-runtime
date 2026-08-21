@@ -23,5 +23,10 @@ Result: **6 passed**. Also passed `python -m compileall -q sonder_runtime tests`
 
 This is a bounded process/protocol slice, not a claim that the complete
 EXT-003 requirement is verified. The current host does not enforce a native
-memory limit, manifest admission, or production extension registry wiring;
-those remain separate implementation work.
+memory limit. Manifest admission and production registry wiring now have a
+composition acceptance slice: `tests/production/test_extension_composition.py`
+installs through the live application graph, reopens the SQLite-backed
+registry through a fresh graph, rechecks the manifest digest, and preserves
+the explicit disabled/unverified state when provenance is absent. Native
+memory limiting and actual extension execution through a persisted
+installation remain unverified.
