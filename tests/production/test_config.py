@@ -179,6 +179,24 @@ def test_env_compatibility_and_precedence(tmp_path):
     assert config.server.port == 14000  # CLI beats env
 
 
+def test_historical_state_home_alias_is_supported_and_canonical_home_wins(tmp_path):
+    historical = tmp_path / "historical"
+    canonical = tmp_path / "canonical"
+
+    config = load_config(
+        env={"SONDER_STATE_HOME": str(historical)},
+    )
+    assert config.state.home == str(historical)
+
+    config = load_config(
+        env={
+            "SONDER_HOME": str(canonical),
+            "SONDER_STATE_HOME": str(historical),
+        },
+    )
+    assert config.state.home == str(canonical)
+
+
 def test_http_and_reasoning_options_are_typed_toml_settings(tmp_path):
     toml = tmp_path / "sonder.toml"
     toml.write_text(

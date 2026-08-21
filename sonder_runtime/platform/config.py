@@ -365,8 +365,13 @@ def _apply_environment(
         server = replace(
             server, reasoning_audience=env["SONDER_REASONING_AUDIENCE"].strip().lower()
         )
-    if env.get("SONDER_HOME", "").strip():
-        state = replace(state, home=env["SONDER_HOME"].strip())
+    # SONDER_STATE_HOME is the historical name used by the migrated control
+    # plane tests and older local configurations.  Keep SONDER_HOME as the
+    # canonical spelling while honoring the compatibility alias when the
+    # canonical variable is absent.
+    state_home = env.get("SONDER_HOME", "").strip() or env.get("SONDER_STATE_HOME", "").strip()
+    if state_home:
+        state = replace(state, home=state_home)
     if env.get("SONDER_FILE_ROOTS", "").strip():
         roots = tuple(
             part.strip()
