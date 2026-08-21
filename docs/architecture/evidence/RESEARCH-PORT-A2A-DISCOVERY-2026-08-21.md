@@ -43,5 +43,17 @@ Evidence: `sonder_runtime/interfaces/http/facades/a2a.py`,
 existing handler authentication suite; no remote A2A interoperability is
 claimed.
 
+The provider-neutral `A2AJsonRpcTransport` now validates the A2A 1.0 JSON-RPC
+envelope for `SendMessage`, `GetTask`, `ListTasks`, `CancelTask`, and
+`GetExtendedAgentCard`, enforces bounded request/response payloads, preserves
+request IDs, and delegates only to an injected application handler. It never
+reads the local task store or treats a request as an authorization grant.
+This is a transport seam; the handler still owns task persistence, capability
+admission, and authentication context.
+
+JSON-RPC contract evidence is in `sonder_runtime/interfaces/a2a/jsonrpc.py`
+and `tests/test_a2a_jsonrpc.py`. Live HTTP and cross-implementation remote
+interoperability remain outside this slice.
+
 References: <https://github.com/a2aproject/A2A/blob/main/docs/specification.md>
 and <https://github.com/a2aproject/A2A/blob/main/docs/topics/agent-discovery.md>.
