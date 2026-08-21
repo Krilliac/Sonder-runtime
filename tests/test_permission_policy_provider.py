@@ -3,6 +3,13 @@ from types import SimpleNamespace
 from sonder_runtime.adapters.security.permission_policy import PermissionPolicyProvider
 
 
+def test_server_binds_canonical_permission_policy_provider():
+    import server
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    assert server.permission_modes is permission_policy
+
+
 def test_provider_resolves_root_engine_dynamically(monkeypatch):
     import permission_modes
 
