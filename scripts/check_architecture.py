@@ -56,7 +56,7 @@ HTTP_SERVE_PATH = "sonder_runtime/interfaces/http/serve.py"
 HTTP_SERVE_ROOT_MODULES = frozenset({
     "admin_auth", "code_runner", "command_catalog", "debug_dump", "feedback",
     "grounding", "intents", "live_reload", "permission_modes",
-    "served_action_receipts", "server", "sonder_health",
+    "served_action_receipts", "server",
     "tool_contract", "training_tasks", "unsafe_lab",
 })
 REPL_PATH = "sonder_runtime/interfaces/repl/repl.py"
