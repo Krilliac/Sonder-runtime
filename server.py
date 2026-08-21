@@ -228,6 +228,11 @@ from sonder_runtime.platform.context_selection import (
 from sonder_runtime.domain.prompt_composition import (
     join_system_parts as _join_system_parts,
 )
+from sonder_runtime.domain.native_tool_policy import (
+    MAX_ARGUMENT_CHARS as _NATIVE_TOOL_ARGUMENTS_MAX_CHARS,
+    TOOL_NAME_RE as _NATIVE_TOOL_NAME_RE,
+    native_tool_call_decision as _native_tool_call_policy,
+)
 from sonder_runtime.domain.model_error_formatting import (
     embedded_model_error as _embedded_model_error_policy,
     redact_model_error_value as _redact_model_error_value,
@@ -3919,10 +3924,6 @@ def _post_model(
     raise AssertionError("unreachable model retry state")
 
 
-_NATIVE_TOOL_ARGUMENTS_MAX_CHARS = 65536
-_NATIVE_TOOL_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z")
-
-
 def _native_tool_call_decision(message):
     """Translate one canonical native tool call into the agent JSON contract.
 
@@ -3930,59 +3931,7 @@ def _native_tool_call_decision(message):
     mutation policy after this translation.  Thinking text and provider-owned
     metadata are intentionally excluded.
     """
-    if not isinstance(message, dict):
-        return None
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, (list, tuple)) or len(tool_calls) != 1:
-        return None
-    tool_call = tool_calls[0]
-    function = tool_call.get("function") if isinstance(tool_call, dict) else None
-    if not isinstance(function, dict):
-        return None
-    name = function.get("name")
-    if not isinstance(name, str):
-        return None
-    name = name.strip()
-    if not _NATIVE_TOOL_NAME_RE.fullmatch(name):
-        return None
-    if "arguments" not in function:
-        return None
-    arguments = function.get("arguments")
-    if isinstance(arguments, str):
-        if len(arguments) > _NATIVE_TOOL_ARGUMENTS_MAX_CHARS:
-            return None
-        try:
-            arguments = json.loads(arguments)
-        except (TypeError, ValueError, RecursionError):
-            return None
-    if not isinstance(arguments, dict):
-        return None
-    try:
-        encoded_arguments = json.dumps(
-            arguments,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError, OverflowError, RecursionError):
-        return None
-    if len(encoded_arguments) > _NATIVE_TOOL_ARGUMENTS_MAX_CHARS:
-        return None
-    try:
-        return json.dumps(
-            {
-                "tool": name,
-                "args": arguments,
-                "reason": "model native tool call",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError, OverflowError, RecursionError):
-        return None
+    return _native_tool_call_policy(message)
 
 
 def _chat_request(
