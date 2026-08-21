@@ -6,19 +6,26 @@ surface (`python -m sonder_runtime mcp --native`).
 ## Scope
 
 The native path composes the bounded JSON-RPC stdio transport with the
-application-owned `ToolExecutor` port and a deterministic generated catalog
-for the six tools currently owned by `ToolExecutorAdapter`. Each call gets a
-fresh MCP `OperationContext`, and executor results retain bounded error and
-evidence fields.
+application-owned `ToolExecutor` port and a deterministic generated catalog.
+The catalog currently contains the six canonical `ToolExecutorAdapter` tools
+plus five explicitly-scoped legacy filesystem/workbench aliases:
+`directory_create`, `file_edit`, `file_read`, `file_write`, and
+`workspace_run`. Alias calls normalize to the canonical executor names, and
+the native boundary validates their JSON schemas before execution. Each call
+gets a fresh MCP `OperationContext`, and executor results retain bounded error
+and evidence fields.
 
 The historical server MCP catalog remains the default compatibility path until
-catalog parity and complete application-service coverage are proven. This
-slice therefore does not claim API-003 or TOOL-001 completion.
+catalog parity and complete application-service coverage are proven. The
+legacy catalog currently contains 204 registered tools; the native catalog
+therefore covers 10 names and does not claim full parity, API-003, or TOOL-001
+completion.
 
 ## Evidence
 
-- `tests/test_native_mcp.py`: deterministic catalog and end-to-end transport
-  to application tool-port translation.
+- `tests/test_native_mcp.py`: deterministic catalog, alias normalization,
+  schema rejection, and end-to-end transport to application tool-port
+  translation.
 - `tests/test_mcp_stdio_transport.py`: negotiation, bounded frames,
   subscriptions, malformed input, and catalog limits.
 - Focused result: **38 passed**.

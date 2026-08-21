@@ -27,8 +27,21 @@ def _app():
 
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
-        "edit_file", "make_directory", "read_file", "run_program", "run_script", "write_file",
+        "directory_create", "edit_file", "file_read", "file_write", "make_directory",
+        "read_file", "run_program", "run_script", "workspace_run", "write_file",
     ]
+
+
+def test_native_catalog_contains_legacy_filesystem_alias_schemas():
+    registry = native_tool_registry()
+    read = registry.require("file_read")
+    write = registry.require("file_write")
+    run = registry.require("workspace_run")
+    assert read.input_schema["required"] == ["path"]
+    assert write.input_schema["properties"]["mode"]["enum"] == [
+        "create", "overwrite", "append",
+    ]
+    assert run.input_schema["properties"]["program"]["type"] == "string"
 
 
 def test_native_transport_calls_application_tool_port():
@@ -49,6 +62,42 @@ def test_native_transport_calls_application_tool_port():
     assert count == 2
     assert rows[1]["result"]["output"] == "read_file:ok"
     assert rows[1]["result"]["isError"] is False
+
+
+def test_native_legacy_file_read_alias_calls_canonical_executor():
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "file_read", "arguments": {"path": "x.txt"}},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        _app(), input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["output"] == "read_file:ok"
+
+
+def test_native_schema_rejects_unknown_arguments_as_protocol_error():
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "file_read", "arguments": {"path": "x.txt", "token": "secret"}},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        _app(), input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    row = [json.loads(line) for line in output.getvalue().splitlines()][1]
+    assert row["error"]["code"] == -32602
 
 
 def test_native_entrypoint_fences_safety_before_configuration(monkeypatch):

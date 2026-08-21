@@ -14,19 +14,79 @@ from typing import TextIO
 
 from ..application.context import local_owner_context
 from ..application.ports.tool_executor import ToolCall
-from ..application.ports.tool_registry import InMemoryToolRegistry, ToolDescriptor
-from ..application.protocol.mcp_compatibility import McpCompatibility
-from ..interfaces.mcp.transport import StdioMcpTransport
-
-
-_NATIVE_TOOLS = (
-    ToolDescriptor("edit_file", "Apply a bounded text edit", {"type": "object"}),
-    ToolDescriptor("make_directory", "Create a directory under an allowed root", {"type": "object"}),
-    ToolDescriptor("read_file", "Read a bounded file", {"type": "object"}),
-    ToolDescriptor("run_program", "Run an argv-based program", {"type": "object"}),
-    ToolDescriptor("run_script", "Run a bounded script", {"type": "object"}),
-    ToolDescriptor("write_file", "Write a file under an allowed root", {"type": "object"}),
+from ..application.ports.tool_registry import (
+    InMemoryToolRegistry,
+    ToolCall as RegistryToolCall,
+    ToolDescriptor,
+    validate_tool_call,
 )
+from ..application.protocol.mcp_compatibility import McpCompatibility
+from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
+
+
+_PATH = {"type": "string", "minLength": 1}
+_ROOT = {"type": "string"}
+_NATIVE_TOOLS = (
+    ToolDescriptor(
+        "directory_create", "Create a guarded directory and optional parents",
+        {"type": "object", "properties": {
+            "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "edit_file", "Apply a bounded text edit",
+        {"type": "object", "properties": {
+            "path": _PATH, "old": {"type": "string"}, "new": {"type": "string"},
+            "count": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path", "old", "new"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_read", "Read a UTF-8-ish text file inside allowed roots",
+        {"type": "object", "properties": {
+            "path": _PATH, "max_bytes": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_write", "Create, overwrite, or append a text file inside allowed roots",
+        {"type": "object", "properties": {
+            "path": _PATH, "content": {"type": "string"},
+            "mode": {"type": "string", "enum": ["create", "overwrite", "append"]},
+            "extra_roots": _ROOT,
+        }, "required": ["path", "content"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "make_directory", "Create a directory under an allowed root", {"type": "object"},
+    ),
+    ToolDescriptor(
+        "read_file", "Read a bounded file", {"type": "object"},
+    ),
+    ToolDescriptor(
+        "run_program", "Run an argv-based program", {"type": "object"},
+    ),
+    ToolDescriptor(
+        "run_script", "Run a bounded script", {"type": "object"},
+    ),
+    ToolDescriptor(
+        "workspace_run", "Run a program as a bounded argv list",
+        {"type": "object", "properties": {
+            "program": _PATH, "args_json": {"type": "string"}, "cwd": {"type": "string"},
+            "stdin": {"type": "string"}, "timeout": {"type": "integer"},
+            "max_output": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["program"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "write_file", "Write a file under an allowed root", {"type": "object"},
+    ),
+)
+
+
+_LEGACY_ALIASES = {
+    "directory_create": "make_directory",
+    "file_edit": "edit_file",
+    "file_read": "read_file",
+    "file_write": "write_file",
+    "workspace_run": "run_program",
+}
 
 
 def native_tool_registry() -> InMemoryToolRegistry:
@@ -45,6 +105,22 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
     registry = native_tool_registry()
 
     def execute(name: str, arguments: dict) -> dict:
+        descriptor = registry.get(name)
+        if descriptor is None:
+            return {
+                "output": "unknown native MCP tool: %s" % name,
+                "isError": True,
+                "error": "unknown_tool",
+                "evidence": {},
+            }
+        try:
+            validate_tool_call(
+                descriptor, RegistryToolCall(tool_name=name, arguments=dict(arguments))
+            )
+        except Exception as exc:
+            raise McpTransportError(str(exc)) from exc
+        canonical_name = _LEGACY_ALIASES.get(name, name)
+        canonical_arguments = dict(arguments)
         context = local_owner_context(
             correlation_id=uuid.uuid4().hex,
             source="mcp",
@@ -52,7 +128,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             timeout_seconds=60.0,
         )
         result = application.tool_executor.execute(
-            ToolCall(tool=name, arguments=dict(arguments)), context
+            ToolCall(tool=canonical_name, arguments=canonical_arguments), context
         )
         return {
             "output": result.output,
