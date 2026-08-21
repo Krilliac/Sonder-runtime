@@ -155,6 +155,7 @@ def store_db_paths() -> dict[str, str]:
             "queued_actions.db", "SONDER_QUEUED_ACTION_DB"
         ),
         "updates": platform_paths.state_path("updates.db", "SONDER_UPDATES_DB"),
+        "jobs": platform_paths.state_path("jobs.db", "SONDER_JOBS_DB"),
     }
 
 
@@ -265,6 +266,7 @@ def status_all_read_only(home: str) -> dict[str, StoreStatus]:
         "operations": "operations.db",
         "queued_actions": "queued_actions.db",
         "updates": "updates.db",
+        "jobs": "jobs.db",
     }
     return {
         store: status_read_only(store, str(root / filename))
