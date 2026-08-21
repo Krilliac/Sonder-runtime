@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 146,
+      "file_count": 147,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -144,6 +144,7 @@
         "sonder_runtime/adapters/persistence/migrations.py",
         "sonder_runtime/adapters/persistence/operations_store.py",
         "sonder_runtime/adapters/persistence/queued_actions.py",
+        "sonder_runtime/adapters/persistence/served_action_receipts.py",
         "sonder_runtime/adapters/persistence/session_repository.py",
         "sonder_runtime/adapters/persistence/sqlite/__init__.py",
         "sonder_runtime/adapters/persistence/sqlite/automation.py",
