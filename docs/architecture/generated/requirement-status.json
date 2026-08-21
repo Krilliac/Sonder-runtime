@@ -242,9 +242,9 @@
     },
     {
       "checked": false,
-      "claim": "The operator control-plane snapshot is assembled from all required providers, exposed through an authenticated HTTP facade, and fails closed on incomplete or invalid data.",
+      "claim": "The production HTTP handler serves an authenticated, provider-backed control-plane snapshot when explicitly composed and returns a bounded unavailable response when composition is absent or fails.",
       "requirement_id": "API-006",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "0026dc853de2ddfff0fba15b222e3f439585124a2bcad4570c24dc2675bdcb7d",
+    "ledger_sha256": "ab8a7adbb47b627ec15e0a0d6a64f50d5243316e1b7174c0cfd365e638008536",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
