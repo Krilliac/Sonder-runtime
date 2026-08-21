@@ -162,6 +162,8 @@ class LegacySelfmodPort(Protocol):
 
     def create_plan(self, objective: str, repository_root: object, **kwargs: object) -> Mapping[str, object]: ...
     def get_run(self, run_id: str) -> Mapping[str, object]: ...
+
+    def list_runs(self, limit: int = 20) -> Sequence[Mapping[str, object]]: ...
     def create_backup(self, run_id: str) -> Mapping[str, object]: ...
     def prepare_workspace(self, run_id: str) -> Mapping[str, object]: ...
     def record_reproducer_before(self, run_id: str, command: Sequence[str], timeout: int | None = None) -> Mapping[str, object]: ...
@@ -216,6 +218,15 @@ class GuardedLegacySelfmodService:
         )
         lifecycle = self._lifecycle.propose(run_id, str(run.get("objective") or objective), baseline)
         return SelfmodIntegrationState(run, governance, lifecycle)
+
+    def list_runs(self, *, limit: int = 64) -> tuple[Mapping[str, object], ...]:
+        """Return bounded legacy run summaries for operator projections."""
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise InvalidInput("selfmod run limit must be between 1 and 256")
+        rows = self._legacy.list_runs(limit=limit)
+        if not isinstance(rows, (list, tuple)):
+            raise InvalidInput("selfmod list_runs returned an invalid result")
+        return tuple(row for row in rows[:limit] if isinstance(row, Mapping))
 
     def prepare(self, run_id: str) -> SelfmodIntegrationState:
         run = self._legacy.get_run(run_id)
