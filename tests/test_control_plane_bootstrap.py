@@ -17,3 +17,21 @@ def test_composition_root_preserves_explicit_control_plane_service(monkeypatch, 
     )
 
     assert application.control_plane_snapshot_service is service
+
+
+def test_default_composition_exposes_real_and_explicitly_unavailable_sections(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("SONDER_STATE_HOME", str(tmp_path))
+    bootstrap_app.reset_for_tests()
+    application = bootstrap_app.build_application()
+
+    snapshot = application.control_plane_snapshot_service.snapshot(captured_at="now")
+    payload = snapshot.as_dict()
+    assert payload["sections"]["sessions"]["records"] == []
+    assert payload["sections"]["plans"]["records"] == [{
+        "available": False,
+        "reason": "owning application port is not composed",
+        "section": "plans",
+    }]
+    assert payload["sections"]["health"]["count"] >= 1
