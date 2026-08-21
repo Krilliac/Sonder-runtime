@@ -54,8 +54,7 @@ UPDATE_ENGINE_PATH = "sonder_runtime/adapters/updates/engine.py"
 VERSION_PLATFORM_PATH = "sonder_runtime/platform/version.py"
 HTTP_SERVE_PATH = "sonder_runtime/interfaces/http/serve.py"
 HTTP_SERVE_ROOT_MODULES = frozenset({
-    "code_runner", "feedback",
-    "grounding", "intents",
+    "feedback", "intents",
     "served_action_receipts", "server",
     "training_tasks", "unsafe_lab",
 })
