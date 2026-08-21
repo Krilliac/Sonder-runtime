@@ -26,6 +26,7 @@ import threading
 import time
 import urllib.request
 import uuid
+from collections.abc import Callable
 
 from sonder_runtime.platform import version as sonder_version
 from sonder_runtime.application.lifecycle import process_state_number
@@ -99,6 +100,7 @@ class RuntimeLifecycle:
         admission_timeout_seconds: float = 10.0,
         drain_deadline_seconds: float = 25.0,
         owner_max_inflight: int | None = None,
+        startup_reconciler: Callable[[], int] | None = None,
     ) -> None:
         def _env_int(name: str, default: int) -> int:
             try:
@@ -164,6 +166,8 @@ class RuntimeLifecycle:
 
         self._probe_thread: threading.Thread | None = None
         self._probe_stop = threading.Event()
+        self._startup_reconciler = startup_reconciler
+        self._startup_reconciled = 0
 
     # -- operations store (lazy, never fatal) ------------------------------
 
@@ -196,6 +200,23 @@ class RuntimeLifecycle:
 
     # -- startup / shutdown ------------------------------------------------
 
+    @staticmethod
+    def _reconcile_durable_jobs() -> int:
+        from sonder_runtime.adapters.persistence.sqlite.job_registry import (
+            SQLiteDurableJobRegistry,
+        )
+        from sonder_runtime.platform.paths import state_path
+
+        registry = SQLiteDurableJobRegistry(
+            state_path("jobs.db", "SONDER_JOBS_DB")
+        )
+        return registry.reconcile()
+
+    def reconcile_startup(self) -> int:
+        """Reconcile durable work before the process can publish READY."""
+        reconciler = self._startup_reconciler or self._reconcile_durable_jobs
+        return int(reconciler())
+
     def startup(self, *, run_migrations: bool = True) -> None:
         """STARTING -> MIGRATING -> READY, used by the serve entry point."""
         snapshot = self.tracker.snapshot()
@@ -206,6 +227,7 @@ class RuntimeLifecycle:
             import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
             sonder_migrations.migrate_all()
+        self._startup_reconciled = self.reconcile_startup()
         self.tracker.transition(ProcessState.READY, "startup complete")
         self.metrics.process_state.set(_state_number(self.tracker))
         self.tracker.add_listener(
@@ -216,7 +238,10 @@ class RuntimeLifecycle:
             component="lifecycle",
             event_code="PROCESS_READY",
             summary="runtime ready",
-            detail={"version": self._build.version},
+            detail={
+                "version": self._build.version,
+                "jobs_reconciled": self._startup_reconciled,
+            },
         )
         sd_notify("READY=1")
 
