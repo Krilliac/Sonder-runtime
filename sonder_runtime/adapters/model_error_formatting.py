@@ -37,4 +37,20 @@ def format_model_call_error(error, *, target: str, display: str) -> str:
     )
 
 
-__all__ = ["TRANSIENT_MODEL_HTTP_CODES", "format_model_call_error"]
+def format_runtime_model_call_error(
+    error, *, endpoint_loopback: bool, display: str,
+) -> str:
+    """Render a runtime model error after classifying its endpoint target."""
+    target = (
+        "hosted Ollama" if error.cloud else
+        "remote Ollama" if not endpoint_loopback else
+        "local Ollama"
+    )
+    return format_model_call_error(error, target=target, display=display)
+
+
+__all__ = [
+    "TRANSIENT_MODEL_HTTP_CODES",
+    "format_model_call_error",
+    "format_runtime_model_call_error",
+]
