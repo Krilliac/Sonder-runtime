@@ -47,7 +47,7 @@ import intents
 import feedback
 import live_reload
 import debug_dump
-import sonder_health
+from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain.launcher_health import token_is_configured
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
 import sonder_runtime.platform.config as runtime_config
