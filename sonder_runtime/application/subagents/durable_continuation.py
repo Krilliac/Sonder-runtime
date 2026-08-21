@@ -21,6 +21,7 @@ from ..ports.subagents import (
     SubagentUsage, TERMINAL_SUBAGENT_STATUSES,
 )
 from .continuable import ContinuableCheckpoint
+from sonder_runtime.domain.agents.roles import AgentRole, role_budget
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,14 +108,110 @@ class DurableContinuationService:
         self._controls: dict[str, DurableCancellation] = {}
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
+        self._admitted_roots: dict[str, int] = {}
 
     def spawn(self, request: SubagentRequest, context: OperationContext, runner: Runner) -> SubagentHandle:
         child_id = request.child_id or f"child-{uuid4().hex}"
         request = SubagentRequest(request.parent_id, request.prompt, request.budget, child_id, request.metadata)
         parent = self._repository.get(request.parent_id)
-        lineage = ChildSessionLineage(request.parent_id, parent.lineage.chain if parent else ())
-        self._repository.create(DurableChildSession(request, lineage))
-        return self._start(child_id, context, runner)
+        # A provider root is an admission anchor whose own id is already the
+        # requested parent; it must not be duplicated in a child's ancestors.
+        # Ordinary parents contribute their completed chain unchanged.
+        parent_is_root = parent is not None and dict(parent.request.metadata).get("provider_root") == "true"
+        lineage = ChildSessionLineage(
+            request.parent_id,
+            () if parent_is_root else (parent.lineage.chain if parent else ()),
+        )
+        self._admit(request, lineage, parent)
+        try:
+            self._repository.create(DurableChildSession(request, lineage))
+        except Exception:
+            self._release(lineage.chain[0])
+            raise
+        try:
+            return self._start(child_id, context, runner)
+        except Exception:
+            self._release(lineage.chain[0])
+            raise
+
+    def register_root(self, root_id: str, budget: SubagentBudget) -> DurableChildSession:
+        """Publish the provider-owned parent required for local children.
+
+        A root is a durable admission anchor, not an executable child.  Keeping
+        it in the same repository makes the provider's parent-existence rule
+        explicit and lets nested children inherit the root ceilings.
+        """
+        if not isinstance(root_id, str) or not root_id.strip():
+            raise InvalidSubagentRequest("root_id must be non-empty")
+        request = SubagentRequest(
+            parent_id=root_id,
+            prompt="local provider root",
+            budget=budget,
+            child_id=root_id,
+            metadata=(("provider_root", "true"),),
+        )
+        return self._repository.create(
+            DurableChildSession(request, ChildSessionLineage(root_id))
+        )
+
+    def require_parent(self, parent_id: str) -> DurableChildSession:
+        """Return a durable parent or raise the typed unknown-id error."""
+        return self._require(parent_id)
+
+    @staticmethod
+    def _metadata(request: SubagentRequest) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for key, value in request.metadata:
+            if not isinstance(key, str) or not isinstance(value, str) or key in values:
+                raise InvalidSubagentRequest("subagent metadata must be unique string pairs")
+            values[key] = value
+        return values
+
+    def _admit(self, request: SubagentRequest, lineage: ChildSessionLineage,
+               parent: DurableChildSession | None) -> None:
+        budget = request.budget
+        metadata = self._metadata(request)
+        role_name = metadata.get("role")
+        if role_name:
+            try:
+                role = AgentRole(role_name)
+                role_limit = role_budget(role).limit
+            except (ValueError, TypeError) as exc:
+                raise InvalidSubagentRequest("unknown subagent role") from exc
+            role_fields = {
+                "max_steps": "steps",
+                "max_output_tokens": "output_tokens",
+                "max_wall_seconds": "wall_seconds",
+            }
+            for field, role_field in role_fields.items():
+                value, ceiling = getattr(budget, field), getattr(role_limit, role_field)
+                if value is None or ceiling is not None and value > ceiling:
+                    raise InvalidSubagentRequest(f"role budget does not admit {field}")
+        root_id = lineage.chain[0]
+        if budget.max_depth is not None and len(lineage.chain) > budget.max_depth:
+            raise InvalidSubagentRequest("subagent depth budget exhausted")
+        if parent is not None:
+            from ..ports.subagents import validate_child_budget
+            validate_child_budget(budget, parent.request.budget)
+            children = self._repository.list_all(limit=10_000)
+            direct = sum(1 for item in children if item.request.parent_id == request.parent_id)
+            if budget.max_children is not None and direct >= budget.max_children:
+                raise InvalidSubagentRequest("subagent child-count budget exhausted")
+        with self._lock:
+            active = sum(1 for item in self._repository.list_active()
+                         if item.lineage.chain[0] == root_id)
+            active += self._admitted_roots.get(root_id, 0)
+            if budget.max_concurrency is not None and active >= budget.max_concurrency:
+                raise InvalidSubagentRequest("subagent concurrency budget exhausted")
+            self._admitted_roots[root_id] = self._admitted_roots.get(root_id, 0) + 1
+
+    def _release(self, root_id: str) -> None:
+        with self._lock:
+            remaining = self._admitted_roots.get(root_id, 0) - 1
+            if remaining > 0:
+                self._admitted_roots[root_id] = remaining
+            else:
+                self._admitted_roots.pop(root_id, None)
 
     def _start(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
         record = self._require(child_id)
@@ -154,21 +251,25 @@ class DurableContinuationService:
             usage = SubagentUsage(steps=max(expected + 1, 0))
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.SUCCEEDED, output=output, usage=usage)
             self._repository.update(child_id, status=result.status, usage=usage, result=result, recovery_required=False)
+            self._release(record.lineage.chain[0])
         except _Cancelled as exc:
             usage = SubagentUsage(steps=max(expected + 1, 0))
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.CANCELLED,
                                     error=SubagentError("cancelled", str(exc)), usage=usage)
             self._repository.update(child_id, status=result.status, usage=usage, result=result)
+            self._release(record.lineage.chain[0])
         except TimeoutError as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.TIMED_OUT,
                                     error=SubagentError("deadline_exceeded", str(exc), True),
                                     usage=SubagentUsage(steps=max(expected + 1, 0)))
             self._repository.update(child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
+            self._release(record.lineage.chain[0])
         except Exception as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.FAILED,
                                     error=SubagentError("runner_failed", str(exc), True),
                                     usage=SubagentUsage(steps=max(expected + 1, 0)))
             self._repository.update(child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
+            self._release(record.lineage.chain[0])
 
     def resume(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
         record = self._require(child_id)

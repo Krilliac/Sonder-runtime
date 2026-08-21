@@ -118,12 +118,12 @@ from sonder_runtime.adapters.inspection import (
 )
 import json_patch_tool
 import json_schema_verifier
-import text_patch as text_patch_ops
+import sonder_runtime.adapters.filesystem.text_patch as text_patch_ops
 import data_convert as data_convert_module
 import sqlite_mutate as sqlite_mutate_module
 import symbol_index
 import git_history
-import archive_create as archive_create_tool
+import sonder_runtime.adapters.archive_create as archive_create_tool
 from sonder_runtime.platform import context_policy
 import command_registry
 import adaptive_training
@@ -288,9 +288,9 @@ from sonder_runtime.platform import logging as sonder_logging
 import tool_capabilities
 import git_tools
 import sonder_runtime.adapters.evaluation_history_store as eval_history
-import artifact_risk as artifact_risk_module
-import artifact_fetch as artifact_fetch_module
-import process_risk as process_risk_module
+import sonder_runtime.adapters.artifact_risk as artifact_risk_module
+import sonder_runtime.adapters.artifact_fetch as artifact_fetch_module
+import sonder_runtime.adapters.process_risk as process_risk_module
 from sonder_runtime.adapters.security import unsafe_lab
 
 
@@ -335,7 +335,13 @@ def _local_model_options(temperature, num_predict, num_ctx):
 
 def _local_runtime_summary():
     """Compatibility delegate for the packaged local-runtime summary."""
-    options = _local_model_options(0.2, 1, SESSION_NUM_CTX)
+    options = _platform_local_model_options(
+        0.2,
+        1,
+        SESSION_NUM_CTX,
+        native_context=context_policy.native,
+        environ=os.environ,
+    )
     return _platform_local_runtime_summary(
         options,
         context_policy.requested(SESSION_NUM_CTX),
@@ -975,9 +981,8 @@ LIVE_RELOAD_MODULES = [
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
     "autopilot_controller",
-    "pdf_risk",
-    "artifact_risk",
-    "process_risk",
+    "sonder_runtime.adapters.artifact_risk",
+    "sonder_runtime.adapters.process_risk",
 ]
 
 def _prime_live_reload_modules():
@@ -1068,10 +1073,10 @@ def _maybe_live_reload():
             # The workflow adapter resolves this watched legacy module lazily.
             # Do not recreate a direct server dependency during live reload.
             continue
-        if name == "artifact_risk":
+        if name == "sonder_runtime.adapters.artifact_risk":
             globals()["artifact_risk_module"] = module
             continue
-        if name == "process_risk":
+        if name == "sonder_runtime.adapters.process_risk":
             globals()["process_risk_module"] = module
             continue
         if name == "sqlite_mutate":

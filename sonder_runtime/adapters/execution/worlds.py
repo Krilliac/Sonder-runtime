@@ -15,6 +15,7 @@ from typing import Callable, FrozenSet
 from urllib.parse import urlparse
 
 from ...application.context import OperationContext
+from ...application.execution.world_control import IsolationClaim, IsolationTruth
 from ...application.ports.execution_world import (
     CleanupResult,
     ExecutionResult,
@@ -78,46 +79,73 @@ def _require_context(context: OperationContext) -> None:
 
 
 class _FailClosedSubprocesses(SubprocessRuntime):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, availability: Callable[[WorldCapability], None]) -> None:
         self._reason = reason
+        self._availability = availability
 
     def start(self, request: SubprocessRequest, context: OperationContext) -> SubprocessHandle:
         _require_context(context)
+        self._availability(WorldCapability.SUBPROCESS)
         raise WorldUnavailable(self._reason)
 
 
 class _FailClosedShell:
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, availability: Callable[[WorldCapability], None]) -> None:
         self._reason = reason
+        self._availability = availability
 
     def execute(self, request: ShellRequest, context: OperationContext) -> ExecutionResult:
         _require_context(context)
+        self._availability(WorldCapability.SHELL)
         raise WorldUnavailable(self._reason)
 
 
 class _FailClosedTerminals(TerminalService):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, availability: Callable[[WorldCapability], None]) -> None:
         self._reason = reason
+        self._availability = availability
 
     def open(self, request: TerminalRequest, context: OperationContext):
         _require_context(context)
+        self._availability(WorldCapability.TERMINAL)
         raise WorldUnavailable(self._reason)
 
 
 class ReferenceExecutionWorld(ExecutionWorld):
-    """Lifecycle-only execution world whose operational surfaces fail closed."""
+    """Typed lifecycle owner whose unverified operations fail closed.
+
+    This is deliberately the safest concrete provider currently available:
+    it unifies the three typed execution services under one owner, advertises
+    only the capabilities supplied by its provider, and never substitutes host
+    execution when a transport is unavailable.
+    """
 
     def __init__(self, identity: WorldIdentity, capabilities: FrozenSet[WorldCapability]) -> None:
         self.identity = identity
-        self.capabilities = capabilities
+        self.capabilities = frozenset(capabilities)
+        self.isolation = IsolationClaim(
+            IsolationTruth.FAILURE_ISOLATION_ONLY,
+            "provider lifecycle is bounded; execution transport isolation is unverified",
+        )
         self._spec = ExecutionWorldSpec(identity.world_id)
         reason = f"{identity.provider_id} has no verified execution transport"
-        self._subprocesses = _FailClosedSubprocesses(reason)
-        self._shell = _FailClosedShell(reason)
-        self._terminals = _FailClosedTerminals(reason)
         self._lock = Lock()
         self._state = ExecutionWorldState.ACTIVE
         self._reason: str | None = None
+        self._subprocesses = _FailClosedSubprocesses(reason, self._require_capability)
+        self._shell = _FailClosedShell(reason, self._require_capability)
+        self._terminals = _FailClosedTerminals(reason, self._require_capability)
+
+    def _require_capability(self, capability: WorldCapability) -> None:
+        with self._lock:
+            if self._state is not ExecutionWorldState.ACTIVE:
+                raise WorldUnavailable(
+                    f"execution world is {self._state.value}; new work is unavailable"
+                )
+            if capability not in self.capabilities:
+                raise WorldUnavailable(
+                    f"execution capability {capability.value!r} is not declared"
+                )
 
     @property
     def spec(self) -> ExecutionWorldSpec:

@@ -110,8 +110,10 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "process_liveness.py" not in entries
     assert "artifact_grounding.py" in entries
     assert {
-        "artifact_risk.py", "pdf_risk.py", "process_risk.py", "unsafe_lab.py",
+        "sonder_runtime/adapters/artifact_risk.py", "unsafe_lab.py",
     } <= set(entries)
+    assert "pdf_risk.py" not in entries
+    assert "pdf_risk.py" in package.RETIRED_ROOT_FILES
     assert "media_assets.py" in entries
     assert "sonder_runtime/adapters/model_transport.py" in entries
     assert "ollama_endpoint.py" not in entries

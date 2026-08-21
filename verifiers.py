@@ -26,8 +26,8 @@ import sys
 import tempfile
 
 import grounding
-import code_runner
 import sonder_logging
+from sonder_runtime.adapters.execution_tools import code_runner
 
 Verdict = collections.namedtuple("Verdict", ["passed", "reason", "detail"])
 

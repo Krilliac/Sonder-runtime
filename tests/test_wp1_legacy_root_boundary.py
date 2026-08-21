@@ -91,3 +91,11 @@ def test_model_accepts_explicit_runtime(monkeypatch):
     assert captured["target_resolver"]("balanced", True).model == "model"
     assert captured["generate_factory"]("m", "s", 0.1, 2, 3) == "ok"
     assert calls == [("m", "s", 0.1, 2, 3)]
+
+
+def test_model_provider_extraction_keeps_root_access_in_compatibility_bootstrap():
+    source = (_BOOTSTRAP / "legacy_model.py").read_text(encoding="utf-8")
+    assert "LegacyModelBootstrapAdapter" in source
+    assert "from .legacy_root import runtime as legacy_runtime" in source
+    assert source.count("_serve_target") == 0
+    assert source.count("_make_generate") == 0

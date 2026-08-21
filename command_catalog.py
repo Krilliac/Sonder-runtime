@@ -31,6 +31,10 @@ import os
 import re
 import shlex
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from sonder_runtime.application.ports.command_catalog import CatalogCommand
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -1191,7 +1195,7 @@ def _summarize(text: str) -> str:
 
 
 @functools.lru_cache(maxsize=1)
-def catalog() -> tuple:
+def catalog() -> tuple[CatalogCommand, ...]:
     """Every reachable command: native slash commands plus every MCP tool."""
     import server  # lazy: server imports this module for /help
 
@@ -1293,7 +1297,7 @@ def catalog() -> tuple:
 
 
 @functools.lru_cache(maxsize=1)
-def http_catalog() -> tuple:
+def http_catalog() -> tuple[CatalogCommand, ...]:
     """Commands the HTTP chat slash dispatcher can actually execute.
 
     Every registered MCP tool remains reachable over HTTP through
@@ -1337,7 +1341,7 @@ def reset_cache() -> None:
 # --- lookup / search ------------------------------------------------------
 
 
-def by_name(name: str):
+def by_name(name: str) -> Optional[CatalogCommand]:
     wanted = str(name or "").strip()
     if not wanted:
         return None
@@ -1357,7 +1361,7 @@ def categories() -> dict:
     return {k: v for k, v in grouped.items() if v}
 
 
-def complete(prefix: str = "", limit: int = 12) -> list:
+def complete(prefix: str = "", limit: int = 12) -> list[CatalogCommand]:
     """Commands to offer for a partially typed slash line.
 
     A bare "/" offers the curated popular set; every extra character narrows

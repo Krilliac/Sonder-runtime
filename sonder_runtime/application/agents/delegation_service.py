@@ -54,6 +54,7 @@ class DelegationService:
                 ("delegation_id", request.delegation_id),
                 ("request_digest", delegation_digest(request)),
                 ("preset", request.preset.name),
+                ("role", request.preset.role.value),
                 ("workspace_read_roots", "|".join(request.workspace.read_roots)),
                 ("workspace_write_roots", "|".join(request.workspace.write_roots)),
             ),

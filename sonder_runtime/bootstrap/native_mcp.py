@@ -28,6 +28,17 @@ _PATH = {"type": "string", "minLength": 1}
 _ROOT = {"type": "string"}
 _INT = {"type": "integer"}
 _BOOL = {"type": "boolean"}
+_ARCHIVE_ENTRIES = {"type": "integer", "minimum": 1, "maximum": 10_000}
+_ARCHIVE_FILE_BYTES = {"type": "integer", "minimum": 1, "maximum": 256_000_000}
+_ARCHIVE_TOTAL_BYTES = {"type": "integer", "minimum": 1, "maximum": 1_000_000_000}
+_ARCHIVE_RATIO = {"type": "number", "minimum": 1, "maximum": 1_000.0}
+_ARCHIVE_PATH_DEPTH = {"type": "integer", "minimum": 1, "maximum": 128}
+_ARCHIVE_RESULTS = {"type": "integer", "minimum": 1, "maximum": 10_000}
+_ARCHIVE_SECONDS = {"type": "number", "minimum": 1, "maximum": 60.0}
+_ARCHIVE_CREATE_FILES = {"type": "integer", "minimum": 1, "maximum": 10_000}
+_ARCHIVE_CREATE_ENTRIES = {"type": "integer", "minimum": 1, "maximum": 20_000}
+_ARCHIVE_CREATE_DEPTH = {"type": "integer", "minimum": 1, "maximum": 64}
+_ARCHIVE_INPUTS_JSON = {"type": "string", "minLength": 2, "maxLength": 1_000_000}
 _NATIVE_TOOLS = (
     ToolDescriptor(
         "directory_tree", "List a bounded guarded directory tree",
@@ -44,6 +55,13 @@ _NATIVE_TOOLS = (
     ),
     ToolDescriptor(
         "edit_file", "Apply a bounded text edit",
+        {"type": "object", "properties": {
+            "path": _PATH, "old": {"type": "string"}, "new": {"type": "string"},
+            "count": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path", "old", "new"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_edit", "Legacy alias for a bounded text edit",
         {"type": "object", "properties": {
             "path": _PATH, "old": {"type": "string"}, "new": {"type": "string"},
             "count": {"type": "integer"}, "extra_roots": _ROOT,
@@ -144,6 +162,13 @@ _NATIVE_TOOLS = (
         }, "additionalProperties": False},
     ),
     ToolDescriptor(
+        "secret_scan", "Scan an authorized tree for redacted credential findings",
+        {"type": "object", "properties": {
+            "root": {"type": "string"}, "timeout": {"type": "number"},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "text_search", "Search bounded text files under allowed roots",
         {"type": "object", "properties": {
             "query": {"type": "string", "minLength": 1}, "root": {"type": "string"},
@@ -171,12 +196,41 @@ _NATIVE_TOOLS = (
     ToolDescriptor(
         "write_file", "Write a file under an allowed root", {"type": "object"},
     ),
+    ToolDescriptor(
+        "archive_extract", "Extract a bounded archive transactionally without replacing a destination",
+        {"type": "object", "properties": {
+            "source": _PATH, "destination": _PATH,
+            "max_entries": _ARCHIVE_ENTRIES, "max_file_bytes": _ARCHIVE_FILE_BYTES,
+            "max_total_bytes": _ARCHIVE_TOTAL_BYTES, "max_ratio": _ARCHIVE_RATIO,
+            "max_path_depth": _ARCHIVE_PATH_DEPTH, "max_results": _ARCHIVE_RESULTS,
+            "max_seconds": _ARCHIVE_SECONDS, "extra_roots": _ROOT,
+        }, "required": ["source", "destination"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "archive_create", "Create a bounded deterministic ZIP or TAR without overwriting",
+        {"type": "object", "properties": {
+            "root": _PATH, "inputs_json": _ARCHIVE_INPUTS_JSON, "destination": _PATH,
+            "archive_format": {"type": "string", "enum": ["zip", "tar"]},
+            "deterministic": _BOOL, "max_files": _ARCHIVE_CREATE_FILES,
+            "max_entries": _ARCHIVE_CREATE_ENTRIES,
+            "max_file_bytes": _ARCHIVE_FILE_BYTES,
+            "max_total_bytes": _ARCHIVE_TOTAL_BYTES, "max_depth": _ARCHIVE_CREATE_DEPTH,
+            "max_results": _ARCHIVE_RESULTS, "extra_roots": _ROOT,
+        }, "required": ["root", "inputs_json", "destination"],
+         "additionalProperties": False},
+    ),
 )
 
 _INSPECTION_TOOLS = (
     ToolDescriptor(
         "archive_list", "Inspect a bounded archive without extracting it",
-        {"type": "object", "properties": {"path": _PATH},
+        {"type": "object", "properties": {
+            "path": _PATH,
+            "max_entries": _ARCHIVE_ENTRIES, "max_file_bytes": _ARCHIVE_FILE_BYTES,
+            "max_total_bytes": _ARCHIVE_TOTAL_BYTES, "max_ratio": _ARCHIVE_RATIO,
+            "max_path_depth": _ARCHIVE_PATH_DEPTH, "max_results": _ARCHIVE_RESULTS,
+            "max_seconds": _ARCHIVE_SECONDS,
+        },
          "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
@@ -185,6 +239,16 @@ _INSPECTION_TOOLS = (
             "path": _PATH, "max_scan_bytes": _INT,
             "max_seconds": {"type": "number"}, "extra_roots": _ROOT,
         }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "fetch_artifact", "Fetch and atomically verify a binary artifact",
+        {"type": "object", "properties": {
+            "url": {"type": "string", "minLength": 1}, "dest": _PATH,
+            "expect_type": {"type": "string"}, "expect_publisher": {"type": "string"},
+            "sha256": {"type": "string"}, "max_mb": {"type": "number"},
+            "timeout": {"type": "number"}, "resume": _BOOL, "overwrite": _BOOL,
+            "extra_roots": _ROOT,
+        }, "required": ["url", "dest"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "data_inspect", "Inspect a bounded data file",
@@ -235,6 +299,48 @@ _INSPECTION_TOOLS = (
         }, "required": ["pid"], "additionalProperties": False},
     ),
     ToolDescriptor(
+        "verify_artifact", "Verify a guarded artifact already on disk",
+        {"type": "object", "properties": {
+            "path": _PATH, "expect_type": {"type": "string"},
+            "expect_publisher": {"type": "string"}, "sha256": {"type": "string"},
+            "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "web_fetch", "Fetch bounded public web text with explicit consent",
+        {"type": "object", "properties": {
+            "url": {"type": "string", "minLength": 1},
+            "max_chars": {"type": "integer"}, "consent": _BOOL,
+        }, "required": ["url", "consent"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "web_search", "Search public web with explicit consent",
+        {"type": "object", "properties": {
+            "query": {"type": "string", "minLength": 1},
+            "limit": {"type": "integer"}, "consent": _BOOL,
+        }, "required": ["query", "consent"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "weather_lookup", "Get bounded weather with explicit consent",
+        {"type": "object", "properties": {
+            "location": {"type": "string", "minLength": 2},
+            "forecast_days": {"type": "integer"},
+            "units": {"type": "string", "enum": ["auto", "metric", "imperial"]},
+            "consent": _BOOL,
+        }, "required": ["location", "consent"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "approximate_location_lookup", "Resolve approximate location after explicit consent",
+        {"type": "object", "properties": {"consent": _BOOL},
+         "required": ["consent"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "vision_analyze", "Analyze one guarded local raster image",
+        {"type": "object", "properties": {
+            "path": _PATH, "prompt": {"type": "string", "minLength": 1},
+        }, "required": ["path", "prompt"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "workspace_compare", "Compare two bounded workspaces",
         {"type": "object", "properties": {
             "left": _PATH, "right": _PATH,
@@ -243,6 +349,7 @@ _INSPECTION_TOOLS = (
 )
 _NATIVE_TOOLS += _INSPECTION_TOOLS
 _INSPECTION_NAMES = frozenset(item.name for item in _INSPECTION_TOOLS)
+_VISION_NAMES = frozenset({"vision_analyze"})
 
 
 _LEGACY_ALIASES = {
@@ -292,12 +399,38 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             raise McpTransportError(str(exc)) from exc
         canonical_name = _LEGACY_ALIASES.get(name, name)
         canonical_arguments = dict(arguments)
+        cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
         context = local_owner_context(
             correlation_id=uuid.uuid4().hex,
             source="mcp",
             workspace_roots=roots,
+            cloud_allowed=cloud_consent,
             timeout_seconds=60.0,
         )
+        if canonical_name in _VISION_NAMES:
+            service = getattr(application, "vision", None)
+            if service is None:
+                return {
+                    "output": "vision service is not configured",
+                    "isError": True,
+                    "error": "DependencyUnavailable",
+                    "evidence": {},
+                }
+            try:
+                vision = service.analyze(
+                    canonical_arguments["path"], canonical_arguments["prompt"], context,
+                )
+            except Exception as exc:
+                return {
+                    "output": str(exc), "isError": True,
+                    "error": type(exc).__name__, "evidence": {},
+                }
+            return {
+                "output": vision.text,
+                "isError": False,
+                "error": None,
+                "evidence": {"model": vision.model, "tier": vision.tier},
+            }
         if canonical_name in _INSPECTION_NAMES:
             result = application.inspections.inspect(
                 canonical_name, canonical_arguments, context

@@ -44,6 +44,10 @@ class RemoteWorldConfig:
     def __post_init__(self) -> None:
         if not all(value.strip() for value in (self.world_id, self.worker_id, self.endpoint)):
             raise ValueError("remote world identity and endpoint are required")
+        endpoint = self.endpoint.strip()
+        scheme, separator, authority = endpoint.partition("://")
+        if scheme.lower() != "https" or separator == "" or not authority.strip():
+            raise ValueError("remote worker endpoint must be an HTTPS URL")
 
 
 class GuardedContainerWorld:

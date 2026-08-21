@@ -63,6 +63,12 @@ class FileSystemRequest:
     max_bytes: int = 256_000
     max_entries: int = 200
     expected_version: str | None = None
+    # Compatibility policy inputs remain explicit at the typed boundary.  The
+    # packaged adapter owns their interpretation; callers must not smuggle
+    # authorization through an untyped kwargs dictionary.
+    extra_roots: str = ""
+    bypass: bool = False
+    developer_authorized: bool = False
 
 
 @dataclass(frozen=True)

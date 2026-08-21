@@ -157,6 +157,7 @@ class SQLiteDurableJobRegistry:
 
     def list(self, *, parent_job_id: str | None = None, include_terminal: bool = True,
              limit: int = 100) -> tuple[JobRecord, ...]:
+        """Return a bounded durable listing, optionally scoped to one parent."""
         if isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be positive")
         clauses, args = [], []

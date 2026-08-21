@@ -1321,9 +1321,26 @@ def verify_rollback_ready(run_id):
         emergency_root.mkdir()
         bundle = scratch / "bundle"
         bundle.mkdir()
+        # The emergency entry point deliberately confines backups to the
+        # manifest bundle. Build a complete temporary bundle for this probe;
+        # reusing the production backup paths would make the probe fail its
+        # own containment contract before exercising restoration.
+        probe_records = []
+        for record in records:
+            probe_record = dict(record)
+            if record["existed_before"]:
+                backup = bundle / "files" / record["path"]
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(record["backup_path"], backup)
+                probe_record["backup_path"] = str(backup)
+            probe_records.append(probe_record)
         manifest_path = bundle / "manifest.json"
         manifest_path.write_text(
-            json.dumps(dict(manifest, repository_root=str(emergency_root)), indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                dict(manifest, repository_root=str(emergency_root), files=probe_records),
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
             encoding="utf-8",
         )
         (bundle / "manifest.sha256").write_text(_sha(manifest_path) + "\n", encoding="ascii")

@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
-from typing import Any, Mapping, TextIO
+from typing import Any, Mapping, Protocol, TextIO
 
 from ...application.protocol.mcp_compatibility import (
-    McpCompatibility, McpNegotiation, McpNegotiationError,
+    LegacyMcpContract, McpCompatibility, McpNegotiation, McpNegotiationError,
     SubscriptionNotificationRouter,
 )
 from ...application.tools.generated_catalogs import GeneratedCatalogs
@@ -19,10 +19,12 @@ class McpTransportLimits:
     max_frame_bytes: int = 256_000
     max_tools: int = 256
     max_arguments_bytes: int = 64_000
+    max_exchange_bytes: int = 1_024_000
 
     def __post_init__(self) -> None:
         if any(isinstance(v, bool) or v <= 0 for v in (
-            self.max_frame_bytes, self.max_tools, self.max_arguments_bytes
+            self.max_frame_bytes, self.max_tools, self.max_arguments_bytes,
+            self.max_exchange_bytes,
         )):
             raise ValueError("MCP transport limits must be positive integers")
 
@@ -31,12 +33,53 @@ class McpTransportError(ValueError):
     """A bounded transport or protocol violation."""
 
 
+class McpProvider(Protocol):
+    """Provider-neutral one-shot MCP exchange port.
+
+    Implementations own their process/socket lifecycle.  The interface only
+    carries the newline-delimited MCP bytes as text, so stream and subprocess
+    providers share the same bounded exchange path without importing one
+    another.
+    """
+
+    def run(self, request: str) -> tuple[str, str]:
+        """Exchange a complete request stream and return stdout/stderr."""
+
+
+class BoundedMcpProviderExchange:
+    """Adapt any one-shot provider to the bounded MCP exchange boundary.
+
+    The exchange deliberately does not decode, reorder, or filter JSON-RPC
+    messages.  This preserves negotiated notifications and lets providers
+    use the same stream semantics as :class:`StdioMcpTransport`.
+    """
+
+    def __init__(self, provider: McpProvider, *, limits: McpTransportLimits | None = None) -> None:
+        if not callable(getattr(provider, "run", None)):
+            raise ValueError("MCP provider must expose a callable run method")
+        self._provider = provider
+        self._limits = limits or McpTransportLimits()
+
+    def exchange(self, request: str) -> tuple[str, str]:
+        if not isinstance(request, str):
+            raise TypeError("MCP provider request must be text")
+        if len(request.encode("utf-8")) > self._limits.max_exchange_bytes:
+            raise McpTransportError("MCP request exceeds max_exchange_bytes")
+        stdout, stderr = self._provider.run(request)
+        if not isinstance(stdout, str) or not isinstance(stderr, str):
+            raise McpTransportError("MCP provider must return text stdout and stderr")
+        if len(stdout.encode("utf-8")) > self._limits.max_exchange_bytes:
+            raise McpTransportError("MCP response exceeds max_exchange_bytes")
+        return stdout, stderr
+
+
 class StdioMcpTransport:
     """Serve newline-delimited JSON-RPC over injectable text-like streams."""
 
     def __init__(
         self, input_stream: TextIO, output_stream: TextIO, *,
         compatibility: McpCompatibility, tool_catalog: Any = (), tool_handler: Any,
+        legacy_contract: LegacyMcpContract | None = None,
         notifications: SubscriptionNotificationRouter | None = None,
         connection_id: str = "stdio", limits: McpTransportLimits | None = None,
     ) -> None:
@@ -44,8 +87,13 @@ class StdioMcpTransport:
             raise ValueError("MCP transport requires an input stream and connection id")
         if not callable(getattr(output_stream, "write", None)):
             raise ValueError("MCP transport requires a writable output stream")
+        if legacy_contract is not None and legacy_contract not in compatibility.legacy_contracts:
+            raise McpTransportError(
+                "legacy MCP transport declaration is not registered with compatibility"
+            )
         self._input, self._output = input_stream, output_stream
         self._compatibility, self._handler = compatibility, tool_handler
+        self._legacy_contract = legacy_contract
         self._router, self._connection_id = notifications, connection_id
         self._limits = limits or McpTransportLimits()
         self._negotiation: McpNegotiation | None = None
@@ -162,7 +210,9 @@ class StdioMcpTransport:
             if not isinstance(capabilities, dict):
                 raise McpNegotiationError("client capabilities must be an object")
             self._negotiation = self._compatibility.negotiate(
-                tuple(versions), client_capabilities=tuple(str(k) for k in capabilities)
+                tuple(versions),
+                client_capabilities=tuple(str(k) for k in capabilities),
+                legacy_contract=self._legacy_contract,
             )
             return {"protocolVersion": self._negotiation.agreed_version,
                     "capabilities": {name: {} for name in self._negotiation.capabilities},

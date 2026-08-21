@@ -112,7 +112,15 @@ class ScopedProviderRegistry:
                 return registration
             except BaseException as exc:
                 try:
-                    provider.cleanup(timeout=0)
+                    cleanup = provider.cleanup(timeout=0)
+                    if (
+                        not isinstance(cleanup, CleanupResult)
+                        or not cleanup.quiescent
+                        or not cleanup.resources_released
+                    ):
+                        raise ProviderLifecycleError(
+                            "provider cleanup did not reach a quiescent released state"
+                        )
                 except BaseException as cleanup_exc:
                     raise ProviderLifecycleError("provider initialization and cleanup failed") from cleanup_exc
                 if isinstance(exc, ProviderLifecycleError):

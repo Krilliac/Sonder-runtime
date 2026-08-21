@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS durable_child_session (
 
 def _budget_json(budget: SubagentBudget) -> str:
     return json.dumps({name: getattr(budget, name) for name in (
-        "max_children", "max_steps", "max_wall_seconds", "max_output_tokens"
+        "max_children", "max_depth", "max_concurrency", "max_steps",
+        "max_wall_seconds", "max_output_tokens"
     )}, sort_keys=True, separators=(",", ":"))
 
 

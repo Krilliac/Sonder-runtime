@@ -73,7 +73,7 @@ CANDIDATE_FILES = (
     "seed_merge.py",
     "store_integrity.py",
     "creative_router.py",
-    "live_reload.py",
+    "sonder_runtime/adapters/web/live_reload.py",
     "self_curriculum.py",
     "eval_retrieval.py",
     "feedback.py",

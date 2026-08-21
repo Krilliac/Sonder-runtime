@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -61,6 +62,26 @@ def test_lineage_projection_joins_durable_jobs_and_children_without_prompt_leak(
     assert [(item.node_id, item.kind, item.depth) for item in descendants] == [("child", "subagent", 1)]
     assert query.operator_query(root_id="root")[0].root_id == "root"
     assert all(not hasattr(item, "prompt") for item in query.snapshot())
+
+
+def test_lineage_projection_exposes_durable_revisions_to_concurrent_readers(tmp_path) -> None:
+    jobs = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    jobs.start(identity("root"))
+    children = SQLiteDurableContinuationRepository(tmp_path / "children.db")
+    request = SubagentRequest("root", "private prompt", SubagentBudget(max_steps=2), "child")
+    children.create(DurableChildSession(request, ChildSessionLineage("root"), SubagentStatus.CREATED))
+    query = DurableLineageQuery(jobs, children)
+
+    def read_once():
+        return tuple((node.node_id, node.root_id, node.depth, node.revision)
+                     for node in query.snapshot(limit=8))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        reads = tuple(pool.map(lambda _: read_once(), range(12)))
+
+    assert reads
+    assert all(read == reads[0] for read in reads)
+    assert reads[0] == (("root", "root", 0, 0), ("child", "root", 1, 0))
 
 
 def test_recovery_executes_only_bounded_cleanup_and_requires_complete_receipt(tmp_path) -> None:

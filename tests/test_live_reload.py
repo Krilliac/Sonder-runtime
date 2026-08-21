@@ -1,9 +1,10 @@
 import importlib
 import os
+from pathlib import Path
 import sys
 import time
 
-import live_reload
+from sonder_runtime.adapters.web import live_reload
 import pytest
 
 
@@ -11,6 +12,19 @@ import pytest
 def _enable_live_reload(monkeypatch):
     """Opt this unit-test module into the feature disabled by the global test sandbox."""
     monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+
+
+def test_packaged_live_reload_owns_behavior_after_root_retirement():
+    packaged = importlib.import_module("sonder_runtime.adapters.web.live_reload")
+
+    assert Path("live_reload.py").exists() is False
+    assert live_reload is packaged
+    assert {
+        "enabled",
+        "prime_modules",
+        "reload_changed_modules",
+        "snapshot",
+    }.issubset(vars(packaged))
 
 
 def test_reload_changed_modules_reloads_source_edit(monkeypatch, tmp_path):

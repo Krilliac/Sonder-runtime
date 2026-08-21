@@ -10,6 +10,7 @@ import pytest
 import sonder_runtime.adapters.updates.service as sonder_updates
 from sonder_runtime.adapters.updates.engine import UpdateManager, confirm_nonce_for
 from sonder_runtime.adapters.updates.service import UpdateRepository, build_bundle
+from sonder_runtime.platform import paths as runtime_paths
 
 pytestmark = pytest.mark.integration
 
@@ -27,6 +28,7 @@ def _pointer_text(link) -> str:
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     """Isolated state, releases dir, and the unsigned-bundle dev gate."""
+    runtime_paths.reset_home()
     home = tmp_path / "home"
     monkeypatch.setenv("SONDER_HOME", str(home))
     monkeypatch.setenv("SONDER_DB", str(home / "memory.db"))

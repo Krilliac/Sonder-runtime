@@ -18,6 +18,7 @@ from ..ports.jobs import (
     JobClaim, JobIdentity, JobRecord, JobRegistry, JobStatus,
     WorkflowCheckpoint, WorkflowDefinition, WorkflowRepository, WorkflowResume,
 )
+from ..jobs.session_lifecycle import JobRegistryLifecycleAdapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,12 +34,22 @@ class JobCancellationResult:
 class JobRegistryService:
     """Validate requests and expose a single leased job lifecycle."""
 
-    def __init__(self, port: JobRegistry, *, process_cleanup: ProcessTreeCleanupContract | None = None) -> None:
+    def __init__(
+        self,
+        port: JobRegistry,
+        *,
+        process_cleanup: ProcessTreeCleanupContract | None = None,
+        lifecycle: JobRegistryLifecycleAdapter | None = None,
+    ) -> None:
         self._port = port
         self._process_cleanup = process_cleanup
+        self._lifecycle = lifecycle
 
     def create(self, identity: JobIdentity, *, metadata: dict[str, Any] | None = None) -> JobRecord:
-        return self._port.create(identity, metadata=metadata)
+        record = self._port.create(identity, metadata=metadata)
+        if self._lifecycle is not None:
+            self._lifecycle.record(record)
+        return record
 
     def get(self, job_id: str) -> JobRecord:
         job = self._port.get(job_id)
@@ -64,7 +75,10 @@ class JobRegistryService:
             records = cancel(job_id, reason=reason)
         except KeyError as exc:
             raise NotFound(f"job {job_id!r} not found") from exc
-        return tuple(records)
+        records = tuple(records)
+        if self._lifecycle is not None:
+            self._lifecycle.record_many(records)
+        return records
 
     def cancel_with_cleanup(
         self,
@@ -150,6 +164,8 @@ class JobRegistryService:
         job = self._port.finish(job_id, worker_id, status, result=result, error=error)
         if job is None:
             raise ConcurrencyConflict(f"job {job_id!r} finish rejected")
+        if self._lifecycle is not None:
+            self._lifecycle.record(job)
         return job
 
     def reconcile(self, *, now: str | None = None) -> int:
@@ -166,6 +182,15 @@ class ResumableWorkflowEngine:
     def start(self, identity: JobIdentity, definition: WorkflowDefinition) -> JobRecord:
         if identity.kind != "workflow":
             raise InvalidInput("workflow jobs must use identity.kind='workflow'")
+        existing = self._jobs._port.get(identity.job_id)
+        if existing is not None:
+            if existing.identity != identity:
+                raise ConcurrencyConflict(f"workflow {identity.job_id!r} identity conflict")
+            if self._checkpoints.get_checkpoint(identity.job_id) is None:
+                raise ConcurrencyConflict(
+                    f"workflow {identity.job_id!r} has no durable checkpoint"
+                )
+            return existing
         job = self._jobs.create(identity, metadata={"workflow_id": definition.workflow_id, "version": definition.version})
         checkpoint = WorkflowCheckpoint(job.identity.job_id, 0, 0)
         saved = self._checkpoints.save_checkpoint(checkpoint, expected_sequence=-1)

@@ -67,8 +67,17 @@ def _manifest() -> ExtensionManifest:
     )
 
 
+def _record_for_manifest(manifest: ExtensionManifest, *, version: str | None = None) -> ExtensionProvenance:
+    manifest_digest = manifest.digest()
+    return ExtensionProvenance(
+        manifest.extension_id, version or manifest.version, "signed-registry", _hash("artifact"), manifest_digest,
+        SignatureRecord("release-key", "ed25519", "signature", manifest_digest),
+        TrustRecord("signed-registry", TrustLevel.TRUSTED, "operator-approved", "sonder-release"),
+    )
+
+
 def test_compatibility_failure_becomes_quarantine_health():
-    inventory = ProvenanceInventory.build([_record()])
+    inventory = ProvenanceInventory.build([_record_for_manifest(_manifest())])
     health = ExtensionProvenanceAdmission(inventory).evaluate(
         _manifest(), protocol="extension-v2", available_dependencies=set(), granted_permissions=set(),
         signatures_verified=True,
@@ -79,10 +88,48 @@ def test_compatibility_failure_becomes_quarantine_health():
 
 
 def test_untrusted_or_unverified_provenance_fails_closed_before_admission():
-    inventory = ProvenanceInventory.build([_record(trust=TrustLevel.UNTRUSTED)])
+    record = _record_for_manifest(_manifest())
+    inventory = ProvenanceInventory.build([
+        ExtensionProvenance(
+            record.extension_id, record.version, record.source, record.artifact_digest,
+            record.manifest_digest, record.signature,
+            TrustRecord(record.trust.source, TrustLevel.UNTRUSTED, record.trust.basis, record.trust.issuer),
+        )
+    ])
     health = ExtensionProvenanceAdmission(inventory).evaluate(
         _manifest(), protocol="extension-v1", available_dependencies=set(), granted_permissions=set(),
         signatures_verified=True,
     )
     assert health.state is ExtensionHealthState.UNVERIFIED
     assert health.reasons == ("provenance-unverified",)
+
+
+def test_admission_rejects_provenance_for_a_different_manifest_version():
+    manifest = _manifest()
+    inventory = ProvenanceInventory.build([_record_for_manifest(manifest, version="1.2.4")])
+
+    health = ExtensionProvenanceAdmission(inventory).evaluate(
+        manifest, protocol="extension-v1", available_dependencies=set(), granted_permissions=set(),
+        signatures_verified=True,
+    )
+
+    assert health.state is ExtensionHealthState.UNVERIFIED
+    assert health.reasons == ("provenance-version-mismatch",)
+
+
+def test_admission_rejects_signed_provenance_for_changed_manifest_contents():
+    manifest = _manifest()
+    signed = _record_for_manifest(manifest)
+    changed = ExtensionManifest(
+        manifest.identity, manifest.version, manifest.protocol, permissions=("filesystem.read",),
+        health=manifest.health, cleanup=manifest.cleanup,
+    )
+    inventory = ProvenanceInventory.build([signed])
+
+    health = ExtensionProvenanceAdmission(inventory).evaluate(
+        changed, protocol="extension-v1", available_dependencies=set(), granted_permissions={"filesystem.read"},
+        signatures_verified=True,
+    )
+
+    assert health.state is ExtensionHealthState.UNVERIFIED
+    assert health.reasons == ("manifest-digest-mismatch",)

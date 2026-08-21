@@ -83,8 +83,14 @@ class GenericJobExecutor:
     def __init__(self, jobs: Mapping[str, GenericJob[object]], *, retry_hook: RetryHook | None = None) -> None:
         self._jobs = dict(jobs)
         self._retry_hook = retry_hook
-        if len(self._jobs) != len(jobs):
-            raise ValueError("job ids must be unique")
+        mismatched = sorted(
+            key for key, job in self._jobs.items() if key != job.job_id
+        )
+        if mismatched:
+            raise ValueError(
+                "job mapping keys must match GenericJob.job_id: "
+                + ", ".join(mismatched)
+            )
         missing = sorted({dep for job in self._jobs.values() for dep in job.dependencies if dep not in self._jobs})
         if missing:
             raise ValueError(f"unknown job dependencies: {', '.join(missing)}")

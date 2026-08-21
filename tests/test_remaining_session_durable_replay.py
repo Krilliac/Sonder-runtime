@@ -77,6 +77,41 @@ def test_replay_rejects_bounded_prefix_as_not_crash_safe(tmp_path) -> None:
         crash_safe_replay(repo, "s1", max_events=4)
 
 
+def test_replay_rejects_integrity_report_for_a_different_snapshot(tmp_path) -> None:
+    repo = SQLiteSessionRepository(tmp_path / "session.db", max_read_limit=100)
+    _snapshot(repo)
+
+    class MismatchedIntegrityView:
+        _max_read_limit = 100
+
+        def read_range(self, *args, **kwargs):
+            return repo.read_range(*args, **kwargs)[:3]
+
+        def inspect_integrity(self, session_id, **kwargs):
+            return repo.inspect_integrity(session_id, **kwargs)
+
+    with pytest.raises(IntegrityFailure, match="does not match"):
+        crash_safe_replay(MismatchedIntegrityView(), "s1")
+
+
+def test_replay_rejects_integrity_report_for_a_shorter_snapshot(tmp_path) -> None:
+    repo = SQLiteSessionRepository(tmp_path / "session.db", max_read_limit=100)
+    _snapshot(repo)
+
+    class StaleIntegrityView:
+        _max_read_limit = 100
+
+        def read_range(self, *args, **kwargs):
+            return repo.read_range(*args, **kwargs)
+
+        def inspect_integrity(self, session_id, **kwargs):
+            report = repo.inspect_integrity(session_id, **kwargs)
+            return replace(report, checked_events=3, last_sequence=3)
+
+    with pytest.raises(IntegrityFailure, match="does not match"):
+        crash_safe_replay(StaleIntegrityView(), "s1")
+
+
 def test_snapshot_digest_detects_changed_request_facts() -> None:
     event = DomainEvent("model.requested", "session", "s", 1, {
         "request_id": "r", "turn_id": "t", "prompt": "p", "tier": "code",

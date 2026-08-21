@@ -13,6 +13,7 @@ from .checkpoints import (
     checkpoint_projection,
     create_projection_checkpoint,
 )
+from .checkpoint_privacy import RetentionCandidate, SessionCheckpointPrivacyService
 from .query_export import (
     DefaultExportRedactor,
     QueryExportError,
@@ -38,6 +39,8 @@ __all__ = [
     "ProjectionCheckpoint",
     "checkpoint_projection",
     "create_projection_checkpoint",
+    "RetentionCandidate",
+    "SessionCheckpointPrivacyService",
     "DefaultExportRedactor",
     "QueryExportError",
     "SessionEventRecord",

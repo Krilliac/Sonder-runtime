@@ -57,7 +57,7 @@ INTREE_GOOD = '    root = Path(manifest["repository_root"])\n    for record in m
 INTREE_BROKEN = '    root = Path(_manifest_root_for_restore(manifest))\n    for record in manifest["files"]:\n        target = root / record["path"]\n        if record["existed_before"]:\n            _atomic_copy('
 
 # The out-of-tree half: same shape, applied to selfmod_recover.restore.
-RECOVER_GOOD = '    root = Path(manifest["repository_root"]).resolve()\n'
+RECOVER_GOOD = '    root, validated = _validated_manifest(manifest_path, manifest)\n'
 RECOVER_BROKEN = '    root = Path(_emergency_root(manifest)).resolve()\n'
 
 

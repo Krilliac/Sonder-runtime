@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-import artifact_fetch
+import sonder_runtime.adapters.artifact_fetch as artifact_fetch
 
 
 pytestmark = pytest.mark.unit

@@ -69,7 +69,7 @@ REQUIRED_FILES = {
     "autopilot_controller.py",
     "autopilot_store.py",
     "artifact_grounding.py",
-    "artifact_risk.py",
+    "sonder_runtime/adapters/artifact_risk.py",
     "assetgen.py",
     "bootstrap-engine.cmd",
     "bootstrap-engine.sh",
@@ -85,7 +85,6 @@ REQUIRED_FILES = {
     "grounded_outcomes.py",
     "calibration.py",
     "compiler_cache.py",
-    "artifact_fetch.py",
     "engine_bundle.py",
     "endless-train.sh",
     "game_forge.py",
@@ -98,8 +97,6 @@ REQUIRED_FILES = {
     "memory_store.py",
     "model_assets.py",
     "ooxml_assets.py",
-    "process_risk.py",
-    "pdf_risk.py",
     "queued_actions.py",
     "reloadable_mcp.py",
     "refinement_transactions.py",
@@ -192,6 +189,16 @@ REQUIRED_FILES = {
     "sonder_runtime/application/workflows/loop.py",
     "sonder_runtime/application/workflows/use_cases.py",
 }
+# The worktree may temporarily retain deleted paths in Git's index until the
+# migration commit is made. These are reviewed root modules that must not be
+# copied into a payload while that staged/deleted boundary is in flight.
+RETIRED_ROOT_FILES = frozenset({
+    "artifact_fetch.py",
+    "artifact_risk.py",
+    "pdf_risk.py",
+    "process_risk.py",
+    "text_patch.py",
+})
 EXACT_OUTPUTS = (
     Path("app/build/local-system"),
     Path("dist/local-system"),
@@ -322,6 +329,8 @@ def _tracked_files() -> list[Path]:
         source = ROOT / rel
         _assert_no_reparse(source, ROOT.resolve())
         if not source.exists() or not source.is_file():
+            if rel.as_posix() in RETIRED_ROOT_FILES:
+                continue
             raise ValueError(f"tracked payload file is missing or not a file: {rel}")
         resolved = source.resolve(strict=True)
         if ROOT.resolve() not in resolved.parents:

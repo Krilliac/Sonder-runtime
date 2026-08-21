@@ -182,6 +182,14 @@ def crash_safe_replay(
     report = repository.inspect_integrity(session_id, start_sequence=1, limit=read_limit)
     if not report.valid:
         raise IntegrityFailure("session history failed integrity verification")
+    # Replay and integrity inspection are separate port calls.  Require both
+    # calls to describe the same bounded snapshot so an append between them,
+    # or an adapter returning a mismatched report, cannot expose a prefix as
+    # crash-safe state.
+    if (report.checked_events != len(events)
+            or report.first_sequence != (events[0].sequence if events else None)
+            or report.last_sequence != (events[-1].sequence if events else None)):
+        raise IntegrityFailure("session integrity report does not match replay snapshot")
     if len(events) == read_limit:
         # A bounded read cannot prove that the tail was reached safely.
         raise IntegrityFailure("session history exceeds replay bound")

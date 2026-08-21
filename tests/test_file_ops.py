@@ -122,7 +122,7 @@ def test_find_files_matches_names(monkeypatch, tmp_path):
     (tmp_path / "a.py").write_text("print(1)", encoding="utf-8")
     (tmp_path / "b.txt").write_text("x", encoding="utf-8")
 
-    result = file_ops.find_files("*.py")
+    result = file_ops.find_files("*.py", include_ignored=True)
 
     assert [r["relative"] for r in result["results"]] == ["a.py"]
 

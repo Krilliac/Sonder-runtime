@@ -22,6 +22,11 @@ def http_server(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_HOME", str(home))
     monkeypatch.setenv("SONDER_OPERATIONS_DB", str(home / "operations.db"))
     sonder_lifecycle.reset_for_tests()
+    # Isolate this fixture from preceding auth-focused tests that temporarily
+    # reconfigure the HTTP module's deployment globals.
+    monkeypatch.setattr(sonder_serve, "API_KEY", "")
+    monkeypatch.setattr(sonder_serve, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(sonder_serve, "REQUIRE_ACCOUNT", False)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), sonder_serve.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

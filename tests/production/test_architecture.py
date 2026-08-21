@@ -44,10 +44,21 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     spec.loader.exec_module(module)
     assert len(module.ROOT_LEGACY_MODULES) <= module.ROOT_LEGACY_MODULE_LIMIT
     assert module.ROOT_LEGACY_MODULES == {"server"}
+    assert module.BASELINE_ROOT_LEGACY_MODULES == frozenset({"server"})
     assert "autopilot_store" not in module.ROOT_LEGACY_MODULES
     assert "memory_store" not in module.ROOT_LEGACY_MODULES
     assert Path("sonder_preflight.py") in module.RETIRED_ROOT_MODULES
     assert Path("model_transport.py") in module.RETIRED_ROOT_MODULES
+    assert Path("text_patch.py") in module.RETIRED_ROOT_MODULES
+    assert Path("artifact_risk.py") in module.RETIRED_ROOT_MODULES
+    assert Path("pdf_risk.py") in module.RETIRED_ROOT_MODULES
+    assert Path("live_reload.py") in module.RETIRED_ROOT_MODULES
+    assert module.COMPATIBILITY_ROOT_MODULES["archive_create"] == Path(
+        "archive_create.py"
+    )
+    assert module.COMPATIBILITY_ROOT_MODULES["code_runner"] == Path(
+        "code_runner.py"
+    )
     assert "model_transport" not in module.ROOT_LEGACY_MODULES
     assert "runtime_policy" not in module.ROOT_LEGACY_MODULES
     assert "eval_history" not in module.ROOT_LEGACY_MODULES

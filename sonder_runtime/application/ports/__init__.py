@@ -6,6 +6,7 @@ interfaces. Ports raise the domain error taxonomy, never transport or
 driver exceptions.
 """
 from .backup import BackupGateway, BackupPath, BackupResultView
+from .archive_create import ArchiveCreateGateway, ArchiveCreateRequest
 from .clock import Clock
 from .event_sink import EventSink
 from .model_gateway import (
@@ -14,6 +15,13 @@ from .model_gateway import (
     ModelGateway,
     ModelRequest,
     ModelResponse,
+)
+from .vision_gateway import (
+    VisionGateway,
+    VisionInput,
+    VisionInputProvider,
+    VisionRequest,
+    VisionResponse,
 )
 from .process_probe import ProbeResult, ProcessIdentity, ProcessProbe
 from .recall import RecallGateway
@@ -81,6 +89,7 @@ from .sandbox import (
     SandboxCleanupResult,
     SandboxPolicy,
     SandboxProvider,
+    SandboxResourceLimits,
     SandboxWorld,
     SandboxWorldKind,
     SandboxWorldSnapshot,
@@ -119,6 +128,8 @@ from .specialized_lifecycle import (
 
 __all__ = [
     "AutomationRepository",
+    "ArchiveCreateGateway",
+    "ArchiveCreateRequest",
     "BackupGateway",
     "BackupPath",
     "BackupResultView",
@@ -131,6 +142,11 @@ __all__ = [
     "ModelGateway",
     "ModelRequest",
     "ModelResponse",
+    "VisionGateway",
+    "VisionInput",
+    "VisionInputProvider",
+    "VisionRequest",
+    "VisionResponse",
     "PolicyRepository",
     "PreferenceCodec",
     "PreferenceEventSink",
@@ -176,6 +192,7 @@ __all__ = [
     "SandboxCleanupResult",
     "SandboxPolicy",
     "SandboxProvider",
+    "SandboxResourceLimits",
     "SandboxWorld",
     "SandboxWorldKind",
     "SandboxWorldSnapshot",

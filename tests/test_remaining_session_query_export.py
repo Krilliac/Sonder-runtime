@@ -93,3 +93,15 @@ def test_range_export_has_stable_order_and_reports_range_integrity(tmp_path):
     assert [item.sequence for item in exported.events] == [2, 3]
     assert exported.integrity is not None and exported.integrity.valid
     assert exported.to_jsonl() == exported.to_jsonl()
+
+
+def test_export_respects_a_stricter_adapter_read_ceiling(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "session.db", max_read_limit=2)
+    for sequence in range(4):
+        repo.append("s4", "event", {"sequence": sequence})
+    engine = SessionQueryEngine(repo, max_page_size=2, max_scan=10)
+
+    exported = engine.export_events("s4", max_events=10)
+
+    assert [item.sequence for item in exported.events] == [1, 2]
+    assert exported.truncated

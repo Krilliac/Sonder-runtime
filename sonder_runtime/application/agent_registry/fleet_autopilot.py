@@ -22,6 +22,45 @@ class AgentRegistryError(ValueError):
 
 
 @dataclass(frozen=True)
+class AgentBudget:
+    """Hard ceilings carried through the unified fleet admission seam."""
+
+    max_steps: int
+    max_output_tokens: int
+    max_wall_seconds: float
+    max_children: int = 1
+    max_depth: int = 1
+    max_concurrency: int = 1
+
+    def __post_init__(self) -> None:
+        values = {
+            "max_steps": self.max_steps,
+            "max_output_tokens": self.max_output_tokens,
+            "max_wall_seconds": self.max_wall_seconds,
+            "max_children": self.max_children,
+            "max_depth": self.max_depth,
+            "max_concurrency": self.max_concurrency,
+        }
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise AgentRegistryError(f"{name} must be positive")
+
+
+@dataclass(frozen=True)
+class AgentLineage:
+    """Immutable root/depth evidence attached at admission time."""
+
+    root_id: str
+    depth: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root_id, str) or not self.root_id.strip():
+            raise AgentRegistryError("lineage root_id must be non-empty")
+        if isinstance(self.depth, bool) or not isinstance(self.depth, int) or self.depth < 0:
+            raise AgentRegistryError("lineage depth must be non-negative")
+
+
+@dataclass(frozen=True)
 class AgentLaunch:
     """Canonical launch envelope emitted by the adapter."""
 
@@ -32,6 +71,8 @@ class AgentLaunch:
     parent_id: str | None = None
     idempotency_key: str = ""
     metadata: tuple[tuple[str, str], ...] = ()
+    budget: AgentBudget | None = None
+    lineage: AgentLineage | None = None
 
     def __post_init__(self) -> None:
         for name in ("agent_id", "operation_id", "prompt", "idempotency_key"):
@@ -76,10 +117,12 @@ class FleetAutopilotAdapter:
         idempotency_key: str,
         parent_id: str | None = None,
         metadata: dict[str, str] | None = None,
+        budget: AgentBudget | None = None,
+        lineage: AgentLineage | None = None,
     ) -> Any:
         return self._launch(
             AgentMode.FLEET, agent_id, operation_id, prompt, idempotency_key,
-            parent_id, metadata,
+            parent_id, metadata, budget, lineage,
         )
 
     def launch_autopilot(
@@ -91,10 +134,12 @@ class FleetAutopilotAdapter:
         idempotency_key: str,
         parent_id: str | None = None,
         metadata: dict[str, str] | None = None,
+        budget: AgentBudget | None = None,
+        lineage: AgentLineage | None = None,
     ) -> Any:
         return self._launch(
             AgentMode.AUTOPILOT, agent_id, operation_id, prompt,
-            idempotency_key, parent_id, metadata,
+            idempotency_key, parent_id, metadata, budget, lineage,
         )
 
     def resume(self, agent_id: str) -> Any:
@@ -122,6 +167,8 @@ class FleetAutopilotAdapter:
         idempotency_key: str,
         parent_id: str | None,
         metadata: dict[str, str] | None,
+        budget: AgentBudget | None,
+        lineage: AgentLineage | None,
     ) -> Any:
         launch = AgentLaunch(
             agent_id=self._require_id(agent_id, "agent_id"),
@@ -131,6 +178,8 @@ class FleetAutopilotAdapter:
             parent_id=parent_id,
             idempotency_key=self._require_id(idempotency_key, "idempotency_key"),
             metadata=self._metadata(metadata),
+            budget=budget,
+            lineage=lineage,
         )
         return self._registry.create(launch)
 
@@ -154,4 +203,7 @@ class FleetAutopilotAdapter:
         return tuple(sorted(pairs))
 
 
-__all__ = ["AgentLaunch", "AgentMode", "AgentRegistryError", "AgentRegistryPort", "FleetAutopilotAdapter"]
+__all__ = [
+    "AgentBudget", "AgentLaunch", "AgentLineage", "AgentMode", "AgentRegistryError",
+    "AgentRegistryPort", "FleetAutopilotAdapter",
+]

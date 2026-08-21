@@ -1,4 +1,4 @@
-from sonder_runtime.interfaces.http.serve import _job_record_payload
+from sonder_runtime.interfaces.http.serve import _job_record_id, _job_record_payload
 from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 
 
@@ -21,3 +21,9 @@ def test_job_record_payload_is_bounded_and_json_ready():
         "created_at": "created", "updated_at": "updated",
         "result": {"ok": True}, "error": "",
     }
+
+
+def test_direct_job_read_decodes_one_safe_path_segment():
+    assert _job_record_id("/v1/jobs/job%2Done") == "job-one"
+    assert _job_record_id("/v1/jobs/job/child") is None
+    assert _job_record_id("/v1/jobs/job%2Fchild") is None

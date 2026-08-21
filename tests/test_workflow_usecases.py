@@ -174,3 +174,19 @@ def test_service_does_not_send_new_cancel_keyword_to_legacy_runner_by_default():
         "demo", lambda _action: {"ok": True}
     )
     assert result.ok is True
+
+
+def test_service_types_runner_contract_failures():
+    class BrokenRunner(Runner):
+        def run(self, actions, dispatch, **options):
+            raise RuntimeError("runner unavailable")
+
+    repository = Repository()
+    repository.save("demo", [{"type": "status"}])
+    result = WorkflowService(repository, BrokenRunner()).run(
+        "demo", lambda _action: {"ok": True}
+    )
+
+    assert result.ok is False
+    assert result.error_code == "WORKFLOW_ERROR"
+    assert result.output == "workflow runner failed: RuntimeError: runner unavailable"

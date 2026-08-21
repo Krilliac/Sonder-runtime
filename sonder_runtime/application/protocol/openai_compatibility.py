@@ -39,6 +39,7 @@ class CanonicalResponse:
 
 PolicyHook = Callable[[str, Mapping[str, Any]], Any]
 EventHook = Callable[[Mapping[str, Any]], Any]
+ModelHook = Callable[[CanonicalRequest], CanonicalResponse]
 
 
 def _text(value: Any, label: str) -> str:
@@ -134,6 +135,48 @@ class OpenAICompatibility:
         self._event({"kind": "openai.request.normalized", "operation": operation,
                      "model": model, "stream": stream})
         return result
+
+    def complete(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        operation: str,
+        model_hook: ModelHook,
+    ) -> CanonicalResponse:
+        """Run one canonical request through an injected model boundary.
+
+        This is deliberately not a transport or HTTP operation.  The policy
+        hook and request normalization happen before ``model_hook`` is called;
+        the response is checked at the same canonical boundary and recorded
+        through the existing event hook.  Providers can therefore be swapped
+        without allowing a model path to bypass policy or event recording.
+        """
+        if not callable(model_hook):
+            raise TypeError("model_hook must be callable")
+        request = self.request(payload, operation=operation)
+        return self.complete_request(request, model_hook=model_hook)
+
+    def complete_request(
+        self,
+        request: CanonicalRequest,
+        *,
+        model_hook: ModelHook,
+    ) -> CanonicalResponse:
+        """Complete an already-normalized request without rerunning hooks."""
+        if not callable(model_hook):
+            raise TypeError("model_hook must be callable")
+        response = model_hook(request)
+        if not isinstance(response, CanonicalResponse):
+            raise CompatibilityError("model hook returned an invalid response")
+        operation = request.operation
+        if response.operation != operation:
+            raise CompatibilityError("model response operation does not match request")
+        _text(response.response_id, "response_id")
+        _text(response.model, "response model")
+        _text(response.text, "response text")
+        self._event({"kind": "openai.response.normalized", "operation": operation,
+                     "model": response.model, "response_id": response.response_id})
+        return response
 
     def response(self, payload: Mapping[str, Any], *, operation: str) -> CanonicalResponse:
         if operation not in {"chat.completions", "responses"}:

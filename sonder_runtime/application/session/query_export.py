@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
+import binascii
 import hashlib
 import json
 import re
@@ -211,8 +212,10 @@ class SessionQueryEngine:
         try:
             padded = cursor + "=" * (-len(cursor) % 4)
             body = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
-        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as exc:
             raise QueryExportError("invalid pagination cursor") from exc
+        if not isinstance(body, dict):
+            raise QueryExportError("invalid pagination cursor")
         if body.get("v") != self._CURSOR_VERSION or body.get("f") != fingerprint:
             raise QueryExportError("pagination cursor does not match query")
         next_sequence = body.get("n")
@@ -266,9 +269,21 @@ class SessionQueryEngine:
     def export_events(self, session_id: str, *, start_sequence: int = 1,
                       end_sequence: int | None = None, max_events: int = 1_000,
                       include_integrity: bool = True) -> SessionExport:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise QueryExportError("session_id must be non-empty")
+        if isinstance(start_sequence, bool) or not isinstance(start_sequence, int) or start_sequence < 1:
+            raise QueryExportError("start_sequence must be positive")
+        if end_sequence is not None and (
+            isinstance(end_sequence, bool) or not isinstance(end_sequence, int) or end_sequence < start_sequence
+        ):
+            raise QueryExportError("end_sequence must be >= start_sequence")
         max_events = _positive("max_events", max_events, self._max_scan)
+        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
+        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
+            adapter_limit = self._max_scan
+        read_limit = min(max_events, adapter_limit)
         events = self._repository.read_range(session_id, start_sequence=start_sequence,
-                                             end_sequence=end_sequence, limit=max_events)
+                                             end_sequence=end_sequence, limit=read_limit)
         records = tuple(SessionEventRecord.from_event(event, redactor=self._redactor) for event in events)
         transcript = self._transcript(records)
         # Integrity is a property of the chain, not merely of the selected
@@ -277,9 +292,9 @@ class SessionQueryEngine:
         # while retaining the caller's end and event bound.
         integrity = self._repository.inspect_integrity(
             session_id, start_sequence=1, end_sequence=end_sequence,
-            limit=max_events,
+            limit=read_limit,
         ) if include_integrity else None
-        truncated = len(events) == max_events
+        truncated = len(events) == read_limit
         return SessionExport(session_id, records, transcript, integrity, truncated)
 
     def export_transcript(self, session_id: str, *, start_sequence: int = 1,

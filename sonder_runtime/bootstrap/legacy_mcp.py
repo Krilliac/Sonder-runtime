@@ -8,7 +8,15 @@ from __future__ import annotations
 from types import ModuleType
 
 from sonder_runtime.adapters.command_surface import LegacyServerMcpRuntime
+from sonder_runtime.application.protocol.mcp_compatibility import LegacyMcpContract
 from .legacy_root import runtime_proxy
+
+
+LEGACY_MCP_DECLARATION = LegacyMcpContract(
+    name="legacy-server",
+    version="1.0",
+    capabilities=("tools",),
+)
 
 
 def build_legacy_server_mcp_runtime(
@@ -26,7 +34,8 @@ def build_legacy_server_mcp_runtime(
     return LegacyServerMcpRuntime(
         require_startup_safety=require_startup_safety,
         run_mcp=run_mcp,
+        declaration=LEGACY_MCP_DECLARATION,
     )
 
 
-__all__ = ["build_legacy_server_mcp_runtime"]
+__all__ = ["LEGACY_MCP_DECLARATION", "build_legacy_server_mcp_runtime"]

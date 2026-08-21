@@ -168,34 +168,53 @@ class ModelRequestFacade:
         gateway: ModelRequestPort,
         context: OperationContext,
     ) -> ModelInvocation:
-        request = self.normalize(path, payload)
         started = time.monotonic()
-        response = gateway.generate(self.to_model_request(request), context)
-        if not isinstance(response, ModelResponse):
-            raise ModelFacadeError("model gateway returned an invalid response")
-        text = response.text
-        if not isinstance(text, str) or not text.strip():
-            raise ModelFacadeError("model gateway returned empty text")
-        usage = {}
-        if response.tokens_in is not None:
-            usage["prompt_tokens"] = response.tokens_in
-        if response.tokens_out is not None:
-            usage["completion_tokens"] = response.tokens_out
-        if usage:
-            usage["total_tokens"] = sum(usage.values())
-        canonical = CanonicalResponse(
-            operation=request.operation,
-            response_id="%s-%s" % (
-                "chatcmpl" if request.operation == "chat.completions" else "resp",
-                uuid.uuid4().hex[:16],
-            ),
-            model=response.model or request.model,
-            text=text,
-            usage=usage,
-            metadata={"tier": response.tier, "duration_ms": max(
-                response.duration_ms, int((time.monotonic() - started) * 1000)
-            )},
-        )
+        route = self.route(path)
+        if route is None:
+            raise ModelFacadeError("unsupported model route")
+
+        try:
+            request = self.normalize(path, payload)
+        except ModelFacadeError:
+            raise
+
+        def complete(request: CanonicalRequest) -> CanonicalResponse:
+            response = gateway.generate(self.to_model_request(request), context)
+            if not isinstance(response, ModelResponse):
+                raise ModelFacadeError("model gateway returned an invalid response")
+            text = response.text
+            if not isinstance(text, str) or not text.strip():
+                raise ModelFacadeError("model gateway returned empty text")
+            usage = {}
+            if response.tokens_in is not None:
+                usage["prompt_tokens"] = response.tokens_in
+            if response.tokens_out is not None:
+                usage["completion_tokens"] = response.tokens_out
+            if usage:
+                usage["total_tokens"] = sum(usage.values())
+            return CanonicalResponse(
+                operation=request.operation,
+                response_id="%s-%s" % (
+                    "chatcmpl" if request.operation == "chat.completions" else "resp",
+                    uuid.uuid4().hex[:16],
+                ),
+                model=response.model or request.model,
+                text=text,
+                usage=usage,
+                metadata={"tier": response.tier, "duration_ms": max(
+                    response.duration_ms, int((time.monotonic() - started) * 1000)
+                )},
+            )
+
+        try:
+            canonical = self._compatibility.complete_request(
+                request,
+                model_hook=complete,
+            )
+        except ModelFacadeError:
+            raise
+        except CompatibilityError as exc:
+            raise ModelFacadeError(str(exc)) from exc
         if self._event_hook is not None:
             self._event_hook({
                 "kind": "model.response.completed",

@@ -25,6 +25,23 @@ class SandboxWorldKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class SandboxResourceLimits:
+    """Finite bounds a provider must enforce for one world request."""
+
+    max_path_length: int = 4096
+    max_file_bytes: int = 16 * 1024 * 1024
+    max_active_resources: int = 32
+
+    def __post_init__(self) -> None:
+        if self.max_path_length < 1:
+            raise ValueError("max_path_length must be positive")
+        if self.max_file_bytes < 1:
+            raise ValueError("max_file_bytes must be positive")
+        if self.max_active_resources < 1:
+            raise ValueError("max_active_resources must be positive")
+
+
+@dataclass(frozen=True)
 class SandboxPolicy:
     """Authority requested for one world.
 
@@ -39,6 +56,7 @@ class SandboxPolicy:
     allow_process: bool = True
     egress_hosts: tuple[str, ...] = ()
     persistent_changes: bool = False
+    resource_limits: SandboxResourceLimits = field(default_factory=SandboxResourceLimits)
 
     def __post_init__(self) -> None:
         if self.read_only and (self.allow_write or self.persistent_changes):
@@ -50,6 +68,8 @@ class SandboxPolicy:
             raise ValueError("egress_hosts must contain non-empty strings")
         if self.egress_hosts and not self.allow_network:
             raise ValueError("egress_hosts require allow_network=True")
+        if not isinstance(self.resource_limits, SandboxResourceLimits):
+            raise TypeError("resource_limits must be SandboxResourceLimits")
 
 
 @dataclass(frozen=True)
@@ -136,6 +156,7 @@ class SandboxProvider(Protocol):
 __all__ = [
     "SandboxCleanupResult",
     "SandboxPolicy",
+    "SandboxResourceLimits",
     "SandboxProvider",
     "SandboxWorld",
     "SandboxWorldKind",

@@ -160,6 +160,32 @@ def test_artifact_risk_uses_packaged_static_inspector(executor, tmp_path):
     assert result.evidence["kind"] == "binary"
 
 
+def test_verify_artifact_uses_packaged_acquisition_verifier(executor, tmp_path):
+    artifact = tmp_path / "sample.exe"
+    artifact.write_bytes(b"MZ" + b"\0" * 2048)
+    result = executor.execute(
+        ToolCall("verify_artifact", {"path": "sample.exe", "expect_type": "pe"}), _ctx()
+    )
+    assert result.ok
+    assert result.evidence["verdict"] == "verified"
+
+
+def test_secret_scan_uses_packaged_redacting_scanner(executor, tmp_path):
+    (tmp_path / "config.env").write_text("API_KEY=super-secret-value\n", encoding="utf-8")
+    result = executor.execute(ToolCall("secret_scan", {"root": "."}), _ctx())
+    assert result.ok
+    assert "[REDACTED CREDENTIAL]" in result.output
+    assert "super-secret" not in result.output
+
+
+def test_web_fetch_requires_context_cloud_consent(executor):
+    result = executor.execute(
+        ToolCall("web_fetch", {"url": "https://example.test", "max_chars": 1200}), _ctx()
+    )
+    assert result.ok is False
+    assert result.error_code == "PermissionError"
+
+
 def test_guard_rejection_surfaces_as_not_ok(executor):
     # Escaping the workspace root must fail closed as ok=False, not raise.
     result = executor.execute(
@@ -216,4 +242,5 @@ def test_application_exposes_tool_executor(tmp_path, monkeypatch):
     bootstrap_app.reset_for_tests()
     app = bootstrap_app.build_application()
     assert isinstance(app.tool_executor, ToolExecutorAdapter)
+    assert app.vision is not None
     bootstrap_app.reset_for_tests()

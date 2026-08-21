@@ -26,6 +26,19 @@ def test_parent_linked_lifecycle_is_one_registry_surface() -> None:
         registry.start(identity("orphan", parent="missing"))
 
 
+def test_parent_listing_is_bounded_and_excludes_terminal_records_when_requested() -> None:
+    registry = DurableJobRegistry()
+    registry.start(identity("parent"))
+    registry.start(identity("child-a", parent="parent"))
+    registry.start(identity("child-b", parent="parent"))
+    registry.transition("child-a", JobStatus.SUCCEEDED)
+
+    assert [record.identity.job_id for record in registry.list(parent_job_id="parent", limit=1)] == ["child-a"]
+    assert [record.identity.job_id for record in registry.list(
+        parent_job_id="parent", include_terminal=False
+    )] == ["child-b"]
+
+
 def test_cancel_propagates_to_descendants_and_collect_is_terminal_only() -> None:
     registry = DurableJobRegistry()
     registry.start(identity("parent"))

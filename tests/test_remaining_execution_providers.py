@@ -41,8 +41,26 @@ def test_remote_denies_until_configured() -> None:
         provider.submit("job")
 
 
+@pytest.mark.parametrize("endpoint", ["http://worker", "worker", "https://"])
+def test_remote_requires_an_explicit_https_endpoint(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        RemoteWorldConfig("r-invalid", "worker-a", endpoint)
+
+
 def test_remote_routes_to_configured_worker_with_stable_identity() -> None:
     worker = Worker([])
     provider = ConfiguredRemoteWorld(RemoteWorldConfig("r-2", "worker-a", "https://worker", True), worker)
     assert provider.submit("job") == "receipt:r-2"
     assert worker.calls == [("r-2", "job")]
+
+
+def test_policy_denial_does_not_call_a_supplied_worker() -> None:
+    worker = Worker([])
+    provider = GuardedContainerWorld(
+        ContainerWorldConfig("c-denied", "img", allowed=False), worker
+    )
+
+    with pytest.raises(PermissionError, match="not configured"):
+        provider.submit("job")
+
+    assert worker.calls == []

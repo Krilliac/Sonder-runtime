@@ -142,6 +142,17 @@ class SessionCaptureService:
         )
         self._replay_limit = replay_limit
 
+    def replay(self, session_id: str) -> DurableReplayResult:
+        """Replay one persisted session after a process/database restart.
+
+        This is deliberately read-only and uses the same bounded,
+        integrity-first path as ``capture_turn``.  A partial or altered
+        append stream therefore fails closed instead of returning a prefix.
+        """
+        return crash_safe_replay(
+            self._repository, session_id, max_events=self._replay_limit,
+        )
+
     def capture_turn(
         self,
         session_id: str,

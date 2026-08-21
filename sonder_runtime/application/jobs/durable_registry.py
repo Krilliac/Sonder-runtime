@@ -159,6 +159,7 @@ class DurableJobRegistry:
         include_terminal: bool = True,
         limit: int = 100,
     ) -> tuple[JobRecord, ...]:
+        """Return a bounded, stable listing optionally scoped to one parent."""
         if isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be positive")
         with self._lock:

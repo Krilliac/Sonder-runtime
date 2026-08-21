@@ -55,3 +55,40 @@ def test_unsupported_shapes_are_rejected_and_policy_can_deny():
         OpenAICompatibility().request({"model": "m", "messages": [{
             "role": "user", "content": [{"type": "image_url"}]
         }]}, operation="chat.completions")
+
+
+def test_complete_is_typed_policy_first_and_maps_provider_response_once():
+    events = []
+    calls = []
+    adapter = OpenAICompatibility(
+        policy_hook=lambda operation, payload: calls.append((operation, payload["model"])) or True,
+        event_hook=lambda event: events.append(event["kind"]),
+    )
+    result = adapter.complete(
+        {"model": "m", "messages": [{"role": "user", "content": "hello"}]},
+        operation="chat.completions",
+        model_hook=lambda request: CanonicalResponse(
+            operation=request.operation,
+            response_id="chatcmpl-1",
+            model=request.model,
+            text="world",
+        ),
+    )
+    assert result.text == "world"
+    assert calls == [("chat.completions", "m")]
+    assert events == ["openai.request.normalized", "openai.response.normalized"]
+
+
+def test_complete_rejects_provider_response_for_the_wrong_operation():
+    adapter = OpenAICompatibility()
+    with __import__("pytest").raises(CompatibilityError, match="does not match"):
+        adapter.complete(
+            {"model": "m", "input": "hello"},
+            operation="responses",
+            model_hook=lambda request: CanonicalResponse(
+                operation="chat.completions",
+                response_id="chatcmpl-1",
+                model=request.model,
+                text="wrong",
+            ),
+        )

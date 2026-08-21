@@ -7,11 +7,17 @@ from .procedural_publication import (
     InMemoryActiveSkillPort,
     ProceduralPublicationService,
 )
+from .composition import (
+    ProceduralPublicationComposition,
+    build_procedural_publication_composition,
+)
 
 __all__ = [
     "DurableLastGoodCatalog",
     "HeldOutEvidence",
     "InMemoryActiveSkillPort",
     "ProceduralPublicationService",
+    "ProceduralPublicationComposition",
+    "build_procedural_publication_composition",
     "SkillRegistry",
 ]

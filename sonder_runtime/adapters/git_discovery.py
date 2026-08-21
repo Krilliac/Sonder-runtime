@@ -124,13 +124,17 @@ def _run_bounded(argv: list[str], *, timeout_seconds: float, output_limit: int) 
     return bytes(buffers["stdout"])
 
 
-def _git_argv(git: str) -> list[str]:
-    return [
+def _git_argv(git: str, *, safe_directory: Path | None = None) -> list[str]:
+    """Build a hermetic Git argv with one validated repository trust scope."""
+    args = [
         git, "--no-optional-locks",
         "-c", "core.excludesFile=%s" % os.devnull,
         "-c", "core.fsmonitor=false",
         "-c", "core.untrackedCache=false",
     ]
+    if safe_directory is not None:
+        args.extend(["-c", "safe.directory=%s" % safe_directory])
+    return args
 
 
 def visible_paths(
@@ -150,7 +154,10 @@ def visible_paths(
     if not git:
         raise GitDiscoveryError("Git metadata exists but the Git executable is unavailable")
     git = str(Path(git).resolve())
-    prefix = _git_argv(git)
+    # The marker was inspected without Git; trust only its containing path,
+    # never a wildcard or user/global config entry.  The later repository and
+    # marker-boundary checks still reject indirect or unrelated metadata.
+    prefix = _git_argv(git, safe_directory=marker.parent.resolve())
     raw_metadata = _run_bounded(
         prefix + ["-C", str(root), "rev-parse", "--show-toplevel", "--absolute-git-dir"],
         timeout_seconds=timeout_seconds,

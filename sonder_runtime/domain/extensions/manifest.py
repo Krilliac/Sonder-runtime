@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from enum import StrEnum
 import re
 
@@ -85,6 +87,30 @@ class ExtensionManifest:
     @property
     def extension_id(self) -> str:
         return f"{self.identity.publisher}.{self.identity.name}"
+
+    def digest(self) -> str:
+        """Return the stable digest bound by extension provenance records."""
+        material = {
+            "extension_id": self.extension_id,
+            "version": self.version,
+            "protocol": self.protocol,
+            "dependencies": [
+                {"name": item.name, "version": item.version, "required": item.required}
+                for item in self.dependencies
+            ],
+            "permissions": list(self.permissions),
+            "health": {
+                "mode": self.health.mode.value,
+                "crash_limit": self.health.crash_limit,
+                "probe_timeout_ms": self.health.probe_timeout_ms,
+            },
+            "cleanup": {
+                "on_quarantine": self.cleanup.on_quarantine,
+                "retain_state": self.cleanup.retain_state,
+            },
+        }
+        encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return sha256(encoded).hexdigest()
 
     def compatibility_reasons(
         self, *, protocol: str, available_dependencies: set[str], granted_permissions: set[str]

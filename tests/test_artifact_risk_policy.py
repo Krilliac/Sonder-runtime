@@ -1,6 +1,6 @@
 """Ownership and behavior tests for the execution-risk domain policy."""
 
-import artifact_risk
+import sonder_runtime.adapters.artifact_risk as artifact_risk
 from sonder_runtime.domain.artifact_risk_policy import policy_denies
 
 
