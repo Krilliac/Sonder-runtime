@@ -149,7 +149,9 @@ import calibration
 from sonder_runtime.adapters.command_catalog import command_catalog
 import grounded_extraction
 import grounded_outcomes
-import permission_modes
+from sonder_runtime.adapters.security.permission_policy import (
+    permission_policy as permission_modes,
+)
 import reloadable_mcp
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
