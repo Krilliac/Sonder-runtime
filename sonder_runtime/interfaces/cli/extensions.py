@@ -66,6 +66,13 @@ class ExtensionCommand:
         define.add_argument("--description", default="")
         define.add_argument("--argv", nargs="+", required=True)
         define.add_argument("--memory-limit-bytes", type=int)
+        installed = sub.add_parser("define-installed")
+        installed.add_argument("experiment_id")
+        installed.add_argument("extension_id")
+        installed.add_argument("--argv", nargs="+", required=True)
+        installed.add_argument("--scope", choices=("global", "project"), default="global")
+        installed.add_argument("--project-id")
+        installed.add_argument("--description", default="")
         for name in ("start", "stop", "delete"):
             command = sub.add_parser(name)
             command.add_argument("experiment_id")
@@ -112,6 +119,12 @@ class ExtensionCommand:
                     description=args.description, authority=authority,
                     limits=ExperimentLimits(args.memory_limit_bytes)
                     if args.memory_limit_bytes is not None else None,
+                ))
+            elif args.command == "define-installed":
+                result = _snapshot(self._facade.define_installed(
+                    args.experiment_id, args.extension_id, tuple(args.argv),
+                    scope=args.scope, project_id=args.project_id,
+                    description=args.description, authority=authority,
                 ))
             elif args.command == "inspect":
                 result = _snapshot(self._facade.inspect(args.experiment_id, authority))

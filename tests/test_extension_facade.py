@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from io import StringIO
+from hashlib import sha256
 import json
 import sys
 
@@ -18,7 +19,11 @@ from sonder_runtime.application.extensions.facade import (
     ExtensionAuthorityDenied,
 )
 from sonder_runtime.application.extensions.registry import ExtensionRegistry
+from sonder_runtime.application.extensions.provenance_inventory import (
+    ExtensionProvenance, ProvenanceInventory, SignatureRecord, TrustLevel, TrustRecord,
+)
 from sonder_runtime.domain.extensions.manifest import ExtensionHealth, ExtensionIdentity, ExtensionManifest
+from sonder_runtime.domain.extensions.manifest import ExtensionResources
 from sonder_runtime.interfaces.cli.extensions import ExtensionCommand
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 
@@ -39,6 +44,25 @@ def _facade(*, allow_start: bool = True):
         host_factory=factory,
     )
     return ExtensionApplicationFacade(ExtensionRegistry(), manager), manager
+
+
+def _trusted_facade():
+    manifest = ExtensionManifest(
+        ExtensionIdentity("installed", "sonder"), "1.0.0", "extension-v1",
+        resources=ExtensionResources(128 * 1024 * 1024),
+    )
+    digest = manifest.digest()
+    inventory = ProvenanceInventory.build([ExtensionProvenance(
+        manifest.extension_id, manifest.version, "signed-registry",
+        sha256(b"artifact").hexdigest(), digest,
+        SignatureRecord("release", "ed25519", "signature", digest),
+        TrustRecord("signed-registry", TrustLevel.TRUSTED, "operator-approved"),
+    )])
+    registry = ExtensionRegistry(provenance=inventory)
+    registry.install(manifest, scope="global", signatures_verified=True)
+    facade, manager = _facade()
+    facade._registry = registry
+    return facade, manager
 
 
 def test_facade_requires_explicit_typed_authority_for_every_operation():
@@ -122,6 +146,25 @@ def test_http_facade_dispatches_health_and_lifecycle():
         manager.close()
 
 
+def test_define_installed_requires_healthy_persisted_record_and_reuses_budget():
+    facade, manager = _trusted_facade()
+    authority = _authority("define_installed", "inspect")
+    try:
+        defined = facade.define_installed(
+            "installed-run", "sonder.installed", [sys.executable, "-c", SERVER],
+            scope="global", project_id=None, authority=authority,
+        )
+        assert defined.state == "defined"
+        facade._registry.disable("sonder.installed", scope="global")
+        with pytest.raises(ValueError, match="not runnable"):
+            facade.define_installed(
+                "blocked", "sonder.installed", [sys.executable, "-c", SERVER],
+                scope="global", project_id=None, authority=authority,
+            )
+    finally:
+        manager.close()
+
+
 def test_http_registry_update_preserves_declared_resource_budget():
     facade, manager = _facade()
     authority = _authority("update", "registry_health")
@@ -137,6 +180,21 @@ def test_http_registry_update_preserves_declared_resource_budget():
         )
         assert updated is not None and updated.status_code == 200
         assert updated.body["extension"]["resources"]["memory_limit_bytes"] == 256 * 1024 * 1024
+    finally:
+        manager.close()
+
+
+def test_http_define_installed_uses_persisted_registry_record():
+    facade, manager = _trusted_facade()
+    authority = _authority("define_installed")
+    try:
+        result = dispatch_extension_route(
+            facade, "POST", "/v1/extensions/experiments/define-installed",
+            {"experiment_id": "installed-http", "extension_id": "sonder.installed",
+             "argv": [sys.executable, "-c", SERVER]}, authority,
+        )
+        assert result is not None and result.status_code == 201
+        assert result.body["experiment"]["state"] == "defined"
     finally:
         manager.close()
 

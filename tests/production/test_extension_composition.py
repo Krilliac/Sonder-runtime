@@ -5,6 +5,7 @@ import sys
 import inspect
 from io import StringIO
 import json
+from hashlib import sha256
 
 import pytest
 
@@ -14,6 +15,9 @@ from sonder_runtime.application.extensions.experiments import (
     ExperimentState,
 )
 from sonder_runtime.application.extensions.registry import ExtensionRegistry
+from sonder_runtime.application.extensions.provenance_inventory import (
+    ExtensionProvenance, ProvenanceInventory, SignatureRecord, TrustLevel, TrustRecord,
+)
 from sonder_runtime.application.extensions.facade import ExtensionApplicationFacade
 from sonder_runtime.domain.extensions.manifest import ExtensionIdentity, ExtensionManifest, ExtensionResources
 from sonder_runtime.bootstrap import app as bootstrap_app
@@ -136,6 +140,43 @@ def test_production_experiment_limit_reaches_native_host_boundary():
         assert defined.state == ExperimentState.DEFINED
         assert application.extension_facade().start("limited", authority).state == ExperimentState.RUNNING
         assert application.extension_facade().stop("limited", authority).state == ExperimentState.STOPPED
+    finally:
+        application.experiment_manager().close()
+        bootstrap_app.reset_for_tests()
+
+
+def test_persisted_healthy_installation_reaches_native_experiment_host(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    manifest = ExtensionManifest(
+        ExtensionIdentity("installed", "sonder"), "1.0.0", "extension-v1",
+        resources=ExtensionResources(256 * 1024 * 1024),
+    )
+    digest = manifest.digest()
+    inventory = ProvenanceInventory.build([ExtensionProvenance(
+        manifest.extension_id, manifest.version, "signed-registry",
+        sha256(b"artifact").hexdigest(), digest,
+        SignatureRecord("release", "ed25519", "signature", digest),
+        TrustRecord("signed-registry", TrustLevel.TRUSTED, "operator-approved"),
+    )])
+    bootstrap_app.reset_for_tests()
+    application = bootstrap_app.build_application(
+        extension_provenance=inventory,
+        extension_startup_authority=lambda _definition: True,
+    )
+    authority = ExtensionAuthority(
+        "operator", frozenset({"define_installed", "start", "stop"})
+    )
+    try:
+        application.extension_registry().install(
+            manifest, scope="global", signatures_verified=True,
+        )
+        defined = application.extension_facade().define_installed(
+            "persisted-run", "sonder.installed", _server(),
+            scope="global", project_id=None, authority=authority,
+        )
+        assert defined.state == ExperimentState.DEFINED
+        assert application.extension_facade().start("persisted-run", authority).state == ExperimentState.RUNNING
+        assert application.extension_facade().stop("persisted-run", authority).state == ExperimentState.STOPPED
     finally:
         application.experiment_manager().close()
         bootstrap_app.reset_for_tests()

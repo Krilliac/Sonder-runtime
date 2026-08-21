@@ -201,6 +201,36 @@ def dispatch_extension_route(
         except Exception as error:
             return _error(error)
 
+    if path == "/v1/extensions/experiments/define-installed" and method == "POST":
+        try:
+            required = {"experiment_id", "extension_id", "argv"}
+            optional = {"description", "environment", "scope", "project_id"}
+            if set(payload) - required - optional or not required.issubset(payload):
+                raise ValueError("define-installed requires experiment_id, extension_id, and argv")
+            experiment_id = payload["experiment_id"]
+            extension_id = payload["extension_id"]
+            argv = payload["argv"]
+            scope = payload.get("scope", "global")
+            project_id = payload.get("project_id")
+            description = payload.get("description", "")
+            environment = payload.get("environment")
+            if not isinstance(experiment_id, str) or not isinstance(extension_id, str):
+                raise TypeError("experiment_id and extension_id must be text")
+            if not isinstance(argv, list) or not isinstance(scope, str):
+                raise TypeError("argv must be an array and scope must be text")
+            if project_id is not None and not isinstance(project_id, str):
+                raise TypeError("project_id must be text or null")
+            if not isinstance(description, str) or (environment is not None and not isinstance(environment, dict)):
+                raise TypeError("description must be text and environment must be an object")
+            snapshot = facade.define_installed(
+                experiment_id, extension_id, tuple(argv), scope=scope,
+                project_id=project_id, description=description,
+                environment=environment, authority=authority,
+            )
+            return ExtensionHttpResult({"object": "experiment_define_installed", "experiment": _snapshot(snapshot)}, 201)
+        except Exception as error:
+            return _error(error)
+
     if path == "/v1/extensions/experiments/define" and method == "POST":
         try:
             required = {"experiment_id", "argv"}

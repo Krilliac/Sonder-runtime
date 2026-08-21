@@ -505,7 +505,7 @@ def _extension_authority(context):
     return ExtensionAuthority(
         actor=str(actor),
         operations=frozenset({
-            "registry_health", "inspect", "define", "start", "stop", "delete",
+            "registry_health", "inspect", "define", "define_installed", "start", "stop", "delete",
         }),
     )
 
