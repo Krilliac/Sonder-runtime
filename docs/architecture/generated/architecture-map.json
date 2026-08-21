@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 200,
+      "file_count": 201,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -242,6 +242,7 @@
         "sonder_runtime/adapters/web/listener_probe.py",
         "sonder_runtime/adapters/web/live_reload.py",
         "sonder_runtime/adapters/web_fetch.py",
+        "sonder_runtime/adapters/web_intents.py",
         "sonder_runtime/adapters/web_provider.py",
         "sonder_runtime/adapters/web_search.py",
         "sonder_runtime/adapters/workflow_loop_runner.py",
@@ -249,7 +250,7 @@
       ]
     },
     {
-      "file_count": 228,
+      "file_count": 233,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -294,9 +295,11 @@
         "sonder_runtime/application/control_plane/__init__.py",
         "sonder_runtime/application/control_plane/snapshot.py",
         "sonder_runtime/application/errors.py",
+        "sonder_runtime/application/evaluation/__init__.py",
         "sonder_runtime/application/evaluation/corpus_inventory.py",
         "sonder_runtime/application/evaluation/durable_lifecycle.py",
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
+        "sonder_runtime/application/evaluation/service.py",
         "sonder_runtime/application/evaluation/trajectory_replay.py",
         "sonder_runtime/application/evaluation_history/__init__.py",
         "sonder_runtime/application/evaluation_history/use_cases.py",
@@ -325,6 +328,7 @@
         "sonder_runtime/application/loop_event_classification.py",
         "sonder_runtime/application/loop_steering.py",
         "sonder_runtime/application/memory/__init__.py",
+        "sonder_runtime/application/memory/facade.py",
         "sonder_runtime/application/memory/memory_policy.py",
         "sonder_runtime/application/memory/outcome_service.py",
         "sonder_runtime/application/memory/procedural_learning.py",
@@ -356,6 +360,7 @@
         "sonder_runtime/application/ports/command_catalog.py",
         "sonder_runtime/application/ports/compaction.py",
         "sonder_runtime/application/ports/content_services.py",
+        "sonder_runtime/application/ports/evaluation.py",
         "sonder_runtime/application/ports/evaluation_history.py",
         "sonder_runtime/application/ports/event_sink.py",
         "sonder_runtime/application/ports/execution_tools.py",
@@ -363,6 +368,7 @@
         "sonder_runtime/application/ports/extensions.py",
         "sonder_runtime/application/ports/filesystem.py",
         "sonder_runtime/application/ports/jobs.py",
+        "sonder_runtime/application/ports/memory.py",
         "sonder_runtime/application/ports/model_bootstrap.py",
         "sonder_runtime/application/ports/model_gateway.py",
         "sonder_runtime/application/ports/model_gateway_contract.py",

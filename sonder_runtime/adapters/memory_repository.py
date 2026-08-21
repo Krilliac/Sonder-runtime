@@ -53,6 +53,12 @@ class MemoryRepositoryAdapter:
 
         return memory_store.get_interaction(self._conn, interaction_id)
 
+    def append_outbox_event(self, event) -> None:
+        """Append a memory-domain event on the caller's transaction."""
+        from .persistence.sqlite.outbox import OutboxWriter
+
+        OutboxWriter(self._conn).append(event)
+
     def recall(self, task: str, *, k: int = 2, project: str | None = None, **options):
         import sonder_runtime.adapters.recall as recall_module
 

@@ -68,6 +68,7 @@ from ..application.agent_registry.unified import UnifiedAgentRegistryService
 from ..application.evaluation_history import EvaluationHistoryService
 from ..application.inspection import InspectionService
 from ..application.recall import RecallService
+from ..application.memory import MemoryLearningFacade
 from ..application.preferences import PreferenceService
 from ..application.ports.preferences import (
     ConnectionFactory,
@@ -120,6 +121,7 @@ class Application:
     backup: BackupService
     inspections: InspectionService
     recall: RecallService
+    memory: MemoryLearningFacade
     evaluation_history: EvaluationHistoryService
     preferences: PreferenceService
     workflows: WorkflowService
@@ -476,6 +478,10 @@ def build_application(
         backup=BackupService(LegacyBackupGateway()),
         inspections=InspectionService(InspectionExecutorAdapter()),
         recall=RecallService(LegacyRecallGateway()),
+        memory=MemoryLearningFacade(
+            UnitOfWorkAdapter,
+            recall_service=RecallService(LegacyRecallGateway()),
+        ),
         evaluation_history=EvaluationHistoryService(
             EvaluationHistoryReaderAdapter()
         ),

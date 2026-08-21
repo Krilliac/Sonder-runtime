@@ -37,6 +37,7 @@ from .vision_gateway import (
 )
 from .process_probe import ProbeResult, ProcessIdentity, ProcessProbe
 from .recall import RecallGateway
+from .memory import MemoryConnectionScope, MemoryRepositoryPort
 from .preferences import PreferenceCodec, PreferenceEventSink, PreferenceRepository
 from .repositories import (
     AutomationRepository,
@@ -177,6 +178,8 @@ __all__ = [
     "ProcessIdentity",
     "ProcessProbe",
     "RecallGateway",
+    "MemoryConnectionScope",
+    "MemoryRepositoryPort",
     "ToolCall",
     "ToolExecutor",
     "ToolResult",

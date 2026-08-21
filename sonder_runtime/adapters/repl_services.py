@@ -12,7 +12,7 @@ class ReplServiceProvider:
         return getattr(importlib.import_module(self.module_name), name)
 
 
-web_intents = ReplServiceProvider("web_intents")
+from .web_intents import web_intents
 personas = ReplServiceProvider("personas")
 consult = ReplServiceProvider("consult")
 tier_router = ReplServiceProvider("tier_router")
