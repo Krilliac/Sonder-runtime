@@ -146,7 +146,7 @@ import sonder_runtime.adapters.runtime_policy as runtime_policy
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
-import command_catalog
+from sonder_runtime.adapters.command_catalog import command_catalog
 import grounded_extraction
 import grounded_outcomes
 import permission_modes
