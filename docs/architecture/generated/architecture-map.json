@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 195,
+      "file_count": 196,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -128,6 +128,7 @@
         "sonder_runtime/adapters/inspection_executor.py",
         "sonder_runtime/adapters/launcher_idempotency.py",
         "sonder_runtime/adapters/launcher_output.py",
+        "sonder_runtime/adapters/learning_health.py",
         "sonder_runtime/adapters/learning_tier_formatting.py",
         "sonder_runtime/adapters/local_observability.py",
         "sonder_runtime/adapters/location.py",
@@ -244,7 +245,7 @@
       ]
     },
     {
-      "file_count": 222,
+      "file_count": 223,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -279,6 +280,7 @@
         "sonder_runtime/application/compaction/legacy.py",
         "sonder_runtime/application/compaction/session_service.py",
         "sonder_runtime/application/context.py",
+        "sonder_runtime/application/context_health.py",
         "sonder_runtime/application/context_integration.py",
         "sonder_runtime/application/context_manifest.py",
         "sonder_runtime/application/context_manifests.py",

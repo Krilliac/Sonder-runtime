@@ -12,15 +12,18 @@ def test_weather_requires_explicit_consent():
 
 
 def test_weather_bounds_request_and_formats_provider_result(monkeypatch):
-    monkeypatch.setattr(weather, "_web_tools", lambda: type("Web", (), {
-        "weather_lookup": staticmethod(lambda location, forecast_days, units: {
-            "place": {"name": "Chicago"}, "forecast": {}, "query": location,
-        }),
-        "format_weather": staticmethod(lambda result: "Weather for Chicago"),
-    })())
+    calls = []
+
+    def fake_lookup(location, forecast_days, units):
+        calls.append((location, forecast_days, units))
+        return {"place": {"name": "Chicago"}, "forecast": {}, "query": location}
+
+    monkeypatch.setattr(weather, "weather_lookup", fake_lookup)
+    monkeypatch.setattr(weather, "format_weather", lambda result: "Weather for Chicago")
     result = weather.lookup(
         "Chicago", forecast_days=100, units="metric",
         context=local_owner_context(correlation_id="weather", cloud_allowed=True),
     )
     assert result["ok"]
+    assert calls == [("Chicago", 7, "metric")]
     assert weather.format_result(result) == "Weather for Chicago"

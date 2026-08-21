@@ -758,7 +758,7 @@ def _json_request(url, timeout=10):
     return data
 
 
-def _weather_condition(code):
+def _legacy_weather_condition(code):
     try:
         value = int(code)
     except (TypeError, ValueError):
@@ -766,7 +766,7 @@ def _weather_condition(code):
     return _WEATHER_CODES.get(value, "Weather code %d" % value)
 
 
-def _wind_direction(degrees):
+def _legacy_wind_direction(degrees):
     try:
         value = float(degrees) % 360
     except (TypeError, ValueError):
@@ -778,7 +778,7 @@ def _wind_direction(degrees):
     return points[int((value + 11.25) // 22.5) % len(points)]
 
 
-def _weather_place(location, timeout):
+def _legacy_weather_place(location, timeout):
     queries = [location]
     parts = [part.strip() for part in location.split(",") if part.strip()]
     if len(parts) > 1 and parts[0].lower() != location.lower():
@@ -809,7 +809,7 @@ def _weather_place(location, timeout):
     raise ValueError("no weather location matched %r" % location)
 
 
-def weather_lookup(location, forecast_days=3, units="auto", timeout=10):
+def _legacy_weather_lookup(location, forecast_days=3, units="auto", timeout=10):
     """Resolve a user-supplied place and fetch current plus daily weather."""
     if not enabled():
         raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
@@ -870,7 +870,7 @@ def weather_lookup(location, forecast_days=3, units="auto", timeout=10):
     }
 
 
-def normalize_location_hint(data):
+def _legacy_normalize_location_hint(data):
     """Validate and minimize a client/server IP-location result without its IP."""
     if not isinstance(data, dict):
         raise ValueError("location hint must be an object")
@@ -898,14 +898,14 @@ def normalize_location_hint(data):
     return result
 
 
-def approximate_location_lookup(timeout=10):
+def _legacy_approximate_location_lookup(timeout=10):
     """Resolve this process's public egress IP to an approximate place."""
     if not enabled():
         raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
     return normalize_location_hint(_json_request(IP_LOCATION_URL, timeout=timeout))
 
 
-def location_label(location):
+def _legacy_location_label(location):
     location = normalize_location_hint(location)
     parts = [location.get("city"), location.get("region"), location.get("country")]
     return ", ".join(
@@ -914,7 +914,7 @@ def location_label(location):
     )
 
 
-def format_approximate_location(location):
+def _legacy_format_approximate_location(location):
     location = normalize_location_hint(location)
     lines = [
         "Approximate location: %s" % location_label(location),
@@ -929,7 +929,7 @@ def format_approximate_location(location):
     return "\n".join(lines)
 
 
-def format_weather(result):
+def _legacy_format_weather(result):
     place = result.get("place") or {}
     forecast = result.get("forecast") or {}
     current = forecast.get("current") or {}
@@ -994,3 +994,17 @@ def format_search_results(results):
     from sonder_runtime.adapters.web_search import format_results
 
     return format_results(results)
+
+
+# Weather and approximate-location compatibility surface.  The canonical
+# provider algorithms and formatting live in packaged adapters; these aliases
+# preserve the long-standing root import and the pinned transport seam above.
+from sonder_runtime.adapters import location as _location_adapter
+from sonder_runtime.adapters import weather as _weather_adapter
+
+weather_lookup = _weather_adapter.weather_lookup
+format_weather = _weather_adapter.format_weather
+normalize_location_hint = _location_adapter.normalize_location_hint
+approximate_location_lookup = _location_adapter.approximate_location_lookup
+location_label = _location_adapter.location_label
+format_approximate_location = _location_adapter.format_approximate_location

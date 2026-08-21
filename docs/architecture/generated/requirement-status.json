@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 19,
-      "planned": 185
+      "implemented_unverified": 20,
+      "planned": 184
     },
     "total": 204,
     "verified": 0
@@ -266,21 +266,21 @@
       "checked": false,
       "claim": "One implementation path.",
       "requirement_id": "ARCH-001",
+      "revision": 8,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Root weather and location surfaces are compatibility aliases.",
+      "requirement_id": "ARCH-002",
       "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Root cleanup.",
-      "requirement_id": "ARCH-002",
-      "revision": 3,
-      "status": "implemented_unverified"
-    },
-    {
-      "checked": false,
-      "claim": "Transitional cleanup.",
+      "claim": "Weather/location ownership is ratcheted to packaged adapters.",
       "requirement_id": "ARCH-003",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1407,8 +1407,8 @@
       "checked": false,
       "claim": "Health.",
       "requirement_id": "SKILL-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "161b3538e637526b1c0545cf1835fdfb2c9be408646e180786254feb21abbd2b",
+    "ledger_sha256": "e83019b780535dd179204a0d71969a5cc3dd8520105a93854e0f4073a9b1268c",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }
