@@ -3738,7 +3738,7 @@ def _post_model(
         )
     _require_ollama_endpoint(cloud=cloud)
     remote_endpoint = not ollama_endpoint.is_loopback(BASE)
-    request_timeout = _bounded_timeout(timeout)
+    request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
     max_attempts = (
         1 if cloud or remote_endpoint else 1 + _local_model_retries()
@@ -4107,7 +4107,7 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     req = urllib.request.Request(
         f"{BASE}{path}", data=data, headers={"Content-Type": "application/json"}
     )
-    request_timeout = _bounded_timeout(timeout)
+    request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     with ollama_endpoint.open_url(req, timeout=request_timeout) as resp:
         raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
@@ -4422,7 +4422,7 @@ def _offload_impl(
     # remote Ollama hosts have different KV-cache and memory ceilings.
     num_ctx = num_ctx or context_policy.native()
     _refresh_live_cloud_tiers()
-    request_timeout = _bounded_timeout(timeout)
+    request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     model = TIERS.get(tier)
     if model is None:
         raise ModelCallError(
