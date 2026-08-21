@@ -255,7 +255,7 @@
       ]
     },
     {
-      "file_count": 253,
+      "file_count": 255,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -351,6 +351,8 @@
         "sonder_runtime/application/model_gateway/escalation.py",
         "sonder_runtime/application/model_gateway/facade.py",
         "sonder_runtime/application/model_gateway/health_and_roles.py",
+        "sonder_runtime/application/observability/__init__.py",
+        "sonder_runtime/application/observability/trace_projection.py",
         "sonder_runtime/application/operations/__init__.py",
         "sonder_runtime/application/operations/admission_gate.py",
         "sonder_runtime/application/operations/durable_repair.py",
