@@ -36,6 +36,7 @@ from ..adapters.application_lifecycle import ApplicationLifecycle
 from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
 from ..application.backup import BackupService
+from ..application.capabilities.jobs import JobRegistryService
 from ..application.evaluation_history import EvaluationHistoryService
 from ..application.inspection import InspectionService
 from ..application.recall import RecallService
@@ -79,6 +80,7 @@ class Application:
     workflows: WorkflowService
     session_repository: Callable[[], SessionRepository]
     job_registry: Callable[[], JobRegistry]
+    job_service: Callable[[], JobRegistryService]
     config: SonderConfig | None = None
 
 
@@ -114,6 +116,7 @@ def build_application(
     gateway = build_model_gateway()
     session_repository: SQLiteSessionRepository | None = None
     job_registry: SQLiteDurableJobRegistry | None = None
+    job_service: JobRegistryService | None = None
 
     def get_session_repository() -> SessionRepository:
         nonlocal session_repository
@@ -134,6 +137,12 @@ def build_application(
                 state_path("jobs.db", "SONDER_JOBS_DB")
             )
         return job_registry
+
+    def get_job_service() -> JobRegistryService:
+        nonlocal job_service
+        if job_service is None:
+            job_service = JobRegistryService(get_job_registry())
+        return job_service
 
     return Application(
         profile=profile,
@@ -164,6 +173,7 @@ def build_application(
         workflows=WorkflowService(WorkflowRepositoryAdapter(), LoopRunnerAdapter()),
         session_repository=get_session_repository,
         job_registry=get_job_registry,
+        job_service=get_job_service,
         config=config,
     )
 
