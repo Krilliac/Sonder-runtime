@@ -20,6 +20,7 @@ def test_typed_session_routes_dispatch_without_legacy_runtime(tmp_path):
     events = dispatch_session_route(facade, "/v1/sessions/s1/events", query={"page_size": ["1"]})
     exported = dispatch_session_route(facade, "/v1/sessions/s1/export", query={"max_events": ["2"]})
     replay = dispatch_session_route(facade, "/v1/sessions/s1/replay")
+    trajectory = dispatch_session_route(facade, "/v1/sessions/s1/trajectory")
 
     assert events.status_code == 200
     assert len(events.body["records"]) == 1
@@ -27,6 +28,23 @@ def test_typed_session_routes_dispatch_without_legacy_runtime(tmp_path):
     assert exported.body["session_id"] == "s1"
     assert replay.status_code == 200
     assert replay.body["integrity_valid"] is True
+    assert trajectory.status_code == 200
+    assert trajectory.body["schema"] == "sonder.session-trajectory.v1"
+
+
+def test_trajectory_route_projects_tool_call_and_result(tmp_path):
+    repository = SQLiteSessionRepository(tmp_path / "trajectory.db", max_read_limit=100)
+    repository.append("s1", "tool.call", {
+        "call_id": "call-1", "turn_id": "turn-1", "name": "read_file", "content": '{"path":"a.txt"}',
+    })
+    repository.append("s1", "tool.result", {
+        "call_id": "call-1", "turn_id": "turn-1", "name": "read_file", "content": "secret output",
+    })
+    result = dispatch_session_route(HttpSessionFacade(repository), "/v1/sessions/s1/trajectory")
+
+    assert result.status_code == 200
+    assert result.body["steps"][0]["status"] == "completed"
+    assert "secret output" not in str(result.body)
 
 
 def test_session_route_rejects_bad_query_and_path(tmp_path):

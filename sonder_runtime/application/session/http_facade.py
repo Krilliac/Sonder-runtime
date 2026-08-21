@@ -16,6 +16,7 @@ from .durable_replay import crash_safe_replay
 from .continuity import SessionContinuityService
 from .fork import ForkBoundary
 from .query_export import QueryExportError, SessionQueryEngine
+from .trajectory import project_trajectory
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +114,19 @@ class HttpSessionFacade:
             "request_snapshot_digest": result.request.snapshot_digest if result.request is not None else None,
             "transcript": [item.to_dict() for item in exported.transcript],
         })
+
+    def trajectory(self, session_id: str, *, max_events: int = 1_000) -> HttpSessionResult:
+        """Return a bounded, redacted action/observation trajectory."""
+        try:
+            exported = self._query.export_events(session_id, max_events=max_events)
+            if exported.truncated:
+                return self._error(409, "session_trajectory_truncated")
+            trajectory = project_trajectory(
+                tuple(record.to_domain_event() for record in exported.events),
+            )
+        except (IntegrityFailure, InvalidInput, QueryExportError):
+            return self._error(409, "session_trajectory_unavailable")
+        return self._ok(trajectory.to_dict())
 
     def repair(self, session_id: str) -> HttpSessionResult:
         """Return a bounded, read-only safe-resume diagnosis."""

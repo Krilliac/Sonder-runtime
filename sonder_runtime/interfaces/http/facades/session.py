@@ -54,6 +54,8 @@ def dispatch_session_route(
             )
         if operation == "replay":
             return facade.replay(session_id, max_events=integer("max_events"))
+        if operation == "trajectory":
+            return facade.trajectory(session_id, max_events=integer("max_events", 1_000) or 1_000)
         if operation == "repair":
             return facade.repair(session_id)
         if operation == "fork":
