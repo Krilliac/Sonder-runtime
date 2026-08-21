@@ -407,8 +407,22 @@ class SQLiteDurableJobRegistry:
             raise ValueError("job is not terminal")
         return record
 
-    def reconcile(self, *, owner_instance_id: str = "", owner_alive: bool | None = None,
-                  max_records: int = 100, max_process_descendants: int = 64) -> DrainPlan:
+    def reconcile(self, *, now: str | None = None) -> int:
+        """Mark expired worker leases interrupted and return their count."""
+        current_time = self._clock() if now is None else now
+        with self._lock, self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE durable_job SET status=?, revision=revision+1, "
+                "updated_at=?, worker_id=NULL, lease_until=NULL "
+                "WHERE status IN (?,?) AND lease_until IS NOT NULL AND lease_until<=?",
+                (JobStatus.INTERRUPTED.value, current_time,
+                 JobStatus.CLAIMED.value, JobStatus.RUNNING.value, current_time),
+            ).rowcount
+        return changed
+
+    def reconcile_recovery(self, *, owner_instance_id: str = "", owner_alive: bool | None = None,
+                           max_records: int = 100, max_process_descendants: int = 64) -> DrainPlan:
+        """Build the bounded process-tree recovery plan for startup."""
         observations = []
         for record in self.all(limit=max_records + 1):
             view = self.view(record.identity.job_id)
@@ -429,7 +443,7 @@ class SQLiteDurableJobRegistry:
         return plan
 
     def reconcile_with_cleanup(self, supervisor: ProcessTreeCleanupContract, **kwargs: Any) -> JobRecoveryReport:
-        plan = self.reconcile(**kwargs)
+        plan = self.reconcile_recovery(**kwargs)
         receipts: list[ProcessTreeCleanupReceipt] = []
         interrupted: list[str] = []
         for intent in plan.cleanup_intents:
