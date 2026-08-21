@@ -58,6 +58,7 @@ from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
 from ..platform.config import SonderConfig
 from ..platform import paths as runtime_paths
+from ..adapters.inference import ollama_endpoint
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -113,6 +114,7 @@ def build_application(
             # any lazy persistence factory can resolve a database path, and
             # must not be translated through the mutable process environment.
             runtime_paths.configure_home(config.state.home)
+        ollama_endpoint.configure_typed_endpoint(config.ollama.url)
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
     from ..adapters.web import lifecycle as runtime_lifecycle
@@ -234,3 +236,4 @@ def reset_for_tests() -> None:
     global _default_config
     _default_config = None
     _application_lifecycle.reset()
+    ollama_endpoint.reset_typed_endpoint()
