@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -104,9 +105,11 @@ def test_version_reports_build(http_server):
 def test_admin_job_list_and_poll_surface_is_bounded(http_server, tmp_path, monkeypatch):
     from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
     from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
 
     database = tmp_path / "jobs.db"
     monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
     registry = SQLiteDurableJobRegistry(database)
     registry.create(JobIdentity("job-http", "shell", "op-http", "idem-http"))
 
@@ -126,6 +129,71 @@ def test_admin_job_list_and_poll_surface_is_bounded(http_server, tmp_path, monke
 
     status, _, _ = _get(http_server, "/v1/jobs/does-not-exist")
     assert status == 404
+
+    status, body = _post(
+        http_server,
+        "/v1/jobs/job-http/cancel",
+        {"reason": "operator requested cancellation"},
+    )
+    assert status == 200
+    assert json.loads(body)["cancelled_count"] == 1
+
+    status, body, _ = _get(http_server, "/v1/jobs/job-http")
+    assert status == 200
+    assert json.loads(body)["status"] == "cancelled"
+
+    status, body = _post(http_server, "/v1/jobs/job-http/cancel", {})
+    assert status == 400
+    assert "reason must be a non-empty string" in json.loads(body)["error"]["message"]
+
+
+def test_admin_job_cancel_surface_validates_reason_and_bounds_response(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.capabilities.jobs import JobRegistryService
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "jobs.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-cancel", "shell", "op-cancel", "idem-cancel"))
+    monkeypatch.setattr(
+        bootstrap_app, "default_app",
+        lambda: SimpleNamespace(job_service=lambda: JobRegistryService(registry)),
+    )
+
+    status, body = _post(
+        http_server, "/v1/jobs/job-cancel/cancel",
+        {"reason": "operator requested cancellation"},
+    )
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "job_cancel"
+    assert payload["job"]["status"] == "cancelled"
+    assert payload["cancelled_count"] == 1
+
+    status, body = _post(http_server, "/v1/jobs/job-cancel/cancel", {"reason": ""})
+    assert status == 400
+    assert "reason must be" in json.loads(body)["error"]["message"]
+
+    status, body = _post(http_server, "/v1/jobs/missing/cancel", {"reason": "cleanup"})
+    assert status == 404
+
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "ordinary", "role": "user"},
+    }
+    monkeypatch.setattr(
+        sonder_serve.Handler, "_request_auth_context",
+        lambda _self: ordinary,
+    )
+    status, body = _post(http_server, "/v1/jobs/job-cancel/cancel", {"reason": "again"})
+    assert status == 403
+    assert "administrator authorization is required" in json.loads(body)["error"]["message"]
+    bootstrap_app.reset_for_tests()
 
 
 def test_ready_reflects_ollama_outage_without_false_success(http_server):
