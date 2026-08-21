@@ -232,8 +232,11 @@ def cmd_migrate(args) -> int:
 
     try:
         config = _load_config(args)
+        _configure_typed_home(config)
         # Migration paths are environment-backed compatibility adapters; without
-        # this export --config/--set selected one home but migrated another.
+        # this process-local override --config/--set selected one home but
+        # migrated another. Keep the compatibility export for the remaining
+        # legacy settings, but path resolution is owned by the typed config.
         _export_runtime_environment(config)
         if args.store:
             results = {
@@ -510,6 +513,12 @@ def _export_runtime_environment(config) -> None:
         os.environ["SONDER_AUTH_SECRET"] = config.secrets.auth_secret
 
 
+def _configure_typed_home(config) -> None:
+    """Bind a non-empty typed state home without mutating ``os.environ``."""
+    if config.state.home:
+        runtime_paths.configure_home(config.state.home)
+
+
 def cmd_serve(args) -> int:
     try:
         config = _load_config(args)
@@ -533,7 +542,10 @@ def cmd_serve(args) -> int:
     # the validated configuration through the compatibility variables until
     # SPEC-3 gives it a constructor.  This runs before the migration phase:
     # migrations resolve their database paths through SONDER_HOME, so an
-    # export after them would migrate the wrong state directory.
+    # export after them would migrate the wrong state directory. Bind the
+    # typed home first; the compatibility export below remains for settings
+    # still consumed by legacy adapters.
+    _configure_typed_home(config)
     _export_runtime_environment(config)
 
     # MIGRATING phase: no listener opens until migrations complete.
