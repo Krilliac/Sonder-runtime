@@ -23809,6 +23809,13 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
     receipts may contain another caller's model answers.  Local-open use keeps
     the full local toolset.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     _run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_status",
@@ -23817,7 +23824,7 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
         return refusal
     receipt = _fanout_receipt(run_id)
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+        return render_model_error(ModelCallError("configuration", "fanout run was not found"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
@@ -23830,13 +23837,20 @@ def model_fanout_recent(limit: StrictInt = 20, include_finished: StrictBool = Tr
     omits prompts, answers, model names, error text, hashes, limits and owner
     data; use ``model_fanout_status(run_id)`` for an authorized full receipt.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "limit must be an integer between 1 and 100",
         ))
     if not isinstance(include_finished, bool):
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "include_finished must be a boolean",
         ))
     refusal = _developer_gate("model_fanout_recent", token, started)
@@ -23854,6 +23868,13 @@ def model_fanout_recent(limit: StrictInt = 20, include_finished: StrictBool = Tr
 @mcp.tool()
 def model_fanout_cancel(run_id: str, token: str = "") -> str:
     """Cancel a durable model fanout; late provider results are discarded."""
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     _run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_cancel",
@@ -23863,7 +23884,7 @@ def model_fanout_cancel(run_id: str, token: str = "") -> str:
     fanout_store.request_cancel(run_id)
     receipt = _fanout_receipt(run_id)
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+        return render_model_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
@@ -23875,6 +23896,13 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
     Unknown results are never retried unless ``retry_unknown`` is true, which
     prevents accidental replays of metered cloud calls after an interruption.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     # Keep direct Python calls strict too.  MCP transport enforces this at the
     # schema boundary through StrictBool, before Pydantic can coerce 1 or
@@ -23884,7 +23912,7 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
         ("retry_unknown", retry_unknown),
     ):
         if not isinstance(value, bool):
-            return _format_model_call_error(ModelCallError(
+            return render_model_error(ModelCallError(
                 "configuration", "%s must be a boolean" % name,
             ))
     _run, refusal = _direct_fanout_access(
@@ -23896,12 +23924,12 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
         run_id, include_failed=include_failed, retry_unknown=retry_unknown,
     )
     if run is None:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "fanout run is not resumable with the selected retry options"
         ))
     receipt = _execute_fanout_run(run["id"])
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+        return render_model_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
