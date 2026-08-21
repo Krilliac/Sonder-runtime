@@ -100,6 +100,62 @@ class ProtocolEnvelope:
 
 
 @dataclass(frozen=True)
+class ImplementationInfo:
+    """Bounded ACP-compatible peer identity exchanged during initialization."""
+
+    name: str
+    version: str
+    capabilities: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.name, label="implementation name", limit=64)
+        _bounded_text(self.version, label="implementation version", limit=64)
+        valid = all(
+            isinstance(item, str)
+            and 0 < len(item) <= 64
+            and all(char.isalnum() or char in "._-" for char in item)
+            for item in self.capabilities
+        )
+        if len(self.capabilities) > 64 or not valid:
+            raise EditorInteropError("capabilities must be bounded identifiers")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "version": self.version,
+            "capabilities": sorted(self.capabilities),
+        }
+
+
+@dataclass(frozen=True)
+class CancellationRequest:
+    """Per-request cancellation message for reconnectable editor sessions."""
+
+    request_id: str
+    session_id: str
+    reason: str = "cancelled"
+
+    def __post_init__(self) -> None:
+        try:
+            UUID(self.request_id)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise EditorInteropError("request_id must be a UUID") from exc
+        _bounded_text(self.session_id, label="session_id", limit=128)
+        _bounded_text(self.reason, label="reason", limit=256)
+
+    def to_envelope(self) -> ProtocolEnvelope:
+        return ProtocolEnvelope(
+            "session/cancel_request",
+            {
+                "request_id": self.request_id,
+                "session_id": self.session_id,
+                "reason": self.reason,
+            },
+            str(uuid4()),
+        )
+
+
+@dataclass(frozen=True)
 class RuleDocument:
     path: str
     content: str

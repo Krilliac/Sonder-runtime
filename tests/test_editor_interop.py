@@ -5,7 +5,9 @@ import json
 import pytest
 
 from sonder_runtime.application.protocol.editor_interop import (
+    CancellationRequest,
     EditorInteropError,
+    ImplementationInfo,
     ProtocolEnvelope,
     RuleDocument,
     export_documents,
@@ -23,6 +25,18 @@ def test_protocol_envelope_round_trips_and_rejects_unknown_fields():
     malformed["unexpected"] = True
     with pytest.raises(EditorInteropError, match="unknown fields"):
         ProtocolEnvelope.from_dict(malformed)
+
+
+def test_acp_peer_metadata_is_bounded_and_cancellation_is_versioned():
+    info = ImplementationInfo("sonder", "2026.08", frozenset({"cancel", "diffs"}))
+    assert info.to_dict()["capabilities"] == ["cancel", "diffs"]
+
+    request = CancellationRequest(envelope_id := ProtocolEnvelope.create("x", {}).message_id, "session-1")
+    envelope = request.to_envelope()
+    assert envelope.message_type == "session/cancel_request"
+    assert envelope.payload["request_id"] == envelope_id
+    with pytest.raises(EditorInteropError):
+        ImplementationInfo("sonder", "1", frozenset({"bad capability"}))
 
 
 def test_rule_documents_import_and_export_are_bounded_and_digest_bound(tmp_path):
