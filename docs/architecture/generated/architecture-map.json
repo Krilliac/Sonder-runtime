@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 153,
+      "file_count": 154,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -169,6 +169,7 @@
         "sonder_runtime/adapters/process_termination.py",
         "sonder_runtime/adapters/recall.py",
         "sonder_runtime/adapters/recall_gateway.py",
+        "sonder_runtime/adapters/repl_services.py",
         "sonder_runtime/adapters/repository_errors.py",
         "sonder_runtime/adapters/runtime_capabilities.py",
         "sonder_runtime/adapters/runtime_configuration.py",
@@ -202,7 +203,7 @@
       ]
     },
     {
-      "file_count": 187,
+      "file_count": 188,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -302,6 +303,7 @@
         "sonder_runtime/application/ports/preflight.py",
         "sonder_runtime/application/ports/process_probe.py",
         "sonder_runtime/application/ports/recall.py",
+        "sonder_runtime/application/ports/repl_services.py",
         "sonder_runtime/application/ports/repositories.py",
         "sonder_runtime/application/ports/sandbox.py",
         "sonder_runtime/application/ports/session_repository.py",
