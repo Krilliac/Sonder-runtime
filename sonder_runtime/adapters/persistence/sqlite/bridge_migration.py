@@ -264,6 +264,14 @@ def run_bridge_migration(
         memory_conn.close()
     else:
         memory_row_count = 0
+        # Fresh installs still participate in the epoch contract.  There is
+        # no legacy data to copy, but the final runtime requires every domain
+        # database in the adopted set to carry an explicit epoch marker.
+        memory_conn = sqlite3.connect(str(memory_db_path))
+        active_connections.append(memory_conn)
+        memory_epoch(memory_conn)
+        _stamp_epoch(memory_conn, version)
+        memory_conn.close()
     checkpoint("after_data_adoption")
 
     # Add outbox to updates.db if it exists
