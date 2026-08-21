@@ -24,7 +24,7 @@ def _manifest_payload(value: object):
     if not isinstance(value, dict):
         raise TypeError("manifest must be an object")
     required = {"extension_id", "version", "protocol"}
-    if set(value) - required - {"dependencies", "permissions"} or not required.issubset(value):
+    if set(value) - required - {"dependencies", "permissions", "memory_limit_bytes"} or not required.issubset(value):
         raise ValueError("manifest requires extension_id, version, and protocol")
     extension_id, version, protocol = value["extension_id"], value["version"], value["protocol"]
     if not all(isinstance(item, str) for item in (extension_id, version, protocol)) or extension_id.count(".") != 1:
@@ -32,11 +32,17 @@ def _manifest_payload(value: object):
     publisher, name = extension_id.split(".")
     dependencies = value.get("dependencies", [])
     permissions = value.get("permissions", [])
+    memory_limit_bytes = value.get("memory_limit_bytes")
     if not isinstance(dependencies, list) or not isinstance(permissions, list):
         raise TypeError("manifest dependencies and permissions must be arrays")
+    if memory_limit_bytes is not None and (
+        isinstance(memory_limit_bytes, bool) or not isinstance(memory_limit_bytes, int)
+    ):
+        raise TypeError("manifest memory_limit_bytes must be an integer")
     return build_extension_manifest(
         extension_id, version, protocol,
         dependencies=dependencies, permissions=permissions,
+        memory_limit_bytes=memory_limit_bytes,
     )
 
 
@@ -80,6 +86,7 @@ def _record(record) -> dict[str, object]:
             "retain_state": record.quarantine.retain_state,
         },
         "crash_count": record.crash_count,
+        "resources": {"memory_limit_bytes": record.manifest.resources.memory_limit_bytes},
     }
 
 

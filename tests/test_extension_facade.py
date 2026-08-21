@@ -122,6 +122,25 @@ def test_http_facade_dispatches_health_and_lifecycle():
         manager.close()
 
 
+def test_http_registry_update_preserves_declared_resource_budget():
+    facade, manager = _facade()
+    authority = _authority("update", "registry_health")
+    try:
+        updated = dispatch_extension_route(
+            facade, "POST", "/v1/extensions/registry/update",
+            {"manifest": {
+                "extension_id": "sonder.limited",
+                "version": "1.0.0",
+                "protocol": "extension-v1",
+                "memory_limit_bytes": 256 * 1024 * 1024,
+            }}, authority,
+        )
+        assert updated is not None and updated.status_code == 200
+        assert updated.body["extension"]["resources"]["memory_limit_bytes"] == 256 * 1024 * 1024
+    finally:
+        manager.close()
+
+
 def test_cli_facade_emits_machine_readable_health_and_requires_injected_authority():
     facade, manager = _facade()
     try:

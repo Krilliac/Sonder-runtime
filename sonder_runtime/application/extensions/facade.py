@@ -17,7 +17,7 @@ from .registry import (
     ExtensionRegistrySnapshot,
     ExtensionRepairDiagnostic,
 )
-from ...domain.extensions.manifest import ExtensionManifest
+from ...domain.extensions.manifest import ExtensionManifest, ExtensionResources
 from ...domain.extensions.manifest import ExtensionDependency, ExtensionIdentity
 
 
@@ -28,6 +28,7 @@ def build_extension_manifest(
     *,
     dependencies: Sequence[object] = (),
     permissions: Sequence[str] = (),
+    memory_limit_bytes: int | None = None,
 ) -> ExtensionManifest:
     """Build a validated manifest for interface callers without domain imports."""
     if not all(isinstance(value, str) and value.strip() for value in (extension_id, version, protocol)):
@@ -48,6 +49,7 @@ def build_extension_manifest(
     return ExtensionManifest(
         ExtensionIdentity(name, publisher), version, protocol,
         tuple(parsed_dependencies), tuple(permissions),
+        resources=ExtensionResources(memory_limit_bytes),
     )
 
 

@@ -15,7 +15,7 @@ from sonder_runtime.application.extensions.experiments import (
 )
 from sonder_runtime.application.extensions.registry import ExtensionRegistry
 from sonder_runtime.application.extensions.facade import ExtensionApplicationFacade
-from sonder_runtime.domain.extensions.manifest import ExtensionIdentity, ExtensionManifest
+from sonder_runtime.domain.extensions.manifest import ExtensionIdentity, ExtensionManifest, ExtensionResources
 from sonder_runtime.bootstrap import app as bootstrap_app
 from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.interfaces.cli.extensions import ExtensionCommand
@@ -94,7 +94,8 @@ def test_live_application_extension_registry_persists_and_rehydrates_manifest(
     monkeypatch.setenv("SONDER_HOME", str(tmp_path))
     bootstrap_app.reset_for_tests()
     manifest = ExtensionManifest(
-        ExtensionIdentity("persisted", "sonder"), "1.0.0", "extension-v1"
+        ExtensionIdentity("persisted", "sonder"), "1.0.0", "extension-v1",
+        resources=ExtensionResources(256 * 1024 * 1024),
     )
     try:
         first = bootstrap_app.build_application()
@@ -112,6 +113,7 @@ def test_live_application_extension_registry_persists_and_rehydrates_manifest(
         second = bootstrap_app.build_application()
         restored = second.extension_registry().get("sonder.persisted", scope="global")
         assert restored.manifest_digest == manifest.digest()
+        assert restored.manifest.resources.memory_limit_bytes == 256 * 1024 * 1024
         assert second.extension_registry().snapshot().digest == first_digest
         # Missing provenance remains explicit; persistence must not turn an
         # unverified installation into an executable healthy extension.

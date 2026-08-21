@@ -11,7 +11,7 @@ from ....application.extensions.provenance_inventory import ExtensionHealthState
 from ....application.extensions.registry import ExtensionInstallRecord, ExtensionScope
 from ....domain.extensions.manifest import (
     CleanupPolicy, ExtensionDependency, ExtensionHealth, ExtensionIdentity,
-    ExtensionManifest, HealthMode,
+    ExtensionManifest, ExtensionResources, HealthMode,
 )
 
 
@@ -28,6 +28,7 @@ def _manifest(value: dict[str, Any]) -> ExtensionManifest:
         tuple(value["permissions"]),
         ExtensionHealth(HealthMode(value["health"]["mode"]), value["health"]["crash_limit"], value["health"]["probe_timeout_ms"]),
         CleanupPolicy(value["cleanup"]["on_quarantine"], value["cleanup"]["retain_state"]),
+        ExtensionResources(value.get("resources", {}).get("memory_limit_bytes")),
     )
 
 
@@ -43,7 +44,8 @@ def _record(record: ExtensionInstallRecord) -> dict[str, Any]:
                      "dependencies": [{"name": x.name, "version": x.version, "required": x.required} for x in manifest.dependencies],
                      "permissions": list(manifest.permissions),
                      "health": {"mode": manifest.health.mode.value, "crash_limit": manifest.health.crash_limit, "probe_timeout_ms": manifest.health.probe_timeout_ms},
-                     "cleanup": {"on_quarantine": manifest.cleanup.on_quarantine, "retain_state": manifest.cleanup.retain_state}},
+                     "cleanup": {"on_quarantine": manifest.cleanup.on_quarantine, "retain_state": manifest.cleanup.retain_state},
+                     "resources": {"memory_limit_bytes": manifest.resources.memory_limit_bytes}},
         "quarantine": None if record.quarantine is None else {
             "extension_id": record.quarantine.extension_id, "quarantined": record.quarantine.quarantined,
             "reasons": list(record.quarantine.reasons), "cleanup_action": record.quarantine.cleanup_action,

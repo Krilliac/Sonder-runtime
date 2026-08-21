@@ -1,6 +1,7 @@
 from sonder_runtime.application.extensions.quarantine import QuarantineReason, QuarantineRegistry
 from sonder_runtime.domain.extensions.manifest import (
     CleanupPolicy, ExtensionDependency, ExtensionHealth, ExtensionIdentity, ExtensionManifest,
+    ExtensionResources,
 )
 import pytest
 
@@ -36,6 +37,15 @@ def test_manifest_digest_is_order_stable_and_dependency_identity_is_bounded():
         _manifest(dependencies=(ExtensionDependency("core"), ExtensionDependency("core")))
     with pytest.raises(ValueError, match="cannot depend on itself"):
         _manifest(dependencies=(ExtensionDependency("sonder.search"),))
+
+
+def test_manifest_resource_budget_is_typed_and_digest_bound():
+    bounded = _manifest(resources=ExtensionResources(256 * 1024 * 1024))
+    changed = _manifest(resources=ExtensionResources(512 * 1024 * 1024))
+    assert bounded.resources.memory_limit_bytes == 256 * 1024 * 1024
+    assert bounded.digest() != changed.digest()
+    with pytest.raises(ValueError, match="memory_limit_bytes"):
+        ExtensionResources(0)
 
 
 def test_incompatibility_is_quarantined_with_cleanup_metadata():
