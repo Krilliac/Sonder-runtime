@@ -39,4 +39,7 @@ the explicit disabled/unverified state when provenance is absent. Native
 memory limiting is proven at the host seam, the declared budget is persisted,
 and a trusted persisted installation is exercised through the native host in
 `test_persisted_healthy_installation_reaches_native_experiment_host`. The full
-platform matrix and artifact-discovery lifecycle remain unverified.
+platform matrix remains unverified. Artifact verification evidence is now
+typed, provenance-digest-bound, and persisted before a trusted installation
+can enter the host boundary; discovery/download orchestration remains owned by
+the existing artifact adapter.

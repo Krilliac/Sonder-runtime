@@ -19,6 +19,7 @@ from .registry import (
     ExtensionRepairDiagnostic,
 )
 from ...domain.extensions.manifest import ExtensionManifest, ExtensionResources
+from ...domain.extensions.artifact import ExtensionArtifactReceipt
 from ...domain.extensions.manifest import ExtensionDependency, ExtensionIdentity
 
 
@@ -135,6 +136,23 @@ class ExtensionApplicationFacade:
                authority: ExtensionAuthority):
         authority.require("update")
         return self._registry.update(manifest, scope=scope, project_id=project_id)
+
+    def install_verified(
+        self,
+        manifest: ExtensionManifest,
+        verification: Mapping[str, object],
+        *,
+        scope: str,
+        project_id: str | None,
+        authority: ExtensionAuthority,
+    ) -> ExtensionInstallRecord:
+        """Admit an artifact only from an accepted artifact-fetch result."""
+        authority.require("install")
+        receipt = ExtensionArtifactReceipt.from_verification(verification)
+        return self._registry.install_verified(
+            manifest, receipt, scope=scope, project_id=project_id,
+            signatures_verified=True,
+        )
 
     def inspect(self, experiment_id: str, authority: ExtensionAuthority) -> ExperimentSnapshot:
         authority.require("inspect")

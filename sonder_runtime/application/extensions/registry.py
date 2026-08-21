@@ -23,6 +23,7 @@ from sonder_runtime.application.extensions.quarantine import (
     QuarantineRegistry,
 )
 from sonder_runtime.domain.extensions.manifest import ExtensionManifest
+from sonder_runtime.domain.extensions.artifact import ExtensionArtifactReceipt
 
 
 class ExtensionRegistryError(ValueError):
@@ -57,6 +58,7 @@ class ExtensionInstallRecord:
     health_reasons: tuple[str, ...] = ()
     quarantine: QuarantineDecision | None = None
     crash_count: int = 0
+    artifact: ExtensionArtifactReceipt | None = None
 
     @property
     def healthy(self) -> bool:
@@ -113,6 +115,12 @@ def _canonical_record(record: ExtensionInstallRecord) -> dict[str, object]:
         "project_id": record.project_id,
         "version": record.version,
         "manifest_digest": record.manifest_digest,
+        "artifact": None if record.artifact is None else {
+            "path": record.artifact.path,
+            "artifact_digest": record.artifact.artifact_digest,
+            "byte_count": record.artifact.byte_count,
+            "source": record.artifact.source,
+        },
         "enabled": record.enabled,
         "health_state": record.health_state.value,
         "health_reasons": list(record.health_reasons),
@@ -174,9 +182,21 @@ class ExtensionRegistry:
         granted_permissions: Iterable[str] = (),
         signatures_verified: bool = False,
         replace: bool = False,
+        artifact: ExtensionArtifactReceipt | None = None,
     ) -> ExtensionInstallRecord:
         normalized_scope = _scope(scope)
         normalized_project = _project_id(normalized_scope, project_id)
+        if artifact is not None and not isinstance(artifact, ExtensionArtifactReceipt):
+            raise ExtensionRegistryError("artifact must be an ExtensionArtifactReceipt")
+        if artifact is not None and not artifact.verified:
+            raise ExtensionRegistryError("unverified artifact cannot be installed")
+        if artifact is not None and self._admission is not None:
+            matching = tuple(
+                item for item in self._admission.inventory.records
+                if item.extension_id == manifest.extension_id and item.version == manifest.version
+            )
+            if not matching or all(item.artifact_digest != artifact.artifact_digest for item in matching):
+                raise ExtensionRegistryError("artifact digest is not bound by extension provenance")
         key = (normalized_scope.value, normalized_project or "", manifest.extension_id)
         if key in self._records and not replace:
             raise ExtensionAlreadyInstalledError(f"extension already installed: {manifest.extension_id}")
@@ -193,6 +213,7 @@ class ExtensionRegistry:
             manifest, normalized_scope, normalized_project, health, quarantine,
             enabled=health.state is ExtensionHealthState.HEALTHY,
             crash_count=self._records[key].crash_count if key in self._records else 0,
+            artifact=artifact if artifact is not None else (self._records[key].artifact if key in self._records else None),
         )
         self._records[key] = record
         self._persist()
@@ -201,6 +222,18 @@ class ExtensionRegistry:
     def update(self, manifest: ExtensionManifest, **kwargs: object) -> ExtensionInstallRecord:
         """Replace an existing installation record after re-evaluating it."""
         kwargs["replace"] = True
+        return self.install(manifest, **kwargs)  # type: ignore[arg-type]
+
+    def install_verified(
+        self,
+        manifest: ExtensionManifest,
+        artifact: ExtensionArtifactReceipt,
+        **kwargs: object,
+    ) -> ExtensionInstallRecord:
+        """Admit only a verified artifact receipt bound to this installation."""
+        if not isinstance(artifact, ExtensionArtifactReceipt) or not artifact.verified:
+            raise ExtensionRegistryError("verified artifact receipt is required")
+        kwargs["artifact"] = artifact
         return self.install(manifest, **kwargs)  # type: ignore[arg-type]
 
     replace = update
@@ -239,6 +272,7 @@ class ExtensionRegistry:
             record.manifest, record.scope, record.project_id, health, quarantine,
             enabled=record.enabled and health.state is ExtensionHealthState.HEALTHY,
             crash_count=record.crash_count,
+            artifact=record.artifact,
         )
         self._records[record.key] = updated
         self._persist()
@@ -256,6 +290,7 @@ class ExtensionRegistry:
             record.manifest_digest, record.manifest, record.enabled and not decision.quarantined,
             health_state, tuple(reasons), decision if decision.quarantined else record.quarantine,
             self._quarantine.crash_count(record.extension_id),
+            record.artifact,
         )
         self._records[record.key] = updated
         self._persist()
@@ -323,10 +358,10 @@ class ExtensionRegistry:
         return health, decision
 
     @staticmethod
-    def _make_record(manifest: ExtensionManifest, scope: ExtensionScope, project_id: str | None, health: ProvenanceHealth, quarantine: QuarantineDecision | None, *, enabled: bool, crash_count: int) -> ExtensionInstallRecord:
+    def _make_record(manifest: ExtensionManifest, scope: ExtensionScope, project_id: str | None, health: ProvenanceHealth, quarantine: QuarantineDecision | None, *, enabled: bool, crash_count: int, artifact: ExtensionArtifactReceipt | None = None) -> ExtensionInstallRecord:
         return ExtensionInstallRecord(
             manifest.extension_id, scope, project_id, manifest.version, manifest.digest(), manifest,
-            enabled, health.state, tuple(health.reasons), quarantine, crash_count,
+            enabled, health.state, tuple(health.reasons), quarantine, crash_count, artifact,
         )
 
     def _set_enabled(self, extension_id: str, *, scope: ExtensionScope | str, project_id: str | None, enabled: bool) -> ExtensionInstallRecord:
@@ -335,6 +370,7 @@ class ExtensionRegistry:
             record.extension_id, record.scope, record.project_id, record.version, record.manifest_digest,
             record.manifest, enabled, record.health_state, record.health_reasons,
             record.quarantine, record.crash_count,
+            record.artifact,
         )
         self._records[record.key] = updated
         return updated
