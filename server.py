@@ -1208,19 +1208,26 @@ def _direct_fanout_identity(token: str):
 
 def _direct_fanout_access(run_id: str, token: str, started, tool_name: str):
     """Authorize a direct-MCP fanout lifecycle operation without cross-user reads."""
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     refusal = _developer_gate(tool_name, token, started)
     if refusal:
         return None, refusal
     run = fanout_store.get_run(run_id)
     if run is None:
-        return None, _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+        return None, render_model_error(ModelCallError("configuration", "fanout run was not found"))
     if not _deployment_authenticates_callers():
         return run, None
     owner, account = _direct_fanout_identity(token)
     if str((account or {}).get("role") or "") == "admin" or run.get("request_owner") == owner:
         return run, None
     # Do not disclose whether another developer's opaque receipt exists.
-    return None, _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+    return None, render_model_error(ModelCallError("configuration", "fanout run was not found"))
 
 
 def _should_learn(tier, learn):
@@ -5188,6 +5195,13 @@ def sonder(
     token: str = "",
 ) -> str:
     """Ask through Sonder Runtime and show observable activity for the response."""
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     # An explicitly selected target is a caller-owned routing contract.  Do
     # not reinterpret its prompt as a local control command before it reaches
     # that model; ``_answer_with_history_impl`` applies the same rule for the
@@ -5199,7 +5213,7 @@ def sonder(
     natural = natural_model_request(prompt)
     if natural and natural["kind"] in ("fanout", "ensemble"):
         if natural["prompt"].lstrip().startswith("/"):
-            return _format_model_call_error(ModelCallError(
+            return render_model_error(ModelCallError(
                 "configuration",
                 "model selection cannot wrap a slash command; issue the command directly.",
             ))
@@ -5214,7 +5228,7 @@ def sonder(
         )
     if natural and natural["kind"] == "model":
         if natural["prompt"].lstrip().startswith("/"):
-            return _format_model_call_error(ModelCallError(
+            return render_model_error(ModelCallError(
                 "configuration",
                 "model selection cannot wrap a slash command; issue the command directly.",
             ))
