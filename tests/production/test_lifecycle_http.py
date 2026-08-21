@@ -101,6 +101,33 @@ def test_version_reports_build(http_server):
     assert "commit_sha" in payload
 
 
+def test_admin_job_list_and_poll_surface_is_bounded(http_server, tmp_path, monkeypatch):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.ports.jobs import JobIdentity
+
+    database = tmp_path / "jobs.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-http", "shell", "op-http", "idem-http"))
+
+    status, body, _ = _get(http_server, "/v1/jobs?limit=1")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "list"
+    assert payload["data"][0]["job_id"] == "job-http"
+
+    status, body, _ = _get(http_server, "/v1/jobs/job-http")
+    assert status == 200
+    assert json.loads(body)["status"] == "pending"
+
+    status, body, _ = _get(http_server, "/v1/jobs?limit=101")
+    assert status == 400
+    assert "limit must be an integer" in json.loads(body)["error"]["message"]
+
+    status, _, _ = _get(http_server, "/v1/jobs/does-not-exist")
+    assert status == 404
+
+
 def test_ready_reflects_ollama_outage_without_false_success(http_server):
     # Hermetic env points Ollama at a closed port: readiness must be 503
     # with the dependency named, while liveness stays 200.

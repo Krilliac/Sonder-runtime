@@ -62,7 +62,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
 )
-from sonder_runtime.domain.common.errors import DependencyUnavailable
+from sonder_runtime.domain.common.errors import DependencyUnavailable, NotFound
 from sonder_runtime.adapters.model_transport import ModelCallError
 
 
@@ -181,6 +181,23 @@ _LOCAL_LOG_PAGE = """<!doctype html>
 def _request_route(path) -> str:
     """Return a normalized routing path while preserving query data elsewhere."""
     return urllib.parse.urlsplit(str(path or "")).path.rstrip("/") or "/"
+
+
+def _job_record_payload(record):
+    return {
+        "job_id": record.identity.job_id,
+        "kind": record.identity.kind,
+        "operation_id": record.identity.operation_id,
+        "idempotency_key": record.identity.idempotency_key,
+        "parent_job_id": record.identity.parent_job_id,
+        "parent_session_id": record.identity.parent_session_id,
+        "status": record.status.value,
+        "revision": record.revision,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "result": record.result,
+        "error": record.error,
+    }
 
 
 def _local_log_dashboard_allowed(peer: str) -> bool:
@@ -3478,6 +3495,62 @@ class Handler(BaseHTTPRequestHandler):
         if self._auth_rate_limited():
             return
         _maybe_live_reload()
+        if path == "/v1/jobs" or path.startswith("/v1/jobs/"):
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+
+            service = default_app().job_service()
+            if path == "/v1/jobs":
+                query = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query,
+                    keep_blank_values=True,
+                )
+                raw_limit = query.get("limit", ["100"])[-1]
+                try:
+                    limit = int(raw_limit)
+                except (TypeError, ValueError):
+                    self._send_json_payload(
+                        {"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}},
+                        status=400,
+                    )
+                    return
+                if limit < 1 or limit > 100:
+                    self._send_json_payload(
+                        {"error": {"message": "limit must be an integer between 1 and 100", "type": "invalid_request"}},
+                        status=400,
+                    )
+                    return
+                records = service.list(limit=limit)
+                self._send_json_payload({
+                    "object": "list",
+                    "data": [_job_record_payload(record) for record in records],
+                })
+                return
+            job_id = path.removeprefix("/v1/jobs/")
+            if not job_id or "/" in job_id:
+                self._send_not_found()
+                return
+            try:
+                record = service.get(job_id)
+            except NotFound:
+                self._send_not_found()
+                return
+            self._send_json_payload(_job_record_payload(record))
+            return
         if path == "/v1/models":
             context = self._request_auth_context()
             if not context["authorized"]:
