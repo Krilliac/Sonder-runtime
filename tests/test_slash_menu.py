@@ -146,17 +146,11 @@ def test_keyboard_interrupt_from_raw_read_is_not_swallowed(monkeypatch):
 def test_default_completer_returns_a_list_when_the_catalog_is_unavailable(
     monkeypatch,
 ):
-    """The catalog imports server; if that fails the menu is empty, not fatal."""
-    import builtins as _builtins
+    """A packaged catalog failure leaves the optional menu empty, not fatal."""
+    def _no_catalog():
+        raise ImportError("no catalog here")
 
-    real_import = _builtins.__import__
-
-    def _no_catalog(name, *args, **kwargs):
-        if name == "command_catalog":
-            raise ImportError("no catalog here")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(_builtins, "__import__", _no_catalog)
+    monkeypatch.setattr(slash_menu, "_load_command_catalog", _no_catalog)
     assert slash_menu._default_completer("/re") == []
 
 

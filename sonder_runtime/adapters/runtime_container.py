@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from ..adapters.runtime_configuration import RuntimeConfig
 from ..adapters.runtime_capabilities import RuntimeCapabilities
+from ..application.agent_registry.unified import UnifiedAgentRegistryService
+from ..adapters.persistence.fleet_registry import FleetStoreRegistryAdapter
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
@@ -19,6 +22,11 @@ class Runtime:
     model_gateway: ModelGateway
     events: EventSink
     clock: Clock
+    # Fleet persistence and its owner lease are deliberately lazy.  The
+    # packaged runtime can therefore be composed for health/configuration
+    # commands without opening the fleet store or importing the legacy root
+    # orchestrator module.
+    agent_registry: Callable[[], UnifiedAgentRegistryService]
 
 
 def build_runtime(
@@ -39,10 +47,20 @@ def build_runtime(
 
         gateway = OllamaGateway()
 
+    agent_registry: UnifiedAgentRegistryService | None = None
+
+    def get_agent_registry() -> UnifiedAgentRegistryService:
+        nonlocal agent_registry
+        if agent_registry is None:
+            agent_registry = UnifiedAgentRegistryService(FleetStoreRegistryAdapter())
+            agent_registry.register_workbench_modes()
+        return agent_registry
+
     return Runtime(
         config=config,
         capabilities=capabilities,
         model_gateway=gateway,
         events=LocalObservabilitySink(LoggingEventSink()),
         clock=SystemClock(),
+        agent_registry=get_agent_registry,
     )

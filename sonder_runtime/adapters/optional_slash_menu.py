@@ -6,7 +6,9 @@ import importlib
 
 def load_optional_slash_menu():
     try:
-        return importlib.import_module("slash_menu")
+        return importlib.import_module(
+            "sonder_runtime.adapters.optional_slash_menu_impl"
+        )
     except ImportError:
         return None
 
