@@ -14,6 +14,9 @@ def _engine():
 
 
 class PermissionPolicyProvider:
+    def __getattr__(self, name):
+        return getattr(_engine(), name)
+
     def decide_for_caller(self, tool_name: str, *, interactive: bool,
                           gate_control_exempt: bool):
         return _engine().decide_for_caller(

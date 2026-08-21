@@ -58,10 +58,9 @@ HTTP_SERVE_ROOT_MODULES = frozenset({
 })
 REPL_PATH = "sonder_runtime/interfaces/repl/repl.py"
 REPL_ROOT_MODULES = frozenset({
-    "server", "grounding", "code_runner", "training_tasks", "intents",
-    "web_intents", "feedback", "personas",
+    "server", "web_intents", "personas",
     "consult", "tier_router", "code_improve", "command_router",
-    "command_catalog", "permission_modes", "project_scaffold", "slash_menu",
+    "project_scaffold", "slash_menu",
     "sonder_headless",
 })
 BASELINE_ROOT_LEGACY_MODULES = frozenset({
