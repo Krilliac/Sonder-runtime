@@ -8,18 +8,22 @@ documents carry deterministic content digests. Versioned envelopes reject
 unknown fields and unsupported protocol versions.
 
 The ACP-oriented extension also validates bounded peer implementation metadata
-and represents per-request cancellation as a versioned envelope. It is still a
-protocol contract, not a claim that Sonder ships a complete ACP stdio or remote
-transport.
+and represents per-request cancellation as a versioned envelope. The thin
+`EditorStdioTransport` now carries those envelopes over bounded newline-
+delimited streams, requires one-time initialization, correlates responses,
+delivers cancellation through an application callback, and redacts handler
+exception details. Filesystem and tool operations remain application-owned.
 
 Focused evidence:
 
 ```text
-python -m pytest tests/test_editor_interop.py -q
+python -m pytest tests/test_editor_interop.py tests/test_editor_transport.py -q
 ```
 
-This proves the protocol and filesystem-boundary slice only. A separately
-deployed editor transport and live SDK client remain outside this evidence;
-the HTTP/MCP surfaces must continue routing imported rules through their
-existing instruction and policy boundaries. ACP capability negotiation,
-elicitation, and live editor interoperability remain adapter-level work.
+This proves the bounded envelope, filesystem boundary, local stdio framing,
+initialization, cancellation, correlation, and error-containment slices. A
+separately deployed editor transport and live SDK client remain outside this
+evidence; the HTTP/MCP surfaces must continue routing imported rules through
+their existing instruction and policy boundaries. Full ACP capability
+negotiation, elicitation, and cross-implementation interoperability remain
+adapter-level work.
