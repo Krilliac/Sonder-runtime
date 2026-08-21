@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from sonder_runtime.adapters.model_gateway_factory import build_model_gateway
-from sonder_runtime.adapters.ollama.gateway import OllamaGateway
-from sonder_runtime.adapters.openai_compat.gateway import OpenAICompatibleGateway
+from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
 from sonder_runtime.bootstrap import app as bootstrap_app
 
 

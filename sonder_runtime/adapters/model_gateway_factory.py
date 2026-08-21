@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 
 from ..application.ports.model_gateway import ModelGateway
-from .ollama.gateway import OllamaGateway
+from .inference.ollama_gateway import OllamaGateway
 
 
 _OPENAI_COMPATIBLE_BACKENDS = frozenset(
@@ -26,7 +26,7 @@ def build_model_gateway() -> ModelGateway:
     """
     backend = os.environ.get("SONDER_MODEL_BACKEND", "ollama").strip().lower()
     if backend in _OPENAI_COMPATIBLE_BACKENDS:
-        from .openai_compat.gateway import OpenAICompatibleGateway
+        from .inference.openai_compat_gateway import OpenAICompatibleGateway
 
         return OpenAICompatibleGateway()
     return OllamaGateway()

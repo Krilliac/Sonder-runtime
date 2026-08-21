@@ -63,7 +63,7 @@ def _configure_http_legacy_boundary():
 
     serve.configure_legacy_runtime(server)
     repl.configure_legacy_runtime(server)
-    from sonder_runtime.adapters.ollama.gateway import OllamaGateway
+    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 
     OllamaGateway.configure_default_providers(
         target_resolver=lambda tier, strict=False: _legacy_model_target(

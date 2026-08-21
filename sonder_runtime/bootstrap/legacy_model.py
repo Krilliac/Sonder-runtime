@@ -1,7 +1,7 @@
 """Explicit bootstrap composition for the transitional model provider."""
 from __future__ import annotations
 
-from ..adapters.ollama.gateway import OllamaGateway
+from ..adapters.inference.ollama_gateway import OllamaGateway
 from ..application.ports.model_target import ModelTarget
 
 

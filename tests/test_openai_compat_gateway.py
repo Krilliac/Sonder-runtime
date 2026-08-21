@@ -11,7 +11,7 @@ import urllib.error
 
 import pytest
 
-from sonder_runtime.adapters.openai_compat.gateway import (
+from sonder_runtime.adapters.inference.openai_compat_gateway import (
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
 )
@@ -198,7 +198,7 @@ def test_graph_selects_backend_by_env(tmp_path, monkeypatch):
     # Default: Ollama.
     monkeypatch.delenv("SONDER_MODEL_BACKEND", raising=False)
     bootstrap_app.reset_for_tests()
-    from sonder_runtime.adapters.ollama.gateway import OllamaGateway
+    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 
     assert isinstance(bootstrap_app.build_application().model_gateway, OllamaGateway)
     # Opt-in: OpenAI-compatible.

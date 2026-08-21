@@ -12,8 +12,8 @@ import os
 
 import pytest
 
-from sonder_runtime.adapters.ollama.gateway import OllamaGateway
-from sonder_runtime.adapters.openai_compat.gateway import OpenAICompatibleGateway
+from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 
