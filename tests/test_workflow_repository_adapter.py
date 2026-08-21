@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-from sonder_runtime.adapters.workflow_adapters import LegacyWorkflowRepository
 from sonder_runtime.adapters.workflow_repository import WorkflowRepositoryAdapter
-
-
-def test_legacy_workflow_repository_is_the_canonical_adapter_alias():
-    assert LegacyWorkflowRepository is WorkflowRepositoryAdapter
-
 
 def test_workflow_repository_delegates_to_packaged_store(monkeypatch):
     calls = []

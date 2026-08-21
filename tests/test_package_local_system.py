@@ -128,7 +128,6 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "requirements-runtime.txt" in entries
     assert {
         "sonder_runtime/adapters/filesystem/workflow_store.py",
-        "sonder_runtime/adapters/workflow_adapters.py",
         "sonder_runtime/application/ports/workflows.py",
         "sonder_runtime/application/workflows/__init__.py",
         "sonder_runtime/application/workflows/loop.py",
