@@ -79,6 +79,8 @@ class ServerConfig:
     reasoning_audience: str = "developer"
     session_state_limit: int = 128
     session_state_owner_limit: int = 32
+    # Zero selects the deterministic derived cap from HTTP capacity.
+    owner_max_inflight: int = 0
     train_max_n: int = 500
     trusted_proxy_cidrs: tuple[str, ...] = ("127.0.0.1/32", "::1/128")
     # Explicit operator declaration that a TLS-terminating proxy fronts any
@@ -523,6 +525,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                  "queue_depth"):
         if getattr(config.capacity, name) < 1:
             errors.append(f"[capacity].{name} must be >= 1")
+    if config.server.owner_max_inflight < 0:
+        errors.append("[server].owner_max_inflight must be >= 0")
 
     obs = config.observability
     if obs.log_format not in ("json", "text"):

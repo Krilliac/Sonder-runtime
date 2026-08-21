@@ -318,9 +318,13 @@ class RuntimeLifecycle:
         # One authenticated principal must never occupy every slot and queue
         # position at once; the default cap always leaves the majority of
         # total admission capacity to other owners.
-        configured_owner_cap = owner_max_inflight or _env_int(
-            "SONDER_OWNER_MAX_INFLIGHT",
-            max(1, (self._max_concurrent + self._queue_depth) // 4),
+        configured_owner_cap = (
+            owner_max_inflight
+            if owner_max_inflight is not None
+            else _env_int(
+                "SONDER_OWNER_MAX_INFLIGHT",
+                max(1, (self._max_concurrent + self._queue_depth) // 4),
+            )
         )
         # An override at or above total capacity would negate the fairness
         # bound entirely, so whenever total capacity exceeds one the
@@ -925,6 +929,10 @@ def get() -> RuntimeLifecycle:
                     max_concurrent_requests=config.capacity.http_requests,
                     queue_depth=config.capacity.queue_depth,
                     metrics_enabled=config.observability.metrics_enabled,
+                    owner_max_inflight=(
+                        config.server.owner_max_inflight
+                        or max(1, (config.capacity.http_requests + config.capacity.queue_depth) // 4)
+                    ),
                 )
         return _instance
 
