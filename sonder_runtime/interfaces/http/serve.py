@@ -61,6 +61,7 @@ from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
+from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_route
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
@@ -512,6 +513,10 @@ def _extension_authority(context):
 
 def _is_extension_route(path):
     return path == "/v1/extensions" or path.startswith("/v1/extensions/")
+
+
+def _is_trace_projection_route(path):
+    return path == "/v1/observability/trace"
 
 
 @dataclass
@@ -3743,6 +3748,30 @@ class Handler(BaseHTTPRequestHandler):
             result = dispatch_extension_route(
                 facade_factory(), "GET", path, None, _extension_authority(context)
             )
+            if result is None:
+                self._send_not_found()
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
+        if _is_trace_projection_route(path):
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "administrator authorization is required",
+                                "type": "forbidden", "code": "FORBIDDEN"}},
+                    status=403,
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True,
+            )
+            result = dispatch_trace_route(default_app().events, "GET", path, query)
             if result is None:
                 self._send_not_found()
                 return
