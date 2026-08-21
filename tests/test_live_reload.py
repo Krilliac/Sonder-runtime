@@ -292,7 +292,7 @@ def test_server_prime_live_reload_upgrades_legacy_helper(monkeypatch):
 def test_serve_rebinds_reloaded_server(monkeypatch):
     import sonder_runtime.interfaces.http.serve as ts
 
-    original = ts.server
+    original = ts._LEGACY_RUNTIME
     replacement = object()
     monkeypatch.setattr(
         ts.live_reload,
@@ -301,9 +301,10 @@ def test_serve_rebinds_reloaded_server(monkeypatch):
     )
     try:
         ts._maybe_live_reload()
-        assert ts.server is replacement
+        assert ts._LEGACY_RUNTIME is replacement
+        assert ts.server is not replacement
     finally:
-        ts.server = original
+        ts._LEGACY_RUNTIME = original
 
 
 def test_repl_rebinds_reloaded_personas(monkeypatch):
