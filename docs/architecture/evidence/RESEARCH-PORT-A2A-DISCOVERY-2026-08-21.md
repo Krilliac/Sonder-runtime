@@ -53,7 +53,12 @@ admission, and authentication context.
 
 JSON-RPC contract evidence is in `sonder_runtime/interfaces/a2a/jsonrpc.py`
 and `tests/test_a2a_jsonrpc.py`. Live HTTP and cross-implementation remote
-interoperability remain outside this slice.
+interoperability now have an authenticated `/a2a` dispatcher seam in
+`sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py`; the route remains
+truthfully unavailable until composition injects an application-owned handler.
+This prevents an unauthenticated or unconfigured endpoint from exposing local
+task state. Route contract evidence is in `tests/test_a2a_http_jsonrpc.py`;
+cross-implementation remote interoperability remains outside this slice.
 
 References: <https://github.com/a2aproject/A2A/blob/main/docs/specification.md>
 and <https://github.com/a2aproject/A2A/blob/main/docs/topics/agent-discovery.md>.
