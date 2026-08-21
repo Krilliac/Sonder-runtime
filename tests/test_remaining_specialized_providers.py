@@ -149,3 +149,38 @@ def test_failed_bundle_publication_restores_registry_and_cleans_candidate():
         )
     assert registry.providers() == ()
     assert registry.capabilities() == {}
+
+
+def test_partial_composition_publishes_live_embedding_and_leaves_other_lanes_absent():
+    registry = ScopedProviderRegistry()
+    bundle = wire_specialized_providers(
+        registry,
+        embedding=EmbeddingLifecycleAdapter(lambda request, ctx: ([1.0],)),
+    )
+
+    assert [item.provider_id for item in registry.providers()] == ["embedding"]
+    with pytest.raises(ProviderLifecycleError, match="unknown provider"):
+        registry.resolve("training")
+    with pytest.raises(ProviderLifecycleError, match="unknown provider"):
+        registry.resolve("update")
+    bundle.close(timeout=0)
+
+
+def test_ollama_gateway_consumes_typed_embedding_lifecycle_provider():
+    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+
+    provider = EmbeddingLifecycleAdapter(
+        lambda request, ctx: ([1.0, 2.0], [3.0, 4.0]),
+        provider_id="typed-embedding",
+    )
+    registry = ScopedProviderRegistry()
+    registry.register(provider)
+    result = OllamaGateway(embedding_provider=provider).embed(
+        ("one", "two"), context()
+    )
+
+    assert result == (
+        Embedding((1.0, 2.0), ""),
+        Embedding((3.0, 4.0), ""),
+    )
+    registry.unregister("typed-embedding", timeout=0)

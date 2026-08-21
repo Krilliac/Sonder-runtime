@@ -18,6 +18,9 @@ from ..adapters.persistence.session_repository import SQLiteSessionRepository
 from ..adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
 from ..adapters.persistence.sqlite.workflow_checkpoints import SQLiteWorkflowCheckpointRepository
 from ..adapters.process_probe import ProcessProbeAdapter
+from ..adapters.process_termination import ProcessTreeSupervisor
+from ..adapters.execution.process_jobs import SubprocessJobProvider
+from ..adapters.execution.durable_output import DurableExecutionOutput, SQLiteSpillStore
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
 from ..adapters.unit_of_work import UnitOfWorkAdapter
@@ -43,7 +46,8 @@ from ..adapters.extensions.host import ExtensionHost
 from ..adapters.system_clock import SystemClock
 from ..application.chat.handle_chat import ChatService
 from ..application.vision import VisionService
-from ..application.session import SessionCaptureService
+from ..application.session import SessionCaptureService, SessionCheckpointPrivacyService
+from ..application.session.http_facade import HttpSessionFacade
 from ..application.compaction import SessionCompactionService
 from ..application.extensions.experiments import (
     EphemeralExperimentManager,
@@ -54,6 +58,7 @@ from ..application.selfmod.selfmod_service import GuardedLegacySelfmodService
 from ..application.extensions.facade import ExtensionApplicationFacade
 from ..application.backup import BackupService
 from ..application.capabilities.jobs import JobRegistryService, ResumableWorkflowEngine
+from ..application.jobs.durable_registry import JobRecoveryReport
 from ..application.jobs.session_lifecycle import JobRegistryLifecycleAdapter, JobSessionLifecycleRecorder
 from ..application.agent_registry.unified import UnifiedAgentRegistryService
 from ..application.evaluation_history import EvaluationHistoryService
@@ -67,9 +72,20 @@ from ..application.ports.preferences import (
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
+from ..application.provider_overrides import ProviderOverrideService
+from ..application.providers import (
+    EmbeddingLifecycleAdapter,
+    ScopedProviderRegistry,
+    SpecializedProviderBundle,
+    TrainingLifecycleAdapter,
+    UpdateLifecycleAdapter,
+    wire_specialized_providers,
+)
+from ..domain.provider_override_policy import ProviderOverridePolicy
 from ..application.ports.web import WebProvider
 from ..application.ports.session_repository import SessionRepository
 from ..application.ports.jobs import JobRegistry
+from ..application.execution.process_jobs import ProcessJobProvider
 from ..application.ports.process_probe import ProcessProbe
 from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.ports.tool_executor import ToolExecutor
@@ -87,6 +103,9 @@ class Application:
     profile: str
     runtime_policy: RuntimePolicyService
     model_gateway: ModelGateway
+    provider_registry: ScopedProviderRegistry
+    provider_overrides: ProviderOverrideService
+    specialized_providers: SpecializedProviderBundle
     chat: ChatService
     automation: AutomationRepository
     unit_of_work: Callable[[], UnitOfWork]
@@ -102,8 +121,12 @@ class Application:
     workflows: WorkflowService
     session_repository: Callable[[], SessionRepository]
     session_capture_service: Callable[[], SessionCaptureService]
+    session_checkpoint_privacy_service: Callable[[], SessionCheckpointPrivacyService]
+    session_http_facade: Callable[[], HttpSessionFacade]
     job_registry: Callable[[], JobRegistry]
     job_service: Callable[[], JobRegistryService]
+    process_job_provider: Callable[[], ProcessJobProvider] | None = None
+    job_recovery: Callable[..., JobRecoveryReport] | None = None
     config: SonderConfig | None = None
     vision: VisionService | None = None
     web_provider: WebProvider | None = None
@@ -114,6 +137,17 @@ class Application:
     experiment_manager: Callable[[], EphemeralExperimentManager] | None = None
     extension_facade: Callable[[], ExtensionApplicationFacade] | None = None
     selfmod_service: Callable[[], GuardedLegacySelfmodService] | None = None
+
+    def provider_health(self):
+        """Return a typed, fail-closed snapshot of published provider health."""
+        return tuple(
+            self.provider_registry.health(item.provider_id)
+            for item in self.provider_registry.providers()
+        )
+
+    def close_providers(self, timeout: float | None = None) -> None:
+        """Quiesce and unpublish composed providers before process shutdown."""
+        self.specialized_providers.close(timeout=timeout)
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -129,6 +163,9 @@ def build_application(
     session_capture_service: SessionCaptureService | None = None,
     extension_startup_authority: StartupAuthority | None = None,
     unrestricted_selfmod: bool = False,
+    embedding_provider=None,
+    training_backend=None,
+    update_activator=None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -157,9 +194,48 @@ def build_application(
     # SPEC-3 Phase 3: the real transport adapter behind the port — consent
     # enforced against the OperationContext, driver errors mapped into the
     # domain taxonomy. Backend is Ollama by default, selectable via env.
+    provider_registry = ScopedProviderRegistry()
+
+    # The default embedding delegate is the existing local adapter.  It is
+    # wrapped by the typed lifecycle shell so cancellation/deadline and
+    # publication health are visible before it reaches the model gateway.
+    if embedding_provider is None:
+        import sonder_runtime.adapters.embeddings as legacy_embeddings
+
+        def embedding_provider(request, context):
+            timeout = context.remaining_seconds
+            timeout = 30.0 if timeout is None else max(0.001, timeout)
+            vectors = []
+            for text in request.texts:
+                if context.cancellation.cancelled or context.expired:
+                    break
+                vector = legacy_embeddings.embed(text, timeout=timeout, model=request.model or None)
+                if vector is None:
+                    raise RuntimeError("embedding dependency unavailable")
+                vectors.append(vector)
+            return vectors
+
+    embedding_adapter = EmbeddingLifecycleAdapter(embedding_provider)
+    training_adapter = TrainingLifecycleAdapter(training_backend) if training_backend is not None else None
+    update_adapter = UpdateLifecycleAdapter(update_activator) if update_activator is not None else None
+    # Absent attended backends remain unpublished rather than represented by a
+    # fake provider.  This preserves the existing fail-closed policy.
+    # Partial publication is intentional: absent attended training/update
+    # backends remain absent and therefore fail closed.  If one is supplied,
+    # require the other so the production path cannot be half-composed.
+    if (training_adapter is None) != (update_adapter is None):
+        raise ValueError("training_backend and update_activator must be supplied together")
+    specialized_bundle = wire_specialized_providers(
+        provider_registry,
+        embedding=embedding_adapter,
+        training=training_adapter,
+        update=update_adapter,
+    )
+
     gateway = build_model_gateway(
         target_resolver=target_resolver,
         generate_factory=generate_factory,
+        embedding_provider=embedding_adapter,
     )
     vision = VisionService(
         FileVisionInputProvider(),
@@ -168,8 +244,13 @@ def build_application(
     session_repository: SQLiteSessionRepository | None = None
     canonical_session_capture: SessionCaptureService | None = session_capture_service
     compaction_service: SessionCompactionService | None = None
+    session_checkpoint_privacy: SessionCheckpointPrivacyService | None = None
+    session_http: HttpSessionFacade | None = None
     job_registry: SQLiteDurableJobRegistry | None = None
     job_service: JobRegistryService | None = None
+    process_job_provider: ProcessJobProvider | None = None
+    process_cleanup: ProcessTreeSupervisor | None = None
+    spill_output: DurableExecutionOutput | None = None
     workflow_engine: ResumableWorkflowEngine | None = None
     agent_registry: UnifiedAgentRegistryService | None = None
     extension_registry: ExtensionRegistry | None = None
@@ -209,14 +290,64 @@ def build_application(
             compaction_service = SessionCompactionService(get_session_repository())
         return compaction_service
 
+    def get_session_checkpoint_privacy_service() -> SessionCheckpointPrivacyService:
+        nonlocal session_checkpoint_privacy
+        if session_checkpoint_privacy is None:
+            from ..adapters.persistence.session_checkpoint_privacy import (
+                build_session_checkpoint_privacy_adapter,
+            )
+
+            session_checkpoint_privacy = build_session_checkpoint_privacy_adapter(
+                get_session_repository()
+            )
+        return session_checkpoint_privacy
+
+    def get_session_http_facade() -> HttpSessionFacade:
+        nonlocal session_http
+        if session_http is None:
+            session_http = HttpSessionFacade(
+                get_session_repository(), max_replay_events=1_000
+            )
+        return session_http
+
     def get_job_service() -> JobRegistryService:
-        nonlocal job_service
+        nonlocal job_service, process_cleanup
         if job_service is None:
+            if process_cleanup is None:
+                process_cleanup = ProcessTreeSupervisor()
             lifecycle = JobRegistryLifecycleAdapter(
                 JobSessionLifecycleRecorder(get_session_repository())
             )
-            job_service = JobRegistryService(get_job_registry(), lifecycle=lifecycle)
+            job_service = JobRegistryService(
+                get_job_registry(),
+                process_cleanup=process_cleanup,
+                lifecycle=lifecycle,
+            )
         return job_service
+
+    def get_process_job_provider() -> ProcessJobProvider:
+        nonlocal process_job_provider, process_cleanup, spill_output
+        if process_job_provider is None:
+            from ..platform.paths import state_path
+            if process_cleanup is None:
+                process_cleanup = ProcessTreeSupervisor()
+            spill_output = DurableExecutionOutput(
+                SQLiteSpillStore(state_path("execution-spill.db", "SONDER_JOBS_DB"))
+            )
+            process_job_provider = SubprocessJobProvider(
+                get_job_registry(),
+                process_cleanup=process_cleanup,
+                lifecycle=get_job_service()._lifecycle,
+                output=spill_output,
+            )
+        return process_job_provider
+
+    def recover_jobs(**kwargs: object) -> JobRecoveryReport:
+        """Reconcile durable process jobs through the typed tree supervisor."""
+        nonlocal process_cleanup
+        if process_cleanup is None:
+            process_cleanup = ProcessTreeSupervisor()
+        return get_job_registry().reconcile_with_cleanup(process_cleanup, **kwargs)
 
     def get_workflow_engine() -> ResumableWorkflowEngine:
         nonlocal workflow_engine
@@ -298,6 +429,11 @@ def build_application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
         model_gateway=gateway,
+        provider_registry=provider_registry,
+        provider_overrides=ProviderOverrideService(
+            ProviderOverridePolicy({item.provider_id: item.provider_id for item in provider_registry.providers()})
+        ),
+        specialized_providers=specialized_bundle,
         chat=ChatService(
             gateway,
             session_capture_service,
@@ -331,9 +467,13 @@ def build_application(
         workflows=WorkflowService(WorkflowRepositoryAdapter(), LoopRunnerAdapter()),
         session_repository=get_session_repository,
         session_capture_service=get_session_capture_service,
+        session_checkpoint_privacy_service=get_session_checkpoint_privacy_service,
+        session_http_facade=get_session_http_facade,
         compaction_service=get_compaction_service,
         job_registry=get_job_registry,
         job_service=get_job_service,
+        process_job_provider=get_process_job_provider,
+        job_recovery=recover_jobs,
         workflow_engine=get_workflow_engine,
         agent_registry=get_agent_registry,
         config=config,

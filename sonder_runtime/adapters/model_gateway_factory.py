@@ -17,7 +17,7 @@ _OPENAI_COMPATIBLE_BACKENDS = frozenset(
 )
 
 
-def build_model_gateway(*, target_resolver=None, generate_factory=None) -> ModelGateway:
+def build_model_gateway(*, target_resolver=None, generate_factory=None, embedding_provider=None) -> ModelGateway:
     """Construct the configured model gateway.
 
     Ollama remains the default.  OpenAI-compatible aliases opt into the
@@ -32,6 +32,7 @@ def build_model_gateway(*, target_resolver=None, generate_factory=None) -> Model
     return OllamaGateway(
         target_resolver=target_resolver,
         generate_factory=generate_factory,
+        embedding_provider=embedding_provider,
     )
 
 

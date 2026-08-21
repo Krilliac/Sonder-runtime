@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import time
 
-from sonder_runtime.adapters import process_liveness
+import sonder_runtime.adapters.process_liveness as process_liveness
 
 
 __all__ = (

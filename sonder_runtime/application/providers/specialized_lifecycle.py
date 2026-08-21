@@ -285,16 +285,17 @@ def wire_specialized_providers(
     registry: ScopedProviderRegistry,
     *,
     embedding: EmbeddingLifecycleAdapter,
-    training: TrainingLifecycleAdapter,
-    update: UpdateLifecycleAdapter,
+    training: TrainingLifecycleAdapter | None = None,
+    update: UpdateLifecycleAdapter | None = None,
 ) -> SpecializedProviderBundle:
-    """Publish all three specialized providers as one composition operation.
+    """Publish the supplied specialized providers as one composition operation.
 
-    If any provider cannot initialize or its capability conflicts, providers
-    already published by this call are synchronously removed.  The caller's
-    pre-existing registry state is therefore restored exactly on failure.
+    Training and update are optional so an absent attended backend remains
+    unpublished and fail-closed. If any supplied provider cannot initialize or
+    its capability conflicts, providers already published by this call are
+    synchronously removed.
     """
-    candidates = (embedding, training, update)
+    candidates = tuple(provider for provider in (embedding, training, update) if provider is not None)
     published: list[ProviderRegistration] = []
     try:
         for provider in candidates:

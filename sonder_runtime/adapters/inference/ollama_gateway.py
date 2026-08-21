@@ -32,6 +32,7 @@ from ...application.ports.model_gateway import (
     require_embedding_vector,
     require_model_text,
 )
+from ...application.ports.specialized_lifecycle import EmbeddingRequest
 from ...application.ports.model_target import (
     ModelGenerateFactory,
     ModelSystemBuilder,
@@ -241,6 +242,15 @@ class OllamaGateway:
             )
 
         _enforce_local_endpoint(getattr(provider, "BASE", ollama_endpoint.normalize()), context)
+        # The composition root may publish a typed lifecycle provider.  Keep
+        # the legacy module-shaped provider path intact for compatibility, but
+        # make the live model path consume the typed contract when present.
+        if getattr(provider, "provider_id", None) and callable(getattr(provider, "health", None)):
+            typed = provider.embed(
+                EmbeddingRequest(tuple(texts), getattr(provider, "EMBED_MODEL", "")),
+                context,
+            )
+            return tuple(item for result in (typed,) for item in result.embeddings)
         results = []
         for text in texts:
             _check_liveness(context)

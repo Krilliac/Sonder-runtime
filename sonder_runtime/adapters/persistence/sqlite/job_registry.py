@@ -1,7 +1,6 @@
 """SQLite-backed durable job registry (JOB-002/003/004)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 from pathlib import Path
 import sqlite3
@@ -13,7 +12,7 @@ from sonder_runtime.application.execution.world_control import (
     BoundedOutputBuffer, OutputPage, OutputStream, OutputWatermark, SpillReference,
 )
 from sonder_runtime.application.jobs.durable_registry import (
-    DurableJobView, ProcessTreeCleanupContract, ProcessTreeCleanupReceipt,
+    DurableJobView, JobRecoveryReport, ProcessTreeCleanupContract, ProcessTreeCleanupReceipt,
     ProcessTreeCleanupRequest,
 )
 from sonder_runtime.application.operations.startup_reconciliation import (
@@ -52,13 +51,6 @@ def _json(value: Any) -> str:
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
-
-
-@dataclass(frozen=True, slots=True)
-class JobRecoveryReport:
-    plan: DrainPlan
-    cleanup_receipts: tuple[ProcessTreeCleanupReceipt, ...]
-    interrupted_job_ids: tuple[str, ...]
 
 
 class SQLiteDurableJobRegistry:

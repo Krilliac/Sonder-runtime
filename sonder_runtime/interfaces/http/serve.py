@@ -67,6 +67,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
 from sonder_runtime.domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.execution.world_control import OutputWatermark
+from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.extensions.facade import ExtensionAuthority
 
 
@@ -135,6 +136,41 @@ _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
 _SESSION_FACADE = None
+
+
+class _LiveSessionCaptureFailure(RuntimeError):
+    """The HTTP turn cannot claim durable recovery evidence."""
+
+
+def _capture_live_session_turn(*, session_id, prompt, history, model, content,
+                               request_id, turn_id, stream):
+    """Capture only a named, model-backed HTTP turn through the app graph.
+
+    Legacy control/web/execution routes intentionally do not enter this seam.
+    A capture error is opaque at the HTTP boundary and fails the request closed
+    so a successful response is never presented as durably recoverable.
+    """
+    if not session_id:
+        return None
+    try:
+        from sonder_runtime.bootstrap.app import default_app
+
+        request = ModelRequest(
+            prompt=prompt,
+            tier=model or "code",
+            history=tuple(history),
+            options={"stream": bool(stream)},
+        )
+        return default_app().session_capture_service().capture_turn(
+            session_id,
+            turn_id,
+            request,
+            request_id=request_id,
+            user_message=prompt,
+            model_response=content,
+        )
+    except Exception as error:
+        raise _LiveSessionCaptureFailure from error
 _MAX_JOB_CANCEL_REASON = 256
 _MAX_JOB_ID_LENGTH = 128
 _MAX_JOB_KIND_LENGTH = 64
@@ -5013,6 +5049,22 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     state=state,
                 )
+                if (
+                    turn is not None
+                    and reply is None
+                    and not web_routed
+                    and not execution_routed
+                ):
+                    _capture_live_session_turn(
+                        session_id=storage_session,
+                        prompt=prompt,
+                        history=history,
+                        model=response_model or model_selector,
+                        content=content,
+                        request_id=self._correlation(),
+                        turn_id=response_iid or uuid.uuid4().hex,
+                        stream=stream,
+                    )
         except sonder_lifecycle.AdmissionRejected as rejection:
             self._record_chat_completion_metric(
                 _lifecycle, rejection.code.lower(),
@@ -5067,6 +5119,21 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 status=status,
                 headers=headers,
+            )
+            return
+        except _LiveSessionCaptureFailure:
+            self._record_chat_completion_metric(
+                _lifecycle, "session_capture_failed",
+                getattr(self, "_request_started", _request_started),
+            )
+            self._send_json_payload(
+                {"error": {
+                    "message": "durable session capture unavailable",
+                    "type": "server_error",
+                    "code": "SESSION_CAPTURE_UNAVAILABLE",
+                }},
+                status=503,
+                headers={"Retry-After": "1"},
             )
             return
         except Exception as error:
@@ -5256,9 +5323,7 @@ def main(config=None):
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.application.session.http_facade import HttpSessionFacade
 
-        configure_session_facade(
-            HttpSessionFacade(default_app().session_repository(), max_replay_events=1_000)
-        )
+        configure_session_facade(default_app().session_http_facade())
     port = DEFAULT_PORT if config is None else CONFIGURED_PORT
     if len(sys.argv) > 1:
         try:

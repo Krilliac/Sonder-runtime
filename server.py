@@ -1433,6 +1433,39 @@ def _application():
         return _APP_GRAPH
 
 
+def _capture_durable_session_turn(
+    session_id, prompt, history, model, system, tier, response, request_id=None,
+):
+    """Commit one completed live turn through the typed session boundary.
+
+    The legacy server still owns routing, memory, and response decoration.  A
+    completed model turn is nevertheless durable through the canonical
+    application graph.  Capture is deliberately post-success and pre-footer:
+    model failures, policy refusals, and synthetic transport text cannot be
+    mistaken for recoverable model-visible history, while the captured
+    response remains the exact model output used by the legacy path.
+    """
+    if session_id is None:
+        return None
+    from sonder_runtime.application.ports.model_gateway import ModelRequest
+    from sonder_runtime.domain.common.ids import new_id
+
+    request = ModelRequest(
+        prompt=prompt,
+        tier=tier or "sonder",
+        system=system,
+        history=tuple(history or ()),
+    )
+    return _application().session_capture_service().capture_turn(
+        str(session_id),
+        new_id("turn"),
+        request,
+        request_id=str(request_id or new_id("request")),
+        user_message=prompt,
+        model_response=response,
+    )
+
+
 def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
                            num_predict=256, num_ctx=None, timeout=None):
     """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
@@ -5113,6 +5146,10 @@ def _sonder_impl_serialized(
     response, _code_verified, code_repaired = _apply_code_gate(
         response, interaction_id=iid, regenerate=_code_repair,
     )
+    _capture_durable_session_turn(
+        session_id, prompt, history, tgt_model, effective_system, tier_label,
+        response, request_id=iid,
+    )
     footer_iid = iid
     if code_repaired and not _persist_verified_code_repair(
         iid, interaction_snapshot, response, repair_usage,
@@ -5476,6 +5513,10 @@ def _answer_with_history_impl(
 
     response, _code_verified, code_repaired = _apply_code_gate(
         response, interaction_id=iid, regenerate=_code_repair,
+    )
+    _capture_durable_session_turn(
+        session_id, prompt, history, model, effective_system, tier_label,
+        response, request_id=iid,
     )
     footer_iid = iid
     if code_repaired and not _persist_verified_code_repair(
