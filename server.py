@@ -23943,6 +23943,13 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
     must be a currently discovered local model that declares chat/completion
     capability. The synthesis and provider reasoning are never persisted.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_synthesize",
@@ -23952,7 +23959,7 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
     try:
         return json.dumps(_fanout_synthesize_run(run, synth_model), ensure_ascii=False, sort_keys=True)
     except ModelCallError as exc:
-        return _format_model_call_error(exc)
+        return render_model_error(exc)
 
 
 def _fanout_synthesize_run(run, synth_model=""):
@@ -24164,6 +24171,13 @@ def ensemble_answer(
             an explicitly named multi-tier ensemble cannot supply two distinct
             available models. Natural code-and-reasoning routing enables this.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     _maybe_live_reload()
     question = (prompt or "").strip()
     if not question:
@@ -24179,7 +24193,7 @@ def ensemble_answer(
             " (unknown: %s)" % ", ".join(unknown) if unknown else ""
         )
     if require_all_tiers and len(targets) < 2:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration",
             "requested ensemble needs two distinct available models%s." % (
                 " (unavailable: %s)" % ", ".join(unknown) if unknown else ""
@@ -24195,7 +24209,7 @@ def ensemble_answer(
         except ModelCallError as error:
             if error.kind == "cancelled":
                 raise
-            failures.append((tier, model, _format_model_call_error(error)))
+            failures.append((tier, model, render_model_error(error)))
             continue
         except Exception as exc:  # a bad tier must not sink the whole ensemble
             failures.append((tier, model, str(exc)))

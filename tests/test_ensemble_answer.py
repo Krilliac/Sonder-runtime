@@ -6,6 +6,28 @@ import pytest
 import server
 
 
+def test_ensemble_and_synthesis_paths_do_not_call_root_model_error_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"ensemble_answer", "model_fanout_synthesize"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_format_model_call_error"
+            for node in ast.walk(function)
+        )
+
+
 # --- local thinking budget ----------------------------------------------------
 #
 # A reasoning model spends num_predict on thought before writing any content, so
