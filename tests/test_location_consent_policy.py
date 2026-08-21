@@ -2,6 +2,21 @@ import server
 from sonder_runtime.platform.location_consent import location_consent
 
 
+def test_server_production_paths_do_not_call_location_consent_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_env_location_consent"
+    ]
+    assert calls == []
+
+
 def test_location_consent_is_off_by_default():
     assert location_consent(environ={}) is False
 

@@ -4965,7 +4965,7 @@ def _sonder_impl_serialized(
         if command is not None:
             return _append_activity(command)
     location_consent = (
-        _env_location_consent() if location_consent is None else bool(location_consent)
+        _location_consent() if location_consent is None else bool(location_consent)
     )
     if not explicit_target:
         web_reply = _route_chat_web(prompt, session, project, location_consent)
