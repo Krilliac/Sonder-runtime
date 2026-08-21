@@ -1,8 +1,8 @@
 # Requirement evidence audit — next formalization pass
 
-Date: 2026-08-21  
+Date: 2026-08-21
 Audited branch: `agent/wp1-execution-status`  
-Audit baseline: current branch HEAD `d9f973b` (2026-08-21 refresh)
+Audit baseline: current branch HEAD `13be730` (2026-08-21 refresh)
 Scope: SESSION/LOOP/SEAM/CTX/REPO/SKILL/AGENT/JOB/TOOL/EXEC/MEM/EVAL/MODEL/API/DATA/OPS/SEC/TRAIN/UPDATE/DOC
 
 ## Decision summary
