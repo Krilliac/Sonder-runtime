@@ -15,7 +15,7 @@ import pytest
 import sonder_runtime.adapters.embeddings as embeddings
 import server
 from sonder_runtime.adapters.ollama import endpoint as ollama_endpoint
-from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
+from sonder_runtime.adapters.inference.injected import InjectedModelGateway
 from sonder_runtime.adapters.ollama.gateway import OllamaGateway
 from sonder_runtime.adapters.openai_compat.gateway import (
     OpenAICompatibleConfig,
@@ -228,7 +228,7 @@ def _legacy_probe(monkeypatch) -> GatewayContractProbe:
     def set_success(text, tokens_in, tokens_out):
         response["text"] = text
 
-    gateway = LegacyModelGateway(
+    gateway = InjectedModelGateway(
         generate=lambda prompt, *, history=None, tier=None: server.sonder(
             prompt, history=history, tier=tier
         )

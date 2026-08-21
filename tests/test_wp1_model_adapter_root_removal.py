@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
+from sonder_runtime.adapters.inference.injected import InjectedModelGateway
 from sonder_runtime.adapters.ollama.gateway import OllamaGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -32,7 +32,7 @@ def _imports_root_server(path: Path) -> bool:
 
 def test_model_adapters_have_no_direct_server_import():
     assert not _imports_root_server(
-        ROOT / "sonder_runtime" / "adapters" / "legacy_model_gateway.py"
+        ROOT / "sonder_runtime" / "adapters" / "inference" / "injected.py"
     )
     assert not _imports_root_server(
         ROOT / "sonder_runtime" / "adapters" / "ollama" / "gateway.py"
@@ -46,7 +46,7 @@ def test_legacy_gateway_preserves_request_shape_with_injected_provider():
         calls.append((prompt, history, tier))
         return "legacy response"
 
-    gateway = LegacyModelGateway(generate=generate, embed=lambda value: [len(value)])
+    gateway = InjectedModelGateway(generate=generate, embed=lambda value: [len(value)])
     response = gateway.generate(
         ModelRequest("hello", "code", history=(("user", "prior"),)), _CONTEXT
     )
@@ -58,8 +58,8 @@ def test_legacy_gateway_preserves_request_shape_with_injected_provider():
 
 
 def test_legacy_gateway_fails_closed_without_injected_chat_provider():
-    with pytest.raises(DependencyUnavailable, match="injected generate"):
-        LegacyModelGateway().generate(ModelRequest("hello", "code"), _CONTEXT)
+    with pytest.raises(DependencyUnavailable, match="generate provider"):
+        InjectedModelGateway().generate(ModelRequest("hello", "code"), _CONTEXT)
 
 
 def test_ollama_gateway_preserves_target_system_and_generation_shape():

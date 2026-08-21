@@ -1,7 +1,7 @@
 import pytest
 
 import server
-from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
+from sonder_runtime.adapters.inference.injected import InjectedModelGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.domain.common.errors import Cancelled, DeadlineExceeded
@@ -22,7 +22,7 @@ def test_generate_rejects_cancelled_context_before_legacy_call(monkeypatch):
     )
 
     with pytest.raises(Cancelled):
-        LegacyModelGateway().generate(ModelRequest("prompt", "code"), context)
+        InjectedModelGateway().generate(ModelRequest("prompt", "code"), context)
     assert called == []
 
 
@@ -34,5 +34,5 @@ def test_generate_rejects_expired_context_before_legacy_call(monkeypatch):
     )
 
     with pytest.raises(DeadlineExceeded):
-        LegacyModelGateway().generate(ModelRequest("prompt", "code"), context)
+        InjectedModelGateway().generate(ModelRequest("prompt", "code"), context)
     assert called == []

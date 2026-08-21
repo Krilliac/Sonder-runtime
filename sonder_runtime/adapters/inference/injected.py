@@ -1,4 +1,4 @@
-"""Compatibility ModelGateway adapter for an injected legacy provider.
+"""ModelGateway adapter for an explicitly injected provider.
 
 The old provider is still supported, but its chat and embedding callables are
 owned by the composition root/provider wiring.  This adapter never imports
@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import time
 
-from ..application.context import OperationContext
-from ..application.ports.model_gateway import (
+from ...application.context import OperationContext
+from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
     ModelResponse,
     require_embedding_vector,
     require_model_text,
 )
-from ..domain.common.errors import (
+from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
     DependencyUnavailable,
@@ -32,8 +32,8 @@ def _check_context_liveness(context: OperationContext) -> None:
         raise Cancelled("operation cancelled before adapter call")
 
 
-class LegacyModelGateway:
-    """ModelGateway over explicitly injected legacy provider callables."""
+class InjectedModelGateway:
+    """ModelGateway over explicitly injected provider callables."""
 
     def __init__(self, *, generate=None, embed=None):
         self._generate_provider = generate
@@ -47,7 +47,7 @@ class LegacyModelGateway:
         _check_context_liveness(context)
         if self._generate_provider is None:
             raise DependencyUnavailable(
-                "legacy model gateway requires an injected generate provider"
+                "injected model gateway requires a generate provider"
             )
         started = time.monotonic()
         text = self._generate_provider(

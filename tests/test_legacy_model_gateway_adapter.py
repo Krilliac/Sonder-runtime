@@ -4,9 +4,9 @@ import pytest
 
 import server
 import sonder_runtime.adapters.embeddings as embeddings
-from sonder_runtime.adapters.legacy_model_gateway import LegacyModelGateway
-from sonder_runtime.adapters.legacy_model_gateway import (
-    LegacyModelGateway as CompatibilityGateway,
+from sonder_runtime.adapters.inference.injected import InjectedModelGateway
+from sonder_runtime.adapters.inference.injected import (
+    InjectedModelGateway as CompatibilityGateway,
 )
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -14,7 +14,7 @@ from sonder_runtime.domain.common.errors import InvalidInput
 
 
 def test_strangler_name_preserves_identity_with_canonical_gateway():
-    assert CompatibilityGateway is LegacyModelGateway
+    assert CompatibilityGateway is InjectedModelGateway
 
 
 def test_generate_preserves_legacy_request_shape_and_response(monkeypatch):
@@ -25,7 +25,7 @@ def test_generate_preserves_legacy_request_shape_and_response(monkeypatch):
         return "legacy response"
 
     monkeypatch.setattr(server, "sonder", sonder)
-    response = LegacyModelGateway(generate=sonder).generate(
+    response = InjectedModelGateway(generate=sonder).generate(
         ModelRequest("hello", "code", history=(("user", "prior"),)),
         local_owner_context(correlation_id="legacy-gateway"),
     )
@@ -39,7 +39,7 @@ def test_generate_preserves_legacy_request_shape_and_response(monkeypatch):
 def test_embed_preserves_order_and_validates_vectors(monkeypatch):
     monkeypatch.setattr(embeddings, "embed", lambda value: [float(len(value))])
 
-    result = LegacyModelGateway().embed(
+    result = InjectedModelGateway().embed(
         ["a", "abcd"], local_owner_context(correlation_id="legacy-embed")
     )
 
@@ -52,7 +52,7 @@ def test_generate_rejects_empty_prompt_before_legacy_call(monkeypatch):
     monkeypatch.setattr(server, "sonder", lambda *args, **kwargs: called.append(1))
 
     with pytest.raises(InvalidInput):
-        LegacyModelGateway().generate(
+        InjectedModelGateway().generate(
             ModelRequest("  ", "code"),
             local_owner_context(correlation_id="legacy-empty"),
         )
