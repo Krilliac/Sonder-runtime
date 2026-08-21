@@ -24,6 +24,7 @@ from ..application.protocol.mcp_compatibility import (
     McpCompatibility,
     SUPPORTED_MCP_PROTOCOL_VERSIONS,
 )
+from ..application.protocol.mcp_tasks import McpTaskHandler
 from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
 
 
@@ -376,7 +377,8 @@ def native_tool_registry() -> InMemoryToolRegistry:
 
 
 def run_native_mcp(application, *, input_stream: TextIO | None = None,
-                   output_stream: TextIO | None = None) -> int:
+                   output_stream: TextIO | None = None,
+                   task_handler=None) -> int:
     """Serve native MCP over stdio using the application tool port."""
     config = application.config
     roots = tuple(
@@ -384,6 +386,13 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         for root in (config.state.workspace_roots if config is not None else ())
     )
     registry = native_tool_registry()
+    if task_handler is None:
+        job_service_factory = getattr(application, "job_service", None)
+        if callable(job_service_factory):
+            task_handler = McpTaskHandler(job_service_factory())
+    capabilities = ("tools", "notifications")
+    if callable(task_handler):
+        capabilities += ("tasks",)
 
     def execute(name: str, arguments: dict) -> dict:
         descriptor = registry.get(name)
@@ -455,10 +464,11 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         compatibility=McpCompatibility(
             server_version="2.0",
             supported_versions=SUPPORTED_MCP_PROTOCOL_VERSIONS,
-            capabilities=("tools", "notifications"),
+            capabilities=capabilities,
         ),
         tool_catalog=registry,
         tool_handler=execute,
+        task_handler=task_handler,
     )
     return transport.serve()
 
