@@ -8,6 +8,7 @@ from sonder_runtime.platform.config import SonderConfig
 from sonder_runtime.bootstrap.native_mcp import native_tool_registry, run_native_mcp
 from sonder_runtime.application.protocol.mcp_compatibility import SubscriptionNotificationRouter
 from sonder_runtime.interfaces.mcp.transport import StdioMcpTransport
+from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 
 
 class _Executor:
@@ -41,6 +42,27 @@ class _Vision:
         assert prompt == "describe"
         assert context.source == "mcp"
         return VisionResponse("a local image", "llava-local", "vision")
+
+
+class _Jobs:
+    def __init__(self):
+        self.record = JobRecord(
+            JobIdentity("job-1", "workflow", "op-1", "idem-1"),
+            JobStatus.RUNNING, 2, "created", "updated",
+        )
+
+    def get(self, task_id):
+        from sonder_runtime.domain.common.errors import NotFound
+        if task_id != self.record.identity.job_id:
+            raise NotFound("job not found")
+        return self.record
+
+    def cancel(self, task_id, *, reason):
+        self.record = JobRecord(
+            self.record.identity, JobStatus.CANCELLED, self.record.revision + 1,
+            self.record.created_at, "cancelled", error=reason,
+        )
+        return (self.record,)
 
 
 def test_native_catalog_is_bounded_and_deterministic():
@@ -324,6 +346,29 @@ def test_packaged_native_mcp_2x_stream_negotiates_lists_calls_and_delivers_subsc
             "job": "j1", "state": "ready",
         }},
     }
+
+
+def test_native_mcp_composes_durable_tasks_when_job_service_is_available():
+    app = _app()
+    app.job_service = lambda: _Jobs()
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersions": ["2.0"], "capabilities": {"tasks": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": {
+            "taskId": "job-1",
+        }},
+    ]
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO("\n".join(json.dumps(item) for item in requests) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[0]["result"]["capabilities"] == {"tasks": {}}
+    assert rows[1]["result"]["taskId"] == "job-1"
+    assert rows[1]["result"]["contentRedacted"] is True
 
 
 def test_native_legacy_file_read_alias_calls_canonical_executor():

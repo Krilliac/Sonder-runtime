@@ -10,7 +10,9 @@ The handler is provider-neutral and can be injected directly into
 `StdioMcpTransport`; the transport still requires the client to negotiate the
 `tasks` capability before dispatch. Focused proof covers direct get/update/
 cancel behavior, protocol-level invalid-input/not-found error mapping, and the
-real negotiated stdio path:
+real negotiated stdio path. `run_native_mcp` now composes this handler from the
+application's durable job service and advertises the `tasks` capability only
+when that service is present; legacy lightweight callers remain tools-only.
 
 ```text
 python -m pytest -q tests/test_mcp_task_handler.py tests/test_mcp_tasks_projection.py tests/test_mcp_stdio_transport.py
