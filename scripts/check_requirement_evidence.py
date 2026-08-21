@@ -143,9 +143,16 @@ def generated_status() -> tuple[dict, str]:
             "revision": record.get("revision"),
         })
     status_counts = Counter(item["status"] for item in requirements)
+    # Hash the logical UTF-8 text rather than platform checkout bytes.  Git
+    # normalizes these text files to LF in CI while Windows may materialize
+    # them as CRLF; generated projections must be identical on both hosts.
+    def logical_sha256(path: Path) -> str:
+        text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
     source = {
-        "spec_sha256": hashlib.sha256(SPEC.read_bytes()).hexdigest(),
-        "ledger_sha256": hashlib.sha256(LEDGER.read_bytes()).hexdigest(),
+        "spec_sha256": logical_sha256(SPEC),
+        "ledger_sha256": logical_sha256(LEDGER),
     }
     payload = {
         "schema": "sonder-requirement-status-v1",
