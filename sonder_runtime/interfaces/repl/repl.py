@@ -24,6 +24,7 @@ from sonder_runtime.adapters.content_services import intents, training_tasks
 from sonder_runtime.adapters.repl_services import personas, web_intents
 from sonder_runtime.adapters.content_services import feedback
 from sonder_runtime.adapters.web import live_reload
+from sonder_runtime.adapters.web import listener_probe
 from sonder_runtime.platform import debug_dump
 from sonder_runtime.adapters.repl_services import (
     code_improve, command_router, consult as consult_flow, tier_router,
@@ -734,9 +735,8 @@ def _startup_banner(strict, persona, project, tier=None):
     except Exception:
         model = "unknown"
     try:
-        import sonder_headless
-        host, port = sonder_headless.DEFAULT_HOST, sonder_headless.DEFAULT_PORT
-        live = sonder_headless.port_open(host, port)
+        host, port = listener_probe.DEFAULT_HOST, listener_probe.DEFAULT_PORT
+        live = listener_probe.port_open(host, port)
         # 0.0.0.0/:: are bind addresses, not browser destinations.  The
         # dashboard remains loopback-only in this presentation, matching the
         # readiness probe and avoiding a dead OSC-8 link on wildcard binds.
