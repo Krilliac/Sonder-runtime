@@ -143,6 +143,13 @@ def test_image_inspection_uses_bounded_packaged_workbench(executor, tmp_path):
     assert result.evidence["height"] == 8
 
 
+def test_process_inventory_preserves_explicit_opt_in_boundary(executor, monkeypatch):
+    monkeypatch.delenv("SONDER_PROCESS_INSPECTION", raising=False)
+    result = executor.execute(ToolCall("process_list", {}), _ctx())
+    assert result.ok is False
+    assert result.evidence["status"] == "opt_in_required"
+
+
 def test_guard_rejection_surfaces_as_not_ok(executor):
     # Escaping the workspace root must fail closed as ok=False, not raise.
     result = executor.execute(

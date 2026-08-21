@@ -215,6 +215,19 @@ _INSPECTION_TOOLS = (
          "additionalProperties": False},
     ),
     ToolDescriptor(
+        "process_list", "List bounded process metadata after explicit opt-in",
+        {"type": "object", "properties": {
+            "max_processes": _INT, "max_seconds": {"type": "number"},
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "process_memory_risk_inspect", "Inspect bounded process memory risk indicators",
+        {"type": "object", "properties": {
+            "pid": {"type": "integer"}, "max_bytes": _INT,
+            "max_regions": _INT, "max_seconds": {"type": "number"},
+        }, "required": ["pid"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "workspace_compare", "Compare two bounded workspaces",
         {"type": "object", "properties": {
             "left": _PATH, "right": _PATH,
