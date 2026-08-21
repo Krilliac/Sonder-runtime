@@ -429,7 +429,7 @@ def cmd_smoke(args) -> int:
     return 0
 
 
-def _export_runtime_environment(config) -> None:
+def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -> None:
     """Publish the validated configuration through the compatibility vars.
 
     The stdlib HTTP adapter and the shared helper modules still read their
@@ -451,42 +451,43 @@ def _export_runtime_environment(config) -> None:
         os.environ["SONDER_FILE_ROOTS"] = os.pathsep.join(
             config.state.workspace_roots
         )
-    os.environ["SONDER_HOST"] = config.server.host
-    os.environ["SONDER_PORT"] = str(config.server.port)
+    if include_typed_runtime:
+        os.environ["SONDER_HOST"] = config.server.host
+        os.environ["SONDER_PORT"] = str(config.server.port)
     # ``require_account`` predates the explicit mode field.  Preserve its
     # documented meaning when a configuration relies on the default api-key
     # mode rather than quietly letting the explicit default take precedence.
     auth_mode = config.server.auth_mode
     if config.server.require_account and auth_mode == "api-key":
         auth_mode = "account"
-    os.environ["SONDER_AUTH_MODE"] = auth_mode
-    os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] = (
-        "1" if config.server.tls_terminated_by_proxy else "0"
-    )
-    os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
-    os.environ["SONDER_MAX_CONCURRENT_REQUESTS"] = str(
-        config.server.max_concurrent_requests
-    )
-    os.environ["SONDER_REQUEST_TIMEOUT_SECONDS"] = str(
-        config.server.request_timeout_seconds
-    )
-    os.environ["SONDER_STREAM_IDLE_TIMEOUT_SECONDS"] = str(
-        config.server.stream_idle_timeout_seconds
-    )
-    os.environ["SONDER_CORS_ORIGINS"] = ",".join(config.server.cors_origins)
-    os.environ["SONDER_REQUIRE_ACCOUNT"] = "1" if config.server.require_account else "0"
-    os.environ["SONDER_ALLOW_REGISTRATION"] = (
-        "1" if config.server.allow_registration else "0"
-    )
-    os.environ["SONDER_REASONING_AUDIENCE"] = config.server.reasoning_audience
-    os.environ["SONDER_HTTP_SESSION_STATE_LIMIT"] = str(config.server.session_state_limit)
-    os.environ["SONDER_HTTP_SESSION_STATE_OWNER_LIMIT"] = str(
-        config.server.session_state_owner_limit
-    )
-    os.environ["SONDER_TRAIN_MAX_N"] = str(config.server.train_max_n)
+    if include_typed_runtime:
+        os.environ["SONDER_AUTH_MODE"] = auth_mode
+        os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
+        os.environ["SONDER_MAX_CONCURRENT_REQUESTS"] = str(
+            config.server.max_concurrent_requests
+        )
+        os.environ["SONDER_REQUEST_TIMEOUT_SECONDS"] = str(
+            config.server.request_timeout_seconds
+        )
+        os.environ["SONDER_STREAM_IDLE_TIMEOUT_SECONDS"] = str(
+            config.server.stream_idle_timeout_seconds
+        )
+        os.environ["SONDER_CORS_ORIGINS"] = ",".join(config.server.cors_origins)
+        os.environ["SONDER_REQUIRE_ACCOUNT"] = "1" if config.server.require_account else "0"
+        os.environ["SONDER_ALLOW_REGISTRATION"] = (
+            "1" if config.server.allow_registration else "0"
+        )
+        os.environ["SONDER_REASONING_AUDIENCE"] = config.server.reasoning_audience
+        os.environ["SONDER_HTTP_SESSION_STATE_LIMIT"] = str(config.server.session_state_limit)
+        os.environ["SONDER_HTTP_SESSION_STATE_OWNER_LIMIT"] = str(
+            config.server.session_state_owner_limit
+        )
+        os.environ["SONDER_TRAIN_MAX_N"] = str(config.server.train_max_n)
     # The stdlib HTTP adapter has a final bind-time gate as well as config
     # validation.  Export the validated proxy declaration so a direct adapter
     # import cannot weaken a non-loopback deployment between those boundaries.
+    # The preflight and legacy deployment probes still consume this explicit
+    # proxy declaration before the HTTP adapter is fully active.
     os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] = (
         "1" if config.server.tls_terminated_by_proxy else "0"
     )
@@ -505,8 +506,9 @@ def _export_runtime_environment(config) -> None:
     os.environ["SONDER_LOCATION_CONSENT"] = (
         "1" if config.features.location_consent else "0"
     )
-    os.environ["SONDER_QUEUE_DEPTH"] = str(config.capacity.queue_depth)
-    os.environ["SONDER_METRICS"] = "1" if config.observability.metrics_enabled else "0"
+    if include_typed_runtime:
+        os.environ["SONDER_QUEUE_DEPTH"] = str(config.capacity.queue_depth)
+        os.environ["SONDER_METRICS"] = "1" if config.observability.metrics_enabled else "0"
     if config.secrets.api_key:
         os.environ["SONDER_API_KEY"] = config.secrets.api_key
     if config.secrets.auth_secret:
@@ -538,15 +540,14 @@ def cmd_serve(args) -> int:
                   "(use --skip-preflight only for recovery work)",
                   file=sys.stderr)
             return 1
-    # The stdlib HTTP adapter still reads its environment at import; feed
-    # the validated configuration through the compatibility variables until
-    # SPEC-3 gives it a constructor.  This runs before the migration phase:
-    # migrations resolve their database paths through SONDER_HOME, so an
-    # export after them would migrate the wrong state directory. Bind the
-    # typed home first; the compatibility export below remains for settings
-    # still consumed by legacy adapters.
+    # Bind typed state and HTTP settings before migration/binding. The
+    # compatibility export below is restricted to settings still consumed by
+    # legacy adapters; typed HTTP authority no longer depends on environment
+    # round-tripping.
     _configure_typed_home(config)
-    _export_runtime_environment(config)
+    import sonder_runtime.interfaces.http.serve as sonder_serve
+    sonder_serve.configure_typed_config(config)
+    _export_runtime_environment(config, include_typed_runtime=False)
 
     # MIGRATING phase: no listener opens until migrations complete.
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
@@ -559,7 +560,6 @@ def cmd_serve(args) -> int:
         print(f"migration failed, refusing to bind: {exc}", file=sys.stderr)
         return 1
 
-    import sonder_runtime.interfaces.http.serve as sonder_serve
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
