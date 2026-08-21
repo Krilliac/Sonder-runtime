@@ -521,7 +521,7 @@
       ]
     },
     {
-      "file_count": 19,
+      "file_count": 20,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -538,6 +538,7 @@
         "sonder_runtime/interfaces/http/serve_policy.py",
         "sonder_runtime/interfaces/mcp/__init__.py",
         "sonder_runtime/interfaces/mcp/handlers.py",
+        "sonder_runtime/interfaces/mcp/transport.py",
         "sonder_runtime/interfaces/repl/__init__.py",
         "sonder_runtime/interfaces/repl/facades/__init__.py",
         "sonder_runtime/interfaces/repl/facades/status_model.py",
