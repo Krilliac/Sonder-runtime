@@ -1,6 +1,6 @@
 {
-  "baseline_date": "2026-08-09",
-  "git_revision": "7d5aa62ab476c3307e6ffcda531302da29357557",
+  "baseline_date": "2026-08-20",
+  "git_revision": "ef420bd3a3ca188c39e9201e26610af0db58d9fc",
   "test_baseline": {
     "passed": 5076,
     "skipped": 38,
@@ -8,7 +8,7 @@
   },
   "architecture_check": "PASS",
   "schema_epoch": 1,
-  "root_python_files": 157,
+  "root_python_files": 132,
   "baseline_root_legacy_modules": [
     "server",
     "runtime_policy",
