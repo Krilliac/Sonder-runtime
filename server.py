@@ -7074,6 +7074,30 @@ def task_progress(project: str = "") -> str:
 
 
 @mcp.tool()
+def task_ledger(
+    goal_id: str,
+    replan_count: int = 0,
+    last_replan_reason: str = "",
+) -> str:
+    """Show a deterministic, digest-bound task ledger for one work plan."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        ledger = _task_service(conn).task_ledger(
+            goal_id, replan_count=replan_count,
+            last_replan_reason=last_replan_reason or None,
+        )
+        return json.dumps(
+            {"ledger": ledger.to_dict(), "digest": ledger.digest()},
+            indent=2, sort_keys=True,
+        )
+    except Exception as e:
+        return "ERROR: %s" % e
+    finally:
+        conn.close()
+
+
+@mcp.tool()
 def task_depend(
     task_id: str,
     depends_on: str,
@@ -7163,6 +7187,17 @@ def scoped_task_tool_dispatch(tool_name: str, kwargs: dict, *, account_scope: st
                 % (stats["total"], stats["pending"], stats["in_progress"], stats["blocked"],
                    stats["done"], stats["canceled"]),
             ])
+        if tool_name == "task_ledger":
+            goal_id = values.pop("goal_id")
+            ledger = service.task_ledger(
+                goal_id, account_scope=account_scope,
+                replan_count=values.pop("replan_count", 0),
+                last_replan_reason=values.pop("last_replan_reason", "") or None,
+            )
+            return json.dumps(
+                {"ledger": ledger.to_dict(), "digest": ledger.digest()},
+                indent=2, sort_keys=True,
+            )
         if tool_name == "task_depend":
             task_id = values.pop("task_id")
             depends_on = values.pop("depends_on")
@@ -15033,7 +15068,7 @@ def tool_manifest() -> str:
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata; script_run applies the operator execution-risk policy before launch.",
-        "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary. task_depend manages blocking relationships.",
+        "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_ledger/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo, ordered checklist, and digest-bound manager ledger state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary; task_ledger exposes bounded dependencies and replan metadata.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
         "tool_manifest/tool_capability_manifest/access_request_preview": "Inspect the human-readable MCP tool catalog, fingerprint the live registered capability schemas, or preview a non-authorizing scoped filesystem access request.",
@@ -15246,6 +15281,8 @@ AGENT_TOOL_HELP = """Available tools:
 - task_delete: {"task_id": "..."}
 - task_plan: {"title": "...", "steps": ["Step 1", "Step 2", {"title": "Step 3", "detail": "..."}], "project": "...", "sequential": true}
 - task_progress: {"project": ""}
+- task_ledger: {"goal_id": "...", "replan_count": 0, "last_replan_reason": ""}
+- task_ledger: {"goal_id": "...", "replan_count": 0, "last_replan_reason": ""}
 - task_depend: {"task_id": "...", "depends_on": "...", "remove": false}
 - checklist_create: {"title": "...", "items_json": ["Inspect", "Implement", "Validate", "Report"], "project": "..."}
 - checklist_update: {"checklist_id": "...", "item": "1|id-prefix", "status": "in_progress|done|blocked", "note": "..."}
@@ -17292,6 +17329,12 @@ def _agent_dispatch(
         )
     if tool_name == "task_progress":
         return task_progress(project=args.get("project", ""))
+    if tool_name == "task_ledger":
+        return task_ledger(
+            goal_id=args.get("goal_id", args.get("id", "")),
+            replan_count=args.get("replan_count", 0),
+            last_replan_reason=args.get("last_replan_reason", ""),
+        )
     if tool_name == "task_depend":
         return task_depend(
             task_id=args.get("task_id", args.get("id", "")),
@@ -17759,7 +17802,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
-        "task_delete", "task_plan", "task_progress", "task_depend",
+        "task_delete", "task_plan", "task_progress", "task_ledger", "task_depend",
         "checklist_create", "checklist_update", "checklist_show",
         "command_registry_list", "tool_manifest", "activity_status",
         "permission_policy", "context_compaction_plan", "diagnostics",
@@ -19047,7 +19090,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_audit", "find_references", "diff_files", "secret_scan",
     "build_run",
-    "task_progress",
+    "task_progress", "task_ledger",
 })
 
 # Tools that only observe the running runtime: no filesystem root, no host
@@ -20625,7 +20668,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     # a reachable, host-observed way to satisfy its verification standing.
     "test_run", "build_run", "lint_run", "typecheck_run",
     "ensemble_codegen_build_loop",
-    "process_list", "process_memory_risk_inspect", "task_progress",
+    "process_list", "process_memory_risk_inspect", "task_progress", "task_ledger",
     "task_delete", "task_plan", "task_depend",
     # Other developer-workflow tools remain absent until their agent dispatch
     # and project-root guards are admitted to this autonomous lane.

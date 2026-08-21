@@ -830,7 +830,7 @@ def _task_account_scope(context):
 
 _SCOPED_TASK_TOOLS = frozenset((
     "task_create", "task_list", "task_update", "task_show", "task_delete",
-    "task_plan", "task_progress", "task_depend", "checklist_create",
+    "task_plan", "task_progress", "task_ledger", "task_depend", "checklist_create",
     "checklist_show", "checklist_update",
 ))
 
