@@ -23730,13 +23730,20 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
     principal and must go through ``model_fanout`` below.  A public boolean
     bypass would let an untrusted caller self-authorize the costly operation.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     question = str(prompt or "").strip()
     if not question:
-        return _format_model_call_error(
+        return render_model_error(
             ModelCallError("configuration", "model_fanout needs a prompt.")
         )
     if len(question) > fanout_store.MAX_PROMPT_CHARS:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS
         ))
     # These values define resource and provider-spend bounds.  Do not use
@@ -23747,7 +23754,7 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
     if any(isinstance(value, bool) or not isinstance(value, int) for value in (
         num_predict, timeout, max_cloud_workers,
     )):
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "num_predict, timeout, and max_cloud_workers must be integers."
         ))
     cap = max(32, min(num_predict, 4096))
@@ -23761,9 +23768,9 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
         )
         receipt = _execute_fanout_run(run["id"])
     except ModelCallError as exc:
-        return _format_model_call_error(exc)
+        return render_model_error(exc)
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+        return render_model_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
