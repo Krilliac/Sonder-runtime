@@ -19,12 +19,10 @@ from sonder_runtime.domain.common.errors import DependencyUnavailable
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 from sonder_runtime.adapters.observability.repl_formatting import elapsed_label as _elapsed_label
 import sonder_runtime.adapters.memory_store as memory_store
-import grounding
-import code_runner
-import training_tasks
-import intents
+from sonder_runtime.adapters.execution_tools import code_runner, grounding
+from sonder_runtime.adapters.content_services import intents, training_tasks
 import web_intents
-import feedback
+from sonder_runtime.adapters.content_services import feedback
 import personas
 from sonder_runtime.adapters.web import live_reload
 from sonder_runtime.platform import debug_dump
@@ -32,8 +30,8 @@ import consult as consult_flow
 import tier_router
 import code_improve
 import command_router
-import command_catalog
-import permission_modes
+from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters.security.permission_policy import permission_policy as permission_modes
 import project_scaffold
 from sonder_runtime.interfaces.repl.facades import (
     ContextHealthFacade,
