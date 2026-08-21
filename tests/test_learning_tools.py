@@ -217,7 +217,9 @@ def test_record_outcome_uses_short_shared_distillation_budget(monkeypatch, tmp_p
     monkeypatch.setattr(
         server.master_orchestrator, "active_model_call_count", lambda: 0,
     )
-    monkeypatch.setattr(server, "_distillation_timeout_seconds", lambda: 7)
+    monkeypatch.setattr(
+        server, "_distillation_timeout_policy", lambda *_args: 7,
+    )
     calls = []
 
     def generate(prompt, **kwargs):

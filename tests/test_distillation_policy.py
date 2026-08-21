@@ -1,6 +1,21 @@
 from sonder_runtime.domain.distillation_policy import distillation_timeout_seconds
 
 
+def test_server_production_paths_do_not_call_distillation_timeout_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_distillation_timeout_seconds"
+    ]
+    assert calls == []
+
+
 def _env(values):
     def read(name, default):
         return values.get(name, default)

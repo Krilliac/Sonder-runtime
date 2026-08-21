@@ -3052,7 +3052,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         recalls = None
         facts = None
         project_facts = None
-        retrieve_fn = _no_retrieve
+        retrieve_fn = _no_retrieve_policy
     if trace:
         resp, iid, tctx = orchestrator.run_with_learning_traced(
             conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
@@ -3162,7 +3162,7 @@ def _distillation_timeout_seconds():
 
 def _prepare_lesson_candidate_bounded(interaction, signal):
     """Generate one lesson within a bounded total model/embedding budget."""
-    budget = _distillation_timeout_seconds()
+    budget = _distillation_timeout_policy(_env_int_option, TIMEOUT)
     deadline = time.monotonic() + budget
 
     def remaining_seconds():
@@ -3464,7 +3464,7 @@ def _record_failure_pitfall(interaction_id, task, response, error):
             # SPEC-3: routed through the ModelGateway port; num_ctx pins the
             # small context distillation has always used.
             offload_fn=lambda prompt, **options: _gateway_generate_text(
-                prompt, timeout=_distillation_timeout_seconds(),
+                prompt, timeout=_distillation_timeout_policy(_env_int_option, TIMEOUT),
                 num_ctx=options.pop("num_ctx", 2048), **options
             ),
         )
@@ -4549,7 +4549,7 @@ def _offload_impl(
             cancel_check=cancel_check,
             schema=schema,
         )
-        retrieve_kwargs["retrieve_fn"] = _no_retrieve
+        retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
         learning_model = resolve_sonder_model(_STRICT_DEFAULT)
         if learning_model is None:
@@ -7376,7 +7376,7 @@ def permission_rule_set(
 def memory_quality_report(sample_limit: int = 5) -> str:
     """Audit lesson quality: duplicates, long/vague rows, embeddings, and FTS health."""
     _maybe_live_reload()
-    sample_limit = _safe_limit(sample_limit, 5, 20)
+    sample_limit = _safe_limit_policy(sample_limit, 5, 20)
     conn = _open_db()
     try:
         report = memory_quality.audit(conn)
@@ -7415,7 +7415,7 @@ def memory_quality_repair(apply: bool = False) -> str:
 def memory_privacy_review(sample_limit: int = 20) -> str:
     """List redacted path/credential-like lessons without revealing raw values."""
     _maybe_live_reload()
-    sample_limit = _safe_limit(sample_limit, 20, 100)
+    sample_limit = _safe_limit_policy(sample_limit, 20, 100)
     conn = _open_db()
     try:
         findings = memory_quality.privacy_findings(conn, limit=sample_limit)
@@ -7498,7 +7498,7 @@ def memory_embedding_backfill(limit: int = 25, apply: bool = False) -> str:
             "ERROR: embedding refresh is local-only; configured Ollama endpoint "
             "is not loopback."
         )
-    limit = _safe_limit(limit, 25, 100)
+    limit = _safe_limit_policy(limit, 25, 100)
     conn = _open_db()
     updated = 0
     failed = []
@@ -7630,7 +7630,7 @@ def memory_interaction_embedding_backfill(
             "ERROR: interaction embedding refresh is local-only; configured "
             "Ollama endpoint is not loopback."
         )
-    limit = _safe_limit(limit, 25, 100)
+    limit = _safe_limit_policy(limit, 25, 100)
     conn = _open_db()
     updated = 0
     failed = []
@@ -14551,7 +14551,7 @@ def memory_search(query: str, limit: int = 10) -> str:
     query = (query or "").strip()
     if not query:
         return "ERROR: empty query."
-    limit = _safe_limit(limit, 10, 50)
+    limit = _safe_limit_policy(limit, 10, 50)
     like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
     conn = _open_db()
     try:
@@ -14669,7 +14669,7 @@ def apply_learned(task: str, limit: int = 5) -> str:
     task = (task or "").strip()
     if not task:
         return "ERROR: empty task."
-    limit = _safe_limit(limit, 5, 20)
+    limit = _safe_limit_policy(limit, 5, 20)
     conn = _open_db()
     try:
         rows = retriever.retrieve_with_ids(conn, task, k=limit)
@@ -14692,7 +14692,7 @@ def apply_learned(task: str, limit: int = 5) -> str:
 def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
     """Export a compact JSON snapshot of local memory."""
     _maybe_live_reload()
-    limit = _safe_limit(limit, 50, 200)
+    limit = _safe_limit_policy(limit, 50, 200)
     conn = _open_db()
     try:
         data = {
@@ -14723,7 +14723,7 @@ def session_export(session: str = "", limit: int = 50) -> str:
     session_id = _resolve_session(session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."
-    limit = _safe_limit(limit, 50, 200)
+    limit = _safe_limit_policy(limit, 50, 200)
     conn = _open_db()
     try:
         sess = memory_store.get_session(conn, session_id)
@@ -19253,7 +19253,7 @@ def _agent_turn(
         tool_allowlist = None
         tool_policy = None
         auto_checklist = False
-    max_steps = _safe_limit(max_steps, 6, 20)
+    max_steps = _safe_limit_policy(max_steps, 6, 20)
     model, cloud, augment, tier_label = _serve_target(tier, None)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -22042,7 +22042,9 @@ def diagnostics() -> str:
     except Exception:
         lines.append("  npu accelerator: unknown (status unavailable)")
     try:
-        names = _inventory_model_names(_inventory_rows(_get("/api/tags"), "/api/tags"))
+        names = _inventory_model_names(
+            _inventory_rows_policy(_get("/api/tags"), "/api/tags")
+        )
         # Show the count AND an enumeration consistent with it: truncating the
         # list to 8 while printing "11 models" silently hid three models
         # (including sonder:latest, the active tier). Cap the enumeration but
@@ -22065,8 +22067,8 @@ def status() -> str:
     """
     _maybe_live_reload()
     try:
-        tags = _inventory_rows(_get("/api/tags"), "/api/tags")
-        ps = _inventory_rows(_get("/api/ps"), "/api/ps")
+        tags = _inventory_rows_policy(_get("/api/tags"), "/api/tags")
+        ps = _inventory_rows_policy(_get("/api/ps"), "/api/ps")
     except ModelCallError as error:
         return _format_model_call_error(error)
     except urllib.error.URLError as e:

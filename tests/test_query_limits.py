@@ -1,6 +1,21 @@
 from sonder_runtime.domain.query_limits import safe_limit
 
 
+def test_server_production_paths_do_not_call_query_limit_compatibility_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_safe_limit"
+    ]
+    assert calls == []
+
+
 def test_safe_limit_uses_default_for_invalid_values():
     assert safe_limit(None) == 10
     assert safe_limit("not-a-number", default=7) == 7
