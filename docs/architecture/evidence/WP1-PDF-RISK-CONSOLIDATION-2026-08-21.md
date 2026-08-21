@@ -34,5 +34,5 @@ Command: `python -m pytest -q tests/test_pdf_risk.py tests/test_pdf_risk_compati
 Result: pass - 76 tests passed, 2 skipped.
 
 The initial default pytest invocation was blocked by an unrelated Windows
-permission error scanning `C:\\Users\\Nathan\\AppData\\Local\\Temp\\pytest-of-Nathan`;
+permission error scanning the host-local pytest temporary directory;
 the same requested tests passed with `--basetemp .pytest-tmp-pdf`.

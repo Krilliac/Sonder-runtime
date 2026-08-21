@@ -19,8 +19,8 @@ directly.
 Focused commands:
 
 ```text
-python -m pytest tests/test_fanout_store.py tests/test_fanout_policy.py tests/test_model_fanout.py --basetemp C:\\Users\\Nathan\\Documents\\Codex\\pytest-fanout-wp1 -q
-python -m pytest tests/test_fanout_store_compatibility.py --basetemp C:\\Users\\Nathan\\Documents\\Codex\\pytest-fanout-compat-wp1 -q
+python -m pytest tests/test_fanout_store.py tests/test_fanout_policy.py tests/test_model_fanout.py --basetemp <host-temp>/pytest-fanout-wp1 -q
+python -m pytest tests/test_fanout_store_compatibility.py --basetemp <host-temp>/pytest-fanout-compat-wp1 -q
 ```
 
 Results: **275 passed, 1 warning** and **4 passed, 1 warning**. The warning
