@@ -124,6 +124,11 @@ _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
 _MAX_JOB_CANCEL_REASON = 256
+_MAX_JOB_ID_LENGTH = 128
+_MAX_JOB_KIND_LENGTH = 64
+_MAX_JOB_OPERATION_LENGTH = 128
+_MAX_JOB_IDEMPOTENCY_LENGTH = 256
+_MAX_JOB_PARENT_LENGTH = 128
 
 
 class _DuplicateJsonObjectKey(ValueError):
@@ -212,6 +217,36 @@ def _job_cancel_id(path):
         return None
     job_id = urllib.parse.unquote(encoded)
     return job_id if job_id and "/" not in job_id else None
+
+
+def _job_start_payload(req):
+    """Validate the bounded identity accepted by the durable job command."""
+    required = {"job_id", "kind", "operation_id", "idempotency_key"}
+    optional = {"parent_job_id", "parent_session_id"}
+    if set(req) - required - optional or not required.issubset(req):
+        raise ValueError(
+            "job start requires exactly the identity fields job_id, kind, "
+            "operation_id, and idempotency_key"
+        )
+    limits = {
+        "job_id": _MAX_JOB_ID_LENGTH,
+        "kind": _MAX_JOB_KIND_LENGTH,
+        "operation_id": _MAX_JOB_OPERATION_LENGTH,
+        "idempotency_key": _MAX_JOB_IDEMPOTENCY_LENGTH,
+        "parent_job_id": _MAX_JOB_PARENT_LENGTH,
+        "parent_session_id": _MAX_JOB_PARENT_LENGTH,
+    }
+    payload = {}
+    for name, limit in limits.items():
+        if name not in req:
+            continue
+        value = req[name]
+        if not isinstance(value, str) or not value.strip() or len(value) > limit:
+            raise ValueError(f"{name} must be a non-empty string of at most {limit} characters")
+        if "/" in value or "\\" in value:
+            raise ValueError(f"{name} must not contain path separators")
+        payload[name] = value
+    return payload
 
 
 _JOB_STREAM_DEFAULT_EVENTS = 64
@@ -4163,6 +4198,67 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        if path == "/v1/jobs/start":
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            try:
+                from sonder_runtime.application.ports.jobs import JobIdentity
+                from sonder_runtime.bootstrap.app import default_app
+
+                identity = JobIdentity(**_job_start_payload(req))
+                record = default_app().job_service().create(identity)
+            except ValueError as error:
+                if "already exists" in str(error):
+                    self._send_json_payload(
+                        {"error": {"message": "job identity already exists", "type": "conflict"}},
+                        status=409,
+                    )
+                    return
+                self._send_json_payload(
+                    {"error": {"message": str(error), "type": "invalid_request"}},
+                    status=400,
+                )
+                return
+            except TypeError as error:
+                self._send_json_payload(
+                    {"error": {"message": str(error), "type": "invalid_request"}},
+                    status=400,
+                )
+                return
+            except Exception as error:
+                # The durable adapter reports duplicate identities and parent
+                # lookup failures as ValueError/KeyError.  Keep storage
+                # details out of the response while preserving a conflict
+                # that callers can safely retry or reconcile.
+                if isinstance(error, KeyError) or "already exists" in str(error):
+                    self._send_json_payload(
+                        {"error": {"message": "job identity already exists", "type": "conflict"}},
+                        status=409,
+                    )
+                    return
+                self.log_error("job start failed: %s", type(error).__name__)
+                self._send_json_payload(
+                    {"error": {"message": "job could not be started", "type": "internal_error"}},
+                    status=500,
+                )
+                return
+            self._send_json_payload(
+                {"object": "job_start", "job": _job_record_payload(record)},
+                status=202,
+            )
+            return
         job_id = _job_cancel_id(path)
         if job_id is not None:
             if not context["authorized"]:

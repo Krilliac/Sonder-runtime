@@ -5,16 +5,21 @@ The application command and its adapter receive plain callable dependencies.
 """
 from __future__ import annotations
 
+from types import ModuleType
+
 from sonder_runtime.adapters.command_surface import LegacyServerMcpRuntime
+from .legacy_root import runtime as legacy_runtime
 
 
-def build_legacy_server_mcp_runtime() -> LegacyServerMcpRuntime:
+def build_legacy_server_mcp_runtime(
+    runtime: ModuleType | None = None,
+) -> LegacyServerMcpRuntime:
     """Compose the legacy MCP hooks at the process boundary."""
-    import server
+    runtime = runtime or legacy_runtime()
 
     return LegacyServerMcpRuntime(
-        require_startup_safety=server.require_mcp_startup_safety,
-        run_mcp=server.run_mcp,
+        require_startup_safety=runtime.require_mcp_startup_safety,
+        run_mcp=runtime.run_mcp,
     )
 
 
