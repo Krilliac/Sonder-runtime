@@ -107,6 +107,8 @@ def build_application(
         profile = config.profile
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
+    from ..adapters.web import lifecycle as runtime_lifecycle
+    runtime_lifecycle.configure(config)
     # SPEC-3 Phase 3: bind the transitional provider only at composition time.
     from .legacy_model import configure_legacy_model_providers
     configure_legacy_model_providers()

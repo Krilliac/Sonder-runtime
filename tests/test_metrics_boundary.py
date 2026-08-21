@@ -20,6 +20,34 @@ def test_lifecycle_uses_canonical_metrics_boundary():
     assert lifecycle.MetricsRegistry is platform_metrics.MetricsRegistry
 
 
+def test_typed_lifecycle_settings_override_environment_without_eager_construction(
+    monkeypatch,
+):
+    from sonder_runtime.platform.config import (
+        CapacityConfig,
+        ObservabilityConfig,
+        SonderConfig,
+    )
+
+    lifecycle.reset_for_tests()
+    lifecycle.configure(
+        SonderConfig(
+            capacity=CapacityConfig(http_requests=6, queue_depth=11),
+            observability=ObservabilityConfig(metrics_enabled=False),
+        )
+    )
+    monkeypatch.setenv("SONDER_MAX_CONCURRENT_REQUESTS", "99")
+    monkeypatch.setenv("SONDER_QUEUE_DEPTH", "99")
+    monkeypatch.setenv("SONDER_METRICS", "1")
+
+    assert lifecycle._instance is None
+    instance = lifecycle.get()
+    assert instance._max_concurrent == 6
+    assert instance._queue_depth == 11
+    assert instance.metrics.enabled is False
+    lifecycle.reset_for_tests()
+
+
 def test_metric_names_and_labels_remain_unchanged():
     registry = platform_metrics.MetricsRegistry(enabled=False)
 

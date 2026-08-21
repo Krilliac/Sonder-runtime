@@ -26,10 +26,21 @@ import threading
 import time
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from sonder_runtime.platform import version as sonder_version
+from sonder_runtime.platform.config import SonderConfig
 from sonder_runtime.application.lifecycle import process_state_number
+from sonder_runtime.application.operations.graceful_drain import (
+    DrainStage,
+    GracefulDrainCoordinator,
+    GracefulDrainRequest,
+    GracefulDrainResult,
+)
+from sonder_runtime.application.operations.startup_reconciliation import (
+    StartupObservation,
+    build_drain_plan,
+)
 from sonder_runtime.platform.metrics import MetricsRegistry
 from sonder_runtime.platform.service_state import (
     DependencyState,
@@ -97,10 +108,13 @@ class RuntimeLifecycle:
         *,
         max_concurrent_requests: int | None = None,
         queue_depth: int | None = None,
+        metrics_enabled: bool | None = None,
         admission_timeout_seconds: float = 10.0,
         drain_deadline_seconds: float = 25.0,
         owner_max_inflight: int | None = None,
         startup_reconciler: Callable[[], int] | None = None,
+        graceful_drain_coordinator: GracefulDrainCoordinator | None = None,
+        graceful_drain_observations: Callable[[], Iterable[StartupObservation]] | None = None,
     ) -> None:
         def _env_int(name: str, default: int) -> int:
             try:
@@ -114,8 +128,12 @@ class RuntimeLifecycle:
             self.tracker, drain_deadline_seconds=drain_deadline_seconds
         )
         self.metrics = MetricsRegistry(
-            enabled=os.environ.get("SONDER_METRICS", "1").strip().lower()
-            in ("1", "true", "yes", "on")
+            enabled=(
+                metrics_enabled
+                if metrics_enabled is not None
+                else os.environ.get("SONDER_METRICS", "1").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
         )
         build = sonder_version.build_info()
         self.metrics.set_build_info(build.version, build.commit_sha)
@@ -126,6 +144,7 @@ class RuntimeLifecycle:
         )
         self._queue_depth = queue_depth or _env_int("SONDER_QUEUE_DEPTH", 32)
         self._admission_timeout = admission_timeout_seconds
+        self._drain_deadline_seconds = drain_deadline_seconds
         self._slots = threading.BoundedSemaphore(self._max_concurrent)
         self._waiters = 0
         self._admission_lock = threading.Lock()
@@ -168,6 +187,8 @@ class RuntimeLifecycle:
         self._probe_stop = threading.Event()
         self._startup_reconciler = startup_reconciler
         self._startup_reconciled = 0
+        self._graceful_drain_coordinator = graceful_drain_coordinator
+        self._graceful_drain_observations = graceful_drain_observations
 
     # -- operations store (lazy, never fatal) ------------------------------
 
@@ -307,6 +328,76 @@ class RuntimeLifecycle:
         clean = self.coordinator.drain(reason=reason)
         self.stop_probe()
         return clean
+
+    def drain_gracefully(
+        self,
+        reason: str = "graceful shutdown requested",
+        *,
+        deadline_seconds: float | None = None,
+        observations: Iterable[StartupObservation] | None = None,
+    ) -> GracefulDrainResult:
+        """Run the explicit OPS-005 bridge when a coordinator is injected.
+
+        The legacy ``drain() -> bool`` surface remains backed by
+        ``ShutdownCoordinator``.  A complete application-level drain requires
+        an injected coordinator assembled with admission, descendant,
+        deadline, flush, cleanup, and process-tree components; silently
+        approximating those protocols here would over-report shutdown safety.
+        """
+        request = GracefulDrainRequest(
+            reason=reason,
+            deadline_seconds=(
+                self._drain_deadline_seconds
+                if deadline_seconds is None else deadline_seconds
+            ),
+        )
+        plan = build_drain_plan(())
+        coordinator = self._graceful_drain_coordinator
+        if coordinator is None:
+            return GracefulDrainResult(
+                request=request,
+                stage=DrainStage.INCOMPLETE,
+                admission_stopped=False,
+                deadline_announced=False,
+                descendants_cancelled=False,
+                descendants_settled=False,
+                flush_completed=False,
+                cleanup_completed=False,
+                process_tree=(),
+                plan=plan,
+                errors=(
+                    "graceful drain bridge is not configured; "
+                    "legacy ShutdownCoordinator remains authoritative",
+                ),
+            )
+
+        try:
+            selected_observations = (
+                tuple(self._graceful_drain_observations())
+                if observations is None and self._graceful_drain_observations is not None
+                else tuple(observations or ())
+            )
+            result = coordinator.drain(
+                request,
+                observations=selected_observations,
+            )
+        except Exception as exc:
+            return GracefulDrainResult(
+                request=request,
+                stage=DrainStage.INCOMPLETE,
+                admission_stopped=False,
+                deadline_announced=False,
+                descendants_cancelled=False,
+                descendants_settled=False,
+                flush_completed=False,
+                cleanup_completed=False,
+                process_tree=(),
+                plan=plan,
+                errors=(f"graceful drain bridge: {type(exc).__name__}",),
+            )
+        finally:
+            self.stop_probe()
+        return result
 
     # -- admission ---------------------------------------------------------
 
@@ -607,17 +698,45 @@ def sd_notify(message: str) -> None:
 
 _instance: RuntimeLifecycle | None = None
 _instance_lock = threading.Lock()
+_configured_config: SonderConfig | None = None
+
+
+def configure(config: SonderConfig | None) -> None:
+    """Bind typed runtime settings without constructing the lazy singleton."""
+    global _configured_config
+    if config is not None and not isinstance(config, SonderConfig):
+        raise TypeError("config must be a SonderConfig when provided")
+    with _instance_lock:
+        if _configured_config is config:
+            return
+        _configured_config = config
+        if _instance is not None:
+            _reset_instance()
+
+
+def _reset_instance() -> None:
+    global _instance
+    _instance = None
 
 
 def get() -> RuntimeLifecycle:
     global _instance
     with _instance_lock:
         if _instance is None:
-            _instance = RuntimeLifecycle()
+            config = _configured_config
+            if config is None:
+                _instance = RuntimeLifecycle()
+            else:
+                _instance = RuntimeLifecycle(
+                    max_concurrent_requests=config.capacity.http_requests,
+                    queue_depth=config.capacity.queue_depth,
+                    metrics_enabled=config.observability.metrics_enabled,
+                )
         return _instance
 
 
 def reset_for_tests() -> None:
-    global _instance
+    global _configured_config
     with _instance_lock:
-        _instance = None
+        _configured_config = None
+        _reset_instance()
