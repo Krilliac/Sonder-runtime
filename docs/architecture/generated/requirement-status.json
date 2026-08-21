@@ -235,16 +235,16 @@
     },
     {
       "checked": false,
-      "claim": "Editor/client interoperability contracts share the typed protocol schema and authorization boundary.",
+      "claim": "Editor and agent rule documents have a bounded, provider-neutral import/export contract.",
       "requirement_id": "API-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Protocol reconnect and event publication remain explicit application operations with fail-closed authorization.",
+      "claim": "The operator control-plane snapshot is assembled from all required providers, exposed through an authenticated HTTP facade, and fails closed on incomplete or invalid data.",
       "requirement_id": "API-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "79e8cc22ed65b518bfb6fcf156738c4a330a0d601961f5b4087af93ec71af13d",
+    "ledger_sha256": "0026dc853de2ddfff0fba15b222e3f439585124a2bcad4570c24dc2675bdcb7d",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
