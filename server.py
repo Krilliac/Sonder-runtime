@@ -7092,7 +7092,7 @@ def task_ledger(
             indent=2, sort_keys=True,
         )
     except Exception as e:
-        return "ERROR: %s" % e
+        return json.dumps({"error": str(e)}, sort_keys=True)
     finally:
         conn.close()
 
