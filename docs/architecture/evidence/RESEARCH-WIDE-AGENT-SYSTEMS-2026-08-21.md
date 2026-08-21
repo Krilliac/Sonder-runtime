@@ -42,6 +42,13 @@ feature-shaped duplication.
    status, dependencies, and replanning evidence through existing durable task
    and session surfaces.
 
+Implementation status on this branch: all six priority items have bounded
+application contracts, tests, and evidence records. The remaining research
+items are integration candidates rather than missing core abstractions: ACP
+or external editor adapters, distributed agent identity, browser execution,
+and default live control-plane provider composition each require a concrete
+host boundary and operational receipts before they should be promoted.
+
 ## Sources
 
 - OpenHands architecture: <https://docs.openhands.dev/sdk/arch/agent>
