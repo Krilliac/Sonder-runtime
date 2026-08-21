@@ -242,6 +242,10 @@ from sonder_runtime.adapters.model_error_details import (
     http_error_detail as _http_error_detail_policy,
     transport_error_detail as _transport_error_detail_policy,
 )
+from sonder_runtime.adapters.model_error_formatting import (
+    TRANSIENT_MODEL_HTTP_CODES,
+    format_model_call_error,
+)
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
@@ -3652,7 +3656,8 @@ def _bounded_timeout(value) -> int:
     return _bound_request_timeout(value, TIMEOUT)
 
 
-_TRANSIENT_MODEL_HTTP_CODES = frozenset({408, 429, 502, 503, 504})
+# Compatibility name retained for callers that inspect the historical module.
+_TRANSIENT_MODEL_HTTP_CODES = TRANSIENT_MODEL_HTTP_CODES
 _MAX_MODEL_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
@@ -4091,35 +4096,8 @@ def _format_model_call_error(error: ModelCallError) -> str:
         "remote Ollama" if not ollama_endpoint.is_loopback(BASE) else
         "local Ollama"
     )
-    suffix = " after %d attempt(s)" % error.attempts
-    if error.kind == "budget":
-        return "ERROR: hosted agent output budget exhausted: %s" % error.detail
-    if error.kind == "http":
-        retry_hint = ""
-        if error.cloud and error.status in _TRANSIENT_MODEL_HTTP_CODES:
-            retry_hint = (
-                " Cloud calls are not retried automatically to avoid duplicate "
-                "metered work."
-            )
-            if error.retry_after_seconds is not None:
-                retry_hint += " Provider suggests retrying after about %ss." % (
-                    int(round(error.retry_after_seconds)),
-                )
-        rendered = "ERROR: %s rejected the model request (HTTP %s)%s: %s%s" % (
-            target, error.status or "unknown", suffix, error.detail,
-            retry_hint,
-        )
-        return rendered
-    if error.kind == "configuration":
-        return "ERROR: %s" % error.detail
-    if error.kind in ("protocol", "empty_response", "request"):
-        return "ERROR: invalid response from %s%s: %s" % (
-            target, suffix, error.detail,
-        )
-    if error.kind == "cancelled":
-        return "ERROR: %s" % error.detail
-    return "ERROR contacting %s at %s%s: %s" % (
-        target, _ollama_display(), suffix, error.detail,
+    return format_model_call_error(
+        error, target=target, display=_ollama_display(),
     )
 
 
