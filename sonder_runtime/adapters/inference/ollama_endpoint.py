@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import urllib.parse
 import urllib.request
 
@@ -10,6 +11,24 @@ from sonder_runtime.domain import ollama_policy
 
 DEFAULT_HOST = ollama_policy.DEFAULT_HOST
 REMOTE_OPT_IN = ollama_policy.REMOTE_OPT_IN
+_configured_endpoint: str | None = None
+_configuration_lock = threading.RLock()
+
+
+def configure_typed_endpoint(value: str | None) -> None:
+    """Make the validated typed Ollama URL authoritative for this process.
+
+    ``None`` restores the compatibility fallback to ``OLLAMA_HOST``.  The
+    setter is deliberately tiny: validation remains at the configuration
+    boundary and this adapter only stores the already-typed startup choice.
+    """
+    global _configured_endpoint
+    with _configuration_lock:
+        _configured_endpoint = None if value is None else str(value)
+
+
+def reset_typed_endpoint() -> None:
+    configure_typed_endpoint(None)
 
 
 def remote_allowed() -> bool:
@@ -21,6 +40,10 @@ def _remote_allowed_in(environment) -> bool:
 
 
 def _candidate(value=None) -> str:
+    with _configuration_lock:
+        configured = _configured_endpoint
+    if value is None and configured is not None:
+        return ollama_policy._candidate(configured)
     return ollama_policy._candidate(
         os.environ.get("OLLAMA_HOST", DEFAULT_HOST) if value is None else value
     )
