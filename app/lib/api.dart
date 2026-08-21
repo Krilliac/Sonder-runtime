@@ -942,6 +942,32 @@ class SonderApi {
     }
   }
 
+  /// Admin-only extension registry projection. Unauthorized/older servers
+  /// hide this optional system section rather than failing the whole refresh.
+  Future<ExtensionRegistryStatus?> fetchExtensionRegistry() async {
+    late http.Response resp;
+    try {
+      resp = await http
+          .get(_uri('/v1/extensions'), headers: _headers())
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw SonderException('Cannot reach server: $e');
+    }
+    if (resp.statusCode == 403 || resp.statusCode == 404) return null;
+    if (resp.statusCode == 401) {
+      throw SonderException('Unauthorized - check the API key.');
+    }
+    if (resp.statusCode != 200) {
+      throw SonderException('Server returned HTTP ${resp.statusCode}.');
+    }
+    try {
+      final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      return ExtensionRegistryStatus.fromJson(obj);
+    } catch (_) {
+      throw SonderException('Could not parse extension registry status.');
+    }
+  }
+
   /// The server's whole published command surface (GET /v1/commands).
   ///
   /// Fetched once and cached by the caller: the catalog is a few hundred
