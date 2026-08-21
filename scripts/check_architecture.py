@@ -57,7 +57,7 @@ HTTP_SERVE_ROOT_MODULES = frozenset({
     "admin_auth", "code_runner", "command_catalog", "feedback",
     "grounding", "intents", "permission_modes",
     "served_action_receipts", "server",
-    "tool_contract", "training_tasks", "unsafe_lab",
+    "training_tasks", "unsafe_lab",
 })
 REPL_PATH = "sonder_runtime/interfaces/repl/repl.py"
 REPL_ROOT_MODULES = frozenset({
