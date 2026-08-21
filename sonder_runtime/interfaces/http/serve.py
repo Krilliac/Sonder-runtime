@@ -53,7 +53,7 @@ import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 import sonder_runtime.adapters.secrets as sonder_secrets
-import served_action_receipts
+from sonder_runtime.adapters.persistence import served_action_receipts
 import tool_contract
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
