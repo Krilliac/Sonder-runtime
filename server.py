@@ -1281,7 +1281,13 @@ def _make_generate(
         if cloud:
             options = {"temperature": temperature, "num_predict": prediction_limit}
         else:
-            options = _local_model_options(temperature, prediction_limit, num_ctx)
+            options = _platform_local_model_options(
+                temperature,
+                prediction_limit,
+                num_ctx,
+                native_context=context_policy.native,
+                environ=os.environ,
+            )
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
         if schema is not None:
@@ -4445,7 +4451,13 @@ def _offload_impl(
         if cloud:
             options = {"temperature": temperature, "num_predict": num_predict}
         else:
-            options = _local_model_options(temperature, num_predict, num_ctx)
+            options = _platform_local_model_options(
+                temperature,
+                num_predict,
+                num_ctx,
+                native_context=context_policy.native,
+                environ=os.environ,
+            )
         payload = {
             "model": model,
             "messages": messages,
@@ -5349,7 +5361,13 @@ def _answer_with_history_impl(
                     tier=tier_label,
                     system=effective_system, prompt=prompt,
                     history=history or [],
-                    options=_local_model_options(temperature, 1024, req_ctx),
+                    options=_platform_local_model_options(
+                        temperature,
+                        1024,
+                        req_ctx,
+                        native_context=context_policy.native,
+                        environ=os.environ,
+                    ),
                     cloud_allowed=cloud_allowed(),
                 )
                 response = request_cache.get(request_cache_key)
@@ -12192,7 +12210,13 @@ def _vision_analyze_impl(
             {"role": "user", "content": question, "images": [encoded]},
         ],
         "stream": False,
-        "options": _local_model_options(0.1, 1024, num_ctx),
+        "options": _platform_local_model_options(
+            0.1,
+            1024,
+            num_ctx,
+            native_context=context_policy.native,
+            environ=os.environ,
+        ),
         "keep_alive": KEEP_ALIVE,
     }
     _out, content = _chat_request(
@@ -23346,7 +23370,13 @@ def _fanout_synthesis_generate(model, source_bundle):
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": _local_model_options(0.2, FANOUT_SYNTHESIS_NUM_PREDICT, num_ctx),
+        "options": _platform_local_model_options(
+            0.2,
+            FANOUT_SYNTHESIS_NUM_PREDICT,
+            num_ctx,
+            native_context=context_policy.native,
+            environ=os.environ,
+        ),
         "keep_alive": KEEP_ALIVE,
     }
     out, _attempts = _post_model(
