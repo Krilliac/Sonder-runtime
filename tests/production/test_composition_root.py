@@ -58,6 +58,28 @@ def test_default_app_passes_typed_config_to_the_lazy_lifecycle():
     assert bootstrap_app.default_app() is application
 
 
+def test_typed_config_reaches_lazy_runtime_lifecycle():
+    from sonder_runtime.adapters.web import lifecycle
+    from sonder_runtime.platform.config import (
+        CapacityConfig,
+        ObservabilityConfig,
+    )
+
+    config = SonderConfig(
+        capacity=CapacityConfig(http_requests=7, queue_depth=9),
+        observability=ObservabilityConfig(metrics_enabled=False),
+    )
+    lifecycle.reset_for_tests()
+    bootstrap_app.build_application(config=config)
+
+    assert lifecycle._instance is None
+    instance = lifecycle.get()
+    assert instance._max_concurrent == 7
+    assert instance._queue_depth == 9
+    assert instance.metrics.enabled is False
+    lifecycle.reset_for_tests()
+
+
 def test_profile_only_application_keeps_compatibility_shape():
     application = bootstrap_app.build_application("workstation-local")
 
