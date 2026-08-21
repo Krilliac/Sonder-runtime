@@ -19,3 +19,21 @@ def test_cloud_disabled_message_is_pure_and_exact():
 
 def test_server_compatibility_alias_preserves_function_identity():
     assert server._cloud_disabled_message is cloud_disabled_message
+
+
+def test_available_tiers_uses_packaged_cloud_policy_directly():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    function = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "available_tiers"
+    )
+    assert not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "cloud_allowed"
+        for node in ast.walk(function)
+    )

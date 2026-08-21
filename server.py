@@ -376,7 +376,7 @@ def cloud_allowed():
 
 def available_tiers(include_disabled=False):
     _refresh_live_cloud_tiers()
-    if include_disabled or cloud_allowed():
+    if include_disabled or _cloud_allowed_policy(os.environ):
         return dict(TIERS)
     return {k: v for k, v in TIERS.items() if k not in CLOUD_TIERS}
 
