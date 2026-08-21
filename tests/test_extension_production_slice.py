@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import json
+import sqlite3
 import sys
+
+import pytest
 
 from sonder_runtime.adapters.extensions.host import ExtensionHost, ExtensionHostCrashed, ExtensionHostLimits
 from sonder_runtime.adapters.persistence.sqlite.extensions import SQLiteExtensionStateRepository
@@ -56,6 +60,21 @@ def test_production_composition_uses_durable_fail_closed_registry(tmp_path, monk
         bootstrap_app.reset_for_tests()
 
 
+def test_production_health_exposes_empty_provenance_inventory_fail_closed(tmp_path, monkeypatch):
+    bootstrap_app.reset_for_tests()
+    monkeypatch.setenv("SONDER_EXTENSIONS_DB", str(tmp_path / "extensions.db"))
+    application = bootstrap_app.build_application()
+    try:
+        health = application.extension_facade().registry_health(
+            ExtensionAuthority("test", frozenset({"registry_health"}))
+        )
+        assert health.provenance_records == 0
+        assert health.provenance_digest
+        assert application.extension_registry().provenance_inventory.records == ()
+    finally:
+        bootstrap_app.reset_for_tests()
+
+
 def test_host_restart_budget_remains_bounded_after_child_crash():
     source = 'import json,sys; print(json.dumps({"type":"ready"}), flush=True); next(sys.stdin); raise SystemExit(7)'
     host = ExtensionHost([sys.executable, "-c", source], limits=ExtensionHostLimits(max_restarts=1, max_crashes=1))
@@ -68,3 +87,20 @@ def test_host_restart_budget_remains_bounded_after_child_crash():
         assert host.stats.launches <= 2
     finally:
         host.close()
+
+
+def test_sqlite_registry_rejects_tampered_duplicated_record_fields(tmp_path):
+    manifest = _manifest()
+    repository = SQLiteExtensionStateRepository(tmp_path / "extensions.db")
+    registry = ExtensionRegistry(provenance=_trusted(manifest), repository=repository)
+    registry.install(manifest, scope="global", signatures_verified=True)
+    with sqlite3.connect(str(tmp_path / "extensions.db")) as connection:
+        row = connection.execute("SELECT slot, record_json FROM extension_registry_state").fetchone()
+        payload = json.loads(row[1])
+        payload["version"] = "9.9.9"
+        connection.execute(
+            "UPDATE extension_registry_state SET record_json = ? WHERE slot = ?",
+            (json.dumps(payload), row[0]),
+        )
+    with pytest.raises(ValueError, match="version mismatch"):
+        SQLiteExtensionStateRepository(tmp_path / "extensions.db").load()

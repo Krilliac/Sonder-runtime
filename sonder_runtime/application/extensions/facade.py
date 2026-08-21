@@ -87,6 +87,8 @@ class ExtensionRegistryHealth:
     diagnostics: tuple[ExtensionRepairDiagnostic, ...]
     persistence: str = "in-memory-only"
     promotion: str = "not-supported"
+    provenance_digest: str = ""
+    provenance_records: int = 0
 
 
 class ExtensionApplicationFacade:
@@ -109,6 +111,9 @@ class ExtensionApplicationFacade:
         return ExtensionRegistryHealth(
             self._registry.snapshot(), self._registry.repair_diagnostics(),
             "durable" if self._registry.durable else "in-memory-only",
+            "not-supported",
+            self._registry.provenance_inventory.digest,
+            len(self._registry.provenance_inventory.records),
         )
 
     def disable(self, extension_id: str, *, scope: str, project_id: str | None, authority: ExtensionAuthority):

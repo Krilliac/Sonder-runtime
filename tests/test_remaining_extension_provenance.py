@@ -133,3 +133,18 @@ def test_admission_rejects_signed_provenance_for_changed_manifest_contents():
 
     assert health.state is ExtensionHealthState.UNVERIFIED
     assert health.reasons == ("manifest-digest-mismatch",)
+
+
+def test_inventory_digest_covers_signature_metadata():
+    record = _record_for_manifest(_manifest())
+    inventory = ProvenanceInventory.build([record])
+    tampered_signature = SignatureRecord(
+        record.signature.signer, record.signature.algorithm, record.signature.signature,
+        record.signature.signed_digest, verified=True,
+    )
+    tampered_record = ExtensionProvenance(
+        record.extension_id, record.version, record.source, record.artifact_digest,
+        record.manifest_digest, tampered_signature, record.trust,
+    )
+    with pytest.raises(ValueError, match="provenance inventory digest"):
+        ProvenanceInventory((tampered_record,), inventory.sbom, inventory.digest).verify()

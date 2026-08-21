@@ -83,8 +83,8 @@
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-004","revision":1,"status":"planned","claim":"Trust and policy."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-005","revision":1,"status":"planned","claim":"Health."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SKILL-006","revision":1,"status":"planned","claim":"Procedural promotion."}
-{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-001","revision":1,"status":"planned","claim":"Extension boundary."}
-{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-002","revision":1,"status":"planned","claim":"Manifest."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-001","revision":2,"status":"implemented_unverified","claim":"Bounded extension registry and explicit production facade exposure are composed; artifact discovery and execution promotion remain out of scope."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-002","revision":2,"status":"implemented_unverified","claim":"Deterministic typed extension manifest identity/dependency validation and manifest-digest admission are implemented; cryptographic verification remains out of scope."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-003","revision":1,"status":"planned","claim":"Isolation."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-004","revision":1,"status":"planned","claim":"Quarantine."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"EXT-005","revision":1,"status":"planned","claim":"Inventory."}
@@ -146,6 +146,9 @@
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-004","revision":1,"status":"planned","claim":"Review and deployment."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-005","revision":1,"status":"planned","claim":"Unrestricted truthfulness."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-006","revision":1,"status":"planned","claim":"No automatic push."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-002","revision":2,"status":"implemented_unverified","claim":"Isolated candidate execution is wired through the live typed selfmod bridge and rejects a candidate workspace that resolves to the live repository.","evidence":[{"path":"sonder_runtime/application/selfmod/selfmod_service.py","claim":"candidate-vs-repository isolation check"},{"path":"tests/test_selfmod_legacy_integration.py","claim":"non-isolated workspace rejection"}],"limitations":["External worktree creation and filesystem execution remain owned by the legacy adapter; full production integration verification is still pending."]}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-005","revision":2,"status":"implemented_unverified","claim":"Unrestricted execution records skipped verification, reproducer, review, and isolation gates as explicit bypasses instead of fabricating evidence.","evidence":[{"path":"sonder_runtime/application/selfmod/governance.py","claim":"explicit unrestricted bypass records"},{"path":"tests/test_selfmod_legacy_integration.py","claim":"unrestricted truthfulness regression"}],"limitations":["Unrestricted authority remains intentionally capable of delegating to the legacy bypass path and is not a substitute for independent production approval."]}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SELFMOD-006","revision":2,"status":"implemented_unverified","claim":"The live typed selfmod bridge refuses automatic or remote push requests before invoking legacy deployment; approved deployment intent remains local-only.","evidence":[{"path":"sonder_runtime/application/selfmod/selfmod_service.py","claim":"push request rejection"},{"path":"tests/test_selfmod_legacy_integration.py","claim":"legacy deploy is not called for push requests"},{"path":"tests/production/test_selfmod_boundary.py","claim":"local-only production intent"}],"limitations":["This slice does not verify remote Git server behavior; it enforces the application boundary before any such operation can be requested."]}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-001","revision":1,"status":"planned","claim":"One gateway."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-002","revision":1,"status":"planned","claim":"Pure route planner."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"MODEL-003","revision":1,"status":"planned","claim":"Logical roles."}
@@ -206,7 +209,7 @@
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-002","revision":1,"status":"planned","claim":"Egress policy."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-003","revision":1,"status":"planned","claim":"Filesystem races."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-004","revision":1,"status":"planned","claim":"Package/archive safety."}
-{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-005","revision":1,"status":"planned","claim":"Extension provenance."}
+{"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-005","revision":2,"status":"implemented_unverified","claim":"Bounded provenance/trust records, deterministic SBOM and inventory tamper detection, fail-closed empty trust inventory, and quarantine admission are implemented; cryptographic verification is not claimed."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-006","revision":1,"status":"planned","claim":"Prompt-injection provenance."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-007","revision":1,"status":"planned","claim":"Secret scanning."}
 {"schema":"sonder-requirement-evidence-v1","requirement_id":"SEC-008","revision":1,"status":"planned","claim":"Fuzzing."}

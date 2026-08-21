@@ -66,7 +66,8 @@ class SessionCheckpointPrivacyService:
         if not isinstance(checkpoint, ProjectionCheckpoint):
             raise InvalidInput("checkpoint must be a ProjectionCheckpoint")
         payload = _checkpoint_payload(checkpoint)
-        existing = self._repository.search(session_id=checkpoint.session_id, event_type=CHECKPOINT_EVENT, limit=self._max_scan)
+        search_limit = min(self._max_scan, getattr(self._repository, "_max_read_limit", self._max_scan))
+        existing = self._repository.search(session_id=checkpoint.session_id, event_type=CHECKPOINT_EVENT, limit=search_limit)
         for event in existing:
             if event.payload.get("checkpoint_digest") == payload["checkpoint_digest"]:
                 return event
@@ -74,7 +75,8 @@ class SessionCheckpointPrivacyService:
 
     def load_checkpoint(self, session_id: str, *, source_sequence: int | None = None,
                         source_hash: str | None = None) -> ProjectionCheckpoint | None:
-        events = self._repository.search(session_id=session_id, event_type=CHECKPOINT_EVENT, limit=self._max_scan)
+        search_limit = min(self._max_scan, getattr(self._repository, "_max_read_limit", self._max_scan))
+        events = self._repository.search(session_id=session_id, event_type=CHECKPOINT_EVENT, limit=search_limit)
         if not events:
             return None
         event = events[-1]
@@ -100,6 +102,10 @@ class SessionCheckpointPrivacyService:
         scan_limit = self._max_scan if limit is None else limit
         if isinstance(scan_limit, bool) or not isinstance(scan_limit, int) or not 1 <= scan_limit <= self._max_scan:
             raise InvalidInput(f"limit must be between 1 and {self._max_scan}")
+        adapter_limit = getattr(self._repository, "_max_read_limit", scan_limit)
+        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
+            adapter_limit = scan_limit
+        scan_limit = min(scan_limit, adapter_limit)
         now = now_utc or datetime.now(timezone.utc)
         if now.tzinfo is None:
             raise InvalidInput("now_utc must be timezone-aware")

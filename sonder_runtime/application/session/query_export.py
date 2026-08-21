@@ -12,6 +12,7 @@ import binascii
 import hashlib
 import json
 import re
+from dataclasses import replace
 from collections.abc import Mapping
 from typing import Any
 
@@ -192,6 +193,36 @@ class SessionQueryEngine:
         self._max_scan = max_scan
         self._redactor = redactor if redactor is not None else DefaultExportRedactor()
 
+    def _privacy_targets(self, session_id: str) -> dict[int, str]:
+        """Read append-only privacy markers and fail closed on malformed ones."""
+        limit = min(self._max_scan, getattr(self._repository, "_max_read_limit", self._max_scan))
+        markers = self._repository.search(
+            session_id=session_id, event_type="session.retention.applied", limit=limit,
+        )
+        targets: dict[int, str] = {}
+        for marker in markers:
+            raw_targets = marker.payload.get("targets")
+            if not isinstance(raw_targets, list):
+                raise QueryExportError("invalid session privacy marker")
+            for target in raw_targets:
+                if not isinstance(target, Mapping):
+                    raise QueryExportError("invalid session privacy target")
+                sequence = target.get("sequence")
+                privacy_class = target.get("privacy_class")
+                if (isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1
+                        or not isinstance(privacy_class, str)):
+                    raise QueryExportError("invalid session privacy target")
+                targets[sequence] = privacy_class
+        return targets
+
+    def _record_for_event(self, event: SessionEvent,
+                          privacy_targets: Mapping[int, str] | None = None) -> SessionEventRecord:
+        record = SessionEventRecord.from_event(event, redactor=self._redactor)
+        privacy_class = (privacy_targets or {}).get(event.sequence)
+        if privacy_class is None:
+            return record
+        return replace(record, payload={"privacy_class": privacy_class, "redacted": True}, redacted=True)
+
     @staticmethod
     def _fingerprint(session_id: str, event_type: str | None, text: str | None,
                      start_sequence: int, end_sequence: int | None) -> str:
@@ -248,13 +279,14 @@ class SessionQueryEngine:
         scan_limit = min(self._max_scan, adapter_limit)
         raw = self._repository.read_range(session_id, start_sequence=next_sequence,
                                           end_sequence=end_sequence, limit=scan_limit)
+        privacy_targets = self._privacy_targets(session_id)
         matches = []
         for event in raw:
             if event_type is not None and event.event_type != event_type:
                 continue
             if text is not None and text not in json.dumps(event.payload, ensure_ascii=False, sort_keys=True):
                 continue
-            matches.append(SessionEventRecord.from_event(event, redactor=self._redactor))
+            matches.append(self._record_for_event(event, privacy_targets))
         selected = matches[:page_size]
         # If the page filled, the cursor must resume after the last selected
         # record, not after the end of the scan (which may contain records that
@@ -284,7 +316,8 @@ class SessionQueryEngine:
         read_limit = min(max_events, adapter_limit)
         events = self._repository.read_range(session_id, start_sequence=start_sequence,
                                              end_sequence=end_sequence, limit=read_limit)
-        records = tuple(SessionEventRecord.from_event(event, redactor=self._redactor) for event in events)
+        privacy_targets = self._privacy_targets(session_id)
+        records = tuple(self._record_for_event(event, privacy_targets) for event in events)
         transcript = self._transcript(records)
         # Integrity is a property of the chain, not merely of the selected
         # slice.  Starting verification at sequence two would necessarily

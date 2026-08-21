@@ -100,6 +100,8 @@ def _health(health) -> dict[str, object]:
         ],
         "persistence": health.persistence,
         "promotion": health.promotion,
+        "provenance_digest": health.provenance_digest,
+        "provenance_records": health.provenance_records,
     }
 
 

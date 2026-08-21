@@ -13,6 +13,8 @@ from typing import Mapping
 from ...domain.common.errors import IntegrityFailure, InvalidInput
 from ..ports.session_repository import SessionRepository
 from .durable_replay import crash_safe_replay
+from .continuity import SessionContinuityService
+from .fork import ForkBoundary
 from .query_export import QueryExportError, SessionQueryEngine
 
 
@@ -35,13 +37,15 @@ class HttpSessionFacade:
     """
 
     def __init__(self, repository: SessionRepository, *, max_page_size: int = 100,
-                 max_scan: int = 1_000, max_replay_events: int = 10_000) -> None:
+                 max_scan: int = 1_000, max_replay_events: int = 10_000,
+                 continuity: SessionContinuityService | None = None) -> None:
         if isinstance(max_replay_events, bool) or not isinstance(max_replay_events, int) or not 1 <= max_replay_events <= 100_000:
             raise ValueError("max_replay_events must be between 1 and 100000")
         self._query = SessionQueryEngine(repository, max_page_size=max_page_size,
                                           max_scan=max_scan)
         self._repository = repository
         self._max_replay_events = max_replay_events
+        self._continuity = continuity or SessionContinuityService(repository, max_events=max_replay_events)
 
     @staticmethod
     def _ok(body: Mapping[str, object]) -> HttpSessionResult:
@@ -108,6 +112,67 @@ class HttpSessionFacade:
             "request_turn_id": result.request.turn_id if result.request is not None else None,
             "request_snapshot_digest": result.request.snapshot_digest if result.request is not None else None,
             "transcript": [item.to_dict() for item in exported.transcript],
+        })
+
+    def repair(self, session_id: str) -> HttpSessionResult:
+        """Return a bounded, read-only safe-resume diagnosis."""
+        try:
+            plan = self._continuity.resume(session_id)
+        except (IntegrityFailure, InvalidInput):
+            return self._error(409, "session_repair_unavailable")
+        return self._ok({
+            "schema": "sonder.http-session-repair.v1",
+            "session_id": plan.diagnosis.session_id,
+            "disposition": plan.diagnosis.disposition,
+            "can_resume": plan.diagnosis.can_resume,
+            "valid_boundary": plan.valid_boundary,
+            "resume_sequence": plan.resume_sequence,
+            "checked_events": plan.diagnosis.checked_events,
+            "issues": [{"sequence": issue.sequence, "code": issue.code, "detail": issue.detail}
+                       for issue in plan.diagnosis.issues],
+        })
+
+    def fork(self, session_id: str, *, fork_sequence: int,
+             child_session_id: str | None = None) -> HttpSessionResult:
+        """Return a bounded, read-only fork plan; materialization stays caller-owned."""
+        try:
+            child = None
+            if child_session_id is not None:
+                from ...domain.common.ids import SessionId
+                child = SessionId.from_serialized(child_session_id)
+            plan = self._continuity.fork(
+                session_id, ForkBoundary(fork_sequence), child_session_id=child,
+            )
+        except (IntegrityFailure, InvalidInput, ValueError):
+            return self._error(409, "session_fork_unavailable")
+        lineage = plan.lineage
+        return self._ok({
+            "schema": "sonder.http-session-fork.v1",
+            "parent_session_id": str(lineage.parent_session_id),
+            "child_session_id": plan.lineage.session_id,
+            "boundary_sequence": lineage.boundary_sequence,
+            "boundary_event_id": lineage.boundary_event_id,
+            "inherited_event_count": len(plan.inherited_events),
+            "next_sequence": plan.next_sequence,
+        })
+
+    def checkpoint(self, session_id: str) -> HttpSessionResult:
+        """Return the current durable checkpoint without creating one."""
+        try:
+            checkpoint = self._continuity.load_checkpoint(session_id)
+        except (IntegrityFailure, InvalidInput):
+            return self._error(409, "session_checkpoint_unavailable")
+        if checkpoint is None:
+            return self._error(404, "session_checkpoint_not_found")
+        return self._ok({
+            "schema": "sonder.http-session-checkpoint.v1",
+            "session_id": checkpoint.session_id,
+            "projection_version": checkpoint.projection_version,
+            "source_sequence": checkpoint.source_sequence,
+            "source_hash": checkpoint.source_hash,
+            "checkpoint_digest": checkpoint.digest(),
+            "projection": dict(checkpoint.projection) if isinstance(checkpoint.projection, Mapping)
+            else {name: getattr(checkpoint.projection, name) for name in checkpoint.projection.__dataclass_fields__},
         })
 
 

@@ -24,6 +24,7 @@ from .query_export import (
     TranscriptRecord,
 )
 from .capture import CapturedTool, CapturedTurn, SessionCaptureService
+from .continuity import RetentionExecution, SessionContinuityService
 
 __all__ = [
     "SessionProjection",
@@ -51,4 +52,6 @@ __all__ = [
     "CapturedTool",
     "CapturedTurn",
     "SessionCaptureService",
+    "RetentionExecution",
+    "SessionContinuityService",
 ]

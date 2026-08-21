@@ -151,7 +151,8 @@ class ExtensionRegistry:
         self._records: dict[tuple[str, str, str], ExtensionInstallRecord] = {}
         if repository is not None:
             loader = getattr(repository, "load", None)
-            if not callable(loader):
+            saver = getattr(repository, "save", None)
+            if not callable(loader) or not callable(saver):
                 raise TypeError("repository must provide load and save")
             loaded = tuple(loader())
             if len(loaded) > max_records:
@@ -207,6 +208,13 @@ class ExtensionRegistry:
     @property
     def durable(self) -> bool:
         return self._repository is not None
+
+    @property
+    def provenance_inventory(self) -> ProvenanceInventory:
+        """Return configured trust records, or an explicit empty inventory."""
+        if self._admission is None:
+            return ProvenanceInventory.build(())
+        return self._admission.inventory
 
     def evaluate_health(
         self,

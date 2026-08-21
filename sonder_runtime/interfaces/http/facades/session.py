@@ -54,6 +54,16 @@ def dispatch_session_route(
             )
         if operation == "replay":
             return facade.replay(session_id, max_events=integer("max_events"))
+        if operation == "repair":
+            return facade.repair(session_id)
+        if operation == "fork":
+            sequence = integer("fork_sequence")
+            if sequence is None:
+                return HttpSessionResult(400, {"error": "invalid_session_query"})
+            return facade.fork(session_id, fork_sequence=sequence,
+                               child_session_id=one("child_session_id"))
+        if operation == "checkpoint":
+            return facade.checkpoint(session_id)
     except ValueError:
         return HttpSessionResult(400, {"error": "invalid_session_query"})
     return HttpSessionResult(404, {"error": "not_found"})
