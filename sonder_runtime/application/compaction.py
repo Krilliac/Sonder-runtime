@@ -52,7 +52,15 @@ def _summary_from(events: tuple[SessionHistoryEvent, ...], max_tokens: int | Non
         for field in _STRUCTURED_FIELDS:
             values[field].extend(_strings(payload.get(field)))
         confidence = payload.get("confidence")
-        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and 0 <= confidence <= 1:
+        if confidence is not None:
+            if (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not 0 <= confidence <= 1
+            ):
+                raise CompactionValidationError(
+                    "confidence must be a number between 0 and 1"
+                )
             confidence_values.append(float(confidence))
         if event.modality != "text" or event.event_type not in {"message.received", "message.sent"}:
             modalities.append(event)

@@ -6,7 +6,13 @@ from typing import Any
 from uuid import uuid4
 
 from .legacy import CompactionApplicationService
-from ..ports.compaction import CompactionRequest, SessionHistoryEvent, SourceRange
+from ..ports.compaction import (
+    CompactionEngine,
+    CompactionValidationError,
+    CompactionRequest,
+    SessionHistoryEvent,
+    SourceRange,
+)
 from ..ports.session_repository import SessionEvent, SessionRepository
 
 
@@ -31,12 +37,19 @@ class SessionCompactionService:
         self,
         repository: SessionRepository,
         *,
+        engine: CompactionEngine | None = None,
         event_id_factory: Callable[[], str] | None = None,
         max_events: int = 1_000,
     ) -> None:
         if isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._repository = repository
+        # Keep the repository orchestration independent from the summarizer.
+        # Production may inject a different typed engine; the deterministic
+        # engine remains the safe default for the current runtime.
+        self._engine = engine or CompactionApplicationService(
+            event_id_factory=event_id_factory,
+        )
         self._event_id_factory = event_id_factory or (lambda: f"compaction-{uuid4().hex}")
         self._max_events = max_events
 
@@ -70,9 +83,14 @@ class SessionCompactionService:
             range(start_sequence, end_sequence + 1)
         ):
             raise SessionCompactionError("source range is truncated or non-contiguous")
+        if any(event.session_id != session_id for event in events):
+            raise SessionCompactionError("source range contains a different session")
         source = SourceRange(
-            session_id, start_sequence, end_sequence,
-            events[0].event_id, events[-1].event_id,
+            session_id,
+            start_sequence,
+            end_sequence,
+            events[0].event_id,
+            events[-1].event_id,
         )
         request = CompactionRequest(
             session_id,
@@ -80,11 +98,13 @@ class SessionCompactionService:
             source,
             max_summary_tokens=max_summary_tokens,
         )
-        result = CompactionApplicationService(
-            event_id_factory=self._event_id_factory,
-        ).compact(request)
-        if not result.validation.valid:
-            raise SessionCompactionError(result.validation.detail)
+        try:
+            result = self._engine.compact(request)
+            validation = self._engine.validate(request, result)
+        except CompactionValidationError as exc:
+            raise SessionCompactionError(str(exc)) from exc
+        if not validation.valid:
+            raise SessionCompactionError(validation.detail)
         summary = result.summary
         payload = {
             "source_range": {

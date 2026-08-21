@@ -68,6 +68,8 @@ ROOT_LEGACY_MODULES = {"server"}
 # always allowed; adding one requires an explicit architecture-policy change
 # and must never happen as an accidental convenience import.
 ROOT_LEGACY_MODULE_LIMIT = 1
+WEB_SEARCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_search"
+WEB_SEARCH_COMPATIBILITY_ROOT = Path("web_tools.py")
 
 LAYERS = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap")
 
@@ -97,6 +99,7 @@ IO_MODULES = {"urllib", "socket", "http", "ftplib", "smtplib"}
 COMPATIBILITY_ROOT_MODULES = {
     "archive_create": Path("archive_create.py"),
     "code_runner": Path("code_runner.py"),
+    "command_catalog": Path("command_catalog.py"),
     "memory_store": Path("memory_store.py"),
     "autopilot_store": Path("autopilot_store.py"),
     "fleet_store": Path("fleet_store.py"),
@@ -165,6 +168,18 @@ RETIRED_ROOT_MODULES = frozenset({
 # import that production code has since moved behind a compatibility adapter;
 # rewriting one would invalidate its recorded checksum on deployed systems.
 COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS = {
+    # These legacy root consumers are intentionally unchanged in the
+    # command-catalog packaging slice.  They are the reverse edges that
+    # motivated the catalog's lazy command_registry/permission_modes imports;
+    # a later caller migration can remove these exceptions without changing
+    # the canonical adapter again.
+    "command_catalog": frozenset({
+        Path("command_registry.py"),
+        Path("command_router.py"),
+        Path("permission_modes.py"),
+        Path("reloadable_mcp.py"),
+        Path("slash_menu.py"),
+    }),
     "memory_store": frozenset({Path("migrations/memory/0001_baseline.py")}),
     "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
     "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),
@@ -292,6 +307,36 @@ def check() -> list[str]:
             "ROOT_LEGACY_MODULES grew from its ratchet limit of %d to %d"
             % (ROOT_LEGACY_MODULE_LIMIT, len(ROOT_LEGACY_MODULES))
         )
+    root_web_path = REPO_ROOT / WEB_SEARCH_COMPATIBILITY_ROOT
+    package_web_path = REPO_ROOT / "sonder_runtime" / "adapters" / "web_search.py"
+    if root_web_path.exists() and package_web_path.exists():
+        root_web_tree = ast.parse(
+            root_web_path.read_text(encoding="utf-8"),
+            filename=str(WEB_SEARCH_COMPATIBILITY_ROOT),
+        )
+        package_web_tree = ast.parse(
+            package_web_path.read_text(encoding="utf-8"),
+            filename=WEB_SEARCH_CANONICAL_MODULE,
+        )
+        root_web_functions = {
+            node.name
+            for node in root_web_tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        package_web_functions = {
+            node.name
+            for node in package_web_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        if "web_search" in root_web_functions:
+            violations.append(
+                "web_tools.py: web_search implementation must remain in "
+                f"{WEB_SEARCH_CANONICAL_MODULE}"
+            )
+        if "search_raw" not in package_web_functions:
+            violations.append(
+                f"{WEB_SEARCH_CANONICAL_MODULE}: missing canonical search_raw entrypoint"
+            )
     imports: dict[str, set[str]] = {}
     files = sorted(PACKAGE_ROOT.rglob("*.py"))
 

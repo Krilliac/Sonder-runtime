@@ -64,7 +64,9 @@ def _runtime_reference() -> dict[str, Any]:
         "schema": "sonder-runtime-document-reference-v1",
         "sources": _source_hashes(),
     }
-    command_catalog = importlib.import_module("command_catalog")
+    command_catalog = importlib.import_module(
+        "sonder_runtime.adapters.command_catalog"
+    ).command_catalog
     result["commands"] = sorted(
         ({
             "aliases": list(command.aliases),
