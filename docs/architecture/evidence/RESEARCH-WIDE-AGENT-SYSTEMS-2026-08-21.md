@@ -26,6 +26,36 @@ feature-shaped duplication.
 | Browser Use | Session-oriented browser automation with explicit browser profiles, workspaces, long-running polling, and resumable result objects | Existing session/job/workspace boundaries are the right ownership seams. Any browser adapter must preserve credential/egress policy and never treat a browser profile as an implicit trust grant. |
 | Magentic-One / Magentic orchestration | A manager maintains a dynamic task ledger, delegates to specialists, tracks progress, and replans after errors | Existing goal/task stores and structured delegation are adjacent. Expose manager progress as durable task-ledger events before adding adaptive orchestration. |
 
+## Second-wave systems and standards
+
+The following systems and standards were reviewed after the first-wave ports.
+They are intentionally treated as interoperability and evidence inputs, not as
+new framework dependencies.
+
+| System or standard | Documented pattern | Sonder disposition |
+| --- | --- | --- |
+| MCP Tasks | A server can return a durable task handle instead of blocking; the client can poll progress, provide input, reconnect, and retrieve the final result. | The task ledger and job summaries are the correct foundation. Add an MCP-task adapter only when a concrete long-running tool needs reconnect semantics; preserve the existing approval, cancellation, and account-scope gates. |
+| OpenTelemetry GenAI semantic conventions | Standard agent, workflow, plan, and tool-execution spans with low-cardinality identity fields and explicit warnings that message content may contain sensitive data. | Map Sonder’s redacted trajectory/activity records to an optional export-neutral span projection. Keep the current local-only observability decision intact: no exporter, persistence, or network path belongs in the core contract. |
+| Temporal | Crash-proof workflow execution, durable workflow state, signals, updates, replay, and long-lived pause/resume across failures. | Treat Temporal as an external durable-execution adapter. Sonder’s workflow/checkpoint ports should remain usable without it; an adapter must not make model calls or authorization decisions replay-unsafe. |
+| Agent Client Protocol (ACP) | JSON-RPC over stdio for local editor agents, with a compatible remote direction; protocol types reuse MCP representations and add coding UX such as diffs. | The existing editor interop contract should target ACP-compatible session/update/permission mapping. Add capability negotiation, implementation metadata, and cancellation as explicit adapter features rather than leaking ACP types into the domain. |
+| ACP elicitation proposals | Structured user input with accept, decline, and cancel outcomes, including schema-backed forms and URL-based flows. | Extend the approval/control-plane boundary only if a host needs structured questions. Keep credentials and URL completion outside durable logs; distinguish decline from cancellation and require an authenticated session identity. |
+| A2A / Google ADK agent serving | Agent Cards plus JSON-RPC expose discoverable remote agents; task/session continuity and artifacts can cross service boundaries. | A2A is a future distributed-agent adapter. First define a capability-scoped remote-agent identity and artifact receipt; do not expose the local task ledger or filesystem directly to remote peers. |
+| Google agents-cli | Local persistent server mode, session-id continuation, remote A2A/ADK selection, artifact output, and optional OTel export are surfaced as CLI concerns. | Use this as a host-integration acceptance model: reconnecting clients need stable session IDs and explicit artifact references. It does not justify changing the core runtime’s local-only observability boundary. |
+
+### Second-wave priority order
+
+1. Add an export-neutral trace/span projection that is redacted by construction
+   and can later be mapped to OpenTelemetry GenAI conventions.
+2. Define an MCP Tasks adapter contract over the existing job/task-ledger
+   primitives, including poll, input-required, cancellation, expiry, and
+   reconnect behavior.
+3. Expand the editor interop adapter toward ACP capability/implementation
+   negotiation and per-request cancellation.
+4. Specify a capability-scoped A2A/remote-agent adapter with artifact receipts
+   and explicit identity/delegation boundaries.
+5. Keep Temporal and ACP elicitation as opt-in host adapters, gated by a real
+   integration need and operational evidence.
+
 ## Priority order
 
 1. Trajectory projection: expose a bounded, redacted action/observation trace
@@ -70,3 +100,12 @@ host boundary and operational receipts before they should be promoted.
 - CrewAI flows: <https://docs.crewai.com/index>
 - Browser Use agent sessions: <https://docs.browser-use.com/cloud/agent/quickstart>
 - Microsoft Magentic orchestration: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-orchestration/magentic>
+- MCP Tasks: <https://modelcontextprotocol.io/extensions/tasks/overview>
+- OpenTelemetry GenAI agent spans: <https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-agent-spans.md>
+- Temporal platform documentation: <https://docs.temporal.io/>
+- Temporal workflow execution: <https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/workflow/workflow-execution/workflow-execution.mdx>
+- Agent Client Protocol introduction: <https://agentclientprotocol.com/get-started/introduction>
+- Agent Client Protocol elicitation proposal: <https://agentclientprotocol.com/rfds/elicitation>
+- Agent Client Protocol cancellation proposal: <https://agentclientprotocol.com/rfds/request-cancellation>
+- Google agents-cli templates and A2A: <https://google.github.io/agents-cli/guide/templates/>
+- Google agents-cli CLI/session behavior: <https://google.github.io/agents-cli/cli/>
