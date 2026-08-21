@@ -36,6 +36,7 @@ composition acceptance slice: `tests/production/test_extension_composition.py`
 installs through the live application graph, reopens the SQLite-backed
 registry through a fresh graph, rechecks the manifest digest, and preserves
 the explicit disabled/unverified state when provenance is absent. Native
-memory limiting is proven at the host seam and the declared budget is
-persisted, but actual extension execution through a persisted installation and
-the full platform matrix remain unverified.
+memory limiting is proven at the host seam, the declared budget is persisted,
+and a trusted persisted installation is exercised through the native host in
+`test_persisted_healthy_installation_reaches_native_experiment_host`. The full
+platform matrix and artifact-discovery lifecycle remain unverified.

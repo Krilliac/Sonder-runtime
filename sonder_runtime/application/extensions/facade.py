@@ -10,10 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from .experiments import EphemeralExperimentManager, ExperimentSnapshot
+from .experiments import EphemeralExperimentManager, ExperimentLimits, ExperimentSnapshot
 from .registry import (
     ExtensionInstallRecord,
     ExtensionRegistry,
+    ExtensionRegistryError,
     ExtensionRegistrySnapshot,
     ExtensionRepairDiagnostic,
 )
@@ -156,6 +157,33 @@ class ExtensionApplicationFacade:
             description=description,
             environment=environment,
             limits=limits,
+        )
+
+    def define_installed(
+        self,
+        experiment_id: str,
+        extension_id: str,
+        argv: Sequence[str],
+        *,
+        scope: str,
+        project_id: str | None,
+        authority: ExtensionAuthority,
+        description: str = "",
+        environment: Mapping[str, str] | None = None,
+    ) -> ExperimentSnapshot:
+        """Define an experiment only from an enabled, persisted installation."""
+        authority.require("define_installed")
+        record = self._registry.get(extension_id, scope=scope, project_id=project_id)
+        if not record.enabled or not record.healthy:
+            raise ExtensionRegistryError(
+                f"extension {extension_id!r} is not runnable: {record.health_state.value}"
+            )
+        return self._experiments.define(
+            experiment_id,
+            argv,
+            description=description,
+            environment=environment,
+            limits=ExperimentLimits(record.manifest.resources.memory_limit_bytes),
         )
 
     def start(self, experiment_id: str, authority: ExtensionAuthority) -> ExperimentSnapshot:
