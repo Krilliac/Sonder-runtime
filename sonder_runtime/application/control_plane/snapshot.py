@@ -18,6 +18,9 @@ class SnapshotValidationError(ValueError):
     """Raised when a control-plane snapshot contains invalid input."""
 
 
+MAX_SECTION_RECORDS = 1024
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
@@ -50,6 +53,10 @@ class SnapshotSection:
         frozen = tuple(_freeze(record) for record in self.records)
         if any(not isinstance(record, Mapping) for record in frozen):
             raise SnapshotValidationError(f"{self.name} records must be mappings")
+        if len(frozen) > MAX_SECTION_RECORDS:
+            raise SnapshotValidationError(
+                f"{self.name} exceeds the {MAX_SECTION_RECORDS}-record limit"
+            )
         object.__setattr__(self, "name", self.name.strip())
         object.__setattr__(self, "records", frozen)
 
@@ -64,11 +71,12 @@ class SnapshotSection:
         return len(self.records)
 
 
-_SECTION_NAMES = (
+CONTROL_PLANE_SECTIONS = (
     "sessions", "plans", "approvals", "jobs", "agents", "model_hardware",
     "context", "memory_explanations", "extensions", "training", "selfmod",
     "updates", "health", "startup_authorities",
 )
+_SECTION_NAMES = CONTROL_PLANE_SECTIONS
 
 
 @dataclass(frozen=True)
@@ -140,4 +148,10 @@ class ControlPlaneSnapshot:
         return sum(getattr(self, name).count for name in _SECTION_NAMES)
 
 
-__all__ = ["ControlPlaneSnapshot", "SnapshotSection", "SnapshotValidationError"]
+__all__ = [
+    "CONTROL_PLANE_SECTIONS",
+    "MAX_SECTION_RECORDS",
+    "ControlPlaneSnapshot",
+    "SnapshotSection",
+    "SnapshotValidationError",
+]
