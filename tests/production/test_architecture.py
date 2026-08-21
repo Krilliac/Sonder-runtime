@@ -59,18 +59,26 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     assert module.COMPATIBILITY_ROOT_MODULES["code_runner"] == Path(
         "code_runner.py"
     )
+    assert module.COMPATIBILITY_ROOT_MODULES["command_catalog"] == Path(
+        "command_catalog.py"
+    )
     assert "model_transport" not in module.ROOT_LEGACY_MODULES
     assert "runtime_policy" not in module.ROOT_LEGACY_MODULES
     assert "eval_history" not in module.ROOT_LEGACY_MODULES
     assert "unsafe_lab" not in module.ROOT_LEGACY_MODULES
     assert module.ROOT_LEGACY_MODULES <= module.BASELINE_ROOT_LEGACY_MODULES
-
     removed = next(iter(module.ROOT_LEGACY_MODULES))
     module.ROOT_LEGACY_MODULES = (
         module.ROOT_LEGACY_MODULES - {removed}
     ) | {"new_accidental_legacy"}
     violations = module.check()
     assert any("new_accidental_legacy" in row for row in violations)
+
+
+def test_web_search_ownership_is_packaged():
+    module = _architecture_module()
+    assert module.WEB_SEARCH_CANONICAL_MODULE == "sonder_runtime.adapters.web_search"
+    assert module.WEB_SEARCH_COMPATIBILITY_ROOT == Path("web_tools.py")
 
 
 def test_unsafe_lab_stateful_owner_is_security_adapter(monkeypatch):
@@ -259,6 +267,13 @@ def test_applied_memory_baseline_remains_byte_for_byte_immutable():
     immutable_baseline = Path("migrations/memory/0001_baseline.py")
     module = _architecture_module()
     assert module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS == {
+        "command_catalog": frozenset({
+            Path("command_registry.py"),
+            Path("command_router.py"),
+            Path("permission_modes.py"),
+            Path("reloadable_mcp.py"),
+            Path("slash_menu.py"),
+        }),
         "memory_store": frozenset({immutable_baseline}),
         "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
         "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),

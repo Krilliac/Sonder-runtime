@@ -751,83 +751,13 @@ def _request(url, timeout=10):
             return raw, resp.headers.get("Content-Type", "")
 
 
-def web_search(query, limit=5, timeout=10):
-    if not enabled():
-        raise RuntimeError("web tools disabled by SONDER_WEB_TOOLS")
-    query = (query or "").strip()
-    if not query:
-        raise ValueError("empty search query")
-    limit = max(1, min(int(limit or 5), 10))
-    provider_query_root = _provider_search_query(query)
-    configured_endpoint = os.environ.get("SONDER_SEARCH_URL", "").strip()
-    endpoints = (
-        [configured_endpoint] if configured_endpoint
-        else [DEFAULT_SEARCH_URL, MOJEEK_SEARCH_URL, BING_SEARCH_RSS_URL]
-    )
-    failures = []
-    best_results = []
-    best_relevance = -1
-    for endpoint in endpoints:
-        provider_queries = (
-            [provider_query_root] if configured_endpoint else _search_query_variants(provider_query_root)
-        )
-        for provider_query in provider_queries:
-            url = endpoint.format(query=urllib.parse.quote_plus(provider_query))
-            try:
-                raw, ctype = _request(url, timeout=timeout)
-                text = raw.decode("utf-8", "replace")
-                lowered = text.lower()
-                if "automated queries" in lowered or "403 - forbidden" in lowered:
-                    failures.append(
-                        "%s blocked" % urllib.parse.urlparse(url).hostname
-                    )
-                    break
-                if "json" in ctype:
-                    data = json.loads(text)
-                    rows = data.get("results") if isinstance(data, dict) else data
-                    results = [
-                        {
-                            "title": str(row.get("title", "")),
-                            "url": str(row.get("url", "")),
-                            "snippet": str(row.get("snippet", "")),
-                        }
-                        for row in (rows or [])[:limit]
-                        if isinstance(row, dict)
-                    ]
-                elif "xml" in ctype or text.lstrip().startswith("<?xml"):
-                    results = _search_rss_rows(raw, limit)
-                else:
-                    results = _search_rows(text, url, limit)
-                if results:
-                    relevance, required = _search_relevance(provider_query_root, results)
-                    if relevance > best_relevance:
-                        best_results = results
-                        best_relevance = relevance
-                    if relevance >= required:
-                        return results
-                if "challenge-form" in text or "anomaly-modal" in text:
-                    failures.append(
-                        "%s challenge" % urllib.parse.urlparse(url).hostname
-                    )
-                    break
-            except Exception as exc:
-                failures.append(
-                    "%s %s" % (
-                        urllib.parse.urlparse(url).hostname, type(exc).__name__,
-                    )
-                )
-                break
-    # Do not turn a weak provider fallback into a plausible-looking answer.
-    # The scorer normalizes straightforward inflections first, so concise
-    # listings such as "computer repairs" still count for "computer repair".
-    _best, required = _search_relevance(query, best_results)
-    if best_results and best_relevance >= required:
-        return best_results
-    if best_results:
-        raise RuntimeError("search providers returned no sufficiently relevant results")
-    if failures and len(failures) == len(endpoints):
-        raise RuntimeError("search providers unavailable: %s" % ", ".join(failures))
-    return []
+def _web_search_compat(query, limit=5, timeout=10):
+    from sonder_runtime.adapters.web_search import search_raw
+
+    return search_raw(query, limit=limit, timeout=timeout)
+
+
+web_search = _web_search_compat
 
 
 def _canonical_charset(value):
@@ -1225,12 +1155,6 @@ def format_weather(result):
 
 
 def format_search_results(results):
-    if not results:
-        return "(no results)"
-    lines = []
-    for i, row in enumerate(results, start=1):
-        lines.append("%d. %s" % (i, row.get("title") or "(untitled)"))
-        lines.append("   %s" % row.get("url", ""))
-        if row.get("snippet"):
-            lines.append("   %s" % row["snippet"])
-    return "\n".join(lines)
+    from sonder_runtime.adapters.web_search import format_results
+
+    return format_results(results)

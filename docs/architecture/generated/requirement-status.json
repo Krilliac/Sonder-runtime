@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 18,
-      "planned": 186
+      "implemented_unverified": 19,
+      "planned": 185
     },
     "total": 204,
     "verified": 0
@@ -266,21 +266,21 @@
       "checked": false,
       "claim": "One implementation path.",
       "requirement_id": "ARCH-001",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Root cleanup.",
       "requirement_id": "ARCH-002",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Transitional cleanup.",
       "requirement_id": "ARCH-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -357,35 +357,35 @@
       "checked": false,
       "claim": "Non-destructive.",
       "requirement_id": "COMPACT-001",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Source range.",
       "requirement_id": "COMPACT-002",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Structured retention.",
       "requirement_id": "COMPACT-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Validation.",
       "requirement_id": "COMPACT-004",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Typed modalities.",
       "requirement_id": "COMPACT-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1162,8 +1162,8 @@
       "checked": false,
       "claim": "WebProvider/CredentialProvider",
       "requirement_id": "SEAM-011",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "da11d152b5e35af4f497b53d201dbef1ae335d6edc4ca7e1e3d701b9356b6400",
+    "ledger_sha256": "5225326c8999c7566da802fbae6b6b791ef1d196f22bc999336835d8f3bf42c2",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

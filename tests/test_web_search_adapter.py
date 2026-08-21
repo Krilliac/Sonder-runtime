@@ -14,9 +14,12 @@ def test_web_search_requires_explicit_consent():
 def test_web_search_bounds_results_and_formats(monkeypatch):
     monkeypatch.setattr(web_search, "_web_tools", lambda: type("Web", (), {
         "enabled": staticmethod(lambda: True),
-        "web_search": staticmethod(lambda query, limit: [{"title": "Example", "url": "https://example.test", "snippet": ""}]),
-        "format_search_results": staticmethod(lambda rows: "Example\nhttps://example.test"),
     })())
+    rows = [{"title": "Example", "url": "https://example.test", "snippet": ""}]
+    monkeypatch.setattr(web_search, "search_raw", lambda query, limit: rows)
+    monkeypatch.setattr(
+        web_search, "format_results", lambda result: "Example\nhttps://example.test"
+    )
     result = web_search.search(
         "example", limit=100,
         context=local_owner_context(correlation_id="search", cloud_allowed=True),
