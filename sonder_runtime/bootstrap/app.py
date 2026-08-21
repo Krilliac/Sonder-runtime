@@ -117,13 +117,17 @@ def build_application(
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
     from ..adapters.web import lifecycle as runtime_lifecycle
     runtime_lifecycle.configure(config)
-    # SPEC-3 Phase 3: bind the transitional provider only at composition time.
-    from .legacy_model import configure_legacy_model_providers
-    configure_legacy_model_providers()
+    # Keep the transitional provider behind lazy closures: composing the
+    # application must not import the historical root module.
+    from .legacy_model import lazy_legacy_model_provider_factories
+    target_resolver, generate_factory = lazy_legacy_model_provider_factories()
     # SPEC-3 Phase 3: the real transport adapter behind the port — consent
     # enforced against the OperationContext, driver errors mapped into the
     # domain taxonomy. Backend is Ollama by default, selectable via env.
-    gateway = build_model_gateway()
+    gateway = build_model_gateway(
+        target_resolver=target_resolver,
+        generate_factory=generate_factory,
+    )
     session_repository: SQLiteSessionRepository | None = None
     job_registry: SQLiteDurableJobRegistry | None = None
     job_service: JobRegistryService | None = None
