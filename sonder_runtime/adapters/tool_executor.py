@@ -31,6 +31,22 @@ class ToolExecutorAdapter:
                 output="operation cancelled",
             )
         try:
+            if call.tool in {"file_copy", "file_move"}:
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
+
+                operation = "copy_file" if call.tool == "file_copy" else "move_file"
+                res = getattr(file_ops, operation)(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool == "file_batch_write":
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
+
+                res = file_ops.batch_write_files(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool == "file_delete":
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
+
+                res = file_ops.delete_path(**args)
+                return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "file_find":
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 

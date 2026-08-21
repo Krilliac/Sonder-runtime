@@ -81,6 +81,31 @@ def test_read_only_workbench_tools_use_packaged_guards(executor, tmp_path):
     assert scripts.ok and "script.py" in scripts.output
 
 
+def test_copy_move_batch_write_and_delete_preserve_guarded_contract(executor, tmp_path):
+    (tmp_path / "source.txt").write_text("copy me", encoding="utf-8")
+    copied = executor.execute(
+        ToolCall("file_copy", {"source": "source.txt", "destination": "copy.txt"}), _ctx()
+    )
+    moved = executor.execute(
+        ToolCall("file_move", {"source": "copy.txt", "destination": "moved.txt"}), _ctx()
+    )
+    batch = executor.execute(
+        ToolCall("file_batch_write", {
+            "operations": [{"path": "batch.txt", "content": "batch", "mode": "create"}],
+        }), _ctx()
+    )
+    preview = executor.execute(
+        ToolCall("file_delete", {"path": "moved.txt", "dry_run": True}), _ctx()
+    )
+
+    assert copied.ok
+    assert moved.ok and not (tmp_path / "copy.txt").exists()
+    assert (tmp_path / "moved.txt").read_text(encoding="utf-8") == "copy me"
+    assert batch.ok and (tmp_path / "batch.txt").read_text(encoding="utf-8") == "batch"
+    assert preview.ok and preview.evidence["dry_run"] is True
+    assert (tmp_path / "moved.txt").exists()
+
+
 def test_guard_rejection_surfaces_as_not_ok(executor):
     # Escaping the workspace root must fail closed as ok=False, not raise.
     result = executor.execute(
