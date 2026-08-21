@@ -25,6 +25,7 @@ from .query_export import (
 )
 from .capture import CapturedTool, CapturedTurn, SessionCaptureService
 from .continuity import RetentionExecution, SessionContinuityService
+from .trajectory import TrajectoryExport, TrajectoryStep, project_trajectory
 
 __all__ = [
     "SessionProjection",
@@ -54,4 +55,7 @@ __all__ = [
     "SessionCaptureService",
     "RetentionExecution",
     "SessionContinuityService",
+    "TrajectoryExport",
+    "TrajectoryStep",
+    "project_trajectory",
 ]
