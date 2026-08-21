@@ -79,6 +79,7 @@ class StdioMcpTransport:
     def __init__(
         self, input_stream: TextIO, output_stream: TextIO, *,
         compatibility: McpCompatibility, tool_catalog: Any = (), tool_handler: Any,
+        task_handler: Any = None,
         legacy_contract: LegacyMcpContract | None = None,
         notifications: SubscriptionNotificationRouter | None = None,
         connection_id: str = "stdio", limits: McpTransportLimits | None = None,
@@ -93,6 +94,7 @@ class StdioMcpTransport:
             )
         self._input, self._output = input_stream, output_stream
         self._compatibility, self._handler = compatibility, tool_handler
+        self._task_handler = task_handler
         self._legacy_contract = legacy_contract
         self._router, self._connection_id = notifications, connection_id
         self._limits = limits or McpTransportLimits()
@@ -221,6 +223,15 @@ class StdioMcpTransport:
             raise McpTransportError("initialize is required")
         if method == "notifications/initialized":
             return {}
+        if method in {"tasks/get", "tasks/cancel", "tasks/update"}:
+            if "tasks" not in (self._negotiation.capabilities if self._negotiation else ()):
+                raise McpTransportError("MCP Tasks capability was not negotiated")
+            if not callable(self._task_handler):
+                raise McpTransportError("MCP Tasks handler is not configured")
+            result = self._task_handler(method, params)
+            if not isinstance(result, Mapping):
+                raise McpTransportError("MCP Tasks handler returned an invalid result")
+            return dict(result)
         if method == "tools/list":
             return {"tools": list(self._catalog)}
         if method == "tools/call":
