@@ -67,6 +67,21 @@ def test_server_status_and_vision_paths_do_not_call_root_error_wrapper():
         )
 
 
+def test_server_has_no_production_calls_to_root_error_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_format_model_call_error"
+    ]
+    assert calls == []
+
+
 def test_model_error_formatter_preserves_http_retry_hint():
     error = SimpleNamespace(
         kind="http", cloud=True, status=503, attempts=2,
