@@ -455,6 +455,83 @@ def build_application(
             )
         return selfmod_service
 
+    def unavailable_section(name: str):
+        """Expose an honest section state when no owning port is composed."""
+        return lambda: ({
+            "available": False,
+            "section": name,
+            "reason": "owning application port is not composed",
+        },)
+
+    def session_section():
+        events = get_session_repository().search(limit=1024)
+        latest: dict[str, object] = {}
+        for event in events:
+            latest[event.session_id] = event
+        return tuple({
+            "session_id": event.session_id,
+            "last_sequence": event.sequence,
+            "last_event_type": event.event_type,
+            "occurred_at_utc": event.occurred_at_utc,
+        } for event in latest.values())
+
+    def job_section():
+        return tuple({
+            "job_id": record.identity.job_id,
+            "kind": record.identity.kind,
+            "status": record.status.value,
+            "revision": record.revision,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        } for record in get_job_service().list(limit=1024))
+
+    def agent_section():
+        return tuple({
+            "name": registration.name,
+            "role": registration.role,
+            "mutation_policy": registration.mutation_policy,
+            "default_tier": registration.default_tier,
+        } for registration in get_agent_registry().registrations)
+
+    def provider_section():
+        return tuple({
+            "provider_id": report.provider_id,
+            "status": report.status.value,
+            "detail": report.detail,
+            "checked_at": report.checked_at,
+        } for report in (
+            provider.provider.health()
+            for provider in provider_registry.providers()
+        ))
+
+    def extension_section():
+        return tuple({
+            "extension_id": record.extension_id,
+            "scope": record.scope.value,
+            "project_id": record.project_id,
+            "version": record.version,
+            "enabled": record.enabled,
+            "health_state": record.health_state.value,
+            "crash_count": record.crash_count,
+        } for record in get_extension_registry().snapshot().records)
+
+    default_control_plane_service = control_plane_snapshot_service or ControlPlaneSnapshotService({
+        "sessions": session_section,
+        "plans": unavailable_section("plans"),
+        "approvals": unavailable_section("approvals"),
+        "jobs": job_section,
+        "agents": agent_section,
+        "model_hardware": provider_section,
+        "context": unavailable_section("context"),
+        "memory_explanations": unavailable_section("memory_explanations"),
+        "extensions": extension_section,
+        "training": unavailable_section("training"),
+        "selfmod": unavailable_section("selfmod"),
+        "updates": unavailable_section("updates"),
+        "health": provider_section,
+        "startup_authorities": unavailable_section("startup_authorities"),
+    })
+
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
@@ -519,7 +596,7 @@ def build_application(
         extension_facade=get_extension_facade,
         selfmod_service=get_selfmod_service,
         context_planning=context_planning,
-        control_plane_snapshot_service=control_plane_snapshot_service,
+        control_plane_snapshot_service=default_control_plane_service,
     )
 
 

@@ -242,9 +242,9 @@
     },
     {
       "checked": false,
-      "claim": "The composition root preserves an explicitly supplied complete control-plane provider service and the production HTTP handler consumes that same service boundary.",
+      "claim": "The default composition exposes bounded real records for composed control-plane owners and explicit unavailable-state records for unsupported sections; injected provider failures remain fail-closed through the authenticated HTTP route.",
       "requirement_id": "API-006",
-      "revision": 5,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "0d957409669944742db905ef2806af6fb37a7adcaf83b2fadad6ac22672c4b74",
+    "ledger_sha256": "402983d241a206ed0605fd9fa12439e23d8ca4d1ae4c336d484de41420b2955d",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
