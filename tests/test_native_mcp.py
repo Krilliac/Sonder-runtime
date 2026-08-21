@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+from types import SimpleNamespace
 
-from sonder_runtime.bootstrap.app import Application
+from sonder_runtime.platform.config import SonderConfig
 from sonder_runtime.bootstrap.native_mcp import native_tool_registry, run_native_mcp
 
 
@@ -48,3 +49,26 @@ def test_native_transport_calls_application_tool_port():
     assert count == 2
     assert rows[1]["result"]["output"] == "read_file:ok"
     assert rows[1]["result"]["isError"] is False
+
+
+def test_native_entrypoint_fences_safety_before_configuration(monkeypatch):
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.adapters.security.unsafe_lab as unsafe_lab
+    import sonder_runtime.bootstrap.app as bootstrap_app
+    import sonder_runtime.bootstrap.native_mcp as native_mcp
+
+    calls = []
+    monkeypatch.setattr(unsafe_lab, "require_startup", lambda: calls.append("safety"))
+    monkeypatch.setattr(
+        entrypoint, "_load_config", lambda args: calls.append("config") or SonderConfig()
+    )
+    monkeypatch.setattr(
+        bootstrap_app, "build_application",
+        lambda **kwargs: calls.append("build") or _app(),
+    )
+    monkeypatch.setattr(
+        native_mcp, "run_native_mcp", lambda application: calls.append("run") or 0,
+    )
+
+    assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 0
+    assert calls == ["safety", "config", "build", "run"]
