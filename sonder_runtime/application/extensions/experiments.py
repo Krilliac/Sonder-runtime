@@ -15,6 +15,23 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 
+@dataclass(frozen=True, slots=True)
+class ExperimentLimits:
+    """Typed resource limits accepted by the application experiment boundary."""
+
+    memory_limit_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.memory_limit_bytes is not None and (
+            isinstance(self.memory_limit_bytes, bool)
+            or not isinstance(self.memory_limit_bytes, int)
+            or self.memory_limit_bytes <= 0
+        ):
+            raise ExperimentInvalidDefinition(
+                "memory_limit_bytes must be a positive integer when set"
+            )
+
+
 class ExperimentHost(Protocol):
     """Injected child-host boundary; process ownership stays in adapters."""
 
@@ -249,6 +266,7 @@ class EphemeralExperimentManager:
 __all__ = [
     "EphemeralExperimentManager",
     "ExperimentDefinition",
+    "ExperimentLimits",
     "ExperimentError",
     "ExperimentInvalidDefinition",
     "ExperimentInvalidTransition",

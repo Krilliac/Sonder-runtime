@@ -12,6 +12,7 @@ from ...application.extensions.facade import (
     build_extension_manifest,
 )
 from ...application.extensions.experiments import ExperimentError
+from ...application.extensions.experiments import ExperimentLimits
 
 
 def _snapshot(value):
@@ -63,6 +64,7 @@ class ExtensionCommand:
         define.add_argument("experiment_id")
         define.add_argument("--description", default="")
         define.add_argument("--argv", nargs="+", required=True)
+        define.add_argument("--memory-limit-bytes", type=int)
         for name in ("start", "stop", "delete"):
             command = sub.add_parser(name)
             command.add_argument("experiment_id")
@@ -106,6 +108,8 @@ class ExtensionCommand:
                 result = _snapshot(self._facade.define(
                     args.experiment_id, tuple(args.argv),
                     description=args.description, authority=authority,
+                    limits=ExperimentLimits(args.memory_limit_bytes)
+                    if args.memory_limit_bytes is not None else None,
                 ))
             elif args.command == "inspect":
                 result = _snapshot(self._facade.inspect(args.experiment_id, authority))

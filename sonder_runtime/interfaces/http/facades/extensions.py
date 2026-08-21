@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ....application.extensions.experiments import (
+    ExperimentLimits,
     ExperimentError,
     ExperimentNotFound,
     ExperimentInvalidDefinition,
@@ -196,7 +197,7 @@ def dispatch_extension_route(
     if path == "/v1/extensions/experiments/define" and method == "POST":
         try:
             required = {"experiment_id", "argv"}
-            optional = {"description", "environment"}
+            optional = {"description", "environment", "memory_limit_bytes"}
             if set(payload) - required - optional or not required.issubset(payload):
                 raise ValueError("define requires exactly experiment_id and argv plus optional fields")
             experiment_id = payload["experiment_id"]
@@ -205,11 +206,17 @@ def dispatch_extension_route(
                 raise TypeError("experiment_id must be text and argv must be an array")
             description = payload.get("description", "")
             environment = payload.get("environment")
+            memory_limit = payload.get("memory_limit_bytes")
             if not isinstance(description, str) or (environment is not None and not isinstance(environment, dict)):
                 raise TypeError("description must be text and environment must be an object")
+            if memory_limit is not None and (
+                isinstance(memory_limit, bool) or not isinstance(memory_limit, int)
+            ):
+                raise TypeError("memory_limit_bytes must be an integer")
             snapshot = facade.define(
                 experiment_id, tuple(argv), authority=authority,
                 description=description, environment=environment,
+                limits=ExperimentLimits(memory_limit) if memory_limit is not None else None,
             )
             return ExtensionHttpResult({"object": "experiment_define", "experiment": _snapshot(snapshot)}, 201)
         except Exception as error:
