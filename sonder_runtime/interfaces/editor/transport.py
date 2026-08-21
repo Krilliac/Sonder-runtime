@@ -67,10 +67,20 @@ class EditorStdioTransport:
         self._cancellation_handler = cancellation_handler
         self._limits = limits or EditorTransportLimits()
         self._initialized = False
+        self._client: ImplementationInfo | None = None
+        self._negotiated_capabilities: frozenset[str] = frozenset()
 
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    @property
+    def client_implementation(self) -> ImplementationInfo | None:
+        return self._client
+
+    @property
+    def negotiated_capabilities(self) -> frozenset[str]:
+        return self._negotiated_capabilities
 
     def serve(self) -> int:
         """Process bounded frames until EOF and return the frame count."""
@@ -112,11 +122,21 @@ class EditorStdioTransport:
         if not self._initialized:
             if envelope.message_type != "session/initialize":
                 raise EditorTransportError("session/initialize is required")
+            implementation = envelope.payload.get("implementation")
+            if implementation is not None:
+                try:
+                    self._client = ImplementationInfo.from_dict(implementation)
+                except (EditorInteropError, TypeError, ValueError) as exc:
+                    raise EditorTransportError("invalid client implementation metadata") from exc
+                self._negotiated_capabilities = self._server.negotiate(self._client)
             self._initialized = True
             return self._response(
                 envelope,
                 "session/initialized",
-                {"implementation": self._server.to_dict()},
+                {
+                    "implementation": self._server.to_dict(),
+                    "capabilities": sorted(self._negotiated_capabilities),
+                },
             )
         if envelope.message_type == "session/initialize":
             raise EditorTransportError("session/initialize may only be sent once")

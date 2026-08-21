@@ -42,6 +42,21 @@ new framework dependencies.
 | A2A / Google ADK agent serving | Agent Cards plus JSON-RPC expose discoverable remote agents; task/session continuity and artifacts can cross service boundaries. | A2A is a future distributed-agent adapter. First define a capability-scoped remote-agent identity and artifact receipt; do not expose the local task ledger or filesystem directly to remote peers. |
 | Google agents-cli | Local persistent server mode, session-id continuation, remote A2A/ADK selection, artifact output, and optional OTel export are surfaced as CLI concerns. | Use this as a host-integration acceptance model: reconnecting clients need stable session IDs and explicit artifact references. It does not justify changing the core runtime’s local-only observability boundary. |
 
+## Third-wave systems reviewed
+
+| System | Documented pattern | Sonder disposition |
+| --- | --- | --- |
+| Dapr Workflows / Durable AI Agents | Durable execution across crashes and restarts, replayable workflow history, history propagation, versioning, concurrency limits, payload bounds, and optional cryptographic history signing. | Strengthens the existing workflow/checkpoint direction. Add explicit workflow-version and payload-bound fields to any future external adapter; keep model calls and authorization out of replay-sensitive workflow code. Do not add a Dapr dependency to the core runtime. |
+| Mastra | Separates open-ended agents from deterministic workflows; workflows use typed step inputs/outputs and support sequential, parallel, branching, looping, error handling, pause/resume, and agent calls from steps. | Confirms Sonder’s typed workflow/job ports and task-ledger projection. The useful port is schema-checked step output and resume evidence, not a second workflow DSL. |
+| Microsoft Semantic Kernel Agent Orchestration | Provides concurrent, sequential, handoff, group-chat, and Magentic orchestration behind a shared invocation shape, with an explicit in-process runtime; current orchestration APIs are experimental. | Treat orchestration patterns as host-level planners over existing fanout and lifecycle ports. Require explicit member identity, budget, cancellation, and terminal evidence; do not import experimental framework semantics into the domain. |
+| LlamaIndex AgentWorkflow | Event-driven workflows combine state management, streaming, human input, branching, loops, concurrency, and multi-agent handoffs. | The event/state combination is already represented by Sonder session events, approvals, and workflow checkpoints. Add a bounded event-to-task projection only when a concrete data-agent integration needs it; preserve provenance for retrieved context. |
+
+These sources broaden the comparison beyond Qwen templates, Zero, Easy Agent,
+and the first two research waves. They converge on three portable invariants:
+durable identity across reconnects, typed bounded step/state transitions, and
+explicit replay/authorization boundaries. They do not justify a framework
+dependency or autonomous orchestration in Sonder’s core.
+
 ### Second-wave priority order
 
 1. Add an export-neutral trace/span projection that is redacted by construction
@@ -50,7 +65,9 @@ new framework dependencies.
    primitives, including poll, input-required, cancellation, expiry, and
    reconnect behavior.
 3. Expand the editor interop adapter toward ACP capability/implementation
-   negotiation and per-request cancellation.
+   negotiation and per-request cancellation. **Implemented:** bounded peer
+   metadata decoding and explicit client/server capability intersection are
+   now returned during editor initialization; elicitation remains deferred.
 4. Specify a capability-scoped A2A/remote-agent adapter with artifact receipts
    and explicit identity/delegation boundaries.
 5. Keep Temporal and ACP elicitation as opt-in host adapters, gated by a real
@@ -75,9 +92,10 @@ new framework dependencies.
 Implementation status on this branch: all six priority items have bounded
 application contracts, tests, and evidence records. The remaining research
 items are integration candidates rather than missing core abstractions: ACP
-or external editor adapters, distributed agent identity, browser execution,
-and default live control-plane provider composition each require a concrete
-host boundary and operational receipts before they should be promoted.
+elicitation or external editor adapters, distributed agent identity, browser
+execution, and default live control-plane provider composition each require a
+concrete host boundary and operational receipts before they should be
+promoted.
 
 ## Sources
 
@@ -109,3 +127,10 @@ host boundary and operational receipts before they should be promoted.
 - Agent Client Protocol cancellation proposal: <https://agentclientprotocol.com/rfds/request-cancellation>
 - Google agents-cli templates and A2A: <https://google.github.io/agents-cli/guide/templates/>
 - Google agents-cli CLI/session behavior: <https://google.github.io/agents-cli/cli/>
+- Dapr durable workflows and AI agents: <https://docs.dapr.io/>
+- Dapr workflow features, versioning, payload limits, and history signing: <https://docs.dapr.io/developing-applications/building-blocks/workflow/>
+- Mastra agents: <https://github.com/mastra-ai/mastra/blob/main/docs/src/content/en/docs/agents/overview.mdx>
+- Mastra workflows: <https://mastra.ai/ai-workflows>
+- Semantic Kernel agent orchestration: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-orchestration/>
+- Semantic Kernel agent architecture: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-architecture>
+- LlamaIndex workflows and agents: <https://docs.llamaindex.ai/en/stable/module_guides/workflow/>

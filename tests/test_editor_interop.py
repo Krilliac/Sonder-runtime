@@ -37,6 +37,9 @@ def test_acp_peer_metadata_is_bounded_and_cancellation_is_versioned():
     assert envelope.payload["request_id"] == envelope_id
     with pytest.raises(EditorInteropError):
         ImplementationInfo("sonder", "1", frozenset({"bad capability"}))
+    restored = ImplementationInfo.from_dict(info.to_dict())
+    assert info.negotiate(restored) == frozenset({"cancel", "diffs"})
+    assert info.negotiate(ImplementationInfo("peer", "1", frozenset({"cancel"}))) == frozenset({"cancel"})
 
 
 def test_rule_documents_import_and_export_are_bounded_and_digest_bound(tmp_path):

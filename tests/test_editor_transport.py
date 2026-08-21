@@ -20,7 +20,9 @@ def _frame(message_type, payload):
 
 def test_editor_stdio_transport_initializes_correlates_and_dispatches():
     incoming = io.StringIO(
-        _frame("session/initialize", {"implementation": {"name": "client", "version": "1"}})
+        _frame("session/initialize", {"implementation": {
+            "name": "client", "version": "1", "capabilities": ["cancel", "diffs"]
+        }})
         + _frame("rules/import", {"paths": ["AGENTS.md"]})
     )
     outgoing = io.StringIO()
@@ -35,6 +37,9 @@ def test_editor_stdio_transport_initializes_correlates_and_dispatches():
     responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
     assert responses[0]["message_type"] == "session/initialized"
     assert responses[0]["payload"]["request_id"]
+    assert responses[0]["payload"]["capabilities"] == ["cancel"]
+    assert transport.client_implementation.name == "client"
+    assert transport.negotiated_capabilities == frozenset({"cancel"})
     assert responses[1]["message_type"] == "rules/import/result"
     assert responses[1]["payload"]["accepted"] == ["AGENTS.md"]
 
@@ -86,3 +91,16 @@ def test_editor_stdio_transport_does_not_expose_handler_exception_details():
     )
     transport.serve()
     assert "secret detail" not in transport._output.getvalue()
+
+
+def test_editor_stdio_transport_rejects_malformed_capability_metadata():
+    transport = EditorStdioTransport(
+        io.StringIO(_frame("session/initialize", {
+            "implementation": {"name": "client", "version": "1", "capabilities": ["bad capability"]}
+        })),
+        io.StringIO(),
+        server=ImplementationInfo("sonder", "1", frozenset({"cancel"})),
+    )
+    transport.serve()
+    assert not transport.initialized
+    assert "invalid client implementation metadata" in transport._output.getvalue()
