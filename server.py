@@ -278,7 +278,7 @@ import sonder_runtime.adapters.evaluation_history_store as eval_history
 import artifact_risk as artifact_risk_module
 import artifact_fetch as artifact_fetch_module
 import process_risk as process_risk_module
-import unsafe_lab
+from sonder_runtime.adapters.security import unsafe_lab
 
 
 def _running_source_commit_at_import():
