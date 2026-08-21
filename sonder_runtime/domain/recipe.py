@@ -49,6 +49,20 @@ class RecipeStep:
             "subrecipe": self.subrecipe,
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "RecipeStep":
+        if not isinstance(value, Mapping):
+            raise RecipeError("recipe step must be an object")
+        try:
+            step_id = value["step_id"]
+            instruction = value["instruction"]
+            subrecipe = value.get("subrecipe")
+        except KeyError as exc:
+            raise RecipeError(f"recipe step is missing {exc.args[0]}") from exc
+        if subrecipe is not None and not isinstance(subrecipe, str):
+            raise RecipeError("subrecipe must be a string or null")
+        return cls(step_id, instruction, subrecipe)
+
 
 @dataclass(frozen=True, slots=True)
 class RecipeManifest:
@@ -93,6 +107,37 @@ class RecipeManifest:
             "parameters": dict(sorted(self.parameters.items())),
             "steps": [step.to_dict() for step in self.steps],
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "RecipeManifest":
+        """Rehydrate a bounded manifest received from a trusted transport boundary."""
+        if not isinstance(value, Mapping):
+            raise RecipeError("recipe manifest must be an object")
+        if value.get("schema") != "sonder.recipe.v1":
+            raise RecipeError("unsupported recipe schema")
+        required = ("name", "version", "description", "instructions")
+        missing = [field for field in required if field not in value]
+        if missing:
+            raise RecipeError(f"recipe manifest is missing {missing[0]}")
+        extensions = value.get("extensions", ())
+        parameters = value.get("parameters", {})
+        steps = value.get("steps", ())
+        if not isinstance(extensions, (list, tuple)):
+            raise RecipeError("extensions must be an array")
+        if not isinstance(parameters, Mapping):
+            raise RecipeError("parameters must be an object")
+        if not isinstance(steps, (list, tuple)):
+            raise RecipeError("steps must be an array")
+        if not all(isinstance(item, str) for item in extensions):
+            raise RecipeError("extensions must contain strings")
+        if not all(isinstance(key, str) and isinstance(item, str) for key, item in parameters.items()):
+            raise RecipeError("parameters must map strings to strings")
+        return cls(
+            value["name"], value["version"], value["description"], value["instructions"],
+            extensions=tuple(extensions),
+            parameters=dict(parameters),
+            steps=tuple(RecipeStep.from_dict(item) for item in steps),
+        )
 
     def digest(self) -> str:
         encoded = json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

@@ -18,6 +18,8 @@ Source: <https://block.github.io/goose/index.html>
 
 - bounded descriptions, instructions, extensions, parameters, and steps;
 - deterministic JSON-safe serialization and SHA-256 identity;
+- strict `from_dict` rehydration at transport boundaries, including schema,
+  collection, and nested-step validation;
 - optional subrecipe references;
 - missing-node and cycle validation before execution.
 
