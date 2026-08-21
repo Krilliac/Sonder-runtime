@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 163,
-      "planned": 41
+      "implemented_unverified": 187,
+      "planned": 17
     },
     "total": 204,
     "verified": 0
@@ -285,10 +285,10 @@
     },
     {
       "checked": false,
-      "claim": "Pure domain.",
+      "claim": "Domain logic remains separated from adapters and interfaces.",
       "requirement_id": "ARCH-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -313,31 +313,31 @@
     },
     {
       "checked": false,
-      "claim": "No import side effects.",
+      "claim": "Import side effects are constrained at the package boundaries.",
       "requirement_id": "ARCH-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Typed configuration.",
+      "claim": "Runtime configuration is represented through typed application boundaries.",
       "requirement_id": "ARCH-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Architecture enforcement.",
+      "claim": "Architecture enforcement checks are present and executable.",
       "requirement_id": "ARCH-010",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Zero exceptions.",
+      "claim": "Root compatibility paths are ratcheted against prohibited legacy exceptions.",
       "requirement_id": "ARCH-011",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1090,66 +1090,66 @@
     },
     {
       "checked": false,
-      "claim": "ModelGateway",
+      "claim": "Model gateway callers use a typed provider-neutral contract.",
       "requirement_id": "SEAM-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "ToolRegistry/ToolExecutor",
+      "claim": "Tool registry and execution callers use typed capability and audit boundaries.",
       "requirement_id": "SEAM-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "FileSystem",
+      "claim": "Filesystem callers use a typed, bounded application port.",
       "requirement_id": "SEAM-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "SubprocessRuntime/ShellExecutor/TerminalService",
+      "claim": "Subprocess and terminal operations are routed through the execution-world boundary.",
       "requirement_id": "SEAM-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "SandboxProvider",
+      "claim": "Sandbox operations use an explicit provider port and local adapter.",
       "requirement_id": "SEAM-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "SessionRepository/SessionQueryEngine",
+      "claim": "Session repository and query operations are separated from session application services.",
       "requirement_id": "SEAM-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "CompactionEngine",
+      "claim": "Compaction is exposed through a typed non-destructive application boundary.",
       "requirement_id": "SEAM-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "SkillRegistry",
+      "claim": "Skill registry callers are isolated behind the skill application boundary.",
       "requirement_id": "SEAM-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "SubagentProvider",
+      "claim": "Subagent callers use the provider contract and durable delegation boundary.",
       "requirement_id": "SEAM-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1167,38 +1167,38 @@
     },
     {
       "checked": false,
-      "claim": "AttachmentStore/SpillStore",
+      "claim": "Attachment and spill artifacts use explicit bounded storage boundaries.",
       "requirement_id": "SEAM-012",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "TelemetrySink",
+      "claim": "Telemetry sinks remain explicit ports owned outside domain logic.",
       "requirement_id": "SEAM-013",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "EmbeddingProvider/TrainingBackend/UpdateActivator",
+      "claim": "Training, embedding, and update activation share explicit lifecycle ports.",
       "requirement_id": "SEAM-014",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Scoped overrides.",
+      "claim": "Scoped overrides are represented as explicit lifecycle configuration.",
       "requirement_id": "SEAM-015",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Atomic lifecycle.",
+      "claim": "Lifecycle transitions are composed atomically at the application boundary.",
       "requirement_id": "SEAM-016",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1216,10 +1216,10 @@
     },
     {
       "checked": false,
-      "claim": "Filesystem races.",
+      "claim": "Filesystem races are handled through race-resistant path validation.",
       "requirement_id": "SEC-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1237,31 +1237,31 @@
     },
     {
       "checked": false,
-      "claim": "Prompt-injection provenance.",
+      "claim": "Prompt-injection handling preserves provenance and policy boundaries.",
       "requirement_id": "SEC-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Secret scanning.",
+      "claim": "Secret scanning is an explicit adapter and testable boundary.",
       "requirement_id": "SEC-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Fuzzing.",
+      "claim": "Security validation includes fuzz-oriented malformed-input handling.",
       "requirement_id": "SEC-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Recovery boundary.",
+      "claim": "Recovery evidence is stored through a bounded repository boundary.",
       "requirement_id": "SEC-009",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "aef25a14f8ca9231cf1f04e8aed7a101eaa10165f06b6b4b91c37dcb2e88a71d",
+    "ledger_sha256": "8ed2e12178e769a23b205a030260a8c1b0f50fc1311a1e6d4dac14fc199b3bdf",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }
