@@ -24,6 +24,8 @@ python -m pytest tests/test_control_plane_snapshot.py -q
 python -m pytest tests/test_control_plane_service.py -q
 ```
 
-These prove the application-level snapshot contract and provider-backed live
-assembly. A deployed HTTP/MCP operator route and live provider wiring remain
-separate integration obligations.
+These prove the application-level snapshot contract, provider-backed live
+assembly, and the production HTTP handler with explicit service injection.
+The default application graph still leaves the service unset unless its
+composition root supplies all providers; the handler then returns a bounded
+503 rather than inventing a partial operator view.

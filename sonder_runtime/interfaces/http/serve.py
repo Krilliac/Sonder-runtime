@@ -58,6 +58,7 @@ from sonder_runtime.adapters.persistence import served_action_receipts
 from . import authority_contract as tool_contract
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
+from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http.facades.model_request import (
@@ -99,6 +100,13 @@ def configure_session_facade(facade):
     return facade
 
 
+def configure_control_plane_service(service):
+    """Inject the composed read-only operator snapshot service."""
+    global _CONTROL_PLANE_SERVICE
+    _CONTROL_PLANE_SERVICE = service
+    return service
+
+
 def _legacy_runtime():
     runtime = _LEGACY_RUNTIME
     if runtime is None:
@@ -134,8 +142,10 @@ DEFAULT_PORT = 11435
 CONFIGURED_PORT = DEFAULT_PORT
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
+_CONTROL_PLANE_FACADE = ControlPlaneFacade()
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
 _SESSION_FACADE = None
+_CONTROL_PLANE_SERVICE = None
 
 
 class _LiveSessionCaptureFailure(RuntimeError):
@@ -3923,6 +3933,34 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json_payload(payload)
             return
+        if _CONTROL_PLANE_FACADE.route(path) is not None:
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            route = _CONTROL_PLANE_FACADE.route(path)
+            if _CONTROL_PLANE_SERVICE is None:
+                self._send_json_payload(
+                    {"error": "control_plane_unavailable"}, status=503
+                )
+                return
+            status, payload = route.render(
+                _CONTROL_PLANE_SERVICE,
+                captured_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            )
+            self._send_json_payload(payload, status=status)
+            return
         if path == "/v1/sonder/status":
             context = self._request_auth_context()
             if not context["authorized"]:
@@ -5345,6 +5383,10 @@ def main(config=None):
         from sonder_runtime.application.session.http_facade import HttpSessionFacade
 
         configure_session_facade(default_app().session_http_facade())
+    if _CONTROL_PLANE_SERVICE is None:
+        from sonder_runtime.bootstrap.app import default_app
+
+        configure_control_plane_service(default_app().control_plane_snapshot_service)
     port = DEFAULT_PORT if config is None else CONFIGURED_PORT
     if len(sys.argv) > 1:
         try:

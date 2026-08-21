@@ -97,6 +97,7 @@ from ..application.ports.tool_executor import ToolExecutor
 from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
 from ..application.context_integration import ContextPlanningFacade
+from ..application.control_plane import ControlPlaneSnapshotService
 from ..platform.config import SonderConfig
 from ..platform import paths as runtime_paths
 from ..adapters.inference import ollama_endpoint
@@ -146,6 +147,7 @@ class Application:
     extension_facade: Callable[[], ExtensionApplicationFacade] | None = None
     selfmod_service: Callable[[], GuardedLegacySelfmodService] | None = None
     context_planning: ContextPlanningFacade | None = None
+    control_plane_snapshot_service: ControlPlaneSnapshotService | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -176,6 +178,7 @@ def build_application(
     training_backend=None,
     update_activator=None,
     extension_provenance: ProvenanceInventory | None = None,
+    control_plane_snapshot_service: ControlPlaneSnapshotService | None = None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -516,6 +519,7 @@ def build_application(
         extension_facade=get_extension_facade,
         selfmod_service=get_selfmod_service,
         context_planning=context_planning,
+        control_plane_snapshot_service=control_plane_snapshot_service,
     )
 
 
