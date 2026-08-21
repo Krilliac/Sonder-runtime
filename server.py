@@ -8801,7 +8801,9 @@ def admin_status(token: str = "") -> str:
         "  accounts: %d" % count,
         "  auth mode: %s" % ("api-key" if os.environ.get("SONDER_API_KEY") else "local-open"),
         "  require account: %s" % os.environ.get("SONDER_REQUIRE_ACCOUNT", "0"),
-        "  hosted/cloud allowed: %s" % ("yes" if cloud_allowed() else "no"),
+        "  hosted/cloud allowed: %s" % (
+            "yes" if _cloud_allowed_policy(os.environ) else "no"
+        ),
         "  logged in: %s" % (_format_account(account) if account else "no"),
         "  safeguards: role gates, bans, session tokens, per-tier rate limits, bounded execution",
     ]
@@ -24037,7 +24039,7 @@ def _ensemble_targets(tiers: str = ""):
             # not swallowed: the caller should see why the tier is absent.
             if not explicit:
                 continue
-            if not cloud_allowed():
+            if not _cloud_allowed_policy(os.environ):
                 unknown.append("%s (cloud disabled; set SONDER_ALLOW_CLOUD=1)" % tier)
                 continue
         model, _cloud, _augment, label = _serve_target(tier, False)
