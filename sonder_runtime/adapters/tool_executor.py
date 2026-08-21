@@ -61,6 +61,15 @@ class ToolExecutorAdapter:
                     output=json.dumps(res, sort_keys=True),
                     evidence=res,
                 )
+            if call.tool == "artifact_risk_inspect":
+                import sonder_runtime.adapters.artifact_risk as artifact_risk
+
+                res = artifact_risk.inspect_artifact(**args)
+                return ToolResult(
+                    ok=True,
+                    output=artifact_risk.format_result(res),
+                    evidence=res,
+                )
             if call.tool in {"file_copy", "file_move"}:
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 

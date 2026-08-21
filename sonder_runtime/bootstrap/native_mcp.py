@@ -180,6 +180,13 @@ _INSPECTION_TOOLS = (
          "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
+        "artifact_risk_inspect", "Statically inspect a guarded artifact for risk",
+        {"type": "object", "properties": {
+            "path": _PATH, "max_scan_bytes": _INT,
+            "max_seconds": {"type": "number"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "data_inspect", "Inspect a bounded data file",
         {"type": "object", "properties": {"path": _PATH},
          "required": ["path"], "additionalProperties": False},

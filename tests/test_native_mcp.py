@@ -34,7 +34,7 @@ class _Inspections:
 
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
-        "archive_list", "data_inspect", "data_query", "dependency_inventory",
+        "archive_list", "artifact_risk_inspect", "data_inspect", "data_query", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file",
         "file_batch_write", "file_copy", "file_delete", "file_digest", "file_find",
         "file_move", "file_read", "file_read_range", "file_write", "image_inspect",

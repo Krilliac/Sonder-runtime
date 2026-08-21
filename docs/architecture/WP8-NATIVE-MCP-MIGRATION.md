@@ -35,6 +35,11 @@ executor, retaining the exact opt-in gate and content-free aggregate risk
 reporting. These tools remain read-only and do not expose command lines,
 memory bytes, module paths, or virtual addresses.
 
+The static artifact-risk and PDF-risk implementations are now package-owned
+under `sonder_runtime/adapters/`. Native MCP exposes `artifact_risk_inspect`
+through the typed executor, preserving bounded scanning, PDF active-content
+checks, and the domain risk-policy contract without importing the root modules.
+
 The native catalog also includes four guarded mutation tools: `file_copy`,
 `file_move`, `file_batch_write`, and `file_delete`. These use the packaged
 transfer, transactional batch, and explicit-delete-confirmation adapters;
@@ -50,7 +55,7 @@ legacy server surface.
 The historical server MCP catalog remains the default compatibility path until
 catalog parity and complete application-service coverage are proven. The
 legacy catalog currently contains 204 registered tools; the native catalog
-therefore covers 34 names and does not claim full parity, API-003, or TOOL-001
+therefore covers 35 names and does not claim full parity, API-003, or TOOL-001
 completion.
 
 ## Evidence

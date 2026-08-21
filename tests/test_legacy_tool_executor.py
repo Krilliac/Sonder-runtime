@@ -150,6 +150,16 @@ def test_process_inventory_preserves_explicit_opt_in_boundary(executor, monkeypa
     assert result.evidence["status"] == "opt_in_required"
 
 
+def test_artifact_risk_uses_packaged_static_inspector(executor, tmp_path):
+    artifact = tmp_path / "sample.txt"
+    artifact.write_text("ordinary local text\n", encoding="utf-8")
+    result = executor.execute(
+        ToolCall("artifact_risk_inspect", {"path": "sample.txt"}), _ctx()
+    )
+    assert result.ok
+    assert result.evidence["kind"] == "binary"
+
+
 def test_guard_rejection_surfaces_as_not_ok(executor):
     # Escaping the workspace root must fail closed as ok=False, not raise.
     result = executor.execute(
