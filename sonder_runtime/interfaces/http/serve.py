@@ -42,7 +42,7 @@ from sonder_runtime.adapters.command_completion import (
     COMPLETE_MAX_LIMIT,
     completion_limit as _completion_limit,
 )
-import command_catalog
+from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 import grounding
 import code_runner
