@@ -1391,7 +1391,7 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
         server, "_serve_target",
         lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
 
     def fake_make_generate(*_args, **kwargs):
@@ -1422,7 +1422,7 @@ def test_structured_exact_cloud_model_does_not_substitute_on_billing_error(monke
         server, "_serve_target",
         lambda *_args, **_kwargs: ("kimi-k3:cloud", True, False, "model:kimi-k3:cloud"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
 
     def fake_make_generate(*_args, **kwargs):
@@ -1441,7 +1441,7 @@ def test_structured_answer_maps_deep_model_json_to_protocol_error(monkeypatch):
         server, "_serve_target",
         lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
     monkeypatch.setattr(
         server, "_make_generate",
@@ -1474,7 +1474,7 @@ def test_structured_answer_rejects_oversized_unique_array_before_pairwise_compar
         server, "_serve_target",
         lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
     monkeypatch.setattr(
         server, "_make_generate",
