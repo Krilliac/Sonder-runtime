@@ -21,6 +21,39 @@ _LEGACY_DB_MIGRATION_POLL_SECONDS = 0.02
 _LEGACY_DB_MIGRATION_STALE_LOCK_SECONDS = 30.0
 _LEGACY_DB_MIGRATION_LOCK_RELEASE_SECONDS = 5.0
 _LEGACY_DB_MIGRATION_THREAD_LOCK = threading.Lock()
+_HOME_OVERRIDE_LOCK = threading.RLock()
+_HOME_OVERRIDE: Path | None = None
+
+
+def configure_home(home: str | os.PathLike[str] | Path) -> None:
+    """Set the process-local state home used by subsequent path lookups.
+
+    The override is intentionally kept in memory rather than exported to the
+    process environment.  Invalid input errors are deliberately generic so a
+    sensitive path is never copied into an exception or log message.
+    """
+    if not isinstance(home, (str, os.PathLike)):
+        raise TypeError("home must be a path-like value")
+    raw_home = os.fspath(home)
+    if not isinstance(raw_home, str) or not raw_home.strip():
+        raise ValueError("home must not be empty")
+    configured = Path(raw_home).expanduser()
+    with _HOME_OVERRIDE_LOCK:
+        global _HOME_OVERRIDE
+        _HOME_OVERRIDE = configured
+
+
+def reset_home() -> None:
+    """Clear the process-local home override and restore environment lookup."""
+    with _HOME_OVERRIDE_LOCK:
+        global _HOME_OVERRIDE
+        _HOME_OVERRIDE = None
+
+
+def _configured_home() -> Path | None:
+    """Return an atomic snapshot of the process-local home override."""
+    with _HOME_OVERRIDE_LOCK:
+        return _HOME_OVERRIDE
 
 
 def windows_system_drive(env=None) -> str:
@@ -107,6 +140,9 @@ def macos_default_home(user_home: Path | None = None) -> Path:
 
 
 def default_home() -> Path:
+    configured = _configured_home()
+    if configured is not None:
+        return configured
     override = os.environ.get("SONDER_HOME", "").strip()
     if override:
         return Path(override).expanduser()
@@ -136,6 +172,10 @@ def ensure_home() -> Path:
 
 
 def state_path(name: str, env_var: str = "") -> str:
+    configured = _configured_home()
+    if configured is not None:
+        configured.mkdir(parents=True, exist_ok=True)
+        return str(configured / name)
     if env_var:
         override = os.environ.get(env_var, "").strip()
         if override:
