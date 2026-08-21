@@ -597,6 +597,22 @@ def build_application(
             for provider in provider_registry.providers()
         ))
 
+    def training_section():
+        reports = tuple(
+            provider.provider.health()
+            for provider in provider_registry.providers()
+            if "training" in provider.provider_id.casefold()
+        )
+        if not reports:
+            return unavailable_section("training")()
+        return tuple({
+            "available": True,
+            "provider_id": report.provider_id,
+            "status": report.status.value,
+            "detail": report.detail,
+            "checked_at": report.checked_at,
+        } for report in reports)
+
     def extension_section():
         return tuple({
             "extension_id": record.extension_id,
@@ -618,7 +634,7 @@ def build_application(
         "context": context_section,
         "memory_explanations": unavailable_section("memory_explanations"),
         "extensions": extension_section,
-        "training": unavailable_section("training"),
+        "training": training_section,
         "selfmod": selfmod_section,
         "updates": update_section,
         "health": provider_section,
