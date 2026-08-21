@@ -14,7 +14,29 @@ from ....application.extensions.facade import (
     ExtensionApplicationFacade,
     ExtensionAuthority,
     ExtensionAuthorityDenied,
+    build_extension_manifest,
 )
+from ....application.extensions.registry import ExtensionRegistryError
+
+
+def _manifest_payload(value: object):
+    if not isinstance(value, dict):
+        raise TypeError("manifest must be an object")
+    required = {"extension_id", "version", "protocol"}
+    if set(value) - required - {"dependencies", "permissions"} or not required.issubset(value):
+        raise ValueError("manifest requires extension_id, version, and protocol")
+    extension_id, version, protocol = value["extension_id"], value["version"], value["protocol"]
+    if not all(isinstance(item, str) for item in (extension_id, version, protocol)) or extension_id.count(".") != 1:
+        raise TypeError("manifest identity, version, and protocol must be bounded text")
+    publisher, name = extension_id.split(".")
+    dependencies = value.get("dependencies", [])
+    permissions = value.get("permissions", [])
+    if not isinstance(dependencies, list) or not isinstance(permissions, list):
+        raise TypeError("manifest dependencies and permissions must be arrays")
+    return build_extension_manifest(
+        extension_id, version, protocol,
+        dependencies=dependencies, permissions=permissions,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +125,7 @@ def _error(error: Exception) -> ExtensionHttpResult:
         return ExtensionHttpResult({"error": {"message": str(error), "type": "startup_denied"}}, 403)
     if isinstance(error, ExperimentInvalidTransition):
         return ExtensionHttpResult({"error": {"message": str(error), "type": "conflict"}}, 409)
-    if isinstance(error, (ExperimentInvalidDefinition, ExperimentError, ValueError, TypeError)):
+    if isinstance(error, (ExperimentInvalidDefinition, ExperimentError, ExtensionRegistryError, ValueError, TypeError)):
         return ExtensionHttpResult({"error": {"message": str(error), "type": "invalid_request"}}, 400)
     return ExtensionHttpResult({"error": {"message": "extension operation failed", "type": "internal_error"}}, 500)
 
@@ -120,6 +142,36 @@ def dispatch_extension_route(
     if path == "/v1/extensions" and method == "GET":
         try:
             return ExtensionHttpResult(_health(facade.registry_health(authority)))
+        except Exception as error:
+            return _error(error)
+
+    # Registry state changes are explicit, authenticated, and never start a
+    # child.  Scope is carried in the body so project targeting is unambiguous.
+    for action, operation in (("disable", "disable"), ("enable", "enable"), ("repair", "repair")):
+        prefix = f"/v1/extensions/registry/"
+        if method == "POST" and path.startswith(prefix) and path.endswith("/" + action):
+            extension_id = path[len(prefix):-len(action)-1]
+            if not extension_id or "/" in extension_id:
+                return None
+            try:
+                scope = payload.get("scope", "global")
+                project_id = payload.get("project_id")
+                if not isinstance(scope, str) or (project_id is not None and not isinstance(project_id, str)):
+                    raise TypeError("scope must be text and project_id must be text or null")
+                record = getattr(facade, operation)(extension_id, scope=scope, project_id=project_id, authority=authority)
+                return ExtensionHttpResult({"object": f"extension_{action}", "extension": _record(record)})
+            except Exception as error:
+                return _error(error)
+
+    if path == "/v1/extensions/registry/update" and method == "POST":
+        try:
+            scope = payload.get("scope", "global")
+            project_id = payload.get("project_id")
+            if not isinstance(scope, str) or (project_id is not None and not isinstance(project_id, str)):
+                raise TypeError("scope must be text and project_id must be text or null")
+            record = facade.update(_manifest_payload(payload.get("manifest")), scope=scope,
+                                   project_id=project_id, authority=authority)
+            return ExtensionHttpResult({"object": "extension_update", "extension": _record(record)})
         except Exception as error:
             return _error(error)
 

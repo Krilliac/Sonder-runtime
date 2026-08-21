@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 
 from sonder_runtime.adapters.mcp_subprocess import McpProviderTimeout, McpSubprocessProvider
+from sonder_runtime.adapters.mcp_subprocess import McpProviderCancelled
+from sonder_runtime.application.protocol.mcp_compatibility import LegacyMcpContract
+from sonder_runtime.application.jobs.durable_registry import ProcessTreeCleanupReceipt
 from sonder_runtime.bootstrap.subprocess_mcp import (
     McpSubprocessProviderConfig,
     build_mcp_subprocess_exchange,
@@ -185,6 +188,53 @@ def test_production_composition_builds_bounded_subprocess_exchange():
 
     assert exchange.exchange("1234") == ("", "")
     assert [event.state for event in events] == ["started", "exited"]
+
+
+def test_subprocess_composition_carries_explicit_declaration_and_cancellation():
+    declaration = LegacyMcpContract("separate-provider", "1.0", ("tools",))
+    provider = McpSubprocessProvider(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=REPO_ROOT, declaration=declaration, timeout_seconds=5,
+    )
+    checks = iter((False, True))
+    with pytest.raises(McpProviderCancelled, match="cancelled"):
+        provider.run("", cancel_check=lambda: next(checks, True))
+    assert provider.declaration is declaration
+    assert provider.cleanup_receipt is not None
+    assert provider.cleanup_receipt.complete is False
+
+
+def test_subprocess_timeout_preserves_incomplete_cleanup_receipt():
+    class IncompleteCleanup:
+        def cleanup(self, request):
+            return ProcessTreeCleanupReceipt(
+                request.job_id, True, descendants_seen=2,
+                descendants_terminated=1, complete=False,
+                detail="descendant could not be verified",
+            )
+
+    provider = McpSubprocessProvider(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=REPO_ROOT, timeout_seconds=0.2, cleanup=IncompleteCleanup(),
+    )
+    with pytest.raises(McpProviderTimeout):
+        provider.run("")
+    assert provider.cleanup_receipt is not None
+    assert provider.cleanup_receipt.complete is False
+    assert "could not be verified" in provider.cleanup_receipt.detail
+
+
+def test_new_provider_instance_can_restart_after_previous_bounded_timeout():
+    first = McpSubprocessProvider(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=REPO_ROOT, timeout_seconds=0.2,
+    )
+    with pytest.raises(McpProviderTimeout):
+        first.run("")
+    second = McpSubprocessProvider(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], cwd=REPO_ROOT,
+    )
+    assert second.run("") == ("", "")
 
 
 def test_production_composition_rejects_invalid_configuration_before_launch():

@@ -7,10 +7,13 @@ from typing import Callable, Mapping, Sequence
 
 from ..adapters.mcp_subprocess import (
     LifecycleObserver,
+    McpProviderCancelled,
     McpProviderLifecycleEvent,
     McpSubprocessProvider,
 )
 from ..interfaces.mcp.transport import BoundedMcpProviderExchange, McpTransportLimits
+from ..application.protocol.mcp_compatibility import LegacyMcpContract
+from ..application.jobs.durable_registry import ProcessTreeCleanupContract
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,8 @@ class McpSubprocessProviderConfig:
     env: Mapping[str, str] | None = None
     timeout_seconds: float = 30.0
     shutdown_timeout_seconds: float = 2.0
+    declaration: LegacyMcpContract | None = None
+    cleanup: ProcessTreeCleanupContract | None = None
 
     def __post_init__(self) -> None:
         if not self.argv or any(not isinstance(item, str) or not item for item in self.argv):
@@ -60,6 +65,8 @@ def build_mcp_subprocess_exchange(
         "env": config.env,
         "timeout_seconds": config.timeout_seconds,
         "shutdown_timeout_seconds": config.shutdown_timeout_seconds,
+        "declaration": config.declaration,
+        "cleanup": config.cleanup,
         "observer": observer,
     }
     if popen is not None:
@@ -70,6 +77,7 @@ def build_mcp_subprocess_exchange(
 
 __all__ = [
     "McpProviderLifecycleEvent",
+    "McpProviderCancelled",
     "McpSubprocessProviderConfig",
     "build_mcp_subprocess_exchange",
 ]

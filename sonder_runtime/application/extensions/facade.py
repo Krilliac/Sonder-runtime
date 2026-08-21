@@ -17,6 +17,38 @@ from .registry import (
     ExtensionRegistrySnapshot,
     ExtensionRepairDiagnostic,
 )
+from ...domain.extensions.manifest import ExtensionManifest
+from ...domain.extensions.manifest import ExtensionDependency, ExtensionIdentity
+
+
+def build_extension_manifest(
+    extension_id: str,
+    version: str,
+    protocol: str,
+    *,
+    dependencies: Sequence[object] = (),
+    permissions: Sequence[str] = (),
+) -> ExtensionManifest:
+    """Build a validated manifest for interface callers without domain imports."""
+    if not all(isinstance(value, str) and value.strip() for value in (extension_id, version, protocol)):
+        raise TypeError("extension identity, version, and protocol must be non-empty text")
+    if extension_id.count(".") != 1:
+        raise ValueError("extension identity must be publisher.name")
+    publisher, name = extension_id.split(".")
+    parsed_dependencies = []
+    for item in dependencies:
+        if isinstance(item, str):
+            parsed_dependencies.append(ExtensionDependency(item, "*"))
+        elif isinstance(item, Mapping) and isinstance(item.get("name"), str):
+            parsed_dependencies.append(ExtensionDependency(item["name"], str(item.get("version", "*"))))
+        else:
+            raise TypeError("extension dependencies must be names or objects")
+    if any(not isinstance(item, str) or not item for item in permissions):
+        raise TypeError("extension permissions must be non-empty text")
+    return ExtensionManifest(
+        ExtensionIdentity(name, publisher), version, protocol,
+        tuple(parsed_dependencies), tuple(permissions),
+    )
 
 
 class ExtensionFacadeError(RuntimeError):
@@ -75,8 +107,26 @@ class ExtensionApplicationFacade:
     def registry_health(self, authority: ExtensionAuthority) -> ExtensionRegistryHealth:
         authority.require("registry_health")
         return ExtensionRegistryHealth(
-            self._registry.snapshot(), self._registry.repair_diagnostics()
+            self._registry.snapshot(), self._registry.repair_diagnostics(),
+            "durable" if self._registry.durable else "in-memory-only",
         )
+
+    def disable(self, extension_id: str, *, scope: str, project_id: str | None, authority: ExtensionAuthority):
+        authority.require("disable")
+        return self._registry.disable(extension_id, scope=scope, project_id=project_id)
+
+    def enable(self, extension_id: str, *, scope: str, project_id: str | None, authority: ExtensionAuthority):
+        authority.require("enable")
+        return self._registry.enable(extension_id, scope=scope, project_id=project_id)
+
+    def repair(self, extension_id: str, *, scope: str, project_id: str | None, authority: ExtensionAuthority):
+        authority.require("repair")
+        return self._registry.evaluate_health(extension_id, scope=scope, project_id=project_id)
+
+    def update(self, manifest: ExtensionManifest, *, scope: str, project_id: str | None,
+               authority: ExtensionAuthority):
+        authority.require("update")
+        return self._registry.update(manifest, scope=scope, project_id=project_id)
 
     def inspect(self, experiment_id: str, authority: ExtensionAuthority) -> ExperimentSnapshot:
         authority.require("inspect")
@@ -115,6 +165,7 @@ class ExtensionApplicationFacade:
 
 
 __all__ = [
+    "build_extension_manifest",
     "ExtensionApplicationFacade",
     "ExtensionAuthority",
     "ExtensionAuthorityDenied",

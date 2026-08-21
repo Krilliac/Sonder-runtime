@@ -135,6 +135,7 @@ class ExtensionRegistry:
         quarantine: QuarantineRegistry | None = None,
         provenance: ProvenanceInventory | None = None,
         admission: ExtensionProvenanceAdmission | None = None,
+        repository: object | None = None,
         max_records: int = 256,
     ) -> None:
         if max_records < 1 or max_records > 4096:
@@ -146,7 +147,20 @@ class ExtensionRegistry:
             ExtensionProvenanceAdmission(provenance, self._quarantine) if provenance is not None else None
         )
         self._max_records = max_records
+        self._repository = repository
         self._records: dict[tuple[str, str, str], ExtensionInstallRecord] = {}
+        if repository is not None:
+            loader = getattr(repository, "load", None)
+            if not callable(loader):
+                raise TypeError("repository must provide load and save")
+            loaded = tuple(loader())
+            if len(loaded) > max_records:
+                raise ExtensionRegistryError("persisted extension state exceeds capacity")
+            for record in loaded:
+                if not isinstance(record, ExtensionInstallRecord):
+                    raise ExtensionRegistryError("persisted extension state is invalid")
+                self._records[record.key] = record
+                self._quarantine.restore_crash_count(record.extension_id, record.crash_count)
 
     def install(
         self,
@@ -180,6 +194,7 @@ class ExtensionRegistry:
             crash_count=self._records[key].crash_count if key in self._records else 0,
         )
         self._records[key] = record
+        self._persist()
         return record
 
     def update(self, manifest: ExtensionManifest, **kwargs: object) -> ExtensionInstallRecord:
@@ -188,6 +203,10 @@ class ExtensionRegistry:
         return self.install(manifest, **kwargs)  # type: ignore[arg-type]
 
     replace = update
+
+    @property
+    def durable(self) -> bool:
+        return self._repository is not None
 
     def evaluate_health(
         self,
@@ -214,6 +233,7 @@ class ExtensionRegistry:
             crash_count=record.crash_count,
         )
         self._records[record.key] = updated
+        self._persist()
         return updated
 
     def record_crash(
@@ -230,6 +250,7 @@ class ExtensionRegistry:
             self._quarantine.crash_count(record.extension_id),
         )
         self._records[record.key] = updated
+        self._persist()
         return updated
 
     def disable(self, extension_id: str, *, scope: ExtensionScope | str, project_id: str | None = None) -> ExtensionInstallRecord:
@@ -243,6 +264,7 @@ class ExtensionRegistry:
 
     def remove(self, extension_id: str, *, scope: ExtensionScope | str, project_id: str | None = None) -> None:
         del self._records[self._key(extension_id, scope, project_id)]
+        self._persist()
 
     def get(self, extension_id: str, *, scope: ExtensionScope | str, project_id: str | None = None) -> ExtensionInstallRecord:
         return self._get(extension_id, scope, project_id)
@@ -315,6 +337,13 @@ class ExtensionRegistry:
             return self._records[key]
         except KeyError as error:
             raise ExtensionNotFoundError(f"extension is not installed: {extension_id}") from error
+
+    def _persist(self) -> None:
+        if self._repository is not None:
+            saver = getattr(self._repository, "save", None)
+            if not callable(saver):
+                raise TypeError("repository must provide load and save")
+            saver(self.snapshot().records)
 
     @staticmethod
     def _key(extension_id: str, scope: ExtensionScope | str, project_id: str | None) -> tuple[str, str, str]:
