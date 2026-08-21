@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 147,
+      "file_count": 146,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -176,7 +176,6 @@
         "sonder_runtime/adapters/security/__init__.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
         "sonder_runtime/adapters/storage.py",
-        "sonder_runtime/adapters/strangler_services.py",
         "sonder_runtime/adapters/system_clock.py",
         "sonder_runtime/adapters/task_events.py",
         "sonder_runtime/adapters/task_formatting.py",
