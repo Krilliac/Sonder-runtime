@@ -268,7 +268,7 @@ import consult as consult_flow
 import code_improve
 import tier_router
 import project_scaffold
-import environment_probe
+from sonder_runtime.platform import environment_probe
 import toolchain_status as toolchain_status_module
 import sonder_hardware
 import sonder_logging

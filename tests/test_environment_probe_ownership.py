@@ -1,6 +1,14 @@
 """The host-environment probe has one canonical platform owner."""
 import importlib
 
+import server
+
+
+def test_server_uses_canonical_platform_environment_probe():
+    packaged = importlib.import_module("sonder_runtime.platform.environment_probe")
+
+    assert server.environment_probe is packaged
+
 
 def test_root_compatibility_import_is_the_platform_implementation():
     legacy = importlib.import_module("environment_probe")
