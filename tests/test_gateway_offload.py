@@ -7,6 +7,24 @@ import pytest
 
 from sonder_runtime.adapters import model_transport
 import server
+
+
+def test_gateway_context_uses_packaged_cloud_policy_directly():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    function = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_gateway_generate_text"
+    )
+    assert not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "cloud_allowed"
+        for node in ast.walk(function)
+    )
 from sonder_runtime.application.chat.handle_chat import ChatResult
 from sonder_runtime.domain.common.errors import (
     DeadlineExceeded,
@@ -58,11 +76,11 @@ def test_offload_returns_gateway_text(monkeypatch):
 def test_consent_gate_is_carried_from_runtime(monkeypatch):
     fake = _FakeChat(ChatResult("x", "m", "fast"))
     _install_chat(monkeypatch, fake)
-    monkeypatch.setattr(server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: False)
     server._gateway_generate_text("p", tier="fast")
     assert fake.calls[0][1].cloud_allowed is False
     fake.calls.clear()
-    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: True)
     server._gateway_generate_text("p", tier="fast")
     assert fake.calls[0][1].cloud_allowed is True
 

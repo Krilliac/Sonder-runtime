@@ -1441,7 +1441,7 @@ def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
     context = local_owner_context(
         correlation_id="offload-%s" % os.urandom(4).hex(),
         source="system",
-        cloud_allowed=cloud_allowed(),
+        cloud_allowed=_cloud_allowed_policy(os.environ),
         remote_ollama_allowed=not ollama_endpoint.is_loopback(BASE),
         timeout_seconds=float(timeout) if timeout else None,
     )
