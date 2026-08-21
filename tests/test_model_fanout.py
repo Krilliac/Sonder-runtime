@@ -48,6 +48,28 @@ def test_fanout_reporting_endpoints_do_not_call_root_model_error_wrapper():
             for node in ast.walk(function)
         )
 
+
+def test_fanout_cloud_admission_and_dispatch_use_packaged_policy():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"_fanout_plan", "_fanout_start", "_execute_fanout_run"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "cloud_allowed"
+            for node in ast.walk(function)
+        )
+
 import server
 import sonder_runtime.interfaces.http.serve as sonder_serve
 
