@@ -1,0 +1,167 @@
+"""Provider-neutral tool graph and production-boundary composition."""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from ...domain.common.errors import Forbidden
+from ..ports.tool_execution import ToolExecutionResult, ToolExecutor
+from ..ports.tool_registry import ToolRegistry
+from .gateway_contract import (
+    ApprovalGate,
+    OutputRedactor,
+    PermissionEvaluator,
+    ReceiptSink,
+    ToolGateway,
+    ToolGatewayRequest,
+    ToolInvocationOutput,
+    ToolPermission,
+    ToolScope,
+    ToolReceipt,
+    RedactedOutput,
+)
+from .generated_catalogs import CatalogBundle, GeneratedCatalogs
+from .resource_policy import ResourcePolicy, ResourceRequest
+
+
+class ResourcePolicyEvaluator:
+    """Adapt the rich resource policy to the gateway's narrow permission port."""
+
+    def __init__(self, policy: ResourcePolicy) -> None:
+        self.policy = policy
+
+    def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> None:
+        result = self.policy.evaluate(ResourceRequest(
+            request_id=f"policy:{tool_name}",
+            tool=tool_name,
+            workspace=scope.workspace_roots[0] if scope.workspace_roots else "",
+            side_effect_class=next(iter(permission.effects), ""),
+        ))
+        if not result.allowed:
+            raise Forbidden(f"tool policy denied {tool_name!r}: {result.receipt.reason}")
+        if result.approval_required and permission.approval.value == "not_required":
+            raise Forbidden(f"tool policy requires approval for {tool_name!r}")
+
+
+class DenyApprovalGate:
+    """Safe default for a graph with no interactive approval authority."""
+
+    def approve(self, request: ToolGatewayRequest) -> bool:
+        del request
+        return False
+
+
+class IdentityRedactor:
+    """Explicitly records that no redaction authority was configured."""
+
+    def redact(self, tool_name: str, output: Any) -> Any:
+        del tool_name
+        return RedactedOutput(output, applied=False)
+
+
+class ReceiptStore:
+    """Process-local receipt sink; durable audit remains an injected port."""
+
+    def __init__(self) -> None:
+        self._items: list[ToolReceipt] = []
+
+    def record(self, receipt: ToolReceipt) -> None:
+        self._items.append(receipt)
+
+    @property
+    def items(self) -> tuple[ToolReceipt, ...]:
+        return tuple(self._items)
+
+
+class FailClosedToolExecutor:
+    """Runtime default until a real provider adapter is explicitly composed."""
+
+    def execute(self, descriptor, call, context, execution_class) -> ToolExecutionResult:
+        del descriptor, call, context, execution_class
+        return ToolExecutionResult(
+            tool_name="unknown",
+            success=False,
+            error_code="provider_unconfigured",
+            error="tool provider is not configured",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ToolGraph:
+    registry: ToolRegistry
+    policy: ResourcePolicy
+    gateway: ToolGateway
+    catalogs: CatalogBundle
+    receipts: ReceiptStore
+
+
+class ToolApplicationFacade:
+    """One model-facing tool boundary with derived catalogs and receipts."""
+
+    def __init__(self, graph: ToolGraph) -> None:
+        if not isinstance(graph, ToolGraph):
+            raise TypeError("graph must be a ToolGraph")
+        self._graph = graph
+
+    @property
+    def graph(self) -> ToolGraph:
+        return self._graph
+
+    @property
+    def gateway(self) -> ToolGateway:
+        return self._graph.gateway
+
+    @property
+    def catalogs(self) -> CatalogBundle:
+        return self._graph.catalogs
+
+    @property
+    def receipts(self) -> tuple[ToolReceipt, ...]:
+        return self._graph.receipts.items
+
+    def execute(self, request: ToolGatewayRequest) -> ToolReceipt:
+        return self._graph.gateway.execute(request)
+
+    @classmethod
+    def compose(
+        cls,
+        registry: ToolRegistry,
+        executor: ToolExecutor | None = None,
+        *,
+        policy: ResourcePolicy | None = None,
+        approvals: ApprovalGate | None = None,
+        redactor: OutputRedactor | None = None,
+        receipts: ReceiptStore | None = None,
+        commands: tuple[Any, ...] = (),
+    ) -> "ToolApplicationFacade":
+        policy = policy or ResourcePolicy()
+        receipts = receipts or ReceiptStore()
+        gateway = ToolGateway.from_typed_ports(
+            registry,
+            _FailClosedTypedPolicy(),
+            executor or FailClosedToolExecutor(),
+            ResourcePolicyEvaluator(policy),
+            approvals or DenyApprovalGate(),
+            redactor or IdentityRedactor(),
+            receipts,
+        )
+        catalogs = GeneratedCatalogs.generate(registry, commands=commands)
+        return cls(ToolGraph(registry, policy, gateway, catalogs, receipts))
+
+
+class _FailClosedTypedPolicy:
+    """Keep typed execution-class selection conservative at this seam."""
+
+    def authorize(self, descriptor, call, context) -> None:
+        del descriptor, call, context
+
+    def select_execution_class(self, descriptor):
+        return descriptor.execution_class
+
+
+__all__ = [
+    "DenyApprovalGate", "FailClosedToolExecutor", "IdentityRedactor", "ReceiptStore",
+    "ResourcePolicyEvaluator", "ToolApplicationFacade", "ToolGraph",
+]
