@@ -3113,6 +3113,28 @@ def test_game_campaign_preserves_single_axis_constraints(monkeypatch):
     ]
 
 
+def test_parallel_generation_paths_use_packaged_cloud_policy_directly():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"parallel_generate_run", "parallel_generate_run_languages"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "cloud_allowed"
+            for node in ast.walk(function)
+        )
+
+
 def test_parallel_generate_run_uses_generated_code(monkeypatch):
     def fake_make_generate(*args, **kwargs):
         def gen(prompt, history=None):

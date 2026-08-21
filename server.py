@@ -5780,7 +5780,7 @@ def parallel_generate_run(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not cloud_allowed():
+    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
         return _cloud_disabled_message()
     cloud = _is_cloud_tier(tier, model)
     system = (
@@ -5891,7 +5891,7 @@ def parallel_generate_run_languages(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not cloud_allowed():
+    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
         return _cloud_disabled_message()
     cloud = _is_cloud_tier(tier, model)
     started = time.time()
