@@ -65,6 +65,21 @@ class CleanupPolicy:
 
 
 @dataclass(frozen=True)
+class ExtensionResources:
+    """Native resource budgets declared by an extension installation."""
+
+    memory_limit_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.memory_limit_bytes is not None and (
+            isinstance(self.memory_limit_bytes, bool)
+            or not isinstance(self.memory_limit_bytes, int)
+            or self.memory_limit_bytes <= 0
+        ):
+            raise ValueError("extension memory_limit_bytes must be a positive integer when set")
+
+
+@dataclass(frozen=True)
 class ExtensionManifest:
     identity: ExtensionIdentity
     version: str
@@ -73,6 +88,7 @@ class ExtensionManifest:
     permissions: tuple[str, ...] = ()
     health: ExtensionHealth = ExtensionHealth()
     cleanup: CleanupPolicy = CleanupPolicy()
+    resources: ExtensionResources = ExtensionResources()
 
     def __post_init__(self) -> None:
         if not _VERSION.fullmatch(self.version):
@@ -90,6 +106,8 @@ class ExtensionManifest:
             raise ValueError("permissions must be non-empty and unique")
         if any(not _IDENTIFIER.fullmatch(item) for item in self.permissions):
             raise ValueError("permissions must be bounded identifiers")
+        if not isinstance(self.resources, ExtensionResources):
+            raise TypeError("resources must be ExtensionResources")
 
     @property
     def extension_id(self) -> str:
@@ -114,6 +132,9 @@ class ExtensionManifest:
             "cleanup": {
                 "on_quarantine": self.cleanup.on_quarantine,
                 "retain_state": self.cleanup.retain_state,
+            },
+            "resources": {
+                "memory_limit_bytes": self.resources.memory_limit_bytes,
             },
         }
         encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

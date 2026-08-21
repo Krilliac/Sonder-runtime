@@ -13,6 +13,9 @@ is applied before the startup handshake through
 `NativeExtensionMemoryLimiter`: Windows uses a Job Object process-memory cap
 with kill-on-close, while unsupported platforms fail closed. The limiter is
 injectable so the lifecycle contract is tested without relying on process RSS.
+The extension manifest also carries an optional typed, digest-bound
+`resources.memory_limit_bytes` budget, and application/CLI/HTTP paths preserve
+that declaration through durable registry state.
 
 ## Verification
 
@@ -33,6 +36,6 @@ composition acceptance slice: `tests/production/test_extension_composition.py`
 installs through the live application graph, reopens the SQLite-backed
 registry through a fresh graph, rechecks the manifest digest, and preserves
 the explicit disabled/unverified state when provenance is absent. Native
-memory limiting is proven at the host seam, but actual extension execution
-through a persisted installation and the full platform matrix remain
-unverified.
+memory limiting is proven at the host seam and the declared budget is
+persisted, but actual extension execution through a persisted installation and
+the full platform matrix remain unverified.

@@ -56,6 +56,7 @@ class ExtensionCommand:
         update.add_argument("extension_id")
         update.add_argument("version")
         update.add_argument("--protocol", default="extension-v1")
+        update.add_argument("--memory-limit-bytes", type=int)
         update.add_argument("--scope", choices=("global", "project"), default="global")
         update.add_argument("--project-id")
         inspect = sub.add_parser("inspect")
@@ -84,6 +85,7 @@ class ExtensionCommand:
                             "enabled": record.enabled,
                             "health_reasons": list(record.health_reasons),
                             "crash_count": record.crash_count,
+                            "memory_limit_bytes": record.manifest.resources.memory_limit_bytes,
                         }
                         for record in health.snapshot.records
                     ],
@@ -127,12 +129,14 @@ class ExtensionCommand:
                 record = self._facade.update(
                     build_extension_manifest(
                         args.extension_id, args.version, args.protocol,
+                        memory_limit_bytes=args.memory_limit_bytes,
                     ),
                     scope=args.scope, project_id=args.project_id, authority=authority,
                 )
                 result = {"object": "extension_update", "extension_id": record.extension_id,
                           "version": record.version, "health_state": record.health_state.value,
-                          "enabled": record.enabled}
+                          "enabled": record.enabled,
+                          "memory_limit_bytes": record.manifest.resources.memory_limit_bytes}
             else:
                 result = _snapshot(getattr(self._facade, args.command)(args.experiment_id, authority))
             out.write(json.dumps(result, sort_keys=True) + "\n")
