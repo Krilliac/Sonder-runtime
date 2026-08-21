@@ -242,9 +242,9 @@
     },
     {
       "checked": false,
-      "claim": "The default control-plane graph reads bounded task plans and approval/action states from their durable owners, redacts approval payloads, and preserves explicit unavailable states for sections without owning read ports.",
+      "claim": "The default control-plane graph exposes bounded last-good context metadata and redacted update status alongside durable plans and approvals, without leaking update paths or confirmation nonces.",
       "requirement_id": "API-006",
-      "revision": 8,
+      "revision": 9,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "4316f6d569848e22b242684c5455ea9553387680662e9e582c1c8a56e0762023",
+    "ledger_sha256": "c66d86fff80ba463f6ddff53032705d593456e292a97f5f89872b54f7e234f0e",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
