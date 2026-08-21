@@ -12,6 +12,11 @@ The implementation is deliberately split across two persistence paths:
   receipt, checks known migration ledgers through `status_read_only`, enforces
   the runtime epoch gate, and reports temporary schema objects or paths that
   still exist. It never deletes them.
+- The designated operator entrypoint is explicit:
+  `python -m sonder_runtime migrate --adopt-epoch2`. It binds the typed state
+  home, runs the bridge without fault injection, and refuses success unless the
+  post-adoption checker proves every epoch marker, receipt, ledger, and cleanup
+  invariant. Ordinary `migrate` and `serve` do not silently perform adoption.
 
 The bridge migration has an explicit optional `step_hook` used only by the
 rehearsal. Normal runtime calls leave it unset, so the production migration
@@ -30,8 +35,10 @@ restore, receipt, and bridge tests are all proven. The new adapter checker
 turns those requirements into an executable post-rehearsal report without
 performing cleanup.
 
-Focused coverage is in `tests/test_remaining_migration_safety.py` and
-`tests/test_remaining_data_005_006.py`. The latter proves backup/restore,
-fault-boundary recovery, source immutability, epoch-2 receipt checks, and
-temporary-schema rejection.
+Focused coverage is in `tests/test_remaining_migration_safety.py`,
+`tests/test_remaining_data_005_006.py`, and
+`tests/test_epoch2_migration_entrypoint.py`. The latter proves explicit CLI
+adoption, fresh-install epoch stamping, backup/restore, fault-boundary
+recovery, source immutability, epoch-2 receipt checks, and temporary-schema
+rejection.
 No formal specification checkbox is changed by this slice.

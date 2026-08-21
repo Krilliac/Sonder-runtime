@@ -238,6 +238,36 @@ def cmd_migrate(args) -> int:
         # migrated another. Keep the compatibility export for the remaining
         # legacy settings, but path resolution is owned by the typed config.
         _export_runtime_environment(config)
+        if getattr(args, "adopt_epoch2", False):
+            from sonder_runtime.adapters.persistence.epoch_adoption import (
+                check_epoch2_cleanup,
+            )
+            from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+                run_bridge_migration,
+            )
+
+            home = runtime_paths.default_home()
+            receipt = run_bridge_migration(home, version="spec5-bridge-cli")
+            cleanup = check_epoch2_cleanup(home)
+            if not cleanup.allowed:
+                print(
+                    "epoch-2 adoption completed but verification failed: "
+                    + "; ".join(cleanup.reasons),
+                    file=sys.stderr,
+                )
+                return 1
+            _emit(
+                {
+                    "adopted": True,
+                    "epoch": receipt.epoch,
+                    "source_version": receipt.source_version,
+                    "backup_path": receipt.backup_path,
+                    "tasks_migrated": receipt.tasks_migrated,
+                    "verified": cleanup.allowed,
+                },
+                as_json=args.json,
+            )
+            return 0
         if args.store:
             results = {
                 args.store: sonder_migrations.migrate_store(args.store)
@@ -824,6 +854,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("migrate", help="apply pending schema migrations")
     common(p)
     p.add_argument("--store", choices=("memory", "autopilot", "fleet", "operations"))
+    p.add_argument(
+        "--adopt-epoch2", action="store_true",
+        help="run the explicit crash-safe SPEC-5 epoch-2 bridge adoption",
+    )
     p.set_defaults(func=cmd_migrate)
 
     p = sub.add_parser("backup", help="backup management")
