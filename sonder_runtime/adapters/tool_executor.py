@@ -48,6 +48,19 @@ class ToolExecutorAdapter:
 
                 res = workbench.image_inspect(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool in {"process_list", "process_memory_risk_inspect"}:
+                import sonder_runtime.adapters.process_risk as process_risk
+
+                operation = (
+                    "list_processes" if call.tool == "process_list"
+                    else "inspect_process_memory"
+                )
+                res = getattr(process_risk, operation)(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool in {"file_copy", "file_move"}:
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
