@@ -3743,7 +3743,7 @@ def _post_model(
     a route will take even the overflow retry.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
-    if cloud and not cloud_allowed():
+    if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
@@ -4441,7 +4441,7 @@ def _offload_impl(
             "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
         )
     cloud = _is_cloud_tier(tier, model)
-    if cloud and not cloud_allowed():
+    if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
@@ -5398,7 +5398,7 @@ def _answer_with_history_impl(
                         native_context=context_policy.native,
                         environ=os.environ,
                     ),
-                    cloud_allowed=cloud_allowed(),
+                    cloud_allowed=_cloud_allowed_policy(os.environ),
                 )
                 response = request_cache.get(request_cache_key)
                 request_cache_status = "hit" if response is not None else "miss"
