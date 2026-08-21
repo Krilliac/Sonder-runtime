@@ -26,7 +26,16 @@ from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
 
 _PATH = {"type": "string", "minLength": 1}
 _ROOT = {"type": "string"}
+_INT = {"type": "integer"}
+_BOOL = {"type": "boolean"}
 _NATIVE_TOOLS = (
+    ToolDescriptor(
+        "directory_tree", "List a bounded guarded directory tree",
+        {"type": "object", "properties": {
+            "path": {"type": "string"}, "depth": _INT, "max_entries": _INT,
+            "include_hidden": _BOOL, "include_ignored": _BOOL, "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
     ToolDescriptor(
         "directory_create", "Create a guarded directory and optional parents",
         {"type": "object", "properties": {
@@ -41,9 +50,23 @@ _NATIVE_TOOLS = (
         }, "required": ["path", "old", "new"], "additionalProperties": False},
     ),
     ToolDescriptor(
+        "file_find", "Find files under allowed roots",
+        {"type": "object", "properties": {
+            "query": {"type": "string"}, "root": {"type": "string"},
+            "max_results": _INT, "extra_roots": _ROOT,
+            "include_ignored": _BOOL,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "file_read", "Read a UTF-8-ish text file inside allowed roots",
         {"type": "object", "properties": {
             "path": _PATH, "max_bytes": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "file_read_range", "Read a bounded line range from a text file",
+        {"type": "object", "properties": {
+            "path": _PATH, "start_line": _INT, "end_line": _INT, "extra_roots": _ROOT,
         }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
@@ -67,6 +90,30 @@ _NATIVE_TOOLS = (
         "run_script", "Run a bounded script", {"type": "object"},
     ),
     ToolDescriptor(
+        "program_search", "Search the executable path for programs",
+        {"type": "object", "properties": {
+            "query": {"type": "string"}, "max_results": _INT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "script_search", "Find scripts under allowed roots",
+        {"type": "object", "properties": {
+            "query": {"type": "string"}, "root": {"type": "string"},
+            "max_results": _INT, "max_entries": _INT, "timeout_seconds": {"type": "number"},
+            "include_hidden": _BOOL, "include_ignored": _BOOL, "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "text_search", "Search bounded text files under allowed roots",
+        {"type": "object", "properties": {
+            "query": {"type": "string", "minLength": 1}, "root": {"type": "string"},
+            "glob": {"type": "string"}, "regex": _BOOL, "case_sensitive": _BOOL,
+            "max_results": _INT, "max_file_bytes": _INT, "max_entries": _INT,
+            "timeout_seconds": {"type": "number"}, "include_hidden": _BOOL,
+            "include_ignored": _BOOL, "extra_roots": _ROOT,
+        }, "required": ["query"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "workspace_run", "Run a program as a bounded argv list",
         {"type": "object", "properties": {
             "program": _PATH, "args_json": {"type": "string"}, "cwd": {"type": "string"},
@@ -81,17 +128,23 @@ _NATIVE_TOOLS = (
 
 
 _LEGACY_ALIASES = {
+    "directory_tree": "directory_tree",
     "directory_create": "make_directory",
     "file_edit": "edit_file",
+    "file_find": "file_find",
     "file_read": "read_file",
+    "file_read_range": "file_read_range",
     "file_write": "write_file",
+    "program_search": "program_search",
+    "script_search": "script_search",
+    "text_search": "text_search",
     "workspace_run": "run_program",
 }
 
 
 def native_tool_registry() -> InMemoryToolRegistry:
     """Return the immutable-at-composition catalog for native MCP tools."""
-    return InMemoryToolRegistry(_NATIVE_TOOLS)
+    return InMemoryToolRegistry(sorted(_NATIVE_TOOLS, key=lambda item: item.name))
 
 
 def run_native_mcp(application, *, input_stream: TextIO | None = None,

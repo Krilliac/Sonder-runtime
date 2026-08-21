@@ -27,8 +27,10 @@ def _app():
 
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
-        "directory_create", "edit_file", "file_read", "file_write", "make_directory",
-        "read_file", "run_program", "run_script", "workspace_run", "write_file",
+        "directory_create", "directory_tree", "edit_file", "file_find", "file_read",
+        "file_read_range", "file_write", "make_directory", "program_search", "read_file",
+        "run_program", "run_script", "script_search", "text_search", "workspace_run",
+        "write_file",
     ]
 
 
