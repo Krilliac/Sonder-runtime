@@ -1610,7 +1610,7 @@ def test_improvement_report_uses_refreshed_learning_health(monkeypatch):
     )
     monkeypatch.setattr(server, "mcp_runtime_data", lambda: {})
     monkeypatch.setattr(server, "tool_manifest", lambda: "ground_artifact artifact_ground")
-    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: True)
 
     report = server.improvement_report_data()
 
@@ -1638,7 +1638,7 @@ def test_improvement_report_never_reports_unavailable_autopilot_as_zero(monkeypa
     monkeypatch.setattr(server, "_application", lambda: Application())
     monkeypatch.setattr(server, "mcp_runtime_data", lambda: {})
     monkeypatch.setattr(server, "tool_manifest", lambda: "ground_artifact artifact_ground")
-    monkeypatch.setattr(server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: False)
 
     report = server.improvement_report_data()
 

@@ -55,3 +55,25 @@ def test_serve_target_uses_packaged_cloud_policy_directly():
         and node.func.id == "cloud_allowed"
         for node in ast.walk(function)
     )
+
+
+def test_status_learning_and_improvement_surfaces_use_packaged_cloud_policy():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"status", "learn_tiers", "improvement_report_data"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "cloud_allowed"
+            for node in ast.walk(function)
+        )
