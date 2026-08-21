@@ -185,6 +185,7 @@ from sonder_runtime.domain.campaign_expectations import (
     campaign_expected as _campaign_expected,
 )
 from sonder_runtime.domain.cloud_access import (
+    cloud_allowed as _cloud_allowed_policy,
     cloud_disabled_message as _cloud_disabled_message,
 )
 from sonder_runtime.domain.interaction_footer import (
@@ -368,9 +369,8 @@ def _refresh_live_cloud_tiers():
 
 
 def cloud_allowed():
-    return os.environ.get("SONDER_ALLOW_CLOUD", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    """Compatibility wrapper for the packaged cloud opt-in policy."""
+    return _cloud_allowed_policy(os.environ)
 
 
 def available_tiers(include_disabled=False):
