@@ -8889,6 +8889,12 @@
       "type": "int"
     },
     {
+      "default": 0,
+      "field": "owner_max_inflight",
+      "section": "server",
+      "type": "int"
+    },
+    {
       "default": 500,
       "field": "train_max_n",
       "section": "server",
@@ -8937,11 +8943,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 300,
-    "configuration": 65,
+    "configuration": 66,
     "events": 43,
     "tools": 204
   },
-  "digest": "fa3e25512d429013db9121bf17fa80f5b14ddea7a992485d407736b4aa6a4645",
+  "digest": "e041e9f291c3e58c4bea1510d8fefa7834f899367e0f1c794e3fffcc5b28b9d7",
   "events": [
     {
       "name": "session.started",
@@ -9415,7 +9421,7 @@
     "server.py": "e7ce823333c7be02f44feefe32d266e28d8a92fef07f66ac064c9a48d4db5a2f",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "15cde97fcc4d60b7f1478ff91a46ff7273ca8550cb6186407334f1a942d5de70"
+    "sonder_runtime/platform/config.py": "e0584a36de498ef047a901197aab26a57a9b3caeb91117756424ed30350fac4c"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
