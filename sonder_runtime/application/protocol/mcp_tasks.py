@@ -100,4 +100,50 @@ def project_job(
     )
 
 
-__all__ = ["McpTaskStatus", "McpTaskView", "project_job"]
+class McpTaskHandler:
+    """Adapt the durable job service to the negotiated MCP Tasks methods.
+
+    The handler is deliberately content-blind: MCP receives only the stable
+    task view and never the job result or error text.  ``tasks/update`` is a
+    read-through projection for transports that receive a provider update;
+    state mutation remains owned by the durable job service.
+    """
+
+    def __init__(self, jobs, *, poll_after_ms: int = 250) -> None:
+        if not callable(getattr(jobs, "get", None)):
+            raise InvalidInput("MCP Tasks handler requires a job get service")
+        if not callable(getattr(jobs, "cancel", None)):
+            raise InvalidInput("MCP Tasks handler requires a job cancel service")
+        if type(poll_after_ms) is not int or isinstance(poll_after_ms, bool):
+            raise InvalidInput("poll_after_ms must be an integer")
+        if not 0 <= poll_after_ms <= 86_400_000:
+            raise InvalidInput("poll_after_ms is out of bounds")
+        self._jobs = jobs
+        self._poll_after_ms = poll_after_ms
+
+    def __call__(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        if method not in {"tasks/get", "tasks/update", "tasks/cancel"}:
+            raise InvalidInput("unsupported MCP Tasks method")
+        if not isinstance(params, dict):
+            raise InvalidInput("MCP Tasks parameters must be an object")
+        task_id = params.get("taskId")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise InvalidInput("taskId is required")
+
+        if method == "tasks/cancel":
+            reason = params.get("reason", "cancelled")
+            if not isinstance(reason, str) or not reason.strip():
+                raise InvalidInput("cancel reason must be a non-empty string")
+            records = tuple(self._jobs.cancel(task_id, reason=reason))
+            record = records[-1] if records else self._jobs.get(task_id)
+        else:
+            record = self._jobs.get(task_id)
+        return project_job(
+            record,
+            input_required=params.get("inputRequired", False),
+            expires_at=params.get("expiresAt"),
+            poll_after_ms=self._poll_after_ms,
+        ).to_dict()
+
+
+__all__ = ["McpTaskHandler", "McpTaskStatus", "McpTaskView", "project_job"]

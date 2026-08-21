@@ -221,7 +221,7 @@ not create ledger records or checkboxes.
 |---|---|---|
 | API-001 | PROVEN-CONTRACT | `WP8-API-001-002.md`; typed event vocabulary and `tests/test_wp8_protocol_streams.py`. |
 | API-002 | PROVEN-CONTRACT | Same evidence covers snapshots, monotonic sequence numbers, resume watermarks, and bounded batches. |
-| API-003 | PARTIAL | `docs/architecture/evidence/REQUIREMENT-AUDIT-2026-08-21.md`, `API-003-LEGACY-DECLARATION-2026-08-21.md`, `API-003-DECLARATION-THREADING-2026-08-21.md`; pure negotiation, bounded stdio transport, native composition, explicit declaration composition/threading, and combined negotiated subscription/provider evidence are covered. A separately deployed subprocess/provider boundary remains unproved. |
+| API-003 | PARTIAL | `docs/architecture/evidence/REQUIREMENT-AUDIT-2026-08-21.md`, `API-003-LEGACY-DECLARATION-2026-08-21.md`, `API-003-DECLARATION-THREADING-2026-08-21.md`, `API-003-SUBPROCESS-LIFECYCLE-2026-08-21.md`, `MCP-TASKS-DURABLE-DISPATCH-2026-08-21.md`; pure negotiation, bounded stdio transport, durable subprocess lifecycle, explicit declaration composition/threading, negotiated subscription/provider evidence, and application-owned durable task dispatch are covered. A separately deployed subprocess/provider release and external interoperability acceptance boundary remains unproved. |
 | API-004 | PROVEN-CONTRACT | `WP8-API-004.md`, `evidence/API-004-OPENAI-COMPATIBILITY-2026-08-21.md`; typed production-facade completion, policy/event ordering, operation matching, and focused tests. |
 | API-005 | PROVEN-CONTRACT | `WP8-API-005.md`; bounded editor/agent envelopes and safe rule exchange tests. |
 | API-006 | PROVEN-CONTRACT | `WP8-API-006.md`; operator control-plane snapshot and focused tests. |
