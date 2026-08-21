@@ -7789,7 +7789,7 @@ def learn_tiers() -> str:
     return format_learning_tiers(
         available_tiers(include_disabled=True),
         LEARN_TIERS,
-        cloud_enabled=cloud_allowed(),
+        cloud_enabled=_cloud_allowed_policy(os.environ),
         cloud_tiers=CLOUD_TIERS,
     )
 
@@ -7968,7 +7968,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "The MCP client did not accept the latest tool-list notification.",
             "Use /mcp status and reconnect only if the client does not relist tools automatically.",
         )
-    if not cloud_allowed():
+    if not _cloud_allowed_policy(os.environ):
         add(
             "deployment",
             "info",
@@ -8065,7 +8065,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         ),
         "lessons": lesson_count,
         "facts": fact_count,
-        "cloud_allowed": cloud_allowed(),
+        "cloud_allowed": _cloud_allowed_policy(os.environ),
         "context_status": context.get("status", "unknown"),
         "memory_quality": {
             "duplicates": quality.get("exact_duplicate_prunable", 0),
@@ -22135,7 +22135,9 @@ def status() -> str:
     loaded = [line for line in map(_residency_display, ps) if line]
     tier_lines = [
         f"  {k}={v}" + ("  [CLOUD - leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
-        for k, v in available_tiers(include_disabled=cloud_allowed()).items()
+        for k, v in available_tiers(
+            include_disabled=_cloud_allowed_policy(os.environ)
+        ).items()
     ]
     if not ollama_endpoint.is_loopback(BASE):
         tier_lines = [
