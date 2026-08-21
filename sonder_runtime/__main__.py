@@ -491,7 +491,12 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] = (
         "1" if config.server.tls_terminated_by_proxy else "0"
     )
-    os.environ["OLLAMA_HOST"] = config.ollama.url
+    # Canonical ``serve`` binds the validated URL into the typed endpoint
+    # adapter before lazy legacy providers are composed.  Keep exporting the
+    # variable for compatibility subcommands, but do not recreate the mutable
+    # environment bridge on the canonical path.
+    if include_typed_runtime:
+        os.environ["OLLAMA_HOST"] = config.ollama.url
     os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
         "1" if config.ollama.allow_remote else "0"
     )
@@ -545,6 +550,8 @@ def cmd_serve(args) -> int:
     # legacy adapters; typed HTTP authority no longer depends on environment
     # round-tripping.
     _configure_typed_home(config)
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    ollama_endpoint.configure_typed_endpoint(config.ollama.url)
     import sonder_runtime.interfaces.http.serve as sonder_serve
     sonder_serve.configure_typed_config(config)
     _export_runtime_environment(config, include_typed_runtime=False)

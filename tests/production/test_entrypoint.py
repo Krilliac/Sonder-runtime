@@ -525,7 +525,11 @@ def test_serve_exports_validated_config_before_migrations(
     assert rc == 1  # the stubbed migration aborts before any listener opens
     assert seen["home"] == str(configured_home)
     assert str(workspace) in seen["roots"]
-    assert seen["ollama"] == "http://127.0.0.1:11500"
+    # Canonical serve no longer mutates OLLAMA_HOST; the typed endpoint is the
+    # authority that the lazy provider sees.
+    assert seen["ollama"] != "http://127.0.0.1:11500"
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    assert ollama_endpoint.normalize() == "http://127.0.0.1:11500"
     assert seen["web"] == "1"
     assert seen["tls_proxy"] == "1"
 
