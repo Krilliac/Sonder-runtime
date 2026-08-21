@@ -5082,7 +5082,10 @@ def _sonder_impl_serialized(
             "temperature": temperature,
             "num_predict": num_predict,
             "num_ctx": num_ctx_eff,
-            "num_ctx_native": _context_native(num_ctx_eff),
+            "num_ctx_native": _platform_native_context(
+                num_ctx_eff,
+                default_value=SESSION_NUM_CTX,
+            ),
         }
         trace_block = _format_trace(tgt_model, tier_label, params, trace_ctx)
         # Footer must stay LAST so parse_interaction_id's $-anchored regex still finds it.
@@ -5422,7 +5425,10 @@ def _answer_with_history_impl(
             "temperature": temperature,
             "num_predict": 1024,
             "num_ctx": req_ctx,
-            "num_ctx_native": _context_native(req_ctx),
+            "num_ctx_native": _platform_native_context(
+                req_ctx,
+                default_value=SESSION_NUM_CTX,
+            ),
         }
         trace_block = _format_trace(model, tier_label, params, trace_ctx)
         traced_response = response + trace_block
