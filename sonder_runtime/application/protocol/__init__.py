@@ -14,6 +14,7 @@ from .mobile_parity import (
     encode_reconnect_response,
 )
 from .mcp_tasks import McpTaskStatus, McpTaskView, project_job
+from .a2a import A2AAgentCard, A2ARemoteTaskRef, A2ASkill, A2ATaskState, card_from_registrations
 
 __all__ = [
     "MobileWireError", "ResumableStream", "ResumeBatch", "StreamBackpressure", "StreamGap",
@@ -25,4 +26,6 @@ __all__ = [
     "ReconnectResponse", "ResumeCursor", "ResumeDisposition", "ResumeResult",
     "SchemaFreshness", "build_client_schema",
     "McpTaskStatus", "McpTaskView", "project_job",
+    "A2AAgentCard", "A2ARemoteTaskRef", "A2ASkill", "A2ATaskState",
+    "card_from_registrations",
 ]
