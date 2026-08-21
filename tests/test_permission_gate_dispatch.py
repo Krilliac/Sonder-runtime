@@ -1572,11 +1572,10 @@ def test_the_exemption_set_is_consulted_in_exactly_one_place():
                 uses.setdefault(name, []).append(node.lineno)
 
     assert uses == {
-        # The one membership test, inside decide_for_caller.
+        # The one membership test, inside decide_for_caller. The REPL keeps a
+        # compatibility value obtained from the policy provider, but does not
+        # load or consult the gate set itself.
         "permission_modes.py": [permission_modes_check_line(root)],
-        # The console's public alias, which exists only so a test can pin the
-        # set to one name; it is not consulted at the gate any more.
-        "sonder_repl.py": [alias_line(root)],
     }, "the exemption is consulted outside decide_for_caller: %r" % uses
 
 
@@ -1588,16 +1587,6 @@ def permission_modes_check_line(root):
         if "in GATE_CONTROL_TOOLS" in line and not line.strip().startswith("#")
     ]
     assert len(hits) == 1, "expected exactly one membership test, found %r" % hits
-    return hits[0]
-
-
-def alias_line(root):
-    source = _source_path("sonder_repl.py").read_text(encoding="utf-8").splitlines()
-    hits = [
-        number for number, line in enumerate(source, 1)
-        if line.startswith("GATE_EXEMPT_TOOLS = ")
-    ]
-    assert len(hits) == 1
     return hits[0]
 
 

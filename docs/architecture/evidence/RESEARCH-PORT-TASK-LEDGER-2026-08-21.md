@@ -17,6 +17,10 @@ engine.
 - canonical JSON and SHA-256 identity;
 - `TaskService.task_ledger()` composition over the existing repository port.
 
+The projection is now exposed through the existing `task_ledger` MCP/control
+surface and account-scoped HTTP task dispatcher. Both return the canonical
+ledger plus its digest; scoped requests cannot read another account's goal.
+
 The projection does not mutate tasks or grant execution authority. It remains
 an operator-visible planning/output surface; durable task events remain the
 source of truth.

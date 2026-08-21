@@ -7211,6 +7211,35 @@
     {
       "aliases": [],
       "category": "planning",
+      "name": "/task_ledger",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "goal_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "replan_count",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "",
+          "name": "last_replan_reason",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Show a deterministic, digest-bound task ledger for one work plan.",
+      "tool": "task_ledger"
+    },
+    {
+      "aliases": [],
+      "category": "planning",
       "name": "/task_list",
       "native": false,
       "params": [
@@ -8942,12 +8971,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 300,
+    "commands": 301,
     "configuration": 66,
     "events": 43,
-    "tools": 204
+    "tools": 205
   },
-  "digest": "8651e7a9e3c9f16fee0a846f36605fc53ab166e9d85edb8e1ea2f16a6ff3657c",
+  "digest": "6287601481bff02b6e4b83808e857442ae958b7bb122958acdb6ed24cca6e9f0",
   "events": [
     {
       "name": "session.started",
@@ -9418,7 +9447,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "709e9bccb5d4893c59958e46be9fa9256d4a0a035574085ff88300627a0205ac",
-    "server.py": "a79c6bc70554dd64e74a0c2f952dbf3cb174afffefab044d16eddcb7b0a26e87",
+    "server.py": "7be50458e4dbfd37ba10850b63499afd264018ba5c713524fa34dde9d9efd0d6",
     "sonder_runtime/application/tools/generated_catalogs.py": "ad0474cfe07fcadb070984dc0ed16544251af471b87d9b00ffa1999ebb5d9136",
     "sonder_runtime/domain/common/events.py": "ee9e50782c831e9d871ae123c1bd1ec5e777ddc51c469f996903bb1401362873",
     "sonder_runtime/platform/config.py": "599a1be9fee687e8018ea5667c40d18404cb7c4b46e799c3225b7a1042759c18"
@@ -15029,6 +15058,33 @@
           "depends_on"
         ],
         "title": "task_dependArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Show a deterministic, digest-bound task ledger for one work plan.",
+      "name": "task_ledger",
+      "parameters": {
+        "properties": {
+          "goal_id": {
+            "title": "Goal Id",
+            "type": "string"
+          },
+          "last_replan_reason": {
+            "default": "",
+            "title": "Last Replan Reason",
+            "type": "string"
+          },
+          "replan_count": {
+            "default": 0,
+            "title": "Replan Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "goal_id"
+        ],
+        "title": "task_ledgerArguments",
         "type": "object"
       }
     },
