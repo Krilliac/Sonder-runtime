@@ -44,8 +44,7 @@ from sonder_runtime.adapters.command_completion import (
 )
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
-import grounding
-import code_runner
+from sonder_runtime.adapters.execution_tools import code_runner, grounding
 import training_tasks
 import intents
 import feedback
