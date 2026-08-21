@@ -299,13 +299,15 @@ def _report_problems(
 def cmd_backup(args) -> int:
     from .bootstrap.app import default_app
 
-    backups = default_app().backup
-
+    config = None
     if args.backup_command != "verify":
         config = _load_config(args)
         # Backup source discovery reads SONDER_HOME; exporting only the validated
         # target backed up unrelated state while reporting success.
         _export_runtime_environment(config)
+        backups = default_app(config=config).backup
+    else:
+        backups = default_app().backup
     if args.backup_command == "create":
         result = backups.create(_backup_target(args, config))
         _emit(

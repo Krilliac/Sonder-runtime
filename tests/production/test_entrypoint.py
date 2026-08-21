@@ -182,6 +182,37 @@ def test_user_global_config_is_discovered_when_present(monkeypatch, tmp_path):
     assert _configured_path(str(tmp_path / "chosen.toml"), "SONDER_CONFIG", "sonder.toml") == str(tmp_path / "chosen.toml")
 
 
+def test_backup_entrypoint_passes_loaded_config_to_default_application(monkeypatch, tmp_path):
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.bootstrap.app as bootstrap_app
+    from sonder_runtime.platform.config import SonderConfig
+
+    config = SonderConfig()
+    seen = []
+
+    class Backups:
+        def list(self, target):
+            return []
+
+    class Application:
+        backup = Backups()
+
+    monkeypatch.setattr(entrypoint, "_load_config", lambda _args: config)
+    monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda _config: None)
+    monkeypatch.setattr(
+        bootstrap_app,
+        "default_app",
+        lambda *, config=None: seen.append(config) or Application(),
+    )
+
+    args = SimpleNamespace(
+        backup_command="list", target=str(tmp_path / "backups"),
+        keep=None, json=True,
+    )
+    assert entrypoint.cmd_backup(args) == 0
+    assert seen == [config]
+
+
 def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(monkeypatch):
     import server
     from sonder_runtime.__main__ import cmd_mcp

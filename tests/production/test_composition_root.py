@@ -15,6 +15,7 @@ from sonder_runtime.domain.common.errors import (
     InvalidInput,
 )
 from sonder_runtime.domain.runtime_policy import rules
+from sonder_runtime.platform.config import SonderConfig
 
 pytestmark = pytest.mark.integration
 
@@ -36,6 +37,32 @@ def _context(**kwargs):
 def test_build_application_requires_known_profile():
     with pytest.raises(ValueError, match="unknown profile"):
         bootstrap_app.build_application("public-saas")
+
+
+def test_build_application_retains_exact_typed_config_and_uses_its_profile():
+    config = SonderConfig(profile="server-private")
+
+    application = bootstrap_app.build_application(config=config)
+
+    assert application.config is config
+    assert application.profile == "server-private"
+
+
+def test_default_app_passes_typed_config_to_the_lazy_lifecycle():
+    config = SonderConfig(profile="server-private")
+    bootstrap_app.reset_for_tests()
+
+    application = bootstrap_app.default_app(config=config)
+
+    assert application.config is config
+    assert bootstrap_app.default_app() is application
+
+
+def test_profile_only_application_keeps_compatibility_shape():
+    application = bootstrap_app.build_application("workstation-local")
+
+    assert application.profile == "workstation-local"
+    assert application.config is None
 
 
 def test_composition_root_uses_canonical_system_clock_adapter():
