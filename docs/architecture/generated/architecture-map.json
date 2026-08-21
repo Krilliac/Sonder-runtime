@@ -244,7 +244,7 @@
       ]
     },
     {
-      "file_count": 221,
+      "file_count": 222,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -302,6 +302,7 @@
         "sonder_runtime/application/execution/world_providers.py",
         "sonder_runtime/application/extensions/__init__.py",
         "sonder_runtime/application/extensions/experiments.py",
+        "sonder_runtime/application/extensions/facade.py",
         "sonder_runtime/application/extensions/provenance_inventory.py",
         "sonder_runtime/application/extensions/quarantine.py",
         "sonder_runtime/application/extensions/registry.py",
@@ -595,16 +596,18 @@
       ]
     },
     {
-      "file_count": 21,
+      "file_count": 23,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
         "sonder_runtime/interfaces/cli/__init__.py",
         "sonder_runtime/interfaces/cli/commands.py",
+        "sonder_runtime/interfaces/cli/extensions.py",
         "sonder_runtime/interfaces/cli/headless.py",
         "sonder_runtime/interfaces/http/__init__.py",
         "sonder_runtime/interfaces/http/authority_contract.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",
+        "sonder_runtime/interfaces/http/facades/extensions.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
         "sonder_runtime/interfaces/http/facades/model_request.py",
         "sonder_runtime/interfaces/http/facades/session.py",

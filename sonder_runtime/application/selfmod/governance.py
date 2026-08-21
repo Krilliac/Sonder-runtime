@@ -166,7 +166,10 @@ class SelfmodGovernance:
 
     def record_verification(self, candidate_id: str, evidence: VerificationEvidence) -> CandidateRecord:
         record = self._get(candidate_id)
-        self._require_phase(record, GovernancePhase.ISOLATED)
+        # A candidate may accumulate multiple independent checks before
+        # review.  The first check moves it to VERIFIED for compatibility;
+        # subsequent checks remain append-only in that same pre-review phase.
+        self._require_phase(record, GovernancePhase.ISOLATED, GovernancePhase.VERIFIED)
         if not evidence.passed and not record.unrestricted:
             return self._reject(record, f"verification_failed:{evidence.evidence_id}")
         updated = replace(record, phase=GovernancePhase.VERIFIED,
@@ -252,11 +255,12 @@ class SelfmodGovernance:
         return record
 
     @staticmethod
-    def _require_phase(record: CandidateRecord, expected: GovernancePhase) -> None:
+    def _require_phase(record: CandidateRecord, *expected: GovernancePhase) -> None:
         if record.phase is GovernancePhase.REJECTED:
             raise Forbidden("rejected candidate cannot advance")
-        if record.phase is not expected:
-            raise Conflict(f"candidate is {record.phase.value}; expected {expected.value}")
+        if record.phase not in expected:
+            labels = ", ".join(item.value for item in expected)
+            raise Conflict(f"candidate is {record.phase.value}; expected one of {labels}")
 
     def _reject(self, record: CandidateRecord, reason: str) -> CandidateRecord:
         updated = replace(record, phase=GovernancePhase.REJECTED, rejection_reason=reason)

@@ -11,6 +11,7 @@ from sonder_runtime.application.extensions.experiments import (
     ExperimentState,
 )
 from sonder_runtime.application.extensions.registry import ExtensionRegistry
+from sonder_runtime.application.extensions.facade import ExtensionApplicationFacade
 from sonder_runtime.bootstrap import app as bootstrap_app
 
 
@@ -41,6 +42,8 @@ def test_extension_services_are_lazy_singletons_and_do_not_change_legacy_shape(a
     assert application.extension_registry() is application.extension_registry()
     assert application.experiment_manager() is application.experiment_manager()
     assert isinstance(application.extension_registry(), ExtensionRegistry)
+    assert application.extension_facade() is application.extension_facade()
+    assert isinstance(application.extension_facade(), ExtensionApplicationFacade)
 
 
 def test_experiment_manager_denies_startup_without_explicit_authority(application):

@@ -70,6 +70,8 @@ ROOT_LEGACY_MODULES = {"server"}
 ROOT_LEGACY_MODULE_LIMIT = 1
 WEB_SEARCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_search"
 WEB_SEARCH_COMPATIBILITY_ROOT = Path("web_tools.py")
+WEB_FETCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_fetch"
+WEB_FETCH_COMPATIBILITY_ROOT = Path("web_tools.py")
 
 LAYERS = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap")
 
@@ -336,6 +338,36 @@ def check() -> list[str]:
         if "search_raw" not in package_web_functions:
             violations.append(
                 f"{WEB_SEARCH_CANONICAL_MODULE}: missing canonical search_raw entrypoint"
+            )
+    fetch_root_path = REPO_ROOT / WEB_FETCH_COMPATIBILITY_ROOT
+    fetch_package_path = REPO_ROOT / "sonder_runtime" / "adapters" / "web_fetch.py"
+    if fetch_root_path.exists() and fetch_package_path.exists():
+        fetch_root_tree = ast.parse(
+            fetch_root_path.read_text(encoding="utf-8"),
+            filename=str(WEB_FETCH_COMPATIBILITY_ROOT),
+        )
+        fetch_package_tree = ast.parse(
+            fetch_package_path.read_text(encoding="utf-8"),
+            filename=WEB_FETCH_CANONICAL_MODULE,
+        )
+        fetch_root_functions = {
+            node.name for node in fetch_root_tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        fetch_package_functions = {
+            node.name for node in fetch_package_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        if "web_fetch" not in fetch_root_functions:
+            violations.append("web_tools.py: missing compatibility web_fetch delegate")
+        if "_decode_web_document" in fetch_root_functions:
+            violations.append(
+                "web_tools.py: web_fetch decoding must remain in "
+                f"{WEB_FETCH_CANONICAL_MODULE}"
+            )
+        if "fetch_raw" not in fetch_package_functions:
+            violations.append(
+                f"{WEB_FETCH_CANONICAL_MODULE}: missing canonical fetch_raw entrypoint"
             )
     imports: dict[str, set[str]] = {}
     files = sorted(PACKAGE_ROOT.rglob("*.py"))
