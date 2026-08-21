@@ -10,9 +10,9 @@ from ...application.protocol.mcp_compatibility import (
     LegacyMcpContract, McpCompatibility, McpNegotiation, McpNegotiationError,
     SubscriptionNotificationRouter,
 )
+from ...application.protocol.mcp_tasks import McpTaskInvalidInput, McpTaskNotFound
 from ...application.tools.generated_catalogs import GeneratedCatalogs
 from ...application.ports.tool_registry import ToolDescriptor
-from ...domain.common.errors import InvalidInput, NotFound
 
 
 @dataclass(frozen=True)
@@ -194,9 +194,9 @@ class StdioMcpTransport:
             return self._error(request_id, -32001, str(exc))
         except McpTransportError as exc:
             return self._error(request_id, -32602, str(exc))
-        except InvalidInput as exc:
+        except McpTaskInvalidInput as exc:
             return self._error(request_id, -32602, str(exc))
-        except NotFound as exc:
+        except McpTaskNotFound as exc:
             return self._error(request_id, -32601, str(exc))
         except KeyError as exc:
             return self._error(request_id, -32601, str(exc))

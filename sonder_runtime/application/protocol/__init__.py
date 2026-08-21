@@ -13,7 +13,10 @@ from .mobile_parity import (
     encode_reconnect_request,
     encode_reconnect_response,
 )
-from .mcp_tasks import McpTaskHandler, McpTaskStatus, McpTaskView, project_job
+from .mcp_tasks import (
+    McpTaskHandler, McpTaskInvalidInput, McpTaskNotFound, McpTaskStatus,
+    McpTaskView, project_job,
+)
 from .a2a import A2AAgentCard, A2ARemoteTaskRef, A2ASkill, A2ATaskState, card_from_registrations
 
 __all__ = [
@@ -25,7 +28,8 @@ __all__ = [
     "ClientParityContract", "ClientSchema", "ClientSchemaError", "ReconnectRequest",
     "ReconnectResponse", "ResumeCursor", "ResumeDisposition", "ResumeResult",
     "SchemaFreshness", "build_client_schema",
-    "McpTaskHandler", "McpTaskStatus", "McpTaskView", "project_job",
+    "McpTaskHandler", "McpTaskInvalidInput", "McpTaskNotFound",
+    "McpTaskStatus", "McpTaskView", "project_job",
     "A2AAgentCard", "A2ARemoteTaskRef", "A2ASkill", "A2ATaskState",
     "card_from_registrations",
 ]
