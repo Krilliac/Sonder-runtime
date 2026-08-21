@@ -130,6 +130,19 @@ def test_json_and_unified_text_patch_tools_preserve_transaction_reports(executor
     assert json.loads(target.read_text(encoding="utf-8"))["value"] == 3
 
 
+def test_image_inspection_uses_bounded_packaged_workbench(executor, tmp_path):
+    image = tmp_path / "sample.svg"
+    image.write_text(
+        '<svg width="12" height="8" xmlns="http://www.w3.org/2000/svg"></svg>',
+        encoding="utf-8",
+    )
+    result = executor.execute(ToolCall("image_inspect", {"path": "sample.svg"}), _ctx())
+    assert result.ok
+    assert result.evidence["format"] == "SVG"
+    assert result.evidence["width"] == 12
+    assert result.evidence["height"] == 8
+
+
 def test_guard_rejection_surfaces_as_not_ok(executor):
     # Escaping the workspace root must fail closed as ok=False, not raise.
     result = executor.execute(
