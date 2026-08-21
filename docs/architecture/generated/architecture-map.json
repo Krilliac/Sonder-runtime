@@ -255,7 +255,7 @@
       ]
     },
     {
-      "file_count": 256,
+      "file_count": 257,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -420,6 +420,7 @@
         "sonder_runtime/application/promotion/__init__.py",
         "sonder_runtime/application/promotion/gates.py",
         "sonder_runtime/application/protocol/__init__.py",
+        "sonder_runtime/application/protocol/a2a.py",
         "sonder_runtime/application/protocol/client_schema.py",
         "sonder_runtime/application/protocol/editor_interop.py",
         "sonder_runtime/application/protocol/events.py",
