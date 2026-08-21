@@ -8,6 +8,11 @@ it to OpenTelemetry GenAI agent, workflow, plan, and tool spans, but it does
 not import an OTel SDK, persist telemetry, contact a collector, or claim
 delivery.
 
+The authenticated read-only route `/v1/observability/trace` now exposes this
+projection with a bounded `limit` query and the same redaction contract. The
+HTTP facade delegates only to the application event sink; it does not add an
+exporter, collector connection, or mutation path.
+
 ## Safety and ownership
 
 - Input is limited to `LocalObservabilitySink.recent_events()`, which has
@@ -25,12 +30,13 @@ delivery.
 |---|---|
 | Stable bounded projection and malformed-input rejection | `sonder_runtime/application/observability/trace_projection.py`; `tests/test_trace_projection.py` |
 | Sink integration consumes only sanitized retained events | `sonder_runtime/adapters/local_observability.py`; `tests/test_local_observability.py` |
+| Authenticated bounded HTTP projection | `sonder_runtime/interfaces/http/facades/observability.py`; `tests/test_observability_http_facade.py` |
 | No exporter or network path was introduced | `docs/architecture/adr/ADR-009-local-observability.md`; `tests/production/test_architecture.py` |
 
 Focused verification: `14 passed` for the trace/local-observability tests;
 architecture and diff checks pass. This is implementation evidence, not a
-claim that a production OpenTelemetry exporter or cross-process trace
-propagation is complete.
+claim that a production OpenTelemetry exporter, collector delivery, or
+cross-process trace propagation is complete.
 
 Reference: OpenTelemetry GenAI agent span conventions:
 <https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-agent-spans.md>
