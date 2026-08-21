@@ -41,6 +41,17 @@ def test_expired_lease_can_be_reclaimed_after_restart(tmp_path):
     assert reopened.finish("job-1", "worker-b", JobStatus.FAILED, error="recovered") is not None
 
 
+def test_parent_listing_is_declared_by_port_and_survives_reopen(tmp_path):
+    path = tmp_path / "jobs.db"
+    first = SQLiteDurableJobRegistry(path)
+    first.create(_identity("parent"))
+    first.create(JobIdentity("child", "test", "op-1", "idem-child", parent_job_id="parent"))
+
+    reopened = SQLiteDurableJobRegistry(path)
+    assert [record.identity.job_id for record in reopened.list(parent_job_id="parent")] == ["child"]
+    assert reopened.get("child").identity.parent_job_id == "parent"
+
+
 def test_reconcile_matches_job_registry_port_and_marks_expired_leases(tmp_path):
     now = ["2026-08-20T12:00:00Z"]
     registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db", clock=lambda: now[0])

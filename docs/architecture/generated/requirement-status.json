@@ -129,7 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "planned": 204
+      "implemented_unverified": 18,
+      "planned": 186
     },
     "total": 204,
     "verified": 0
@@ -223,8 +224,8 @@
       "checked": false,
       "claim": "MCP.",
       "requirement_id": "API-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -265,22 +266,22 @@
       "checked": false,
       "claim": "One implementation path.",
       "requirement_id": "ARCH-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 3,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Root cleanup.",
       "requirement_id": "ARCH-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Transitional cleanup.",
       "requirement_id": "ARCH-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -342,8 +343,8 @@
       "checked": false,
       "claim": "Ownership catalog.",
       "requirement_id": "ARCH-012",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -356,36 +357,36 @@
       "checked": false,
       "claim": "Non-destructive.",
       "requirement_id": "COMPACT-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Source range.",
       "requirement_id": "COMPACT-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Structured retention.",
       "requirement_id": "COMPACT-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Validation.",
       "requirement_id": "COMPACT-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Typed modalities.",
       "requirement_id": "COMPACT-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -748,36 +749,36 @@
       "checked": false,
       "claim": "Isolation.",
       "requirement_id": "EXT-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Quarantine.",
       "requirement_id": "EXT-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Inventory.",
       "requirement_id": "EXT-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Ephemeral experiments.",
       "requirement_id": "EXT-006",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "No automatic promotion.",
       "requirement_id": "EXT-007",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1266,8 +1267,8 @@
       "checked": false,
       "claim": "Evidence first.",
       "requirement_id": "SELFMOD-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1280,15 +1281,15 @@
       "checked": false,
       "claim": "Verification.",
       "requirement_id": "SELFMOD-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Review and deployment.",
       "requirement_id": "SELFMOD-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1566,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "f083cda7b4d7c35db4c551934b5fae1cc0d16108ede804f666dd54335c124b4c",
+    "ledger_sha256": "da11d152b5e35af4f497b53d201dbef1ae335d6edc4ca7e1e3d701b9356b6400",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

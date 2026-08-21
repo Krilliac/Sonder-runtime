@@ -79,6 +79,28 @@ def test_facade_invokes_injected_gateway_and_renders_both_protocols():
     assert chat.render()["choices"][0]["message"]["content"] == "answer"
 
 
+def test_facade_invoke_uses_typed_completion_boundary_without_repeating_hooks():
+    calls = []
+    events = []
+    facade = ModelRequestFacade(
+        policy_hook=lambda operation, payload: calls.append((operation, payload["model"])) or True,
+        event_hook=lambda event: events.append(event["kind"]),
+    )
+    invocation = facade.invoke(
+        "/v1/responses",
+        {"model": "code", "input": "hello"},
+        _Gateway(),
+        _context(),
+    )
+    assert invocation.response.text == "answer"
+    assert calls == [("responses", "code")]
+    assert events == [
+        "openai.request.normalized",
+        "openai.response.normalized",
+        "model.response.completed",
+    ]
+
+
 def test_facade_preserves_injected_policy_and_bounds():
     calls = []
     facade = ModelRequestFacade(

@@ -3,12 +3,21 @@ from dataclasses import replace
 import pytest
 
 from sonder_runtime.application.ports.jobs import JobStatus
+from sonder_runtime.application.workflows import (
+    RestartRecoveryService as ExportedRestartRecoveryService,
+    WorkflowSnapshot as ExportedWorkflowSnapshot,
+)
 from sonder_runtime.application.workflows.restart_recovery import (
     RestartDisposition,
     RestartRecoveryService,
     WorkflowSnapshot,
 )
 from sonder_runtime.domain.common.errors import Conflict
+
+
+def test_recovery_service_is_wired_through_workflows_package():
+    assert ExportedRestartRecoveryService is RestartRecoveryService
+    assert ExportedWorkflowSnapshot is WorkflowSnapshot
 
 
 class Store:

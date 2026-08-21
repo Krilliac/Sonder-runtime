@@ -1,25 +1,9 @@
-"""Dynamic compatibility providers for grounded execution helpers."""
-from __future__ import annotations
+"""Compatibility shim for the packaged execution-tools adapter package.
 
-import importlib
+Python resolves the sibling ``execution_tools`` package before this legacy
+module. The file remains present during the migration so tracked-source
+architecture checks and older tooling see a stable path; new production code
+must import ``sonder_runtime.adapters.execution_tools`` as a package.
+"""
 
-
-class _RootProvider:
-    module_name = ""
-
-    def __getattr__(self, name):
-        return getattr(importlib.import_module(self.module_name), name)
-
-
-class GroundingProvider(_RootProvider):
-    module_name = "grounding"
-
-
-class CodeRunnerProvider(_RootProvider):
-    module_name = "code_runner"
-
-
-grounding = GroundingProvider()
-code_runner = CodeRunnerProvider()
-
-__all__ = ["CodeRunnerProvider", "GroundingProvider", "code_runner", "grounding"]
+from sonder_runtime.adapters.execution_tools import *  # noqa: F401,F403

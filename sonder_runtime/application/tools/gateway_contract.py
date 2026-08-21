@@ -58,6 +58,8 @@ class ToolGatewayRequest:
     deadline_monotonic: float | None = None
     cancellation: "CancellationSignal | None" = None
     approval_token: str | None = None
+    session_id: str | None = None
+    project_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id.strip() or not self.tool_name.strip():
@@ -66,6 +68,9 @@ class ToolGatewayRequest:
             raise InvalidInput("tool arguments must be a mapping")
         if self.deadline_monotonic is not None and self.deadline_monotonic <= 0:
             raise InvalidInput("deadline must be a positive monotonic timestamp")
+        for name, value in (("session_id", self.session_id), ("project_id", self.project_id)):
+            if value is not None and not value.strip():
+                raise InvalidInput(f"{name} must be non-empty when supplied")
 
 
 class CancellationSignal(Protocol):
@@ -95,6 +100,12 @@ class OutputRedactor(Protocol):
 
 class ReceiptSink(Protocol):
     def record(self, receipt: "ToolReceipt") -> None: ...
+
+
+class ToolAuditRepository(Protocol):
+    """Durable, scope-preserving audit sink for already-redacted receipts."""
+
+    def append(self, request: ToolGatewayRequest, receipt: "ToolReceipt") -> None: ...
 
 
 @dataclass(frozen=True)
@@ -130,6 +141,7 @@ class ToolGateway:
         invoker: ToolInvoker,
         redactor: OutputRedactor,
         receipts: ReceiptSink,
+        audit: ToolAuditRepository | None = None,
     ) -> None:
         self._schema = schema
         self._permissions = permissions
@@ -137,6 +149,42 @@ class ToolGateway:
         self._invoker = invoker
         self._redactor = redactor
         self._receipts = receipts
+        self._audit = audit
+
+    @classmethod
+    def from_typed_ports(
+        cls,
+        registry: Any,
+        policy: Any,
+        executor: Any,
+        permissions: PermissionEvaluator,
+        approvals: ApprovalGate,
+        redactor: OutputRedactor,
+        receipts: ReceiptSink,
+        *,
+        audit: ToolAuditRepository | None = None,
+        context_factory: Any = None,
+    ) -> "ToolGateway":
+        """Compose the gateway over the typed registry/execution ports.
+
+        The gateway's request controls intentionally remain in this class;
+        the typed adapters are limited to descriptor validation and execution
+        after those controls have admitted the call.
+        """
+        from .typed_gateway import PortBackedToolInvoker, RegistrySchemaValidator
+
+        invoker_kwargs = {}
+        if context_factory is not None:
+            invoker_kwargs["context_factory"] = context_factory
+        return cls(
+            RegistrySchemaValidator(registry),
+            permissions,
+            approvals,
+            PortBackedToolInvoker(registry, policy, executor, **invoker_kwargs),
+            redactor,
+            receipts,
+            audit=audit,
+        )
 
     def execute(self, request: ToolGatewayRequest) -> ToolReceipt:
         started = time.monotonic()
@@ -160,6 +208,8 @@ class ToolGateway:
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
             approval_required=request.permission.approval is ApprovalMode.REQUIRED,
         )
+        if self._audit is not None:
+            self._audit.append(request, receipt)
         self._receipts.record(receipt)
         return receipt
 
@@ -174,6 +224,7 @@ class ToolGateway:
 __all__ = [
     "ApprovalGate", "ApprovalMode", "CancellationSignal", "OutputRedactor",
     "PermissionEvaluator", "ReceiptSink", "SchemaValidator", "ToolGateway",
+    "ToolAuditRepository",
     "ToolGatewayRequest", "ToolInvocationOutput", "ToolInvoker", "ToolPermission",
     "ToolReceipt", "ToolScope",
 ]

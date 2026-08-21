@@ -127,33 +127,42 @@ class WorkflowService:
             cancel=lambda _reason: True,
             cleanup=cleanup,
         )
+        options = {
+            "max_iterations": max_iterations,
+            "stop_on_failure": stop_on_failure,
+            "stop_on_success": stop_on_success,
+            "delay_seconds": delay_seconds,
+        }
         try:
-            options = {
-                "max_iterations": max_iterations,
-                "stop_on_failure": stop_on_failure,
-                "stop_on_success": stop_on_success,
-                "delay_seconds": delay_seconds,
-            }
-            try:
-                parameters = inspect.signature(self._runner.run).parameters
-                accepts_cancel_check = (
-                    "cancel_check" in parameters
-                    or any(
-                        parameter.kind is inspect.Parameter.VAR_KEYWORD
-                        for parameter in parameters.values()
-                    )
+            parameters = inspect.signature(self._runner.run).parameters
+            accepts_cancel_check = (
+                "cancel_check" in parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
                 )
-            except (TypeError, ValueError):
-                accepts_cancel_check = True
-            if accepts_cancel_check:
-                options["cancel_check"] = durable_cancel_check
+            )
+        except (TypeError, ValueError):
+            accepts_cancel_check = True
+        if accepts_cancel_check:
+            options["cancel_check"] = durable_cancel_check
+        try:
             result = self._runner.run(
                 workflow["actions"],
                 dispatch,
                 **options,
             )
-        except (OSError, ValueError) as exc:
-            return _failure(exc, "WORKFLOW_ERROR")
+        except Exception as exc:
+            return _failure(
+                "workflow runner failed: %s: %s"
+                % (exc.__class__.__name__, exc),
+                "WORKFLOW_ERROR",
+            )
+        if not isinstance(result, dict):
+            return _failure(
+                "workflow runner returned an invalid result",
+                "WORKFLOW_ERROR",
+            )
         cancellation_evidence = {}
         cancellation_error = ""
         if result.get("cancelled") is True:

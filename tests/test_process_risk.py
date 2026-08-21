@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-import process_risk
+import sonder_runtime.adapters.process_risk as process_risk
 
 
 def test_memory_inspection_requires_exact_opt_in(monkeypatch):

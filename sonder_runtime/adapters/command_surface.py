@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..domain.common.errors import DependencyUnavailable
+from ..application.protocol.mcp_compatibility import LegacyMcpContract
 
 
 StartupSafetyHook = Callable[[], None]
@@ -29,9 +30,16 @@ class LegacyServerMcpRuntime:
         *,
         require_startup_safety: StartupSafetyHook | None = None,
         run_mcp: McpRunHook | None = None,
+        declaration: LegacyMcpContract | None = None,
     ) -> None:
         self._require_startup_safety = require_startup_safety
         self._run_mcp = run_mcp
+        self._declaration = declaration
+
+    @property
+    def declaration(self) -> LegacyMcpContract | None:
+        """Return the explicit legacy protocol declaration, when composed."""
+        return self._declaration
 
     def require_startup_safety(self) -> None:
         hook = self._require_startup_safety

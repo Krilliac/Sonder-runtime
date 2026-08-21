@@ -80,7 +80,7 @@ class McpCompatibility:
         client_versions: tuple[str, ...],
         *,
         client_capabilities: tuple[str, ...] = (),
-        legacy_contract: str | None = None,
+        legacy_contract: str | LegacyMcpContract | None = None,
     ) -> McpNegotiation:
         """Choose the first server-preferred common version.
 
@@ -92,9 +92,14 @@ class McpCompatibility:
         agreed = next((v for v in self._supported_versions if v in client_versions), None)
         selected_legacy = None
         if agreed is None and legacy_contract is not None:
-            selected_legacy = next(
-                (c for c in self._legacy_contracts if c.name == legacy_contract), None
-            )
+            if isinstance(legacy_contract, LegacyMcpContract):
+                selected_legacy = next(
+                    (c for c in self._legacy_contracts if c == legacy_contract), None
+                )
+            else:
+                selected_legacy = next(
+                    (c for c in self._legacy_contracts if c.name == legacy_contract), None
+                )
             if selected_legacy is not None:
                 agreed = selected_legacy.version
         if agreed is None:
@@ -147,4 +152,3 @@ class SubscriptionNotificationRouter:
 
     def subscriber_count(self, event: str | None = None) -> int:
         return sum(1 for events in self._subscriptions.values() if event is None or event in events)
-

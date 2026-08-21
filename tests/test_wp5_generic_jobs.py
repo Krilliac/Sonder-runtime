@@ -61,3 +61,10 @@ def test_missing_and_cyclic_dependencies_are_rejected() -> None:
             "a": GenericJob("a", lambda ctx: None, ("b",)),
             "b": GenericJob("b", lambda ctx: None, ("a",)),
         }).order()
+
+
+def test_mapping_key_must_match_job_identity() -> None:
+    with pytest.raises(ValueError, match="mapping keys must match"):
+        GenericJobExecutor({
+            "external-id": GenericJob("declared-id", lambda ctx: None),
+        })

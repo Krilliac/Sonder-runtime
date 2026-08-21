@@ -3,13 +3,14 @@ from __future__ import annotations
 
 
 TRANSIENT_MODEL_HTTP_CODES = frozenset({408, 429, 502, 503, 504})
+_ERROR_PREFIX = "ERROR:"
 
 
 def format_model_call_error(error, *, target: str, display: str) -> str:
     """Render a bounded model error without owning endpoint classification."""
     suffix = " after %d attempt(s)" % error.attempts
     if error.kind == "budget":
-        return "ERROR: hosted agent output budget exhausted: %s" % error.detail
+        return _ERROR_PREFIX + " hosted agent output budget exhausted: %s" % error.detail
     if error.kind == "http":
         retry_hint = ""
         if error.cloud and error.status in TRANSIENT_MODEL_HTTP_CODES:
@@ -21,18 +22,18 @@ def format_model_call_error(error, *, target: str, display: str) -> str:
                 retry_hint += " Provider suggests retrying after about %ss." % (
                     int(round(error.retry_after_seconds)),
                 )
-        return "ERROR: %s rejected the model request (HTTP %s)%s: %s%s" % (
+        return _ERROR_PREFIX + " %s rejected the model request (HTTP %s)%s: %s%s" % (
             target, error.status or "unknown", suffix, error.detail, retry_hint,
         )
     if error.kind == "configuration":
-        return "ERROR: %s" % error.detail
+        return _ERROR_PREFIX + " %s" % error.detail
     if error.kind in ("protocol", "empty_response", "request"):
-        return "ERROR: invalid response from %s%s: %s" % (
+        return _ERROR_PREFIX + " invalid response from %s%s: %s" % (
             target, suffix, error.detail,
         )
     if error.kind == "cancelled":
-        return "ERROR: %s" % error.detail
-    return "ERROR contacting %s at %s%s: %s" % (
+        return _ERROR_PREFIX + " %s" % error.detail
+    return _ERROR_PREFIX + " contacting %s at %s%s: %s" % (
         target, display, suffix, error.detail,
     )
 

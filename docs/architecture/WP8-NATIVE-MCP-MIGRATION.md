@@ -40,6 +40,18 @@ under `sonder_runtime/adapters/`. Native MCP exposes `artifact_risk_inspect`
 through the typed executor, preserving bounded scanning, PDF active-content
 checks, and the domain risk-policy contract without importing the root modules.
 
+Artifact acquisition is package-owned under
+`sonder_runtime/adapters/artifact_fetch.py`. Native MCP exposes
+`verify_artifact` and `fetch_artifact` through the typed executor. The network
+path retains the legacy SSRF-safe opener and explicit `SONDER_WEB_TOOLS` gate;
+the destination path retains guarded root containment and atomic replacement.
+Legacy token/bypass parameters are not part of the native schema.
+
+Vision now has a typed `VisionGateway` port and an injected local-only adapter,
+plus a `VisionService` and guarded filesystem input provider. Native MCP still
+does not expose `vision_analyze`: installed-model capability checking and the
+concrete Ollama multimodal transport have not yet been moved behind that port.
+
 The native catalog also includes four guarded mutation tools: `file_copy`,
 `file_move`, `file_batch_write`, and `file_delete`. These use the packaged
 transfer, transactional batch, and explicit-delete-confirmation adapters;
@@ -55,7 +67,7 @@ legacy server surface.
 The historical server MCP catalog remains the default compatibility path until
 catalog parity and complete application-service coverage are proven. The
 legacy catalog currently contains 204 registered tools; the native catalog
-therefore covers 35 names and does not claim full parity, API-003, or TOOL-001
+therefore covers 45 names and does not claim full parity, API-003, or TOOL-001
 completion.
 
 ## Evidence
@@ -65,5 +77,6 @@ completion.
   translation.
 - `tests/test_mcp_stdio_transport.py`: negotiation, bounded frames,
   subscriptions, malformed input, and catalog limits.
-- Focused result: **38 passed**.
+- Focused result: **66 passed** for the artifact-acquisition/native-executor
+  slice.
 - `scripts/check_architecture.py`, compileall, and diff checks pass.

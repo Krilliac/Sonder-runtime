@@ -58,6 +58,7 @@ from sonder_runtime.adapters.persistence import served_action_receipts
 from . import authority_contract as tool_contract
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
+from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
@@ -86,6 +87,13 @@ def configure_legacy_runtime(runtime):
     global _LEGACY_RUNTIME
     _LEGACY_RUNTIME = runtime
     return runtime
+
+
+def configure_session_facade(facade):
+    """Inject the typed durable-session facade at composition time."""
+    global _SESSION_FACADE
+    _SESSION_FACADE = facade
+    return facade
 
 
 def _legacy_runtime():
@@ -124,6 +132,7 @@ CONFIGURED_PORT = DEFAULT_PORT
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
+_SESSION_FACADE = None
 _MAX_JOB_CANCEL_REASON = 256
 _MAX_JOB_ID_LENGTH = 128
 _MAX_JOB_KIND_LENGTH = 64
@@ -262,6 +271,18 @@ def _job_subroute_id(path, suffix):
     if not path.startswith(prefix) or not path.endswith(suffix):
         return None
     encoded = path[len(prefix):-len(suffix)]
+    if not encoded or "/" in encoded:
+        return None
+    job_id = urllib.parse.unquote(encoded)
+    return job_id if job_id and "/" not in job_id else None
+
+
+def _job_record_id(path):
+    """Return one safely encoded job id from the direct read route."""
+    prefix = "/v1/jobs/"
+    if not path.startswith(prefix):
+        return None
+    encoded = path[len(prefix):]
     if not encoded or "/" in encoded:
         return None
     job_id = urllib.parse.unquote(encoded)
@@ -3610,6 +3631,38 @@ class Handler(BaseHTTPRequestHandler):
         if self._auth_rate_limited():
             return
         _maybe_live_reload()
+        if path.startswith("/v1/sessions/"):
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "administrator authorization is required",
+                                "type": "forbidden", "code": "FORBIDDEN"}},
+                    status=403,
+                )
+                return
+            facade = _SESSION_FACADE
+            if facade is None:
+                self._send_json_payload(
+                    {"error": {"message": "session facade is unavailable",
+                                "type": "server_error", "code": "SESSION_FACADE_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            result = dispatch_session_route(
+                facade, path,
+                query=urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query,
+                    keep_blank_values=True,
+                ),
+            )
+            if result is None:
+                self._send_not_found()
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
         if path == "/v1/jobs" or path.startswith("/v1/jobs/"):
             context = self._request_auth_context()
             if not context["authorized"]:
@@ -3710,8 +3763,8 @@ class Handler(BaseHTTPRequestHandler):
                     "data": [_job_record_payload(record) for record in records],
                 })
                 return
-            job_id = path.removeprefix("/v1/jobs/")
-            if not job_id or "/" in job_id:
+            job_id = _job_record_id(path)
+            if job_id is None:
                 self._send_not_found()
                 return
             try:
@@ -5113,6 +5166,13 @@ class Handler(BaseHTTPRequestHandler):
 def main(config=None):
     if config is not None:
         configure_typed_config(config)
+    if _SESSION_FACADE is None:
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.application.session.http_facade import HttpSessionFacade
+
+        configure_session_facade(
+            HttpSessionFacade(default_app().session_repository(), max_replay_events=1_000)
+        )
     port = DEFAULT_PORT if config is None else CONFIGURED_PORT
     if len(sys.argv) > 1:
         try:

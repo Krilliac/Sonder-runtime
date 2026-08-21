@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 from sonder_runtime.platform.config import SonderConfig
 from sonder_runtime.bootstrap.native_mcp import native_tool_registry, run_native_mcp
+from sonder_runtime.application.protocol.mcp_compatibility import SubscriptionNotificationRouter
+from sonder_runtime.interfaces.mcp.transport import StdioMcpTransport
 
 
 class _Executor:
@@ -32,16 +34,55 @@ class _Inspections:
         return ToolResult(ok=True, output=name + ":inspection", evidence={"args": arguments})
 
 
+class _Vision:
+    def analyze(self, path, prompt, context):
+        from sonder_runtime.application.ports.vision_gateway import VisionResponse
+        assert path == "image.png"
+        assert prompt == "describe"
+        assert context.source == "mcp"
+        return VisionResponse("a local image", "llava-local", "vision")
+
+
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
-        "archive_list", "artifact_risk_inspect", "data_inspect", "data_query", "dependency_inventory",
-        "directory_create", "directory_digest", "directory_tree", "edit_file",
-        "file_batch_write", "file_copy", "file_delete", "file_digest", "file_find",
-        "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
+        "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect", "data_inspect", "data_query", "dependency_inventory",
+        "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
+        "file_batch_write", "file_copy", "file_delete", "file_digest", "file_edit",
+        "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
         "json_patch", "log_inspect", "make_directory", "process_list", "process_memory_risk_inspect",
-        "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "text_patch", "text_search",
-        "workspace_compare", "workspace_run", "write_file",
+        "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "secret_scan", "text_patch", "text_search",
+        "verify_artifact", "vision_analyze", "weather_lookup", "web_fetch", "web_search", "workspace_compare", "workspace_run", "write_file",
     ]
+
+
+def test_native_catalog_has_exact_packaged_adapter_executor_parity():
+    packaged_executor = {
+        "approximate_location_lookup", "archive_create", "archive_extract",
+        "artifact_risk_inspect", "directory_tree", "edit_file", "fetch_artifact",
+        "file_batch_write", "file_copy", "file_delete", "file_find", "file_move",
+        "file_read_range", "image_inspect", "json_patch", "make_directory",
+        "process_list", "process_memory_risk_inspect", "program_search", "read_file",
+        "run_program", "run_script", "script_search", "secret_scan", "text_patch",
+        "text_search", "verify_artifact", "weather_lookup", "web_fetch", "web_search",
+        "write_file",
+    }
+    packaged_inspections = {
+        "archive_list", "data_inspect", "data_query", "dependency_inventory",
+        "directory_digest", "file_digest", "log_inspect", "project_detect",
+        "workspace_compare",
+    }
+    native_names = {item.name for item in native_tool_registry().list_all()}
+    compatibility_aliases = {
+        name for name, target in __import__(
+            "sonder_runtime.bootstrap.native_mcp", fromlist=["_LEGACY_ALIASES"]
+        )._LEGACY_ALIASES.items() if name != target
+    }
+    canonical_native = native_names - compatibility_aliases - {"vision_analyze"}
+    assert canonical_native == packaged_executor | packaged_inspections
+    assert len(canonical_native) == 40
+    assert compatibility_aliases == {
+        "directory_create", "file_edit", "file_read", "file_write", "workspace_run",
+    }
 
 
 def test_native_catalog_contains_legacy_filesystem_alias_schemas():
@@ -54,6 +95,152 @@ def test_native_catalog_contains_legacy_filesystem_alias_schemas():
         "create", "overwrite", "append",
     ]
     assert run.input_schema["properties"]["program"]["type"] == "string"
+
+
+def test_native_file_edit_schema_is_bounded_and_omits_legacy_bypass_fields():
+    schema = native_tool_registry().require("file_edit").input_schema
+    assert schema["required"] == ["path", "old", "new"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["path"]["minLength"] == 1
+    assert "token" not in schema["properties"]
+    assert "approval" not in schema["properties"]
+
+
+def test_native_file_edit_routes_to_canonical_typed_executor():
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "file_edit", "arguments": {
+            "path": "notes.txt", "old": "before", "new": "after", "count": 1,
+        }},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        _app(), input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["output"] == "edit_file:ok"
+    assert rows[1]["result"]["isError"] is False
+
+
+def test_native_archive_extract_schema_declares_safe_bounds():
+    schema = native_tool_registry().require("archive_extract").input_schema
+    assert schema["required"] == ["source", "destination"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["max_entries"] == {
+        "type": "integer", "minimum": 1, "maximum": 10_000,
+    }
+    assert schema["properties"]["max_file_bytes"]["maximum"] == 256_000_000
+    assert schema["properties"]["max_total_bytes"]["maximum"] == 1_000_000_000
+    assert schema["properties"]["max_ratio"]["maximum"] == 1_000.0
+    assert schema["properties"]["max_path_depth"]["maximum"] == 128
+    assert schema["properties"]["max_results"]["maximum"] == 10_000
+    assert schema["properties"]["max_seconds"]["maximum"] == 60.0
+
+
+def test_native_archive_extract_routes_to_typed_executor():
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "archive_extract", "arguments": {
+            "source": "bundle.zip", "destination": "unpacked",
+            "max_entries": 10, "max_seconds": 5,
+        }},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        _app(), input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["output"] == "archive_extract:ok"
+    assert rows[1]["result"]["isError"] is False
+
+
+def test_native_archive_create_schema_is_bounded_and_omits_legacy_bypass_fields():
+    schema = native_tool_registry().require("archive_create").input_schema
+    assert schema["required"] == ["root", "inputs_json", "destination"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["archive_format"]["enum"] == ["zip", "tar"]
+    assert schema["properties"]["max_files"]["maximum"] == 10_000
+    assert schema["properties"]["max_entries"]["maximum"] == 20_000
+    assert schema["properties"]["max_depth"]["maximum"] == 64
+    assert schema["properties"]["inputs_json"]["maxLength"] == 1_000_000
+    assert "token" not in schema["properties"]
+    assert "approval" not in schema["properties"]
+
+
+def test_native_archive_create_routes_to_typed_executor():
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "archive_create", "arguments": {
+            "root": "project", "inputs_json": '["src", "README.md"]',
+            "destination": "release.zip", "archive_format": "zip",
+            "max_files": 10, "max_entries": 20,
+        }},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        _app(), input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["output"] == "archive_create:ok"
+    assert rows[1]["result"]["isError"] is False
+
+
+def test_native_archive_list_schema_is_bounded_and_omits_legacy_bypass_fields():
+    schema = native_tool_registry().require("archive_list").input_schema
+    assert schema["required"] == ["path"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["max_entries"] == {
+        "type": "integer", "minimum": 1, "maximum": 10_000,
+    }
+    assert schema["properties"]["max_file_bytes"]["maximum"] == 256_000_000
+    assert schema["properties"]["max_total_bytes"]["maximum"] == 1_000_000_000
+    assert schema["properties"]["max_ratio"]["maximum"] == 1_000.0
+    assert schema["properties"]["max_path_depth"]["maximum"] == 128
+    assert schema["properties"]["max_results"]["maximum"] == 10_000
+    assert schema["properties"]["max_seconds"]["maximum"] == 60.0
+    assert "token" not in schema["properties"]
+    assert "approval" not in schema["properties"]
+
+
+def test_native_archive_list_routes_to_packaged_typed_inspection_executor():
+    app = _app()
+    app.inspections = _Inspections()
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "archive_list", "arguments": {
+            "path": "bundle.zip", "max_entries": 10, "max_file_bytes": 1000,
+            "max_total_bytes": 2000, "max_ratio": 10.0, "max_path_depth": 8,
+            "max_results": 10, "max_seconds": 5.0,
+        }},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        app, input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["output"] == "archive_list:inspection"
+    assert rows[1]["result"]["evidence"]["args"]["max_ratio"] == 10.0
+    assert rows[1]["result"]["isError"] is False
 
 
 def test_native_transport_calls_application_tool_port():
@@ -74,6 +261,69 @@ def test_native_transport_calls_application_tool_port():
     assert count == 2
     assert rows[1]["result"]["output"] == "read_file:ok"
     assert rows[1]["result"]["isError"] is False
+
+
+def test_packaged_native_mcp_2x_stream_negotiates_lists_calls_and_delivers_subscription(
+    monkeypatch,
+):
+    """Exercise the packaged native path as one MCP 2.x client/server stream."""
+    import sonder_runtime.bootstrap.native_mcp as native_mcp
+
+    router = SubscriptionNotificationRouter()
+    captured = []
+
+    class _Input(io.StringIO):
+        def readline(self, *args):
+            line = super().readline(*args)
+            if line == "" and not getattr(self, "published", False):
+                self.published = True
+                assert router.publish("job.updated", {"job": "j1", "state": "ready"}) == 1
+            return line
+
+    class _RoutedTransport(StdioMcpTransport):
+        def __init__(self, *args, **kwargs):
+            kwargs["notifications"] = router
+            kwargs["connection_id"] = "api-003-client"
+            super().__init__(*args, **kwargs)
+            captured.append(self)
+
+    monkeypatch.setattr(native_mcp, "StdioMcpTransport", _RoutedTransport)
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersions": ["2.0"],
+            "capabilities": {"tools": {}, "notifications": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "read_file", "arguments": {"path": "notes.txt"},
+        }},
+        {"jsonrpc": "2.0", "id": 4, "method": "sonder/subscribe", "params": {
+            "event": "job.updated",
+        }},
+    ]
+    output = io.StringIO()
+    count = run_native_mcp(
+        _app(),
+        input_stream=_Input("\n".join(json.dumps(request) for request in requests) + "\n"),
+        output_stream=output,
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert count == 4
+    assert captured[0].negotiation.agreed_version == "2.0"
+    assert rows[0]["result"]["protocolVersion"] == "2.0"
+    assert "read_file" in {tool["name"] for tool in rows[1]["result"]["tools"]}
+    assert rows[2]["result"] == {
+        "output": "read_file:ok", "isError": False,
+        "error": "", "evidence": {"tool": "read_file"},
+    }
+    assert rows[3]["result"] == {"subscribed": "job.updated"}
+    assert rows[4] == {
+        "jsonrpc": "2.0", "method": "notifications/event",
+        "params": {"event": "job.updated", "payload": {
+            "job": "j1", "state": "ready",
+        }},
+    }
 
 
 def test_native_legacy_file_read_alias_calls_canonical_executor():
@@ -130,6 +380,29 @@ def test_native_read_only_inspection_routes_through_application_service():
     )
     row = [json.loads(line) for line in output.getvalue().splitlines()][1]
     assert row["result"]["output"] == "file_digest:inspection"
+
+
+def test_native_vision_routes_through_application_vision_service():
+    app = _app()
+    app.vision = _Vision()
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2.0", "capabilities": {"tools": {}}},
+    }
+    call = {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "vision_analyze", "arguments": {
+            "path": "image.png", "prompt": "describe",
+        }},
+    }
+    output = io.StringIO()
+    run_native_mcp(
+        app, input_stream=io.StringIO(json.dumps(request) + "\n" + json.dumps(call) + "\n"),
+        output_stream=output,
+    )
+    row = [json.loads(line) for line in output.getvalue().splitlines()][1]
+    assert row["result"]["output"] == "a local image"
+    assert row["result"]["evidence"]["model"] == "llava-local"
 
 
 def test_native_entrypoint_fences_safety_before_configuration(monkeypatch):

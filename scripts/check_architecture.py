@@ -61,8 +61,7 @@ REPL_ROOT_MODULES = frozenset({
     "server",
 })
 BASELINE_ROOT_LEGACY_MODULES = frozenset({
-    "server", "autopilot_store",
-    "fleet_store",
+    "server",
 })
 ROOT_LEGACY_MODULES = {"server"}
 # This is a ratchet, not a target.  Removing a legacy root dependency is
@@ -96,6 +95,8 @@ ALLOWED_ROOT_IMPORTS = {
 IO_MODULES = {"urllib", "socket", "http", "ftplib", "smtplib"}
 
 COMPATIBILITY_ROOT_MODULES = {
+    "archive_create": Path("archive_create.py"),
+    "code_runner": Path("code_runner.py"),
     "memory_store": Path("memory_store.py"),
     "autopilot_store": Path("autopilot_store.py"),
     "fleet_store": Path("fleet_store.py"),
@@ -152,6 +153,12 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("sonder_runtime/adapters/ollama/gateway.py"),
     Path("sonder_runtime/adapters/openai_compat/gateway.py"),
     Path("sonder_runtime/adapters/ollama/endpoint.py"),
+    Path("text_patch.py"),
+    Path("artifact_fetch.py"),
+    Path("artifact_risk.py"),
+    Path("pdf_risk.py"),
+    Path("process_risk.py"),
+    Path("live_reload.py"),
 })
 
 # Applied migrations are immutable historical artifacts. They may retain an
@@ -198,6 +205,8 @@ def tracked_production_python_files(
             continue
         path = repo_root / relative
         if path.is_symlink() or not path.is_file():
+            if relative in RETIRED_ROOT_MODULES:
+                continue
             raise RuntimeError(
                 f"tracked production source is missing or not a regular file: {relative}"
             )

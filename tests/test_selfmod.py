@@ -478,6 +478,31 @@ def test_emergency_recovery_does_not_import_application(isolated):
     assert (root / "calc.py").read_bytes() == original
 
 
+def test_emergency_recovery_preflights_every_backup_before_mutating(isolated):
+    root = repository(isolated, use_git=False)
+    original_calc = (root / "calc.py").read_bytes()
+    original_test = (root / "tests/test_calc.py").read_bytes()
+    run = plan(root, files=("calc.py", "tests/test_calc.py"))
+    backed = selfmod.create_backup(run["id"])
+    (root / "calc.py").write_bytes(b"changed calc\n")
+    (root / "tests/test_calc.py").write_bytes(b"changed test\n")
+
+    manifest = json.loads(Path(backed["backup_manifest"]).read_text(encoding="utf-8"))
+    second_backup = Path(manifest["files"][1]["backup_path"])
+    corrupted = bytearray(second_backup.read_bytes())
+    corrupted[0] ^= 0x01
+    second_backup.write_bytes(corrupted)  # preserve size; digest is the failure
+
+    with pytest.raises(RuntimeError, match="backup checksum failed"):
+        selfmod_recover.restore(backed["backup_manifest"])
+
+    # A later corrupt record must not leave an earlier record partially restored.
+    assert (root / "calc.py").read_bytes() == b"changed calc\n"
+    assert (root / "tests/test_calc.py").read_bytes() == b"changed test\n"
+    assert original_calc != (root / "calc.py").read_bytes()
+    assert original_test != (root / "tests/test_calc.py").read_bytes()
+
+
 def test_end_to_end_edit_deploy_rollback_restores_every_hash(isolated):
     root = repository(isolated)
     original_hashes = hashes(root)

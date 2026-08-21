@@ -15,6 +15,9 @@ class LineageNode:
     depth: int
     operation_id: str | None = None
     parent_session_id: str | None = None
+    # The durable source revision lets a caller distinguish a repeated read
+    # from a node that changed while concurrent work was in flight.
+    revision: int = 0
 
 
 class JobLineageSource(Protocol):
@@ -51,12 +54,13 @@ class DurableLineageQuery:
                 parent = identity.parent_job_id or identity.parent_session_id
                 nodes.append(LineageNode(identity.job_id, parent, identity.job_id, "job",
                                          record.status.value, 0, identity.operation_id,
-                                         identity.parent_session_id))
+                                         identity.parent_session_id, record.revision))
         if self._children is not None:
             for child in self._children.list_all(limit=limit):
                 request = child.request
                 nodes.append(LineageNode(request.child_id, request.parent_id, request.child_id,
-                                         "subagent", child.status.value, 0))
+                                         "subagent", child.status.value, 0,
+                                         revision=child.revision))
         by_id = {node.node_id: node for node in nodes}
         resolved: list[LineageNode] = []
         for node in nodes:
@@ -71,7 +75,7 @@ class DurableLineageQuery:
                 parent = by_id[parent].parent_id
             resolved.append(LineageNode(node.node_id, node.parent_id, root, node.kind,
                                         node.status, depth, node.operation_id,
-                                        node.parent_session_id))
+                                        node.parent_session_id, node.revision))
         return tuple(sorted(resolved, key=lambda item: (item.depth, item.node_id))[:limit])
 
     def descendants(self, node_id: str, *, include_root: bool = False, max_depth: int = 32,

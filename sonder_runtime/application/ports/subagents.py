@@ -46,6 +46,8 @@ class SubagentBudget:
     """Hard ceilings inherited by a child and never widened by a provider."""
 
     max_children: int | None = None
+    max_depth: int | None = None
+    max_concurrency: int | None = None
     max_steps: int | None = None
     max_wall_seconds: float | None = None
     max_output_tokens: int | None = None
@@ -53,6 +55,8 @@ class SubagentBudget:
     def __post_init__(self) -> None:
         values = {
             "max_children": self.max_children,
+            "max_depth": self.max_depth,
+            "max_concurrency": self.max_concurrency,
             "max_steps": self.max_steps,
             "max_wall_seconds": self.max_wall_seconds,
             "max_output_tokens": self.max_output_tokens,
@@ -194,7 +198,10 @@ class SubagentProvider(Protocol):
 
 def validate_child_budget(child: SubagentBudget, parent: SubagentBudget) -> None:
     """Ensure a child cannot widen a finite parent ceiling."""
-    for name in ("max_children", "max_steps", "max_wall_seconds", "max_output_tokens"):
+    for name in (
+        "max_children", "max_depth", "max_concurrency", "max_steps",
+        "max_wall_seconds", "max_output_tokens",
+    ):
         parent_value = getattr(parent, name)
         child_value = getattr(child, name)
         if parent_value is not None and (child_value is None or child_value > parent_value):

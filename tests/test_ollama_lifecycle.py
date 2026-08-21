@@ -16,10 +16,7 @@ def test_resident_models_accepts_name_and_model_fields():
 def test_root_compatibility_import_uses_packaged_public_implementation():
     import ollama_lifecycle as legacy_lifecycle
 
-    assert legacy_lifecycle.__all__ == (
-        "cleanup_orphaned_discovery_probes",
-        "resident_models",
-    )
+    assert legacy_lifecycle.__all__ == ollama_lifecycle.__all__
     assert not hasattr(legacy_lifecycle, "_is_windows")
     assert legacy_lifecycle.resident_models is ollama_lifecycle.resident_models
     assert (
@@ -38,6 +35,43 @@ def test_root_compatibility_surface_survives_reload():
         ollama_lifecycle.cleanup_orphaned_discovery_probes
     )
     assert not hasattr(reloaded, "_trusted_model_roots")
+
+
+def test_root_compatibility_entrypoint_preserves_cleanup_lifecycle(
+    monkeypatch, tmp_path,
+):
+    import ollama_lifecycle as legacy_lifecycle
+
+    monkeypatch.setattr(ollama_lifecycle, "_is_windows", lambda: True)
+    trusted = tmp_path / "Ollama"
+    trusted.mkdir()
+    monkeypatch.setattr(ollama_lifecycle, "_trusted_ollama_roots", lambda: (trusted,))
+    executable = str(trusted / "llama-server.exe")
+    row = {
+        "ProcessId": 88,
+        "ParentAlive": False,
+        "ExecutablePath": executable,
+        "CommandLine": (
+            "llama-server.exe --port 62002 --host 127.0.0.1 "
+            "--no-webui --offline --verbose"
+        ),
+    }
+    terminated = []
+    monkeypatch.setattr(
+        ollama_lifecycle.process_liveness,
+        "probe_process",
+        lambda pid: (process_liveness.PROCESS_ALIVE, "windows:root-entrypoint"),
+    )
+
+    result = legacy_lifecycle.cleanup_orphaned_discovery_probes(
+        grace_seconds=0.0,
+        inspector=lambda: [row],
+        terminator=lambda pid, identity: terminated.append((pid, identity)) or True,
+        sleeper=lambda seconds: None,
+    )
+
+    assert result["terminated"] == [88]
+    assert terminated == [(88, "windows:root-entrypoint")]
 
 
 def test_windows_process_inspector_parses_single_json_object(monkeypatch):

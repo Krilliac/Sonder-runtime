@@ -12,7 +12,8 @@ from ..application.ports.tool_executor import ToolCall, ToolResult
 def _packaged_module(name: str):
     """Resolve an inspection implementation owned by the packaged adapter."""
     return importlib.import_module(
-        "sonder_runtime.adapters.inspection.%s" % name
+        name if name.startswith("sonder_runtime.adapters.")
+        else "sonder_runtime.adapters.inspection.%s" % name
     )
 
 

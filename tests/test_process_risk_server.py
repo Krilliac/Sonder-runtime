@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-import process_risk
+import sonder_runtime.adapters.process_risk as process_risk
 import server
 
 
@@ -71,7 +71,7 @@ def test_process_tool_registration_help_reload_and_autopilot():
         assert server._agent_dispatch(name, {"pid": 1234}, read_only=True).startswith(
             "ERROR: tool '%s' is not allowed by the repository read-only policy." % name
         )
-    assert "process_risk" in server.LIVE_RELOAD_MODULES
+    assert "sonder_runtime.adapters.process_risk" in server.LIVE_RELOAD_MODULES
     assert "process_list/process_memory_risk_inspect" in server.tool_manifest()
 
 

@@ -7,6 +7,15 @@ from sonder_runtime.application.capabilities import (
     CapabilityRegistry,
     ProviderLifecycleError,
 )
+from sonder_runtime.application.ports.specialized_lifecycle import (
+    CleanupResult,
+    HealthReport,
+    HealthStatus,
+)
+from sonder_runtime.application.providers.lifecycle_registry import (
+    ProviderLifecycleError as ScopedProviderLifecycleError,
+    ScopedProviderRegistry,
+)
 
 
 class FakeProvider:
@@ -94,3 +103,27 @@ def test_published_snapshot_cannot_be_mutated_and_unregisters_cleanly():
     assert registry.get("read") is None
     assert registry.providers() == ()
     assert provider.shutdown_count == 1
+
+
+def test_failed_initialization_rejects_non_quiescent_cleanup():
+    class LeakyProvider:
+        provider_id = "leaky"
+
+        def initialize(self, scope):
+            scope.register("read", object())
+            raise RuntimeError("startup failed")
+
+        def health(self):
+            return HealthReport(self.provider_id, HealthStatus.UNHEALTHY)
+
+        def cleanup(self, timeout=None):
+            return CleanupResult(self.provider_id, False, False, "active work remains")
+
+    registry = ScopedProviderRegistry()
+    provider = LeakyProvider()
+
+    with pytest.raises(ScopedProviderLifecycleError, match="initialization and cleanup failed"):
+        registry.register(provider)
+
+    assert registry.providers() == ()
+    assert registry.capabilities() == {}

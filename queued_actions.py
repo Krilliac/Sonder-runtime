@@ -1,12 +1,14 @@
-"""Immutable migration compatibility alias for the packaged queue ledger."""
+"""Identity-preserving compatibility redirect for the packaged queue ledger.
+
+The immutable queued-actions baseline still imports this historical root name
+to obtain its schema.  Redirecting the module object itself keeps that import
+working while ensuring callers observe the canonical packaged implementation,
+rather than a second delegating module namespace.
+"""
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence import queued_actions as _store
+import sys
 
+from sonder_runtime.adapters.persistence import queued_actions as _implementation
 
-def __getattr__(name):
-    return getattr(_store, name)
-
-
-def __dir__():
-    return sorted(set(globals()) | set(dir(_store)))
+sys.modules[__name__] = _implementation

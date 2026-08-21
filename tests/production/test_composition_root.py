@@ -104,6 +104,19 @@ def test_composition_root_uses_canonical_evaluation_history_adapter():
     assert type(application.evaluation_history._reader) is EvaluationHistoryReaderAdapter
 
 
+def test_composition_root_exposes_typed_web_provider():
+    from sonder_runtime.adapters.web_provider import LegacyWebProvider
+    from sonder_runtime.application.ports.web import WebProvider
+
+    application = bootstrap_app.build_application()
+
+    assert isinstance(application.web_provider, LegacyWebProvider)
+    assert callable(WebProvider.request)
+    assert callable(WebProvider.health)
+    assert callable(application.web_provider.request)
+    assert callable(application.web_provider.health)
+
+
 def test_composition_root_exposes_lazy_cached_durable_session_repository(
     tmp_path, monkeypatch
 ):

@@ -3,7 +3,11 @@ import json
 
 import pytest
 
-from sonder_runtime.application.protocol.mcp_compatibility import McpCompatibility, SubscriptionNotificationRouter
+from sonder_runtime.application.protocol.mcp_compatibility import (
+    LegacyMcpContract,
+    McpCompatibility,
+    SubscriptionNotificationRouter,
+)
 from sonder_runtime.interfaces.mcp.transport import McpTransportError, McpTransportLimits, StdioMcpTransport
 
 
@@ -85,3 +89,47 @@ def test_generated_catalog_registry_projection_is_supported():
     output = io.StringIO()
     transport = StdioMcpTransport(io.StringIO(""), output, compatibility=McpCompatibility(), tool_catalog=registry, tool_handler=lambda *_: {})
     assert transport._catalog[0]["name"] == "echo"
+
+
+def test_transport_threads_registered_legacy_declaration_into_negotiation():
+    legacy = LegacyMcpContract("legacy-server", "1.0", ("tools",))
+    output = io.StringIO()
+    transport = StdioMcpTransport(
+        io.StringIO(json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersions": ["1.0"], "capabilities": {"tools": {}}},
+        }) + "\n"),
+        output,
+        compatibility=McpCompatibility(
+            supported_versions=("2.0",),
+            legacy_contracts=(legacy,),
+            capabilities=("tools",),
+        ),
+        legacy_contract=legacy,
+        tool_catalog=(), tool_handler=lambda *_: {},
+    )
+
+    assert transport.serve() == 1
+    assert transport.negotiation is not None
+    assert transport.negotiation.agreed_version == "1.0"
+    assert transport.negotiation.legacy_contract == legacy
+
+
+def test_transport_rejects_unregistered_legacy_declaration_fail_closed():
+    legacy = LegacyMcpContract("legacy-server", "1.0")
+    with pytest.raises(McpTransportError, match="not registered"):
+        StdioMcpTransport(
+            io.StringIO(""), io.StringIO(),
+            compatibility=McpCompatibility(), legacy_contract=legacy,
+            tool_catalog=(), tool_handler=lambda *_: {},
+        )
+
+
+def test_transport_without_legacy_declaration_does_not_downgrade():
+    transport, output = _transport([{
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersions": ["1.0"]},
+    }])
+    transport.serve()
+    result = json.loads(output.getvalue())
+    assert result["error"]["code"] == -32001

@@ -68,3 +68,30 @@ def test_loop_runner_cleanup_is_a_complete_bounded_result():
     assert result == CleanupResult(
         "workflow-loop", True, True, "bounded loop execution has returned"
     )
+
+
+def test_replayed_cancellation_reuses_clean_evidence_without_repeating_cleanup():
+    control = DurableLoopControl()
+    calls = []
+
+    def cancel(_reason):
+        calls.append("cancel")
+        return True
+
+    def cleanup(_timeout):
+        calls.append("cleanup")
+        return CleanupResult("workflow-loop", True, True, "released")
+
+    child = control.cancellation.create_child(node_id="workflow:demo:1")
+    control.bind(
+        child.node_id,
+        "workflow-loop:1",
+        cancel=cancel,
+        cleanup=cleanup,
+    )
+
+    first = control.cancel_and_cleanup(child.node_id, reason="stop", timeout=0)
+    replay = control.cancel_and_cleanup(child.node_id, reason="stop", timeout=0)
+
+    assert first == replay
+    assert calls == ["cancel", "cleanup"]

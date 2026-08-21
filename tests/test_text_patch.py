@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import server
-import text_patch
+import sonder_runtime.adapters.filesystem.text_patch as text_patch
 
 
 def run(root: Path, patch: str, apply=False):

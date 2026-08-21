@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import artifact_risk
+import sonder_runtime.adapters.artifact_risk as artifact_risk
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 

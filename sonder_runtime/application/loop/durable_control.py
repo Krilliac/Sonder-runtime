@@ -234,6 +234,8 @@ class _Binding:
     target_id: str
     cancel: Callable[[str], bool]
     cleanup: Callable[[float | None], CleanupResult]
+    cancel_result: bool | None = None
+    cleanup_result: CleanupConformance | None = None
 
 
 class DurableLoopControl:
@@ -258,11 +260,28 @@ class DurableLoopControl:
             selected = tuple(binding for binding in self._bindings if binding.node.cancelled)
         reports: list[CleanupConformance] = []
         for binding in selected:
-            cancelled = bool(binding.cancel(reason)) if changed or node.cancelled else False
-            result = binding.cleanup(timeout)
-            if not isinstance(result, CleanupResult):
-                raise TypeError("cleanup callback must return CleanupResult")
-            reports.append(CleanupConformance(binding.target_id, cancelled, result.quiescent, result.resources_released, result.detail))
+            # Cancellation requests are durable state transitions.  Cache the
+            # first callback result so replaying the same request cannot turn
+            # a successful cancellation into a false report when an adapter
+            # correctly returns False for an already-cancelled target.
+            if binding.cancel_result is None:
+                binding.cancel_result = bool(binding.cancel(reason)) if changed or node.cancelled else False
+
+            # A clean result is terminal for this binding.  Incomplete
+            # cleanup remains retryable, which preserves recovery after a
+            # bounded timeout without repeating completed side effects.
+            if binding.cleanup_result is None or not binding.cleanup_result.conforms:
+                result = binding.cleanup(timeout)
+                if not isinstance(result, CleanupResult):
+                    raise TypeError("cleanup callback must return CleanupResult")
+                binding.cleanup_result = CleanupConformance(
+                    binding.target_id,
+                    binding.cancel_result,
+                    result.quiescent,
+                    result.resources_released,
+                    result.detail,
+                )
+            reports.append(binding.cleanup_result)
         return tuple(reports)
 
     def retry(self, operation_id: str, *, failure_code: str = "", status: int | None = None, attempt: int = 1, max_attempts: int = 3, outcome_known: bool = True, effect: SideEffectClass = SideEffectClass.NONE, idempotency_key: str | None = None, retry_after_seconds: float | None = None, deadline_seconds: float | None = None) -> RetryDecision:

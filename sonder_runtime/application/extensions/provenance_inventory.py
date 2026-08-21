@@ -216,6 +216,18 @@ class ExtensionProvenanceAdmission:
         signatures_verified: bool = False,
     ) -> ExtensionHealth:
         provenance = self._inventory.record(manifest.extension_id)
+        if provenance.version != manifest.version:
+            return ExtensionHealth(
+                manifest.extension_id,
+                ExtensionHealthState.UNVERIFIED,
+                ("provenance-version-mismatch",),
+            )
+        if provenance.manifest_digest != manifest.digest():
+            return ExtensionHealth(
+                manifest.extension_id,
+                ExtensionHealthState.UNVERIFIED,
+                ("manifest-digest-mismatch",),
+            )
         if not signatures_verified or provenance.trust.level is TrustLevel.UNTRUSTED:
             return ExtensionHealth(manifest.extension_id, ExtensionHealthState.UNVERIFIED, ("provenance-unverified",))
         decision = self._quarantine.evaluate(

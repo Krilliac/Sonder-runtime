@@ -14,6 +14,12 @@ from dataclasses import dataclass, replace
 from enum import Enum
 
 from ...domain.common.errors import Conflict, Forbidden, NotFound
+from .reproducer_contract import (
+    BenchmarkEvidence,
+    FailureEvidence,
+    ReproducerContractService,
+    ReproducerEvidence,
+)
 
 
 class GovernancePhase(str, Enum):
@@ -102,6 +108,7 @@ class CandidateRecord:
     unrestricted: bool = False
     bypassed_gates: tuple[str, ...] = ()
     rejection_reason: str = ""
+    reproducer_evidence: tuple[ReproducerEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("candidate_id", "objective", "baseline_digest"):
@@ -169,6 +176,27 @@ class SelfmodGovernance:
         self._candidates[candidate_id] = updated
         return updated
 
+    def record_reproducer(self, candidate_id: str, evidence: ReproducerEvidence) -> CandidateRecord:
+        """Attach one concrete failure or benchmark contract to a candidate."""
+        record = self._get(candidate_id)
+        self._require_phase(record, GovernancePhase.ISOLATED)
+        if isinstance(evidence, FailureEvidence):
+            ReproducerContractService().validate_failure(evidence)
+        elif isinstance(evidence, BenchmarkEvidence):
+            ReproducerContractService().validate_benchmark(evidence)
+        else:
+            raise GovernanceInputError(
+                "reproducer evidence must be FailureEvidence or BenchmarkEvidence"
+            )
+        if any(item.evidence_id == evidence.evidence_id for item in record.reproducer_evidence):
+            raise Conflict(f"reproducer evidence {evidence.evidence_id!r} already exists")
+        updated = replace(
+            record,
+            reproducer_evidence=record.reproducer_evidence + (evidence,),
+        )
+        self._candidates[candidate_id] = updated
+        return updated
+
     def record_review(self, candidate_id: str, review: ReviewEvidence) -> CandidateRecord:
         record = self._get(candidate_id)
         self._require_phase(record, GovernancePhase.VERIFIED)
@@ -194,7 +222,12 @@ class SelfmodGovernance:
             or not record.worktree.managed
         ):
             return self._reject(record, "clean_worktree_required")
-        updated = replace(record, phase=GovernancePhase.APPROVED)
+        if not record.reproducer_evidence and not record.unrestricted:
+            return self._reject(record, "reproducer_evidence_required")
+        bypasses = record.bypassed_gates
+        if not record.reproducer_evidence:
+            bypasses = _append_once(bypasses, "reproducer")
+        updated = replace(record, phase=GovernancePhase.APPROVED, bypassed_gates=bypasses)
         self._candidates[candidate_id] = updated
         return updated
 

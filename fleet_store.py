@@ -1,20 +1,13 @@
-"""Historical migration compatibility alias for the packaged fleet store.
+"""Identity-preserving compatibility redirect for the packaged fleet store.
 
 Production code imports ``sonder_runtime.adapters.persistence.fleet_store``
-directly. This root name remains only for the immutable fleet baseline
-migration.
+directly. This root name remains for the immutable fleet baseline migration
+and other historical callers.
 """
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence import fleet_store as _store
+import sys
 
+from sonder_runtime.adapters.persistence import fleet_store as _implementation
 
-def __getattr__(name):
-    return getattr(_store, name)
-
-
-def __dir__():
-    return sorted(set(globals()) | set(dir(_store)))
-
-
-_ensure_schema = _store._ensure_schema
+sys.modules[__name__] = _implementation

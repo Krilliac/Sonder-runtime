@@ -1,4 +1,12 @@
-"""Execution-world adapter implementations."""
+"""Execution-world and durable output adapter implementations."""
+
+from .durable_output import DurableExecutionOutput, DurableSpillIntegrityError, SQLiteSpillStore
+from .persistent_terminal import (
+    PersistentTerminalError,
+    SQLitePersistentTerminalService,
+    TerminalCleanup,
+    TerminalCleanupError,
+)
 
 from .worlds import (
     ConfiguredRemoteWorkerProvider,
@@ -12,6 +20,13 @@ from .worlds import (
 )
 
 __all__ = [
+    "DurableExecutionOutput",
+    "DurableSpillIntegrityError",
+    "SQLiteSpillStore",
+    "PersistentTerminalError",
+    "SQLitePersistentTerminalService",
+    "TerminalCleanup",
+    "TerminalCleanupError",
     "ConfiguredRemoteWorkerProvider",
     "GuardedContainerProvider",
     "ReferenceExecutionWorld",
