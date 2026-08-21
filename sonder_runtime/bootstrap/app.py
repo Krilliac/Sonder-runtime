@@ -57,6 +57,7 @@ from ..application.ports.tool_executor import ToolExecutor
 from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
 from ..platform.config import SonderConfig
+from ..platform import paths as runtime_paths
 
 PROFILES = ("workstation-local", "server-private")
 
@@ -107,6 +108,11 @@ def build_application(
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
         profile = config.profile
+        if config.state.home:
+            # Keep typed startup state process-local.  This must happen before
+            # any lazy persistence factory can resolve a database path, and
+            # must not be translated through the mutable process environment.
+            runtime_paths.configure_home(config.state.home)
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
     from ..adapters.web import lifecycle as runtime_lifecycle
