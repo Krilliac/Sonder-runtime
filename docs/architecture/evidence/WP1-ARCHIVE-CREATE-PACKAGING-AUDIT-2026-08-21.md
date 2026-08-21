@@ -34,7 +34,7 @@ The packaged module retains both the historical positional API and the typed
 - Focused pytest command:
   `python -m pytest -q tests/test_archive_create_boundary.py tests/test_archive_create_executor.py tests/test_native_mcp.py tests/production/test_architecture.py`
   — **41 passed, 50 errors**. The errors are environment/setup failures from
-  pytest being unable to scan `C:\Users\Nathan\AppData\Local\Temp\pytest-of-Nathan`
+  pytest being unable to scan the host-local temporary directory
   (`WinError 5: Access is denied`), not assertion failures in the checkpoint
   code.
 

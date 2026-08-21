@@ -14,7 +14,7 @@ This checkpoint composes the existing agent delegation, skill discovery, procedu
 
 ## Verification
 
-Focused command: `python -m pytest tests/test_agent001_unified_composition.py tests/test_remaining_agent_004_008_009.py tests/test_remaining_agent_010.py tests/test_remaining_agent_005_job_integration.py tests/test_remaining_durable_subagents.py tests/test_skill_registry.py tests/test_skill_refresh_plugin_manifest.py tests/test_wp4_skill_registry.py tests/test_remaining_training_002_003_004_008.py tests/test_adaptive_training_boundary.py tests/test_attended_training_execution.py tests/test_wp7_training_catalog.py tests/test_training_data.py tests/test_training_tasks.py tests/test_train006_route_activation.py --basetemp C:\Users\Nathan\Documents\Codex\pytest-wp6-agents-skills-training -q`
+Focused command: `python -m pytest tests/test_agent001_unified_composition.py tests/test_remaining_agent_004_008_009.py tests/test_remaining_agent_010.py tests/test_remaining_agent_005_job_integration.py tests/test_remaining_durable_subagents.py tests/test_skill_registry.py tests/test_skill_refresh_plugin_manifest.py tests/test_wp4_skill_registry.py tests/test_remaining_training_002_003_004_008.py tests/test_adaptive_training_boundary.py tests/test_attended_training_execution.py tests/test_wp7_training_catalog.py tests/test_training_data.py tests/test_training_tasks.py tests/test_train006_route_activation.py --basetemp <host-temp>/pytest-wp6-agents-skills-training -q`
 
 Result: 69 passed, 1 known pytest cache-permission warning.
 

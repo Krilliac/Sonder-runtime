@@ -33,7 +33,7 @@ requirement because they do not establish the packaged end-to-end path.
 
 The 56 setup errors were pytest fixture setup failures, not assertion failures:
 the shared temp root
-`C:\\Users\\Nathan\\AppData\\Local\\Temp\\pytest-of-Nathan` returned
+the host-local pytest temporary directory returned
 `WinError 5 Access is denied` during `tmp_path` creation. Therefore archive,
 secret-scan, provider, and composition-root candidates from that run are
 withheld from the proven set. The broader run was not retried and no broad test

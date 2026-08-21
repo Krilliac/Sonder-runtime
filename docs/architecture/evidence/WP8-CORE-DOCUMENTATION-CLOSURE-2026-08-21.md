@@ -12,7 +12,7 @@ The architecture README identifies the authority index and master specification;
 
 ## Verification
 
-Focused command: `python -m pytest tests/test_runtime_model_configuration.py tests/test_cloud_model_policy.py tests/test_admin_auth_secret.py tests/test_update_manifest_trust.py tests/test_attended_training_execution.py tests/test_read_only_agent_policy.py tests/test_model_gateway_factory.py tests/test_extension_registry.py tests/production/test_entrypoint.py --basetemp C:\Users\Nathan\Documents\Codex\pytest-wp8-core-docs -q`
+Focused command: `python -m pytest tests/test_runtime_model_configuration.py tests/test_cloud_model_policy.py tests/test_admin_auth_secret.py tests/test_update_manifest_trust.py tests/test_attended_training_execution.py tests/test_read_only_agent_policy.py tests/test_model_gateway_factory.py tests/test_extension_registry.py tests/production/test_entrypoint.py --basetemp <host-temp>/pytest-wp8-core-docs -q`
 
 Result: 104 passed, 7 expected skips, and 1 known pytest cache-permission warning.
 
