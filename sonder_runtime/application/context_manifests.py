@@ -7,6 +7,7 @@ immutable records and receive immutable, hashable manifests with provenance.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 import re
@@ -17,8 +18,28 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 
+def _json_default(value: Any) -> Any:
+    """Canonicalize immutable context records for snapshot digests."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _json_default(getattr(value, field.name))
+            if dataclasses.is_dataclass(getattr(value, field.name))
+            or isinstance(getattr(value, field.name), (Mapping, tuple, set, frozenset))
+            else getattr(value, field.name)
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (tuple, set, frozenset)):
+        return list(value)
+    raise TypeError(f"unsupported digest value: {type(value).__name__}")
+
+
 def _json_bytes(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=_json_default,
+    ).encode("utf-8")
 
 
 def _digest(value: Any) -> str:

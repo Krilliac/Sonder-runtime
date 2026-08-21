@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 201,
+      "file_count": 202,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -110,6 +110,7 @@
         "sonder_runtime/adapters/goal_formatting.py",
         "sonder_runtime/adapters/inference/__init__.py",
         "sonder_runtime/adapters/inference/injected.py",
+        "sonder_runtime/adapters/inference/model_gateway_factory.py",
         "sonder_runtime/adapters/inference/ollama.py",
         "sonder_runtime/adapters/inference/ollama_endpoint.py",
         "sonder_runtime/adapters/inference/ollama_gateway.py",
@@ -250,7 +251,7 @@
       ]
     },
     {
-      "file_count": 233,
+      "file_count": 236,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -336,6 +337,7 @@
         "sonder_runtime/application/memory/retrieval_evaluation.py",
         "sonder_runtime/application/model_gateway/__init__.py",
         "sonder_runtime/application/model_gateway/escalation.py",
+        "sonder_runtime/application/model_gateway/facade.py",
         "sonder_runtime/application/model_gateway/health_and_roles.py",
         "sonder_runtime/application/operations/__init__.py",
         "sonder_runtime/application/operations/admission_gate.py",
@@ -380,6 +382,7 @@
         "sonder_runtime/application/ports/recall.py",
         "sonder_runtime/application/ports/repl_services.py",
         "sonder_runtime/application/ports/repositories.py",
+        "sonder_runtime/application/ports/repository_intelligence.py",
         "sonder_runtime/application/ports/sandbox.py",
         "sonder_runtime/application/ports/session_repository.py",
         "sonder_runtime/application/ports/specialized_lifecycle.py",
@@ -413,6 +416,7 @@
         "sonder_runtime/application/recall/__init__.py",
         "sonder_runtime/application/recall/use_cases.py",
         "sonder_runtime/application/repository_intelligence/__init__.py",
+        "sonder_runtime/application/repository_intelligence/facade.py",
         "sonder_runtime/application/repository_intelligence/index_map.py",
         "sonder_runtime/application/repository_intelligence/lsp_multiroot.py",
         "sonder_runtime/application/repository_intelligence/navigation.py",

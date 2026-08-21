@@ -96,6 +96,7 @@ from ..application.ports.repositories import AutomationRepository, UnitOfWork
 from ..application.ports.tool_executor import ToolExecutor
 from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
+from ..application.context_integration import ContextPlanningFacade
 from ..platform.config import SonderConfig
 from ..platform import paths as runtime_paths
 from ..adapters.inference import ollama_endpoint
@@ -144,6 +145,7 @@ class Application:
     experiment_manager: Callable[[], EphemeralExperimentManager] | None = None
     extension_facade: Callable[[], ExtensionApplicationFacade] | None = None
     selfmod_service: Callable[[], GuardedLegacySelfmodService] | None = None
+    context_planning: ContextPlanningFacade | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -249,6 +251,9 @@ def build_application(
         FileVisionInputProvider(),
         OllamaVisionGateway(target_resolver=target_resolver),
     )
+    # Provider-neutral context planning is part of the live application graph;
+    # hardware measurements remain an explicit adapter input at call time.
+    context_planning = ContextPlanningFacade()
     session_repository: SQLiteSessionRepository | None = None
     canonical_session_capture: SessionCaptureService | None = session_capture_service
     compaction_service: SessionCompactionService | None = None
@@ -510,6 +515,7 @@ def build_application(
         experiment_manager=get_experiment_manager,
         extension_facade=get_extension_facade,
         selfmod_service=get_selfmod_service,
+        context_planning=context_planning,
     )
 
 

@@ -12,6 +12,7 @@ from .health_and_roles import (
     RoleBinding,
     RoleBudgetBook,
 )
+from .facade import ModelGatewayFacade
 from .escalation import (
     ControlledEscalation,
     ControlledEscalationPolicy,
@@ -42,4 +43,5 @@ __all__ = [
     "EscalationReason",
     "EscalationRequest",
     "EscalationRoute",
+    "ModelGatewayFacade",
 ]
