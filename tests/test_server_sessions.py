@@ -158,7 +158,7 @@ def test_long_thread_summarizes_overflow(stub, monkeypatch):
 def test_remember_fact_routes_through_unit_of_work(stub, monkeypatch):
     """SPEC-3: fact persistence goes through the UnitOfWork port, bound to
     the server's database path (which tests repoint)."""
-    from sonder_runtime.adapters.strangler_services import LegacyUnitOfWork
+    from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter as LegacyUnitOfWork
 
     seen = {}
 

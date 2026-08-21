@@ -154,6 +154,7 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("log_inspect.py"),
     Path("project_detect.py"),
     Path("workspace_compare.py"),
+    Path("sonder_runtime/adapters/strangler_services.py"),
 })
 
 # Applied migrations are immutable historical artifacts. They may retain an

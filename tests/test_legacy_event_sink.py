@@ -13,6 +13,6 @@ def test_event_store_failure_does_not_change_business_success(monkeypatch):
 
 
 def test_strangler_name_is_identity_compatible():
-    from sonder_runtime.adapters.strangler_services import OperationsEventSink as Legacy
+    from sonder_runtime.adapters.operations_event_sink import OperationsEventSink as Legacy
 
     assert Legacy is OperationsEventSink

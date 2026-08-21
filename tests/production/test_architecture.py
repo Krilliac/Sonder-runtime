@@ -367,6 +367,7 @@ def test_checker_detects_a_violation(tmp_path):
         "log_inspect.py",
         "project_detect.py",
         "workspace_compare.py",
+        "sonder_runtime\\adapters\\strangler_services.py",
     ],
 )
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):

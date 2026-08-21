@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from sonder_runtime.adapters.strangler_services import (
-    LegacyMemoryRepository,
-    LegacyUnitOfWork,
-)
+from sonder_runtime.adapters.memory_repository import MemoryRepositoryAdapter as LegacyMemoryRepository
+from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter as LegacyUnitOfWork
 from sonder_runtime.adapters.memory_repository import MemoryRepositoryAdapter
 
 
