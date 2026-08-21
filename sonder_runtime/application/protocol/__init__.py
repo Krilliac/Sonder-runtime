@@ -13,6 +13,7 @@ from .mobile_parity import (
     encode_reconnect_request,
     encode_reconnect_response,
 )
+from .mcp_tasks import McpTaskStatus, McpTaskView, project_job
 
 __all__ = [
     "MobileWireError", "ResumableStream", "ResumeBatch", "StreamBackpressure", "StreamGap",
@@ -23,4 +24,5 @@ __all__ = [
     "ClientParityContract", "ClientSchema", "ClientSchemaError", "ReconnectRequest",
     "ReconnectResponse", "ResumeCursor", "ResumeDisposition", "ResumeResult",
     "SchemaFreshness", "build_client_schema",
+    "McpTaskStatus", "McpTaskView", "project_job",
 ]

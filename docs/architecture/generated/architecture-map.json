@@ -255,7 +255,7 @@
       ]
     },
     {
-      "file_count": 255,
+      "file_count": 256,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -425,6 +425,7 @@
         "sonder_runtime/application/protocol/events.py",
         "sonder_runtime/application/protocol/facade.py",
         "sonder_runtime/application/protocol/mcp_compatibility.py",
+        "sonder_runtime/application/protocol/mcp_tasks.py",
         "sonder_runtime/application/protocol/mobile_parity.py",
         "sonder_runtime/application/protocol/openai_compatibility.py",
         "sonder_runtime/application/protocol/resumable_streams.py",
