@@ -21,6 +21,7 @@ from .training import (
     TrainingProcessPort,
 )
 from .event_sink import EventSink
+from .protocol import ProtocolAuthorization
 from .model_gateway import (
     Embedding,
     InferenceTelemetry,
@@ -161,6 +162,7 @@ __all__ = [
     "TrainingProcessPort",
     "Embedding",
     "EventSink",
+    "ProtocolAuthorization",
     "InferenceTelemetry",
     "MemoryRepository",
     "ModelGateway",

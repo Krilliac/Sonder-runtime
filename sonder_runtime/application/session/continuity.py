@@ -75,6 +75,11 @@ class SessionContinuityService:
         report = self._repository.inspect_integrity(session_id, limit=limit)
         if not report.valid or report.checked_events != len(events):
             raise IntegrityFailure("session history failed integrity verification")
+        if (
+            report.first_sequence != (events[0].sequence if events else None)
+            or report.last_sequence != (events[-1].sequence if events else None)
+        ):
+            raise IntegrityFailure("session integrity report does not match continuity snapshot")
         if len(events) == limit:
             raise IntegrityFailure("session history exceeds continuity bound")
         return events
