@@ -5004,7 +5004,10 @@ def _sonder_impl_serialized(
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
-    requested_ctx = _context_requested(context_size or (SESSION_NUM_CTX if session_id else num_ctx))
+    requested_ctx = _platform_requested_context(
+        context_size or (SESSION_NUM_CTX if session_id else num_ctx),
+        default_value=SESSION_NUM_CTX,
+    )
     # Sessioned threads get the selected virtual context window; honor a larger explicit num_ctx.
     num_ctx_eff = max(num_ctx, requested_ctx) if session_id else requested_ctx
 
@@ -5306,7 +5309,10 @@ def _answer_with_history_impl(
     # cloud from learning and have the app respect it. The local route is gated via 'code'.
     learn = _should_learn(_canonical_learn_tier(tier_label), True)
     temperature = _serve_temperature()
-    req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
+    req_ctx = _platform_requested_context(
+        context_size or SESSION_NUM_CTX,
+        default_value=SESSION_NUM_CTX,
+    )
     session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
     interaction_snapshot = None
@@ -5538,7 +5544,10 @@ def structured_answer_with_history(
             target_observer(model, tier_label, cloud)
         except Exception:
             pass
-    req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
+    req_ctx = _platform_requested_context(
+        context_size or SESSION_NUM_CTX,
+        default_value=SESSION_NUM_CTX,
+    )
     system = _build_system("", False, "", model=model, cloud=cloud)
     response = _make_generate(
         model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
