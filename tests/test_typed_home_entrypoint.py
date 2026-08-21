@@ -105,3 +105,25 @@ def test_cmd_serve_migrates_typed_home_before_binding_when_environment_is_poison
 
     assert seen["jobs"] == str(configured / "jobs.db")
     assert not (poisoned / "jobs.db").exists()
+
+
+def test_cmd_serve_refuses_pre_epoch_home_and_points_to_explicit_adoption(
+    tmp_path, monkeypatch, capsys
+):
+    import sqlite3
+
+    configured = tmp_path / "pre-epoch"
+    configured.mkdir()
+    conn = sqlite3.connect(str(configured / "memory.db"))
+    conn.execute("CREATE TABLE schema_epoch (epoch INTEGER)")
+    conn.execute("INSERT INTO schema_epoch VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    called = []
+    monkeypatch.setattr(migrations, "migrate_all", lambda **kwargs: called.append(kwargs))
+    assert main([
+        "serve", "--skip-preflight", "--set", f"state.home={configured}",
+    ]) == 1
+    assert called == []
+    assert "migrate --adopt-epoch2" in capsys.readouterr().err

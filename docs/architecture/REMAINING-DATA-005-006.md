@@ -17,6 +17,8 @@ The implementation is deliberately split across two persistence paths:
   home, runs the bridge without fault injection, and refuses success unless the
   post-adoption checker proves every epoch marker, receipt, ledger, and cleanup
   invariant. Ordinary `migrate` and `serve` do not silently perform adoption.
+  `serve` now applies the epoch gate before migration or listener binding and
+  directs pre-epoch homes to this explicit command.
 
 The bridge migration has an explicit optional `step_hook` used only by the
 rehearsal. Normal runtime calls leave it unset, so the production migration
