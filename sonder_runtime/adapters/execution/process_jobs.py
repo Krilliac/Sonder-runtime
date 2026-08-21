@@ -8,7 +8,10 @@ from typing import Any, Callable
 
 from ...application.capabilities.jobs import JobCancellationResult, JobRegistryService
 from ...application.execution.process_jobs import ProcessJobRequest, ProcessJobStart, ProcessJobWait
-from ...application.jobs.durable_registry import DurableJobRegistry, ProcessTreeCleanupContract
+from ...application.jobs.durable_registry import ProcessTreeCleanupContract
+from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
+from ...application.execution.world_control import OutputStream
+from .durable_output import DurableExecutionOutput
 from ...application.ports.jobs import JobStatus
 
 
@@ -27,15 +30,24 @@ class SubprocessJobProvider:
         process_cleanup: ProcessTreeCleanupContract,
         launcher: Callable[..., Any] | None = None,
         platform_name: str | None = None,
+        lifecycle: JobRegistryLifecycleAdapter | None = None,
+        output: DurableExecutionOutput | None = None,
+        inline_output_bytes: int = 16 * 1024,
     ) -> None:
-        if not isinstance(registry, DurableJobRegistry):
-            raise TypeError("registry must be a DurableJobRegistry")
+        if not all(callable(getattr(registry, name, None)) for name in (
+            "start", "poll", "transition", "append_output", "stream",
+        )):
+            raise TypeError("registry must provide the durable process-job operations")
         if not callable(getattr(process_cleanup, "cleanup", None)):
             raise TypeError("process_cleanup must provide cleanup")
+        if inline_output_bytes < 1:
+            raise ValueError("inline_output_bytes must be positive")
         self._registry = registry
-        self._jobs = JobRegistryService(registry, process_cleanup=process_cleanup)
+        self._jobs = JobRegistryService(registry, process_cleanup=process_cleanup, lifecycle=lifecycle)
         self._launcher = launcher or subprocess.Popen
         self._platform = platform_name or os.name
+        self._output = output
+        self._inline_output_bytes = inline_output_bytes
         self._processes: dict[str, Any] = {}
         self._limits: dict[str, int] = {}
 
@@ -80,7 +92,15 @@ class SubprocessJobProvider:
     def wait(self, job_id: str, *, timeout: float | None = None) -> ProcessJobWait:
         process = self._process(job_id)
         try:
-            exit_code = process.wait(timeout=timeout)
+            if callable(getattr(process, "communicate", None)):
+                stdout, stderr = process.communicate(timeout=timeout)
+                exit_code = getattr(process, "returncode", None)
+                if exit_code is None:
+                    exit_code = process.wait(timeout=0)
+                self._record_output(job_id, OutputStream.STDOUT, stdout)
+                self._record_output(job_id, OutputStream.STDERR, stderr)
+            else:
+                exit_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return ProcessJobWait(self._registry.poll(job_id), None, timed_out=True)
         status = JobStatus.SUCCEEDED if exit_code == 0 else JobStatus.FAILED
@@ -90,6 +110,8 @@ class SubprocessJobProvider:
             result={"exit_code": exit_code} if status is JobStatus.SUCCEEDED else None,
             error="process exited with a non-zero status" if status is JobStatus.FAILED else "",
         )
+        if self._jobs._lifecycle is not None:
+            self._jobs._lifecycle.record(record)
         self._processes.pop(job_id, None)
         self._limits.pop(job_id, None)
         return ProcessJobWait(record, exit_code)
@@ -97,6 +119,8 @@ class SubprocessJobProvider:
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
         limit = self._limits.get(job_id, 64)
         result = self._jobs.cancel_with_cleanup(job_id, reason, max_descendants=limit)
+        if self._jobs._lifecycle is not None:
+            self._jobs._lifecycle.record_many(result.records)
         if result.cleanup_completed:
             process = self._processes.pop(job_id, None)
             self._limits.pop(job_id, None)
@@ -106,6 +130,24 @@ class SubprocessJobProvider:
                 except (subprocess.TimeoutExpired, OSError):
                     pass
         return result
+
+    def _record_output(self, job_id: str, stream: OutputStream, data: str | None) -> None:
+        if not data:
+            return
+        payload = str(data)
+        encoded_size = len(payload.encode("utf-8"))
+        spill = None
+        inline = payload
+        if encoded_size > self._inline_output_bytes:
+            if self._output is not None:
+                spill = self._output.spill_text(payload, owner_id=job_id)
+            inline = payload[: self._inline_output_bytes]
+        self._registry.append_output(job_id, stream, inline, spill=spill)
+        if self._jobs._lifecycle is not None:
+            page = self._registry.stream(job_id, max_events=1, max_bytes=self._inline_output_bytes)
+            if page.events:
+                record = self._registry.poll(job_id)
+                self._jobs._lifecycle.record_output(record, page.events[-1])
 
     def _process(self, job_id: str) -> Any:
         try:

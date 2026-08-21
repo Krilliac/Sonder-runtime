@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 22,
-      "planned": 182
+      "implemented_unverified": 34,
+      "planned": 170
     },
     "total": 204,
     "verified": 0
@@ -264,9 +264,9 @@
     },
     {
       "checked": false,
-      "claim": "One implementation path for durable fanout persistence with full lifecycle regression coverage.",
+      "claim": "Provider lifecycle publication is composed into the live model/embedding path with fail-closed optional training and update lanes.",
       "requirement_id": "ARCH-001",
-      "revision": 11,
+      "revision": 12,
       "status": "implemented_unverified"
     },
     {
@@ -782,38 +782,38 @@
     },
     {
       "checked": false,
-      "claim": "Generic registry.",
+      "claim": "Generic durable jobs can be started and polled through the composed SQLite registry.",
       "requirement_id": "JOB-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 3,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Control.",
+      "claim": "Composed jobs support bounded poll/stream reads, monotonic output watermarks, durable inline previews, and spill references.",
       "requirement_id": "JOB-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 3,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Recovery.",
+      "claim": "The composed application exposes bounded restart recovery and routes complete orphan process cleanup through the typed supervisor.",
       "requirement_id": "JOB-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 3,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Process containment.",
+      "claim": "The composed subprocess provider uses the existing bounded process-tree cleanup contract and preserves incomplete cleanup truth.",
       "requirement_id": "JOB-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 3,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Output watermarks.",
+      "claim": "Composed process output uses durable monotonic watermarks with bounded previews and durable spill references across restart.",
       "requirement_id": "JOB-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 3,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1153,10 +1153,10 @@
     },
     {
       "checked": false,
-      "claim": "JobRegistry/WorkflowEngine",
+      "claim": "The live application composition exposes the durable job registry, process provider, bounded recovery callback, process-tree cleanup contract, and session lifecycle linkage.",
       "requirement_id": "SEAM-010",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1307,38 +1307,38 @@
     },
     {
       "checked": false,
-      "claim": "Typed identities.",
+      "claim": "Live server turns use the typed session identity boundary for durable capture.",
       "requirement_id": "SESSION-001",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Append-only log.",
+      "claim": "Completed live turns append to the canonical SQLite event stream and remain visible after reopen.",
       "requirement_id": "SESSION-002",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Durable vocabulary.",
+      "claim": "The live bridge records the typed request, user message, and model response vocabulary.",
       "requirement_id": "SESSION-003",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Model-visible invariant.",
+      "claim": "The live bridge persists the model-visible prompt, system boundary, history, tier, and request identity before replay.",
       "requirement_id": "SESSION-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Deterministic replay.",
+      "claim": "A reopened application can verify and deterministically replay a live captured turn; capture failure is fail-closed.",
       "requirement_id": "SESSION-005",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1356,10 +1356,10 @@
     },
     {
       "checked": false,
-      "claim": "Query and export.",
+      "claim": "The live composition path retains bounded administrator-gated query, export, and replay access over the same durable repository.",
       "requirement_id": "SESSION-008",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "c164d65893513a58dac0b27169368dd739b318884cfc948345252f2c43e07f6c",
+    "ledger_sha256": "453077b7d385b5070453c9321c39b3f8f35427be4f9af9af56f3c0efe9afbe24",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

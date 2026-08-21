@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...domain.common.errors import ConcurrencyConflict, InvalidInput, NotFound
+from ..execution.world_control import OutputPage, OutputStream, OutputWatermark, SpillReference
 from ..jobs.durable_registry import (
     ProcessTreeCleanupContract,
     ProcessTreeCleanupReceipt,
@@ -51,11 +52,69 @@ class JobRegistryService:
             self._lifecycle.record(record)
         return record
 
+    def start(
+        self,
+        identity: JobIdentity,
+        *,
+        parent_job_id: str | None = None,
+        process_id: int | None = None,
+        process_group_id: int | None = None,
+    ) -> JobRecord:
+        """Start a durable job when the backing adapter exposes the richer seam."""
+        starter = getattr(self._port, "start", None)
+        if not callable(starter):
+            return self.create(identity)
+        record = starter(
+            identity,
+            parent_job_id=parent_job_id,
+            process_id=process_id,
+            process_group_id=process_group_id,
+        )
+        if self._lifecycle is not None:
+            self._lifecycle.record(record)
+        return record
+
     def get(self, job_id: str) -> JobRecord:
         job = self._port.get(job_id)
         if job is None:
             raise NotFound(f"job {job_id!r} not found")
         return job
+
+    def poll(self, job_id: str) -> JobRecord:
+        """Poll using the durable vocabulary while preserving get semantics."""
+        return self.get(job_id)
+
+    def stream(
+        self,
+        job_id: str,
+        *,
+        after: OutputWatermark | None = None,
+        max_events: int = 64,
+        max_bytes: int = 16 * 1024,
+    ) -> OutputPage:
+        """Read one bounded durable output page."""
+        reader = getattr(self._port, "stream", None)
+        if not callable(reader):
+            raise InvalidInput("job output streaming is not supported")
+        return reader(job_id, after=after, max_events=max_events, max_bytes=max_bytes)
+
+    def append_output(
+        self,
+        job_id: str,
+        stream: OutputStream,
+        data: str,
+        *,
+        spill: SpillReference | None = None,
+    ) -> None:
+        """Persist output and forward the newly appended event to session history."""
+        writer = getattr(self._port, "append_output", None)
+        if not callable(writer):
+            raise InvalidInput("job output is not supported")
+        before = self.stream(job_id)
+        writer(job_id, stream, data, spill=spill)
+        for event in self.stream(job_id, after=before.next_watermark).events:
+            if self._lifecycle is not None:
+                self._lifecycle.record_output(self.get(job_id), event)
 
     def list(self, *, include_terminal: bool = True, limit: int = 100) -> tuple[JobRecord, ...]:
         if limit < 1:
@@ -170,6 +229,28 @@ class JobRegistryService:
 
     def reconcile(self, *, now: str | None = None) -> int:
         return self._port.reconcile(now=now)
+
+    def recover(
+        self,
+        *,
+        owner_instance_id: str = "",
+        owner_alive: bool | None = None,
+        max_records: int = 100,
+        max_process_descendants: int = 64,
+    ) -> Any:
+        """Run the adapter's bounded restart recovery with configured cleanup."""
+        if self._process_cleanup is None:
+            raise InvalidInput("process cleanup contract is not configured")
+        recover = getattr(self._port, "reconcile_with_cleanup", None)
+        if not callable(recover):
+            raise InvalidInput("job recovery is not supported")
+        return recover(
+            self._process_cleanup,
+            owner_instance_id=owner_instance_id,
+            owner_alive=owner_alive,
+            max_records=max_records,
+            max_process_descendants=max_process_descendants,
+        )
 
 
 class ResumableWorkflowEngine:

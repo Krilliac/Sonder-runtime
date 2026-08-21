@@ -75,6 +75,15 @@ class ProcessTreeCleanupReceipt:
             raise ValueError("terminated descendants cannot exceed seen descendants")
 
 
+@dataclass(frozen=True, slots=True)
+class JobRecoveryReport:
+    """Typed result of bounded restart reconciliation and cleanup."""
+
+    plan: DrainPlan
+    cleanup_receipts: tuple[ProcessTreeCleanupReceipt, ...]
+    interrupted_job_ids: tuple[str, ...]
+
+
 class ProcessTreeCleanupContract(Protocol):
     """Platform-owned process-tree cleanup operation."""
 
@@ -307,6 +316,6 @@ class DurableJobRegistry:
 
 
 __all__ = [
-    "DurableJobRegistry", "DurableJobView", "ProcessTreeCleanupContract",
+    "DurableJobRegistry", "DurableJobView", "JobRecoveryReport", "ProcessTreeCleanupContract",
     "ProcessTreeCleanupReceipt", "ProcessTreeCleanupRequest",
 ]

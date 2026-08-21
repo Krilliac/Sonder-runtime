@@ -208,5 +208,9 @@ class JobRegistryLifecycleAdapter:
         linkages = [self._recorder.record_lifecycle(record) for record in records]
         return tuple(linkage for linkage in linkages if linkage is not None)
 
+    def record_output(self, record: JobRecord, output: OutputEvent) -> JobSessionLinkage | None:
+        """Forward one durable output event through the session linkage seam."""
+        return self._recorder.record_output(record, output)
+
 
 __all__ = ["JobRegistryLifecycleAdapter", "JobSessionLifecycleRecorder", "JobSessionLinkage"]
