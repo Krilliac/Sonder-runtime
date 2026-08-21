@@ -246,6 +246,7 @@ from sonder_runtime.adapters.model_error_details import (
 from sonder_runtime.adapters.model_error_formatting import (
     TRANSIENT_MODEL_HTTP_CODES,
     format_model_call_error,
+    format_runtime_model_call_error as _format_runtime_model_call_error_policy,
 )
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
@@ -4097,13 +4098,10 @@ def _response_error_metadata(error) -> dict:
 
 
 def _format_model_call_error(error: ModelCallError) -> str:
-    target = (
-        "hosted Ollama" if error.cloud else
-        "remote Ollama" if not ollama_endpoint.is_loopback(BASE) else
-        "local Ollama"
-    )
-    return format_model_call_error(
-        error, target=target, display=_ollama_display(),
+    return _format_runtime_model_call_error_policy(
+        error,
+        endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+        display=_ollama_display(),
     )
 
 
@@ -4660,7 +4658,11 @@ def offload(
             schema=schema,
         )
     except ModelCallError as error:
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
 
 
 def _leading_json_object(text):
@@ -4809,7 +4811,11 @@ def extract_grounded(
             timeout=timeout,
         )
     except ModelCallError as error:
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
 
 
 def _env_location_consent() -> bool:
@@ -5038,7 +5044,11 @@ def _sonder_impl_serialized(
                 internal_generate=internal_generate,
             )
     except ModelCallError as error:
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
@@ -5400,7 +5410,11 @@ def _answer_with_history_impl(
     except ModelCallError as error:
         if raise_model_errors:
             raise
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
