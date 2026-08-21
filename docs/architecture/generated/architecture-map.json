@@ -254,7 +254,7 @@
       ]
     },
     {
-      "file_count": 247,
+      "file_count": 249,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -322,6 +322,8 @@
         "sonder_runtime/application/extensions/registry.py",
         "sonder_runtime/application/inspection/__init__.py",
         "sonder_runtime/application/inspection/use_cases.py",
+        "sonder_runtime/application/instruction_discovery/__init__.py",
+        "sonder_runtime/application/instruction_discovery/registry.py",
         "sonder_runtime/application/jobs/durable_registry.py",
         "sonder_runtime/application/jobs/generic_jobs.py",
         "sonder_runtime/application/jobs/session_lifecycle.py",
