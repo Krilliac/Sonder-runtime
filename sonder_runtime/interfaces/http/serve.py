@@ -60,6 +60,7 @@ from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
+from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import dispatch_a2a_jsonrpc_route
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_route
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
@@ -100,6 +101,15 @@ def configure_session_facade(facade):
     global _SESSION_FACADE
     _SESSION_FACADE = facade
     return facade
+
+
+def configure_a2a_request_handler(handler):
+    """Inject the explicitly authorized application-owned A2A handler."""
+    if handler is not None and not callable(handler):
+        raise TypeError("A2A request handler must be callable or None")
+    global _A2A_REQUEST_HANDLER
+    _A2A_REQUEST_HANDLER = handler
+    return handler
 
 
 def configure_control_plane_service(service):
@@ -146,6 +156,7 @@ _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _CONTROL_PLANE_FACADE = ControlPlaneFacade()
 _A2A_AGENT_CARD_FACADE = A2AAgentCardFacade()
+_A2A_REQUEST_HANDLER = None
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
 _SESSION_FACADE = None
 _CONTROL_PLANE_SERVICE = None
@@ -4474,6 +4485,29 @@ class Handler(BaseHTTPRequestHandler):
         self._operation_context = sonder_lifecycle.get().operation_context(
             self._correlation(), context,
         )
+        if path == "/a2a":
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            result = dispatch_a2a_jsonrpc_route(
+                _A2A_REQUEST_HANDLER, "POST", path, req,
+            )
+            if result is None:
+                self._send_not_found()
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
         if _is_extension_route(path):
             if not context["authorized"]:
                 self._send_auth_error()

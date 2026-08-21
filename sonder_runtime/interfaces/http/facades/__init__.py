@@ -5,6 +5,7 @@ from .extensions import ExtensionHttpResult, dispatch_extension_route
 from .observability import TraceHttpResult, dispatch_trace_route
 from .control_plane import ControlPlaneFacade, ControlPlaneRoute
 from .a2a import A2AAgentCardFacade, A2AAgentCardRoute
+from .a2a_jsonrpc import A2AJsonRpcHttpResult, dispatch_a2a_jsonrpc_route
 
 __all__ = [
     "ExtensionHttpResult",
@@ -17,4 +18,6 @@ __all__ = [
     "ControlPlaneRoute",
     "A2AAgentCardFacade",
     "A2AAgentCardRoute",
+    "A2AJsonRpcHttpResult",
+    "dispatch_a2a_jsonrpc_route",
 ]
