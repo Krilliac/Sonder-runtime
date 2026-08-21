@@ -12,6 +12,7 @@ from sonder_runtime.application.extensions.experiments import (
 )
 from sonder_runtime.application.extensions.registry import ExtensionRegistry
 from sonder_runtime.application.extensions.facade import ExtensionApplicationFacade
+from sonder_runtime.domain.extensions.manifest import ExtensionIdentity, ExtensionManifest
 from sonder_runtime.bootstrap import app as bootstrap_app
 
 
@@ -79,3 +80,34 @@ def test_application_extension_services_do_not_import_adapters():
     assert "sonder_runtime.adapters" not in inspect.getsource(registry)
     assert "..adapters" not in inspect.getsource(experiments)
     assert "..adapters" not in inspect.getsource(registry)
+
+
+def test_live_application_extension_registry_persists_and_rehydrates_manifest(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    bootstrap_app.reset_for_tests()
+    manifest = ExtensionManifest(
+        ExtensionIdentity("persisted", "sonder"), "1.0.0", "extension-v1"
+    )
+    try:
+        first = bootstrap_app.build_application()
+        installed = first.extension_registry().install(
+            manifest, scope="global", protocol="extension-v1",
+        )
+        assert first.extension_registry().durable is True
+        assert installed.manifest_digest == manifest.digest()
+        first_digest = first.extension_registry().snapshot().digest
+    finally:
+        bootstrap_app.reset_for_tests()
+
+    try:
+        second = bootstrap_app.build_application()
+        restored = second.extension_registry().get("sonder.persisted", scope="global")
+        assert restored.manifest_digest == manifest.digest()
+        assert second.extension_registry().snapshot().digest == first_digest
+        # Missing provenance remains explicit; persistence must not turn an
+        # unverified installation into an executable healthy extension.
+        assert restored.enabled is False
+    finally:
+        bootstrap_app.reset_for_tests()
