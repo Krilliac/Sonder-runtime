@@ -23,7 +23,9 @@ class _Jobs:
         self.cancelled = []
 
     def get(self, task_id):
-        assert task_id == "job-1"
+        if task_id != "job-1":
+            from sonder_runtime.domain.common.errors import NotFound
+            raise NotFound("job not found")
         return self.record
 
     def cancel(self, task_id, *, reason):
@@ -86,3 +88,28 @@ def test_mcp_task_handler_is_the_negotiated_stdio_dispatch_seam():
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert rows[1]["result"]["taskId"] == "job-1"
     assert rows[1]["result"]["contentRedacted"] is True
+
+
+@pytest.mark.parametrize(
+    ("params", "code"),
+    [({}, -32602), ({"taskId": "missing"}, -32601)],
+)
+def test_mcp_task_errors_are_mapped_to_bounded_json_rpc_errors(params, code):
+    request = "\n".join(json.dumps(item) for item in (
+        {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersions": ["2.0"], "capabilities": {"tasks": {}}},
+        },
+        {
+            "jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": params,
+        },
+    )) + "\n"
+    output = io.StringIO()
+    transport = StdioMcpTransport(
+        io.StringIO(request), output,
+        compatibility=McpCompatibility(supported_versions=("2.0",), capabilities=("tasks",)),
+        tool_catalog=(), tool_handler=lambda *_: {}, task_handler=McpTaskHandler(_Jobs()),
+    )
+    transport.serve()
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["error"]["code"] == code

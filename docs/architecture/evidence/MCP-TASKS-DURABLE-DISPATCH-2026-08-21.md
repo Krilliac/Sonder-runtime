@@ -9,7 +9,8 @@ poll bounds, and update metadata before the transport sees the response.
 The handler is provider-neutral and can be injected directly into
 `StdioMcpTransport`; the transport still requires the client to negotiate the
 `tasks` capability before dispatch. Focused proof covers direct get/update/
-cancel behavior and the real negotiated stdio path:
+cancel behavior, protocol-level invalid-input/not-found error mapping, and the
+real negotiated stdio path:
 
 ```text
 python -m pytest -q tests/test_mcp_task_handler.py tests/test_mcp_tasks_projection.py tests/test_mcp_stdio_transport.py
