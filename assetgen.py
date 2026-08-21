@@ -21,7 +21,7 @@ import struct
 import wave
 import zlib
 
-import artifact_grounding
+import sonder_runtime.adapters.artifact_grounding as artifact_grounding
 import media_assets
 import model_assets
 import ooxml_assets

@@ -371,6 +371,40 @@ def format_plan(plan):
     return "\n".join(lines)
 
 
+# Compatibility names for callers that still import the legacy entrypoint.
+# The canonical planning implementation lives in the application boundary;
+# lifecycle/deployment code below remains intentionally in this module until
+# its external process and policy seams can be extracted safely.
+from sonder_runtime.application.training.hardware_planning import (
+    HardwarePlan,
+    PlanOptions,
+    Recommendation,
+    build_plan as _application_build_plan,
+    format_hardware as _application_format_hardware,
+    format_plan as _application_format_plan,
+    memory_budgets as _application_memory_budgets,
+)
+
+
+def memory_budgets(profile, options):
+    return _application_memory_budgets(profile, options)
+
+
+def build_plan(profile=None, options=None):
+    profile = profile or system_profile.detect_hardware(
+        gpu_index=(options or PlanOptions()).gpu_index
+    )
+    return _application_build_plan(profile, options)
+
+
+def format_hardware(profile=None):
+    return _application_format_hardware(profile or system_profile.detect_hardware())
+
+
+def format_plan(plan):
+    return _application_format_plan(plan)
+
+
 def state_path():
     return Path(
         sonder_paths.state_path("training_state.json", "SONDER_TRAINING_STATE")

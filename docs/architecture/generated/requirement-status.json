@@ -129,8 +129,8 @@
   "overall": {
     "checked": 0,
     "statuses": {
-      "implemented_unverified": 20,
-      "planned": 184
+      "implemented_unverified": 22,
+      "planned": 182
     },
     "total": 204,
     "verified": 0
@@ -264,23 +264,23 @@
     },
     {
       "checked": false,
-      "claim": "One implementation path.",
+      "claim": "One implementation path for durable fanout persistence with full lifecycle regression coverage.",
       "requirement_id": "ARCH-001",
-      "revision": 8,
+      "revision": 11,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Root weather and location surfaces are compatibility aliases.",
+      "claim": "The root fanout store is an identity compatibility alias.",
       "requirement_id": "ARCH-002",
-      "revision": 4,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Weather/location ownership is ratcheted to packaged adapters.",
+      "claim": "Fanout persistence ownership is ratcheted to the packaged adapter.",
       "requirement_id": "ARCH-003",
-      "revision": 4,
+      "revision": 6,
       "status": "implemented_unverified"
     },
     {
@@ -350,8 +350,8 @@
       "checked": false,
       "claim": "Split oversized modules.",
       "requirement_id": "ARCH-013",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1223,10 +1223,10 @@
     },
     {
       "checked": false,
-      "claim": "Package/archive safety.",
+      "claim": "Package and archive safety semantics are preserved in the packaged artifact-grounding adapter.",
       "requirement_id": "SEC-004",
-      "revision": 1,
-      "status": "planned"
+      "revision": 2,
+      "status": "implemented_unverified"
     },
     {
       "checked": false,
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "e83019b780535dd179204a0d71969a5cc3dd8520105a93854e0f4073a9b1268c",
+    "ledger_sha256": "c164d65893513a58dac0b27169368dd739b318884cfc948345252f2c43e07f6c",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

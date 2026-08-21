@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 196,
+      "file_count": 198,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -62,6 +62,7 @@
         "sonder_runtime/adapters/archive_create.py",
         "sonder_runtime/adapters/artifact_digest.py",
         "sonder_runtime/adapters/artifact_fetch.py",
+        "sonder_runtime/adapters/artifact_grounding.py",
         "sonder_runtime/adapters/artifact_risk.py",
         "sonder_runtime/adapters/backup.py",
         "sonder_runtime/adapters/backup_gateway.py",
@@ -167,6 +168,7 @@
         "sonder_runtime/adapters/persistence/autopilot_store.py",
         "sonder_runtime/adapters/persistence/durable_continuation.py",
         "sonder_runtime/adapters/persistence/epoch_adoption.py",
+        "sonder_runtime/adapters/persistence/fanout_store.py",
         "sonder_runtime/adapters/persistence/fleet_registry.py",
         "sonder_runtime/adapters/persistence/fleet_store.py",
         "sonder_runtime/adapters/persistence/migration_rehearsal.py",
@@ -245,7 +247,7 @@
       ]
     },
     {
-      "file_count": 223,
+      "file_count": 224,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -455,6 +457,7 @@
         "sonder_runtime/application/training/__init__.py",
         "sonder_runtime/application/training/adapter_catalog.py",
         "sonder_runtime/application/training/deployment_rollback.py",
+        "sonder_runtime/application/training/hardware_planning.py",
         "sonder_runtime/application/training/qualification.py",
         "sonder_runtime/application/training/route_activation.py",
         "sonder_runtime/application/training/training_service.py",

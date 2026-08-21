@@ -137,7 +137,7 @@ from sonder_runtime.adapters.model_inventory_formatting import (
     residency_display as _residency_display,
 )
 import assetgen
-import artifact_grounding
+import sonder_runtime.adapters.artifact_grounding as artifact_grounding
 import game_forge
 import sonder_runtime.adapters.filesystem.workbench as workbench
 import creative_router
@@ -155,7 +155,7 @@ from sonder_runtime.adapters.security.permission_policy import (
 import reloadable_mcp
 import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
-import fanout_store
+from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
