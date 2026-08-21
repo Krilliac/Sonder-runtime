@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from hashlib import sha256
+import json
+from collections.abc import Mapping
+from typing import Any
 
 from sonder_runtime.domain.agents.roles import AgentRole, BudgetLimit, role_budget
 
@@ -45,6 +49,43 @@ class CapabilityProfile:
 
     def supports(self, required: frozenset[Capability]) -> bool:
         return required.issubset(self.capabilities)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the canonical provider/profile record for persistence."""
+        return {
+            "model": self.model,
+            "capabilities": sorted(capability.value for capability in self.capabilities),
+            "quality": self.quality,
+            "latency_ms": self.latency_ms,
+            "context_tokens": self.context_tokens,
+            "escalation_rank": self.escalation_rank,
+        }
+
+    def digest(self) -> str:
+        """Return a stable identity for this measured profile."""
+        encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        return sha256(encoded).hexdigest()
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CapabilityProfile":
+        """Rehydrate a profile while validating capability names at the boundary."""
+        if not isinstance(value, Mapping):
+            raise ValueError("capability profile must be an object")
+        capabilities = value.get("capabilities")
+        if not isinstance(capabilities, (list, tuple, set, frozenset)):
+            raise ValueError("capabilities must be an array")
+        try:
+            parsed = frozenset(Capability(item) for item in capabilities)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("capabilities contain an unknown value") from exc
+        return cls(
+            model=value.get("model", ""),
+            capabilities=parsed,
+            quality=value.get("quality", 0.5),
+            latency_ms=value.get("latency_ms", 0),
+            context_tokens=value.get("context_tokens", 1),
+            escalation_rank=value.get("escalation_rank", 0),
+        )
 
 
 @dataclass(frozen=True)
