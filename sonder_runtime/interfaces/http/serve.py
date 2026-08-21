@@ -120,6 +120,7 @@ class _InjectedLegacyRuntime:
 server = _InjectedLegacyRuntime()
 
 DEFAULT_PORT = 11435
+CONFIGURED_PORT = DEFAULT_PORT
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _MODEL_REQUEST_FACADE = ModelRequestFacade()
@@ -356,6 +357,7 @@ def _parse_cors_origins(value):
 
 # Auth + bind config. No credentials remains open only on loopback.
 API_KEY = os.environ.get("SONDER_API_KEY", "")
+AUTH_SECRET = os.environ.get("SONDER_AUTH_SECRET", "")
 HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
 REQUIRE_ACCOUNT = _env_flag("SONDER_REQUIRE_ACCOUNT")
 AUTH_MODE = _resolve_auth_mode(API_KEY, REQUIRE_ACCOUNT)
@@ -552,14 +554,16 @@ HTTP_SESSION_STATE_OWNER_LIMIT = max(1, min(
 
 def configure_typed_config(config) -> None:
     """Bind validated ``SonderConfig`` values at the HTTP boundary."""
-    global API_KEY, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
+    global CONFIGURED_PORT, API_KEY, AUTH_SECRET, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
     global TLS_TERMINATED_BY_PROXY, ALLOW_REGISTRATION, MAX_REQUEST_BYTES
     global MAX_DISCARDED_BODY_BYTES, REQUEST_TIMEOUT_SECONDS
     global STREAM_IDLE_TIMEOUT_SECONDS, HTTP_SESSION_STATE_LIMIT
     global HTTP_SESSION_STATE_OWNER_LIMIT, TRAIN_MAX_N
 
     server_config = config.server
+    CONFIGURED_PORT = server_config.port
     API_KEY = config.secrets.api_key
+    AUTH_SECRET = config.secrets.auth_secret
     HOST = server_config.host
     REQUIRE_ACCOUNT = server_config.require_account
     AUTH_MODE = server_config.auth_mode
@@ -1304,7 +1308,7 @@ def _validate_bind_security(
     unsafe_lab.require_startup(host=host)
     api_key = API_KEY if api_key is None else api_key
     mode = _effective_auth_mode() if auth_mode is None else auth_mode
-    auth_secret = os.environ.get("SONDER_AUTH_SECRET", "") if auth_secret is None else auth_secret
+    auth_secret = AUTH_SECRET if auth_secret is None else auth_secret
     if mode == "api-key" and not api_key:
         raise RuntimeError("api-key auth mode requires SONDER_API_KEY")
     if mode == "both" and (not api_key or not auth_secret):
@@ -5107,13 +5111,13 @@ class Handler(BaseHTTPRequestHandler):
 def main(config=None):
     if config is not None:
         configure_typed_config(config)
-    port = DEFAULT_PORT if config is None else config.server.port
+    port = DEFAULT_PORT if config is None else CONFIGURED_PORT
     if len(sys.argv) > 1:
         try:
             port = int(sys.argv[1])
         except ValueError:
             pass
-    else:
+    elif config is None:
         port = int(os.environ.get("SONDER_PORT", DEFAULT_PORT))
 
     _validate_bind_security(HOST)
