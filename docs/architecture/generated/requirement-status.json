@@ -756,28 +756,28 @@
       "checked": false,
       "claim": "Quarantine.",
       "requirement_id": "EXT-004",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Inventory.",
       "requirement_id": "EXT-005",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Ephemeral experiments.",
       "requirement_id": "EXT-006",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "No automatic promotion.",
       "requirement_id": "EXT-007",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1267,7 +1267,7 @@
       "checked": false,
       "claim": "Evidence first.",
       "requirement_id": "SELFMOD-001",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1281,14 +1281,14 @@
       "checked": false,
       "claim": "Verification.",
       "requirement_id": "SELFMOD-003",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
       "claim": "Review and deployment.",
       "requirement_id": "SELFMOD-004",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "5225326c8999c7566da802fbae6b6b791ef1d196f22bc999336835d8f3bf42c2",
+    "ledger_sha256": "161b3538e637526b1c0545cf1835fdfb2c9be408646e180786254feb21abbd2b",
     "spec_sha256": "9e74527582b56bb3a02007e8b8f6f17dacd0f136eaadad79afdfc8110f03df2c"
   }
 }

@@ -81,6 +81,12 @@ def test_web_search_ownership_is_packaged():
     assert module.WEB_SEARCH_COMPATIBILITY_ROOT == Path("web_tools.py")
 
 
+def test_web_fetch_ownership_is_packaged():
+    module = _architecture_module()
+    assert module.WEB_FETCH_CANONICAL_MODULE == "sonder_runtime.adapters.web_fetch"
+    assert module.WEB_FETCH_COMPATIBILITY_ROOT == Path("web_tools.py")
+
+
 def test_unsafe_lab_stateful_owner_is_security_adapter(monkeypatch):
     """The compatibility module must preserve identity without app ownership."""
     import inspect

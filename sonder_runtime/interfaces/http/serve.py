@@ -58,6 +58,7 @@ from sonder_runtime.adapters.persistence import served_action_receipts
 from . import authority_contract as tool_contract
 from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.interfaces.http.facades import HealthStatusFacade
+from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
@@ -66,6 +67,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
 from sonder_runtime.domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.execution.world_control import OutputWatermark
+from sonder_runtime.application.extensions.facade import ExtensionAuthority
 
 
 _LEGACY_RUNTIME = None
@@ -443,6 +445,25 @@ LAST_RUN_SOURCE = None  # answer-only text; trace/footer removed for /run
 CURRENT_ACCOUNT = None
 CURRENT_TOKEN = ""
 CHAT_EVENTS = []
+
+
+def _extension_authority(context):
+    """Bind extension authority to an already authenticated administrator."""
+    account = context.get("account")
+    if isinstance(account, dict):
+        actor = account.get("username") or account.get("id") or "authenticated-admin"
+    else:
+        actor = account or "authenticated-admin"
+    return ExtensionAuthority(
+        actor=str(actor),
+        operations=frozenset({
+            "registry_health", "inspect", "define", "start", "stop", "delete",
+        }),
+    )
+
+
+def _is_extension_route(path):
+    return path == "/v1/extensions" or path.startswith("/v1/extensions/")
 
 
 @dataclass
@@ -3630,6 +3651,37 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._auth_rate_limited():
             return
+        if _is_extension_route(path):
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "administrator authorization is required",
+                                "type": "forbidden", "code": "FORBIDDEN"}},
+                    status=403,
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+
+            application = default_app()
+            facade_factory = application.extension_facade
+            if facade_factory is None:
+                self._send_json_payload(
+                    {"error": {"message": "extension facade is unavailable",
+                                "type": "server_error", "code": "EXTENSION_FACADE_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            result = dispatch_extension_route(
+                facade_factory(), "GET", path, None, _extension_authority(context)
+            )
+            if result is None:
+                self._send_not_found()
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
         _maybe_live_reload()
         if path.startswith("/v1/sessions/"):
             context = self._request_auth_context()
@@ -4257,6 +4309,40 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
+        if _is_extension_route(path):
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+
+            application = default_app()
+            facade_factory = application.extension_facade
+            if facade_factory is None:
+                self._send_json_payload(
+                    {"error": {"message": "extension facade is unavailable",
+                                "type": "server_error", "code": "EXTENSION_FACADE_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            result = dispatch_extension_route(
+                facade_factory(), "POST", path, req, _extension_authority(context)
+            )
+            if result is None:
+                self._send_not_found()
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
         if path == "/v1/jobs/start":
             if not context["authorized"]:
                 self._send_auth_error()

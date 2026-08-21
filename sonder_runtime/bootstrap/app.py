@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import importlib
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.persistence.fleet_registry import FleetStoreRegistryAdapter
@@ -49,6 +50,8 @@ from ..application.extensions.experiments import (
     StartupAuthority,
 )
 from ..application.extensions.registry import ExtensionRegistry
+from ..application.selfmod.selfmod_service import GuardedLegacySelfmodService
+from ..application.extensions.facade import ExtensionApplicationFacade
 from ..application.backup import BackupService
 from ..application.capabilities.jobs import JobRegistryService, ResumableWorkflowEngine
 from ..application.jobs.session_lifecycle import JobRegistryLifecycleAdapter, JobSessionLifecycleRecorder
@@ -109,6 +112,8 @@ class Application:
     compaction_service: Callable[[], SessionCompactionService] | None = None
     extension_registry: Callable[[], ExtensionRegistry] | None = None
     experiment_manager: Callable[[], EphemeralExperimentManager] | None = None
+    extension_facade: Callable[[], ExtensionApplicationFacade] | None = None
+    selfmod_service: Callable[[], GuardedLegacySelfmodService] | None = None
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -123,6 +128,7 @@ def build_application(
     preference_module_provider: PreferenceModuleProvider | None = None,
     session_capture_service: SessionCaptureService | None = None,
     extension_startup_authority: StartupAuthority | None = None,
+    unrestricted_selfmod: bool = False,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -168,6 +174,8 @@ def build_application(
     agent_registry: UnifiedAgentRegistryService | None = None
     extension_registry: ExtensionRegistry | None = None
     experiment_manager: EphemeralExperimentManager | None = None
+    extension_facade: ExtensionApplicationFacade | None = None
+    selfmod_service: GuardedLegacySelfmodService | None = None
 
     def get_session_repository() -> SessionRepository:
         nonlocal session_repository
@@ -263,6 +271,29 @@ def build_application(
             )
         return experiment_manager
 
+    def get_extension_facade() -> ExtensionApplicationFacade:
+        nonlocal extension_facade
+        if extension_facade is None:
+            extension_facade = ExtensionApplicationFacade(
+                get_extension_registry(), get_experiment_manager()
+            )
+        return extension_facade
+
+    def get_selfmod_service() -> GuardedLegacySelfmodService:
+        nonlocal selfmod_service
+        if selfmod_service is None:
+            # The root module remains the mutation/recovery authority. Keep
+            # its import lazy and behind this bootstrap-only port so the
+            # application service remains free of legacy dependencies.
+            class _LegacySelfmodModulePort:
+                def __getattr__(self, name: str):
+                    return getattr(importlib.import_module("selfmod"), name)
+
+            selfmod_service = GuardedLegacySelfmodService(
+                _LegacySelfmodModulePort(), unrestricted=unrestricted_selfmod,
+            )
+        return selfmod_service
+
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
@@ -310,6 +341,8 @@ def build_application(
         web_provider=LegacyWebProvider(),
         extension_registry=get_extension_registry,
         experiment_manager=get_experiment_manager,
+        extension_facade=get_extension_facade,
+        selfmod_service=get_selfmod_service,
     )
 
 
