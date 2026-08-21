@@ -31,6 +31,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+# Compatibility name for callers/tests that patch the old HTTP module seam;
+# the provider object is shared with all canonical permission calls above.
+permission_modes = permission_policy
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import sonder_runtime.adapters.observability.chat_formatting as chat_formatting
 from sonder_runtime.adapters.command_completion import (
@@ -39,7 +43,7 @@ from sonder_runtime.adapters.command_completion import (
     completion_limit as _completion_limit,
 )
 import command_catalog
-import admin_auth
+from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 import grounding
 import code_runner
 import training_tasks

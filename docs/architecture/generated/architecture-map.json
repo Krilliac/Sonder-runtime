@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 149,
+      "file_count": 150,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -175,6 +175,7 @@
         "sonder_runtime/adapters/runtime_readiness_formatting.py",
         "sonder_runtime/adapters/secrets.py",
         "sonder_runtime/adapters/security/__init__.py",
+        "sonder_runtime/adapters/security/account_auth.py",
         "sonder_runtime/adapters/security/permission_policy.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
         "sonder_runtime/adapters/storage.py",
@@ -198,7 +199,7 @@
       ]
     },
     {
-      "file_count": 183,
+      "file_count": 184,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -277,6 +278,7 @@
         "sonder_runtime/application/persistence/outbox_cas.py",
         "sonder_runtime/application/plugin_manifest.py",
         "sonder_runtime/application/ports/__init__.py",
+        "sonder_runtime/application/ports/account_auth.py",
         "sonder_runtime/application/ports/artifact_store.py",
         "sonder_runtime/application/ports/backup.py",
         "sonder_runtime/application/ports/clock.py",
