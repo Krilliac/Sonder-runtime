@@ -2,6 +2,7 @@ from sonder_runtime.application.protocol.mcp_compatibility import (
     LegacyMcpContract,
     McpCompatibility,
     McpNegotiationError,
+    SUPPORTED_MCP_PROTOCOL_VERSIONS,
     SubscriptionNotificationRouter,
 )
 
@@ -11,6 +12,13 @@ def test_negotiation_prefers_supported_v2_and_intersects_capabilities():
     result = compatibility.negotiate(("2.0", "1.0"), client_capabilities=("tools", "other"))
     assert result.agreed_version == "2.0"
     assert result.capabilities == ("tools",)
+
+
+def test_default_compatibility_supports_standard_and_legacy_handshakes():
+    compatibility = McpCompatibility()
+    assert compatibility.supported_versions == SUPPORTED_MCP_PROTOCOL_VERSIONS
+    assert compatibility.negotiate(("2025-11-25",)).agreed_version == "2025-11-25"
+    assert compatibility.negotiate(("2.0",)).agreed_version == "2.0"
 
 
 def test_legacy_negotiation_requires_declared_contract():

@@ -20,7 +20,10 @@ from ..application.ports.tool_registry import (
     ToolDescriptor,
     validate_tool_call,
 )
-from ..application.protocol.mcp_compatibility import McpCompatibility
+from ..application.protocol.mcp_compatibility import (
+    McpCompatibility,
+    SUPPORTED_MCP_PROTOCOL_VERSIONS,
+)
 from ..interfaces.mcp.transport import McpTransportError, StdioMcpTransport
 
 
@@ -450,7 +453,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         input_stream or sys.stdin,
         output_stream or sys.stdout,
         compatibility=McpCompatibility(
-            server_version="2.0", supported_versions=("2.0",),
+            server_version="2.0",
+            supported_versions=SUPPORTED_MCP_PROTOCOL_VERSIONS,
             capabilities=("tools", "notifications"),
         ),
         tool_catalog=registry,

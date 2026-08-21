@@ -133,3 +133,23 @@ def test_transport_without_legacy_declaration_does_not_downgrade():
     transport.serve()
     result = json.loads(output.getvalue())
     assert result["error"]["code"] == -32001
+
+
+def test_standard_handshake_wraps_tool_output_in_call_tool_result_shape():
+    output = io.StringIO()
+    transport = StdioMcpTransport(
+        io.StringIO("\n".join(json.dumps(line) for line in [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersions": ["2025-11-25"], "capabilities": {}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "echo", "arguments": {"value": "x"}}},
+        ]) + "\n"),
+        output,
+        compatibility=McpCompatibility(),
+        tool_catalog=({"name": "echo", "inputSchema": {"type": "object"}},),
+        tool_handler=lambda _name, _args: {"output": {"echo": "x"}},
+    )
+    transport.serve()
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["structuredContent"] == {"output": {"echo": "x"}}
+    assert rows[1]["result"]["content"][0]["type"] == "text"
