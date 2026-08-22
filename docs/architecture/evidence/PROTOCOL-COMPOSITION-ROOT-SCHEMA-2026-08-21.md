@@ -15,14 +15,14 @@ facade's explicit `protocol.stream.create` operation.
 
 ```text
 python -m pytest -q --basetemp <fresh-user-temp> tests/test_runtime_container_adapter.py tests/test_protocol_application_facade.py tests/test_remaining_client_schema.py
-15 passed
+16 passed
 ```
 
 The composition test proves the runtime exposes the protocol facade, binds its
 source catalog digest to the tool catalog, and carries the canonical
 snapshot-plus-events stream contract. Facade tests prove authorized stream
-creation, reconnect, identity matching, bounded event publication, and
-fail-closed authorization.
+creation/closure, reconnect, identity matching, bounded event publication,
+and fail-closed authorization.
 
 ## Limitations
 
