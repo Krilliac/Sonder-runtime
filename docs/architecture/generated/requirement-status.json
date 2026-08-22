@@ -340,9 +340,9 @@
     },
     {
       "checked": false,
-      "claim": "Ownership catalog.",
+      "claim": "The typed ownership catalog is wired into generated architecture authority artifacts with deterministic layer-level package, state, port, provider, schema, and lifecycle records.",
       "requirement_id": "ARCH-012",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "3c06aea6e29048cb29cc1e4d3e6ab7c840ef5a15c2d9c8b82c5deba7310e4775",
+    "ledger_sha256": "65dcbf9f0b327e560dc822d54bcee288d8c01b9fe2104401165e8fb13c1040af",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
