@@ -145,6 +145,45 @@ def test_production_experiment_limit_reaches_native_host_boundary():
         bootstrap_app.reset_for_tests()
 
 
+def test_live_bootstrap_host_factory_preserves_memory_limit(monkeypatch):
+    from sonder_runtime.adapters.extensions.host import ExtensionHostStats
+
+    captured = []
+
+    class FakeHost:
+        def __init__(self, argv, *, limits, cwd, env):
+            captured.append((tuple(argv), limits, cwd, dict(env)))
+            self.stats = ExtensionHostStats()
+
+        def start(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(bootstrap_app, "ExtensionHost", FakeHost)
+    bootstrap_app.reset_for_tests()
+    application = bootstrap_app.build_application(
+        extension_startup_authority=lambda _definition: True,
+    )
+    manager = application.experiment_manager()
+    try:
+        manager.define(
+            "factory-limit", _server(),
+            environment={"EXTENSION_MODE": "test"},
+            limits=ExperimentLimits(192 * 1024 * 1024),
+        )
+        assert manager.start("factory-limit").state == ExperimentState.RUNNING
+        assert len(captured) == 1
+        argv, limits, _cwd, environment = captured[0]
+        assert argv[0] == sys.executable
+        assert limits.memory_limit_bytes == 192 * 1024 * 1024
+        assert environment == {"EXTENSION_MODE": "test"}
+    finally:
+        manager.close()
+        bootstrap_app.reset_for_tests()
+
+
 def test_persisted_healthy_installation_reaches_native_experiment_host(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_HOME", str(tmp_path))
     manifest = ExtensionManifest(
