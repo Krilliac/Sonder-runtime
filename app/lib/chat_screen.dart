@@ -866,20 +866,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         );
         return Shortcuts(
           shortcuts: const <ShortcutActivator, Intent>{
-            const SingleActivator(LogicalKeyboardKey.keyK, control: true):
-                const _OpenCommandBrowserIntent(),
-            const SingleActivator(LogicalKeyboardKey.keyN, control: true):
-                const _NewChatIntent(),
-            const SingleActivator(LogicalKeyboardKey.keyP, control: true):
-                const _OpenThreadSwitcherIntent(),
-            const SingleActivator(LogicalKeyboardKey.comma, control: true):
-                const _OpenSettingsIntent(),
-            const SingleActivator(LogicalKeyboardKey.keyD, control: true):
-                const _OpenSystemIntent(),
-            const SingleActivator(
+            SingleActivator(LogicalKeyboardKey.keyK, control: true):
+                _OpenCommandBrowserIntent(),
+            SingleActivator(LogicalKeyboardKey.keyN, control: true):
+                _NewChatIntent(),
+            SingleActivator(LogicalKeyboardKey.keyP, control: true):
+                _OpenThreadSwitcherIntent(),
+            SingleActivator(LogicalKeyboardKey.comma, control: true):
+                _OpenSettingsIntent(),
+            SingleActivator(LogicalKeyboardKey.keyD, control: true):
+                _OpenSystemIntent(),
+            SingleActivator(
               LogicalKeyboardKey.tab,
               shift: true,
-            ): const _CyclePermissionModeIntent(),
+            ): _CyclePermissionModeIntent(),
           },
           child: Actions(
             actions: <Type, Action<Intent>>{
