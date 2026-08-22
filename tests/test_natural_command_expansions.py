@@ -56,6 +56,15 @@ def test_read_only_argument_phrases_reach_the_matching_catalog_tool():
     assert cr.resolve("check weather for Chicago") == "/weather Chicago"
     assert cr.resolve("show the workspace inventory") == "/inventory"
     assert cr.resolve("list the workspace tree") == "/tree"
+    assert cr.resolve("inspect artifact risk at report.bin") == \
+        "/artifact_risk_inspect report.bin"
+    assert cr.resolve("check artifact file integrity report.json") == \
+        "/verify_artifact report.json"
+    assert cr.resolve("show NPU status") == "/npu_status"
+    assert cr.resolve("probe local service http://127.0.0.1:11435/health") == \
+        "/local_service_probe http://127.0.0.1:11435/health"
+    assert cr.resolve("inspect process 1234 memory risk") == \
+        "/process_memory_risk_inspect 1234"
 
 
 def test_argument_expansions_leave_follow_on_work_for_the_agent():
@@ -86,3 +95,6 @@ def test_local_prompt_wrappers_require_a_prompt_and_explicit_lane():
     assert cr.resolve("ask several models to compare parser strategies") is None
     assert cr.resolve("verify generated file report.json") is None
     assert cr.resolve("check weather for Chicago and tell me what to wear") is None
+    assert cr.resolve("inspect artifact risk report.bin and explain it") is None
+    assert cr.resolve("probe local service https://example.com") is None
+    assert cr.resolve("inspect process abc memory risk") is None

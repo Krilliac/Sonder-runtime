@@ -402,6 +402,8 @@ _RULES = [
           _fixed("/tool_manifest")),
     _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?tools\s*[?!.]*$",
           _fixed("/tool_manifest")),
+    _rule(r"^(?:show|check|inspect)\s+(?:the\s+)?(?:NPU|neural\s+processing\s+unit)"
+          r"(?:\s+status)?\s*[?!.]*$", _fixed("/npu_status")),
     _rule(r"^(?:show|list|inspect)\s+(?:the\s+)?workspace\s+inventory\s*[?!.]*$",
           _fixed("/inventory")),
     _rule(r"^(?:show|list|inspect)\s+(?:the\s+)?workspace\s+tree\s*[?!.]*$",
@@ -412,6 +414,18 @@ _RULES = [
     # path.  Keep the captured value to one contiguous token: it preserves
     # guarded path prefixes while avoiding a free-form prompt becoming a tool
     # argument by accident.
+    _rule(r"^(?:inspect|check|scan)\s+(?:the\s+)?artifact\s+risk"
+          r"(?:\s+(?:at|in))?\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/artifact_risk_inspect")),
+    _rule(r"^(?:verify|check)\s+(?:the\s+)?artifact\s+file"
+          r"(?:\s+(?:integrity|signature|manifest))?\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/verify_artifact")),
+    _rule(r"^(?:probe|check)\s+(?:the\s+)?local\s+service\s+"
+          r"(?P<arg>https?://(?:localhost|127\.0\.0\.1|\[::1\])"
+          r"(?::\d+)?\S*)\s*[?!.]*$", _with_arg("/local_service_probe")),
+    _rule(r"^(?:inspect|check)\s+(?:the\s+)?process\s+(?P<arg>\d+)"
+          r"\s+memory\s+risk\s*[?!.]*$",
+          _with_arg("/process_memory_risk_inspect")),
     _rule(r"^(?:inspect|check|show)\s+(?:the\s+)?image\s+(?P<arg>\S+)\s*[?!.]*$",
           _with_arg("/image_inspect")),
     _rule(r"^(?:inspect|preview|show)\s+(?:the\s+)?data\s+(?P<arg>\S+)\s*[?!.]*$",
