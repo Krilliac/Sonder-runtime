@@ -97,6 +97,8 @@ _RULES = [
     # --- lifecycle / session ---
     _rule(r"^(?:new session|start over|reset(?: the)? session|fresh session|"
           r"clear(?: the)? session|new thread)\b", _fixed("/new")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?(?:past|recent|sonder)\s+"
+          r"(?:sonder\s+)?sessions\s*[?!.]*$", _fixed("/sonder_sessions")),
     _rule(r"^(?:list|show|my)\s+sessions\b", _fixed("/sessions")),
     _rule(r"^resume(?:\s+session)?\s+(?P<arg>.+)$", _with_arg("/resume")),
     _rule(r"^(?:switch(?:\s+to)?|set|use|change(?:\s+to)?)\s+(?:the\s+)?project"
@@ -127,6 +129,16 @@ _RULES = [
     # --- status / info ---
     _rule(r"^(?:show\s+(?:me\s+)?(?:your\s+)?|what\s+are\s+(?:your\s+)?|runtime\s+|"
           r"usage\s+)?stats\b", _fixed("/stats")),
+    _rule(r"^(?:suggest|recommend)\s+(?:the\s+)?(?:best\s+)?tier"
+          r"(?:\s+for\s+.+)?\s*[?!.]*$", _fixed("/route")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?repo(?:sitory)?\s+log\s*[?!.]*$",
+          _fixed("/repo_log")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?(?:task|todo)\s+list\s*[?!.]*$",
+          _fixed("/task_list")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?context\s+size\s*[?!.]*$",
+          _fixed("/contextsize")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?tool\s+status\s*[?!.]*$",
+          _fixed("/toolstatus")),
     _rule(r"^(?:show\s+)?context\s+health\b|^how'?s\s+the\s+context\b|"
           r"^context\s+usage\b", _fixed("/context")),
     _rule(r"^(?:show\s+)?(?:context\s+)?compaction(?:\s+plan)?\b|"
@@ -241,6 +253,8 @@ _RULES = [
     _rule(r"^file\s+policy\b", _fixed("/filepolicy")),
 
     # --- file operations (require the word "file" or a path with an extension) ---
+    _rule(r"^(?:ground|validate)\s+(?:the\s+)?artifact\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/artifact_ground")),
     _rule(r"^search\s+(?:the\s+)?files?\s*[?!.]*$", _fixed("/search")),
     _rule(r"^(?:find|list|search)\s+files?\b(?:\s+(?:matching|named|like)?\s*(?P<arg>.+))?",
           lambda m: ("/files %s" % (m.group("arg") or "")).strip()),
