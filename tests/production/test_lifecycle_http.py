@@ -152,6 +152,32 @@ def test_admin_job_list_and_poll_surface_is_bounded(http_server, tmp_path, monke
     assert "reason must be a non-empty string" in json.loads(body)["error"]["message"]
 
 
+def test_http_job_surface_reads_canonical_application_service_after_restart(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "canonical-http-jobs.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    application = bootstrap_app.build_application()
+    application.job_service().create(
+        JobIdentity("canonical-http-job", "shell", "op-canonical", "idem-canonical")
+    )
+
+    status, body, _ = _get(http_server, "/v1/jobs/canonical-http-job")
+    assert status == 200
+    assert json.loads(body)["status"] == "pending"
+
+    bootstrap_app.reset_for_tests()
+    reopened = bootstrap_app.build_application()
+    assert reopened.job_service().get("canonical-http-job").status.value == "pending"
+    status, body, _ = _get(http_server, "/v1/jobs/canonical-http-job")
+    assert status == 200
+    assert json.loads(body)["job_id"] == "canonical-http-job"
+
+
 def test_admin_job_cancel_surface_validates_reason_and_bounds_response(
     http_server, tmp_path, monkeypatch,
 ):

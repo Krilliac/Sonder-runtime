@@ -22,6 +22,12 @@ imports that contract rather than making application code import SQLite types.
 The existing `sonder_runtime/adapters/execution/durable_output.py` remains the
 concrete spill implementation.
 
+The production HTTP test now creates a job through the canonical application
+`JobRegistryService`, reads it through `/v1/jobs/{job_id}`, rebuilds the
+application against the same durable database, and reads the same job again
+through HTTP. This proves the route is using the application-owned registry
+and service composition rather than an isolated test registry.
+
 ## Evidence
 
 Focused command:
@@ -40,6 +46,18 @@ The API-003 restart rehearsal additionally launches a real child process,
 reopens the SQLite registry under a new provider owner, cleans the persisted
 process identity through the platform supervisor, and verifies the interrupted
 durable state.
+
+Additional live HTTP composition command:
+
+```text
+python -m pytest -q --basetemp <fresh-temp> \
+  tests/production/test_lifecycle_http.py \
+  tests/test_composition_job_registry.py \
+  tests/test_generic_job_composition.py \
+  tests/test_generic_job_live_integration.py
+```
+
+Result: **27 passed**.
 
 ## Limitations
 
