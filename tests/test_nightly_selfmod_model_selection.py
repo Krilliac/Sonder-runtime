@@ -1,0 +1,44 @@
+"""Focused contract tests for the bounded selfmod worker's model pin."""
+
+from scripts import nightly_selfmod
+
+
+class _FakeServer:
+    def __init__(self):
+        self.calls = []
+
+    def ensemble_answer(self, prompt, *, tiers, num_predict, mode):
+        self.calls.append({
+            "prompt": prompt,
+            "tiers": tiers,
+            "num_predict": num_predict,
+            "mode": mode,
+        })
+        return "def sample():\n    return 1\n"
+
+
+def test_selfmod_model_pin_is_passed_as_an_explicit_catalog_selector():
+    server = _FakeServer()
+
+    reply = nightly_selfmod._ask(
+        server,
+        "rewrite one function",
+        num_predict=64,
+        model="qwen2.5-coder:14b",
+    )
+
+    assert reply.startswith("def sample")
+    assert server.calls == [{
+        "prompt": "rewrite one function",
+        "tiers": "qwen2.5-coder:14b",
+        "num_predict": 64,
+        "mode": "code",
+    }]
+
+
+def test_selfmod_without_model_pin_keeps_using_code_tier():
+    server = _FakeServer()
+
+    nightly_selfmod._ask(server, "inspect", num_predict=32)
+
+    assert server.calls[0]["tiers"] == "code"

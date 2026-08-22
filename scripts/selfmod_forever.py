@@ -56,9 +56,6 @@ def main() -> int:
     # of the original file. A 14B fits the host's 6 GB of VRAM with the
     # remainder in system RAM and converted 6 of 12 bodies the 7B could not
     # in a separate measurement.
-    if args.model:
-        server.TIERS['code'] = args.model
-
     def log(message):
         print("%s %s" % (time.strftime("%H:%M:%S"), message), flush=True)
 
@@ -79,7 +76,8 @@ def main() -> int:
         log("--- pass %d (%.1fh left) ---" % (passes, (deadline - time.time()) / 3600.0))
         try:
             result = nightly_selfmod.run(
-                server, log, test_timeout=args.test_timeout, branch=True)
+                server, log, test_timeout=args.test_timeout, branch=True,
+                model=args.model)
         except Exception as exc:
             result = "pass failed: %s" % str(exc)[:200]
         log(result)
