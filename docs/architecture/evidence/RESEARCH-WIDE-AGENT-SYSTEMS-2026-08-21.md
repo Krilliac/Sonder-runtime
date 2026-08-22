@@ -97,6 +97,26 @@ execution, and default live control-plane provider composition each require a
 concrete host boundary and operational receipts before they should be
 promoted.
 
+## Fourth-wave research: durability and runtime boundaries
+
+The additional first-party review focused on systems that solve the failure
+modes that appear after an agent leaves a single request/response turn.
+
+| System | Newly useful pattern | Sonder disposition |
+| --- | --- | --- |
+| OpenAI Agents SDK durable integrations | Durable runners can preserve run state across long waits, retries, process restarts, human approval, handoffs, and sessions; tracing groups model/tool/handoff/custom events under a run. | Keep the runtime-owned job/session ledger as the source of truth. Add an explicit run correlation projection and approval-resume record where the existing event stream cannot associate a resumed operation with its original side effect. Do not make provider SDK state authoritative. |
+| LangGraph persistence and durability | Checkpointers are thread-scoped working state; stores are cross-thread memory. Durability modes make the persistence point explicit (`sync`, `async`, or `exit`), while interrupts carry resumable human decisions and edited state. | Preserve the separation between resumable workflow state and durable long-term memory. A future adapter must declare its persistence mode and never claim a completed side effect until the receipt is durable. The current checkpoint/task ports should gain this as metadata rather than adopting graph types. |
+| Dapr Workflows | Replayable histories, workflow versioning, bounded payloads, concurrency limits, and optional signed history provide operational controls for long-running workflows. | Add version and payload-bound metadata to external workflow adapters and enforce limits before enqueue. Keep authorization and non-deterministic model/tool calls in activities, outside replay-sensitive workflow code. No Dapr dependency belongs in the core runtime. |
+| Restate / DBOS durable-agent integrations | Lightweight durable execution can use a single runtime or SQLite/Postgres to preserve progress, approvals, handoffs, and sessions without requiring a large orchestration cluster. | This validates a local-first adapter tier: a SQLite-backed resume ledger is valuable even when Temporal/Dapr are unavailable. It must share Sonder’s idempotency keys, cancellation, receipt, and redaction contracts rather than introduce another state machine. |
+
+The cross-system result is a sharper boundary: workflow durability, transport
+reconnect, and agent memory are separate concerns. A reconnectable stream is
+not proof that the workflow state is durable; a checkpoint is not proof that an
+external side effect completed; and long-term memory must not be used as an
+implicit workflow journal. Sonder should represent these as separate typed
+records with explicit correlation, persistence point, idempotency key, and
+receipt status.
+
 ## Sources
 
 - OpenHands architecture: <https://docs.openhands.dev/sdk/arch/agent>
@@ -134,3 +154,9 @@ promoted.
 - Semantic Kernel agent orchestration: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-orchestration/>
 - Semantic Kernel agent architecture: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-architecture>
 - LlamaIndex workflows and agents: <https://docs.llamaindex.ai/en/stable/module_guides/workflow/>
+- OpenAI Agents SDK durable execution integrations: <https://github.com/openai/openai-agents-python/blob/main/docs/running_agents.md>
+- LangGraph persistence and checkpointers: <https://github.com/langchain-ai/docs/blob/main/src/oss/langgraph/persistence.mdx>
+- LangGraph durability modes and interrupts: <https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/types.py>
+- Dapr workflow durability and versioning: <https://docs.dapr.io/developing-applications/building-blocks/workflow/>
+- Restate durable execution: <https://docs.restate.dev/>
+- DBOS durable workflows: <https://docs.dbos.dev/>
