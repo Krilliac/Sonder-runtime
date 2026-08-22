@@ -24,6 +24,10 @@ fail-closed.
 - `Application.provider_health()` reports only published provider health, and
   `Application.close_providers()` provides the composition-owned cleanup
   boundary.
+- The production composition test also injects attended training and update
+  backends, verifies all three published provider health rows, exercises the
+  cooperative cancellation boundary, and closes the bundle through the live
+  `Application` graph.
 - The live Ollama model gateway consumes the typed embedding provider when the
   composition root supplies one; legacy module-shaped embedding providers remain
   compatible.
@@ -43,8 +47,9 @@ present. No session/job implementation files were changed to work around it.
 
 ## Limitations
 
-- No concrete production training backend or update activator is selected by
-  this slice; both remain explicit injection seams and are absent by default.
+- No concrete default training backend or update activator is selected; both
+  remain explicit injection seams and are absent by default. The injected live
+  composition path is covered by `tests/production/test_composition_root.py`.
 - Provider health is exposed on the typed `Application` object and projected
   into the administrator `/v1/sonder/status` payload; ordinary account status
   remains restricted from host-wide provider details.

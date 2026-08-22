@@ -134,6 +134,40 @@ def test_composition_root_exposes_cooperative_provider_cancellation():
     assert application.cancel_provider("embedding", reason="test stop") is False
 
 
+def test_composition_root_publishes_attended_training_and_update_lanes():
+    from sonder_runtime.application.ports.specialized_lifecycle import (
+        ActivationResult, DeploymentResult,
+    )
+
+    class Training:
+        def train(self, request, context):
+            assert request.run_id == "run-1"
+            assert not context.cancellation.cancelled
+            return DeploymentResult(
+                "training", request.run_id, "deployment-1", "model-1", "a" * 64,
+            )
+
+    class Update:
+        def activate(self, request, context):
+            assert request.activation_id == "activation-1"
+            assert not context.cancellation.cancelled
+            return ActivationResult(
+                "update", request.activation_id, request.release_id,
+                request.version, request.artifact_digest,
+            )
+
+    application = bootstrap_app.build_application(
+        training_backend=Training(), update_activator=Update(),
+    )
+    try:
+        assert {row.provider_id for row in application.provider_health()} == {
+            "embedding", "training", "update",
+        }
+        assert application.cancel_provider("training", reason="operator stop") is False
+    finally:
+        application.close_providers(timeout=1)
+
+
 def test_composition_root_exposes_lazy_cached_durable_session_repository(
     tmp_path, monkeypatch
 ):
