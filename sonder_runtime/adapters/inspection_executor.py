@@ -183,15 +183,16 @@ class InspectionExecutorAdapter:
     def _project_detect(self, args: dict, context: OperationContext) -> ToolResult:
         project_detect = _packaged_module("project_detect")
 
-        audit_args = {key: args[key] for key in (
-            "path", "max_depth", "max_files", "max_total_bytes",
-            "max_file_bytes", "max_results",
-        )}
+        option_names = (
+            "max_depth", "max_files", "max_total_bytes", "max_file_bytes",
+            "max_results",
+        )
+        audit_args = {"path": args["path"]}
+        audit_args.update({key: args[key] for key in option_names if key in args})
         try:
+            options = {key: args[key] for key in option_names if key in args}
             data = project_detect.detect_project(
-                path=args["path"], max_depth=args["max_depth"],
-                max_files=args["max_files"], max_total_bytes=args["max_total_bytes"],
-                max_file_bytes=args["max_file_bytes"], max_results=args["max_results"],
+                path=args["path"], **options,
                 extra_roots=_authorized_roots(context) if _authorized(context) else "",
             )
             summary = "%d manifest(s), %d command candidate(s)%s" % (
@@ -232,15 +233,16 @@ class InspectionExecutorAdapter:
     ) -> ToolResult:
         content_digest = _packaged_module("content_digest")
 
-        audit_args = {key: args[key] for key in (
-            "path", "max_depth", "max_files", "max_total_bytes",
-            "max_file_bytes", "max_results",
-        )}
+        option_names = (
+            "max_depth", "max_files", "max_total_bytes", "max_file_bytes",
+            "max_results",
+        )
+        audit_args = {"path": args["path"]}
+        audit_args.update({key: args[key] for key in option_names if key in args})
         try:
+            options = {key: args[key] for key in option_names if key in args}
             data = content_digest.digest_directory(
-                args["path"], max_depth=args["max_depth"],
-                max_files=args["max_files"], max_total_bytes=args["max_total_bytes"],
-                max_file_bytes=args["max_file_bytes"], max_results=args["max_results"],
+                args["path"], **options,
                 extra_roots=_authorized_roots(context) if _authorized(context) else "",
             )
             summary = "%d file(s), %d byte(s)%s" % (
