@@ -13,6 +13,7 @@ abstract final class SonderTheme {
   static const darkPanel = Color(0xFF121B23);
   static const darkBorder = Color(0xFF24343D);
   static const lightBorder = Color(0xFFDDE7E7);
+  static const mono = 'Consolas';
 
   static ThemeData get dark => _build(Brightness.dark);
   static ThemeData get light => _build(Brightness.light);

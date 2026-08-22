@@ -7,6 +7,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'api.dart';
 import 'chat_store.dart';
 import 'models.dart';
+import 'safety_colors.dart';
 import 'settings.dart';
 import 'settings_screen.dart';
 import 'system_screen.dart';
@@ -1425,29 +1426,15 @@ class _Bubble extends StatelessWidget {
                 child: Wrap(
                   spacing: 10,
                   children: [
-                    InkWell(
+                    _FeedbackAction(
+                      icon: Icons.copy_all_outlined,
+                      label: 'Copy response',
+                      text: 'copy',
+                      color: fg,
                       onTap: () {
                         Clipboard.setData(ClipboardData(text: message.content));
                         onPassive?.call('/copied');
                       },
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.copy_all_outlined,
-                            size: 14,
-                            color: fg.withValues(alpha: 0.6),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            'copy',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: fg.withValues(alpha: 0.6),
-                            ),
-                          ),
-                        ],
-                      ),
                     ),
                     // Quality feedback trains the learning loop on the last
                     // answer. An error bubble is a transport or server
@@ -1456,53 +1443,71 @@ class _Bubble extends StatelessWidget {
                     // copying the failure text is exactly what you want to do
                     // with it.
                     if (!message.error) ...[
-                      InkWell(
+                      _FeedbackAction(
+                        icon: Icons.check_circle_outline,
+                        label: 'Mark response useful',
+                        text: 'useful',
+                        color: fg,
                         onTap: () => onPassive?.call('/accept'),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.check_circle_outline,
-                              size: 14,
-                              color: fg.withValues(alpha: 0.6),
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'useful',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: fg.withValues(alpha: 0.6),
-                              ),
-                            ),
-                          ],
-                        ),
                       ),
-                      InkWell(
+                      _FeedbackAction(
+                        icon: Icons.edit_outlined,
+                        label: 'Mark response edited',
+                        text: 'edited',
+                        color: fg,
                         onTap: () => onPassive?.call('/edited'),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.edit_outlined,
-                              size: 14,
-                              color: fg.withValues(alpha: 0.6),
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'edited',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: fg.withValues(alpha: 0.6),
-                              ),
-                            ),
-                          ],
-                        ),
                       ),
                     ],
                   ],
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A feedback control with a full-size touch target and an explicit label.
+/// The visible text stays compact, while keyboard and assistive technology get
+/// a stable action name instead of relying on a 14px icon or hover tooltip.
+class _FeedbackAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String text;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _FeedbackAction({
+    required this.icon,
+    required this.label,
+    required this.text,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = color.withValues(alpha: 0.6);
+    return Semantics(
+      button: true,
+      label: label,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 14, color: muted),
+                const SizedBox(width: 4),
+                Text(text, style: TextStyle(fontSize: 11, color: muted)),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -1699,65 +1704,6 @@ class _TypingDotsState extends State<_TypingDots>
   }
 }
 
-/// Colour for a command's risk band.
-///
-/// The bands are the ones `permission_modes._MATRIX` has rows for, because the
-/// server publishes each command under the class its gate decides on. There is
-/// no second table here to keep in step — a band this switch does not know is a
-/// band the app must not colour, so it takes the neutral outline: an unlabelled
-/// row is honest, a wrongly-green one is not.
-///
-/// `execution` earns its own band rather than borrowing `mutation`'s. It was
-/// missing while the server still published a four-class vocabulary, and the
-/// four tools it should have covered — `/build_run`, `/test_run`,
-/// `/typecheck_run`, `/dependency_audit` — arrived as `safe` and were drawn
-/// green with "read only" under their name, for work `plan` mode refuses.
-Color _riskColor(ColorScheme cs, String risk) {
-  switch (risk) {
-    case 'safe':
-      return const Color(0xFF4CAF50);
-    case 'ask':
-      return const Color(0xFFFFC107);
-    case 'mutation':
-      return const Color(0xFFFF7043);
-    case 'execution':
-      return const Color(0xFF8D6E63); // brown — distinct from mutation orange
-    case 'dangerous':
-      return const Color(0xFFE53935);
-    case 'unclassified':
-      return const Color(0xFF757575); // explicit neutral: policy has no class
-    default:
-      return cs.outline;
-  }
-}
-
-/// Human wording for a risk band, used as the dot's tooltip.
-///
-/// These name the *class*, not the outcome. What actually happens is
-/// `PermissionMode.matrix[risk]` for the mode on the chip above the composer,
-/// and it differs by mode: `ask`-class work runs unprompted under acceptEdits
-/// and auto, and every class but `safe` is refused outright under plan. So the
-/// `ask` band no longer reads "Asks before acting" — that was a promise this
-/// row is in no position to make, and it was false in two of the four modes.
-String _riskLabel(String risk) {
-  switch (risk) {
-    case 'safe':
-      return 'Safe — read only';
-    case 'ask':
-      return 'Acts beyond a read — prompts depend on the mode';
-    case 'mutation':
-      return 'Changes files or state';
-    case 'execution':
-      return 'Runs a program on the host';
-    case 'dangerous':
-      return 'Dangerous — destructive';
-    case 'unclassified':
-      return 'Unclassified - refused until policy is defined';
-    default:
-      return 'Risk not published';
-  }
-}
-
 /// Small coloured dot that carries a command's risk band.
 class _RiskDot extends StatelessWidget {
   final String risk;
@@ -1766,14 +1712,25 @@ class _RiskDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final label = riskLabel(risk);
     return Tooltip(
-      message: _riskLabel(risk),
-      child: Container(
-        width: 9,
-        height: 9,
-        decoration: BoxDecoration(
-          color: _riskColor(cs, risk),
-          shape: BoxShape.circle,
+      message: label,
+      child: Semantics(
+        label: 'Risk: $label',
+        container: true,
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: Center(
+            child: Container(
+              width: 9,
+              height: 9,
+              decoration: BoxDecoration(
+                color: riskColor(cs, risk),
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -2281,47 +2238,6 @@ class _InputBar extends StatelessWidget {
   }
 }
 
-/// Fill colour for an autonomy mode.
-///
-/// Green is reserved for `plan` — the only mode that genuinely cannot change
-/// anything — and deliberately withheld from `auto`. Green reads as "safe",
-/// and `auto` is the least cautious setting on offer; colouring it green would
-/// say the opposite of what it means. An unrecognised name gets the neutral
-/// outline colour rather than borrowing another mode's meaning.
-///
-/// All four are dark enough for white text (>= 4.5:1) and are used as-is in
-/// both themes so the same mode is the same colour wherever it appears.
-Color _permissionModeColor(ColorScheme cs, String mode) {
-  switch (mode) {
-    case 'plan':
-      return const Color(0xFF1B5E20); // green
-    case 'manual':
-      return const Color(0xFF0D47A1); // blue
-    case 'acceptEdits':
-      return const Color(0xFFBF360C); // deep orange
-    case 'auto':
-      return const Color(0xFF6A1B9A); // purple
-    default:
-      return cs.outline;
-  }
-}
-
-/// A glyph per mode, so the chip does not carry its meaning in colour alone.
-IconData _permissionModeIcon(String mode) {
-  switch (mode) {
-    case 'plan':
-      return Icons.visibility_outlined;
-    case 'manual':
-      return Icons.pan_tool_outlined;
-    case 'acceptEdits':
-      return Icons.edit_outlined;
-    case 'auto':
-      return Icons.fast_forward_outlined;
-    default:
-      return Icons.help_outline;
-  }
-}
-
 /// The always-visible autonomy indicator above the composer: what the agent
 /// will do without asking, and — separately — whether it is elevated.
 class _PermissionModeChip extends StatelessWidget {
@@ -2338,7 +2254,11 @@ class _PermissionModeChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final fill = _permissionModeColor(cs, state.mode);
+    final fill = permissionModeColor(cs, state.mode);
+    final modeLabel = state.displayLabel;
+    final modeDescription = state.blurb.trim().isEmpty
+        ? 'Autonomy mode'
+        : '${state.displayLabel}: ${state.blurb}';
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2346,52 +2266,57 @@ class _PermissionModeChip extends StatelessWidget {
           message: state.blurb.trim().isEmpty
               ? 'Autonomy mode — tap to change'
               : '${state.displayLabel} — ${state.blurb}',
-          child: InkWell(
-            key: const Key('permission-mode-chip'),
-            onTap: busy ? null : onTap,
-            borderRadius: BorderRadius.circular(20),
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
-              decoration: BoxDecoration(
-                color: fill,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _permissionModeIcon(state.mode),
-                    size: 14,
-                    color: Colors.white,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    state.displayLabel,
-                    style: const TextStyle(
+          child: Semantics(
+            button: true,
+            label: modeDescription,
+            hint: busy ? 'Changing mode' : 'Double tap to change mode',
+            child: InkWell(
+              key: const Key('permission-mode-chip'),
+              onTap: busy ? null : onTap,
+              borderRadius: BorderRadius.circular(20),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
+                decoration: BoxDecoration(
+                  color: fill,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      permissionModeIcon(state.mode),
+                      size: 14,
                       color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
                     ),
-                  ),
-                  if (busy)
-                    const Padding(
-                      padding: EdgeInsets.only(left: 6, right: 2),
-                      child: SizedBox(
-                        width: 11,
-                        height: 11,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
+                    const SizedBox(width: 6),
+                    Text(
+                      modeLabel,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
                       ),
-                    )
-                  else
-                    const Icon(
-                      Icons.arrow_drop_down,
-                      size: 18,
-                      color: Colors.white,
                     ),
-                ],
+                    if (busy)
+                      const Padding(
+                        padding: EdgeInsets.only(left: 6, right: 2),
+                        child: SizedBox(
+                          width: 11,
+                          height: 11,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        ),
+                      )
+                    else
+                      const Icon(
+                        Icons.arrow_drop_down,
+                        size: 18,
+                        color: Colors.white,
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -2425,29 +2350,37 @@ class _ElevatedBadge extends StatelessWidget {
           ? 'Elevated privileges are on. This is separate from the mode — no '
                 'mode turns it on.'
           : 'Elevated privileges are on: ${reason.trim()}',
-      child: Container(
-        key: const Key('permission-elevated-badge'),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: cs.errorContainer,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: cs.error, width: 1.5),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.shield_outlined, size: 13, color: cs.onErrorContainer),
-            const SizedBox(width: 4),
-            Text(
-              'ADMIN',
-              style: TextStyle(
+      child: Semantics(
+        label: 'Elevated privileges: on',
+        hint: reason.trim().isEmpty ? null : reason.trim(),
+        child: Container(
+          key: const Key('permission-elevated-badge'),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: cs.errorContainer,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: cs.error, width: 1.5),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.shield_outlined,
+                size: 13,
                 color: cs.onErrorContainer,
-                fontSize: 11,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 1.0,
               ),
-            ),
-          ],
+              const SizedBox(width: 4),
+              Text(
+                'ADMIN',
+                style: TextStyle(
+                  color: cs.onErrorContainer,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.0,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2493,9 +2426,9 @@ class _PermissionModeDialog extends StatelessWidget {
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
                           child: Icon(
-                            _permissionModeIcon(option.name),
+                            permissionModeIcon(option.name),
                             size: 16,
-                            color: _permissionModeColor(cs, option.name),
+                            color: permissionModeColor(cs, option.name),
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -2509,7 +2442,7 @@ class _PermissionModeDialog extends StatelessWidget {
                                   fontWeight: option.name == state.mode
                                       ? FontWeight.w700
                                       : FontWeight.w500,
-                                  color: _permissionModeColor(cs, option.name),
+                                  color: permissionModeColor(cs, option.name),
                                 ),
                               ),
                               if (option.blurb.trim().isNotEmpty)
