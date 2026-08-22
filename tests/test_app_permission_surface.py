@@ -110,18 +110,18 @@ def test_every_published_risk_class_is_a_key_of_the_matrix():
 def test_flutter_app_draws_every_risk_class_the_matrix_defines():
     """The app's rendering table, pinned to the enforcing module's keys.
 
-    Both halves matter. ``_riskColor`` decides the colour and ``_riskLabel``
+    Both halves matter. ``riskColor`` decides the colour and ``riskLabel``
     decides the words; a class missing from either is a class the operator
     reads wrongly, and they are separate switch statements that can drift
     apart independently.
     """
-    source = _dart("app/lib/chat_screen.dart")
+    source = _dart("app/lib/safety_colors.dart")
     classes = _matrix_risk_classes()
 
-    for function_name in ("_riskColor", "_riskLabel"):
+    for function_name in ("riskColor", "riskLabel"):
         missing = sorted(classes - _dart_switch_cases(source, function_name))
         assert not missing, (
-            "app/lib/chat_screen.dart %s has no branch for these risk classes, "
+            "app/lib/safety_colors.dart %s has no branch for these risk classes, "
             "so the app falls back to its neutral 'risk not published' "
             "rendering for commands the gate does classify: %s"
             % (function_name, ", ".join(missing))
