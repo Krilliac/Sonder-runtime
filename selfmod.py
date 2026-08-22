@@ -523,6 +523,12 @@ def create_backup(run_id):
             if existed:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
+                # The bundle is sealed below, but keep the individual backup
+                # writable until sealing completes so integrity checks and
+                # controlled corruption tests can operate on the artifact.
+                if os.name != "nt":
+                    with contextlib.suppress(OSError):
+                        os.chmod(destination, 0o600)
                 record["sha256_backup"] = _sha(destination)
                 if record["sha256_backup"] != record["sha256_before"]:
                     raise RuntimeError("backup hash mismatch for %s" % rel)

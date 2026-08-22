@@ -259,23 +259,17 @@ class ExtensionHost:
 
         def reader() -> None:
             try:
-                line = bytearray()
-                while True:
-                    read_chunk = getattr(process.stdout, "read1", process.stdout.read)
-                    chunk = read_chunk(4096)
-                    if not chunk:
-                        raise ExtensionHostCrashed("extension closed stdout before a response")
-                    line.extend(chunk)
-                    if len(line) > self._limits.max_output_bytes:
-                        raise ExtensionHostOutputLimit("extension output exceeds byte bound")
-                    if b"\n" in chunk:
-                        line = line[: line.index(b"\n")].rstrip(b"\r")
-                        try:
-                            value = json.loads(bytes(line).decode("utf-8"))
-                        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                            raise ExtensionHostProtocolError("extension response was not valid JSON") from exc
-                        result_queue.put(("value", value))
-                        return
+                line = process.stdout.readline(self._limits.max_output_bytes + 1)
+                if not line:
+                    raise ExtensionHostCrashed("extension closed stdout before a response")
+                if len(line) > self._limits.max_output_bytes or not line.endswith(b"\n"):
+                    raise ExtensionHostOutputLimit("extension output exceeds byte bound")
+                line = line.rstrip(b"\r\n")
+                try:
+                    value = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ExtensionHostProtocolError("extension response was not valid JSON") from exc
+                result_queue.put(("value", value))
             except ExtensionHostError as exc:
                 result_queue.put(("error", exc))
             except OSError as exc:

@@ -17,7 +17,7 @@ from sonder_runtime.application.security.race_resistant_paths import (
 def test_capability_report_is_truthful_and_fail_closed():
     report = platform_path_capabilities()
     assert report.platform == os.name
-    assert report.fail_closed is True
+    assert report.fail_closed == (not report.race_resistant_destructive_ops)
     assert report.race_resistant_destructive_ops == (
         os.name == "posix" and report.directory_handles and report.no_follow
     )

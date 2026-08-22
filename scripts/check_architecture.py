@@ -200,6 +200,12 @@ def is_approved_retired_shim(path: Path) -> bool:
         return False
     return actual == expected
 
+
+def _repo_relative_path(repo_root: Path, relative: Path) -> Path:
+    """Resolve policy paths written with either host's separators."""
+    parts = str(relative).replace("\\", "/").split("/")
+    return repo_root.joinpath(*parts)
+
 # Applied migrations are immutable historical artifacts. They may retain an
 # import that production code has since moved behind a compatibility adapter;
 # rewriting one would invalidate its recorded checksum on deployed systems.
@@ -334,7 +340,7 @@ def check() -> list[str]:
         # test) that does not carry the original .git metadata.  A retired
         # production path is a violation by presence; the Git inventory is
         # still authoritative for dependency and packaging checks below.
-        retired_path = REPO_ROOT / retired
+        retired_path = _repo_relative_path(REPO_ROOT, retired)
         if retired in tracked or retired_path.is_file():
             if is_approved_retired_shim(retired_path):
                 continue

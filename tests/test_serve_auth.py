@@ -2248,7 +2248,7 @@ def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):
     # This test exercises a provider-side 429.  Enable the separate operator
     # cloud consent gate so early selector preflight reaches the mocked model
     # transport rather than correctly denying cloud use first.
-    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: True)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
 
     class FakeConnection:
         def close(self):
