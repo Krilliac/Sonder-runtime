@@ -45,7 +45,10 @@ def _jsonable(value: Any) -> Any:
 
 
 def _sha(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Source hashes are an authority signal, so they must not change merely
+    # because Git checked the same file out with CRLF on Windows and LF on CI.
+    normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _source_hashes() -> dict[str, str]:
@@ -237,7 +240,8 @@ def main() -> int:
     for path, content in expected().items():
         if args.write:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            with path.open("w", encoding="utf-8", newline="\n") as stream:
+                stream.write(content)
         elif not path.is_file() or path.read_text(encoding="utf-8") != content:
             problems.append(path.relative_to(ROOT).as_posix())
     for problem in problems:
