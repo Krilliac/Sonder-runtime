@@ -106,6 +106,8 @@ def _value(param: dict[str, Any], root: str, fixture_root: str | None = None,
     }:
         if name in {"root", "cwd", "workspace", "project_root"}:
             return root
+        if name == "path" and not param.get("required") and param.get("default") == ".":
+            return root
         filename = "data.json" if command_name == "/data_query" else "probe.txt"
         return str(Path(fixture_root) / filename)
     if name in _ID_NAMES or name.endswith("_id"):
@@ -143,6 +145,26 @@ def invocation(row: dict[str, Any], root: str, include_stateful: bool,
                fixture_root: str | None = None) -> str:
     name = str(row["name"])
     params = row.get("params") or []
+    if row.get("native"):
+        values = {
+            str(param.get("name")): _value(param, root, fixture_root, name)
+            for param in params
+            if param.get("required") or include_stateful
+        }
+        if name == "/artifactcheck":
+            return "%s %s | auto" % (name, values.get("path", ""))
+        if name == "/game":
+            return "/game python 2d slash-audit | compact loop"
+        if name == "/asset":
+            return "%s %s" % (name, " ".join(values.values()))
+        if name == "/gamefleet":
+            return "%s slash-audit | compact loop" % name
+        if name in {"/weather", "/ensemble", "/work"}:
+            return "%s %s" % (name, next(iter(values.values()), "slash-audit"))
+        if name in {"/agentcancel", "/agentretry"}:
+            return "%s %s" % (name, " ".join(values.values()))
+        if name == "/capacity":
+            return "%s %s" % (name, values.get("requested_agents", "0"))
     parts = [name]
     # These native toggles are catalogued as safe because they do not touch
     # durable data.  Explicitly turn them off so a probe cannot leave the
