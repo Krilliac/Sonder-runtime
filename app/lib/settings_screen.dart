@@ -319,6 +319,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // Keep the async guard compatible with the mobile back stack used by the
+    // current client targets; the PopScope migration can be handled when the
+    // minimum Flutter version is raised across all platform templates.
+    // ignore: deprecated_member_use
     return WillPopScope(
       onWillPop: _confirmDiscard,
       child: Scaffold(
