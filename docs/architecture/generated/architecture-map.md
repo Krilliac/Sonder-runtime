@@ -12,7 +12,7 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 | `adapters` | 208 |
 | `application` | 257 |
 | `bootstrap` | 14 |
-| `domain` | 104 |
+| `domain` | 106 |
 | `interfaces` | 32 |
 | `platform` | 33 |
 

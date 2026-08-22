@@ -41,6 +41,21 @@ lane-selected tier to a specialist tier the operator has actually bound; it
 never selects cloud and never widens a permission. With only the base tiers
 bound it is a deliberate no-op.
 
+When a caller supplies the measured hardware capability report and an exact
+quantized model profile, the same pure route planner also carries a
+`memory_mode`: `gpu-resident`, `gpu+ram-hybrid`, or `cpu-fallback`. This is
+metadata for scheduling and diagnostics; it does not silently replace the
+configured model, widen permissions, or turn unknown backend readiness into a
+claim of acceleration. The route remains local by default and keeps its
+existing bounded escalation ladder.
+
+Modality jobs (vision, OCR, speech, text-to-speech, and embeddings) share a
+small pure scheduler that orders by priority against measured free VRAM. It
+uses CPU fallback when permitted, defers work when fallback is disabled, and
+refuses non-local work unless the caller explicitly supplies cloud consent.
+The scheduler does not move payloads or claim that a provider is installed;
+the owning gateway still performs the actual local capability check.
+
 ## Routing lanes (runtime policy)
 
 The hot-reloadable `runtime_policy.json` maps **lanes** to tiers:
