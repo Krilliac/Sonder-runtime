@@ -16,13 +16,29 @@ Run:
     python sonder_client.py
     python sonder_client.py --server http://your-vps:11435 --key s3cret
 """
-import json
-import os
 import sys
 import urllib.error
-import urllib.request
 
-LOCAL_FALLBACK_SERVER = os.environ.get("SONDER_LOCAL_FALLBACK", "http://127.0.0.1:11435")
+from sonder_runtime.adapters.client_endpoint import (
+    local_fallback_server as _local_fallback_server,
+    same_server as _same_server,
+)
+from sonder_runtime.adapters.client_fallback import (
+    send_prompt_with_fallback as _send_prompt_with_fallback,
+)
+from sonder_runtime.adapters.client_request import (
+    build_chat_request as _build_chat_request,
+)
+from sonder_runtime.adapters.client_transport import (
+    send_chat_prompt as _send_chat_prompt,
+)
+from sonder_runtime.adapters.client_config import (
+    parse_argv as _parse_argv,
+    resolve_config as _resolve_config,
+)
+from sonder_runtime.platform.client_fallback import enabled as local_fallback_enabled
+
+LOCAL_FALLBACK_SERVER = _local_fallback_server()
 
 USAGE = """usage: sonder_client.py [--server URL] [--key API_KEY]
 
@@ -36,94 +52,31 @@ Example:
 """
 
 
-def _parse_argv(argv):
-    """Parse --server/--key overrides out of argv. Returns (server, key)."""
-    server = None
-    key = None
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--server" and i + 1 < len(argv):
-            server = argv[i + 1]
-            i += 2
-        elif arg == "--key" and i + 1 < len(argv):
-            key = argv[i + 1]
-            i += 2
-        else:
-            i += 1
-    return server, key
-
-
 def build_request(server, api_key, prompt):
-    """Pure builder: returns (url, headers_dict, body_bytes) for a chat completion
-    POST to `server`, with the given prompt as the sole user message."""
-    url = server.rstrip("/") + "/v1/chat/completions"
-    body = json.dumps({
-        "model": "sonder",
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-    }).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = "Bearer " + api_key
-    return url, headers, body
+    """Compatibility delegate for the packaged standalone-client adapter."""
+    return _build_chat_request(server, api_key, prompt)
 
 
 def send_prompt(server, api_key, prompt):
     """Send a prompt to the hosted Sonder Runtime; returns the assistant's reply text,
     or raises on a network/HTTP error (caller handles presentation)."""
-    url, headers, body = build_request(server, api_key, prompt)
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req) as resp:
-        raw = resp.read().decode("utf-8")
-    obj = json.loads(raw)
-    return obj["choices"][0]["message"]["content"]
-
-
-def _same_server(a, b):
-    return (a or "").strip().rstrip("/") == (b or "").strip().rstrip("/")
-
-
-def local_fallback_enabled():
-    return os.environ.get("SONDER_FALLBACK_LOCAL", "1").strip().lower() not in (
-        "0", "false", "no", "off",
+    return _send_chat_prompt(
+        server, api_key, prompt, request_builder=build_request
     )
 
 
 def send_prompt_with_fallback(server, api_key, prompt, fallback_server=None):
-    """Try hosted/server URL first, then local Sonder on connection failure.
-
-    HTTP errors intentionally do not fall back: auth, ban, rate-limit, and server
-    policy failures should stay visible instead of silently changing hosts.
-    Returns (reply, server_used, warning_text).
-    """
-    fallback_server = fallback_server or LOCAL_FALLBACK_SERVER
-    try:
-        return send_prompt(server, api_key, prompt), server, ""
-    except urllib.error.HTTPError:
-        raise
-    except urllib.error.URLError as first_error:
-        if (
-            not local_fallback_enabled()
-            or not fallback_server
-            or _same_server(server, fallback_server)
-        ):
-            raise
-        reply = send_prompt(fallback_server, "", prompt)
-        warning = (
-            "WARNING: hosted server %s was unreachable (%s). "
-            "Fell back to local server %s for this request."
-            % (server, first_error, fallback_server)
-        )
-        return reply, fallback_server, warning
+    """Compatibility delegate for packaged fallback orchestration."""
+    return _send_prompt_with_fallback(
+        server, api_key, prompt, fallback_server or LOCAL_FALLBACK_SERVER,
+        sender=send_prompt,
+        fallback_policy=local_fallback_enabled,
+    )
 
 
 def resolve_config(argv):
-    """Resolve (server, api_key) from argv overrides then env. Returns (server, key)."""
-    argv_server, argv_key = _parse_argv(argv)
-    server = argv_server or os.environ.get("SONDER_SERVER", "")
-    key = argv_key or os.environ.get("SONDER_API_KEY", "")
-    return server, key
+    """Compatibility delegate for the packaged client configuration adapter."""
+    return _resolve_config(argv)
 
 
 def main(argv=None):

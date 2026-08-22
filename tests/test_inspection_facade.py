@@ -10,7 +10,10 @@ import server
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.inspection import INSPECTION_TOOLS, InspectionService
 from sonder_runtime.application.ports.tool_executor import ToolCall, ToolResult
-from sonder_runtime.adapters.inspection_executor import LegacyInspectionExecutor
+from sonder_runtime.adapters.inspection_executor import (
+    InspectionExecutorAdapter,
+    LegacyInspectionExecutor,
+)
 
 
 EXPECTED_TOOLS = {
@@ -18,6 +21,19 @@ EXPECTED_TOOLS = {
     "directory_digest", "file_digest", "log_inspect", "project_detect",
     "workspace_compare",
 }
+
+
+def test_inspection_adapter_has_a_canonical_owner_and_legacy_identity_alias():
+    assert LegacyInspectionExecutor is InspectionExecutorAdapter
+
+
+def test_composition_uses_the_canonical_inspection_adapter(tmp_path, monkeypatch):
+    from sonder_runtime.bootstrap import app as bootstrap
+
+    monkeypatch.setenv("SONDER_HOME", str(tmp_path))
+    application = bootstrap.build_application()
+
+    assert type(application.inspections._executor) is InspectionExecutorAdapter
 
 
 class CaptureExecutor:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 
 
 def test_client_supplied_history_is_used_verbatim():

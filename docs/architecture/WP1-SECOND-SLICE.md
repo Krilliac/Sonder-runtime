@@ -1,6 +1,6 @@
 # WP1 second migration slice: memory MMR adapter
 
-**Status:** Implemented locally; CI verification pending
+**Status:** Focused verification passed; CI/full-suite qualification pending
 **Target requirements:** `ARCH-001`, `ARCH-002`, `ARCH-004`, `ARCH-010`, `MEM-006`
 **Retired root module:** `mmr_rerank.py`
 
@@ -27,7 +27,8 @@ module without a compatibility shim.
 
 ## Verification record
 
-- [x] Dedicated context/MMR, architecture, evidence, and packaging selection: 138 passed.
+- [x] Dedicated context/MMR, architecture, evidence, and packaging selection: 113 passed
+  in the current environment.
 - [x] Ruff passes for every newly introduced module and evidence test.
 - [x] Architecture checker, requirement-evidence checker, and `git diff --check` pass.
 - [x] Full suite reached 1,063 passed and 3 skipped before the first failure.

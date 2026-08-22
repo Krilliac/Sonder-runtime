@@ -7,7 +7,6 @@ arbitrary arguments from clients.
 from __future__ import annotations
 
 import argparse
-from decimal import Decimal, InvalidOperation
 import errno
 import hashlib
 import hmac
@@ -30,10 +29,27 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import sonder_health
+from sonder_runtime.domain import launcher_health as sonder_health
 import command_recovery
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
-from sonder_paths import state_path
+from sonder_runtime.adapters.launcher_idempotency import (
+    _IDEMPOTENCY_KEY,
+    _REPLAY_HEADER_NAME,
+    _REPLAY_HEADER_VALUE,
+    normalize_idempotency_key,
+    valid_command_replay,
+)
+from sonder_runtime.adapters.launcher_output import (
+    bounded_seconds,
+    output_text,
+    retention_limit,
+)
+from sonder_runtime.application.lifecycle import (
+    MAX_CONTEXT_TOKENS,
+    _CONTEXT_SIZE,
+    normalize_context_size,
+)
+from sonder_runtime.platform.paths import state_path
 
 
 ROOT = Path(__file__).resolve().parent
@@ -42,7 +58,6 @@ DEFAULT_PORT = 11436
 DEFAULT_SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 11435
 MAX_BODY = 16_384
-MAX_CONTEXT_TOKENS = 1_000_000
 START_ACTION_TIMEOUT_SECONDS = 31 * 60.0
 STOP_ACTION_TIMEOUT_SECONDS = 60.0
 # Kept for callers that imported the old single timeout constant. Start and
@@ -60,11 +75,14 @@ CONTROL_KILL_GRACE_SECONDS = 3.0
 FINALIZE_RETRY_DELAYS = (0.0, 0.05, 0.2)
 ACTIVE_PHASES = ("queued", "running")
 TERMINAL_PHASES = ("succeeded", "failed", "cancelled", "interrupted")
-_CONTEXT_SIZE = re.compile(r"^(\d{1,7})(?:\.(\d{1,3}))?([km]?)$")
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
-_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
-_REPLAY_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
-_REPLAY_HEADER_VALUE = re.compile(r"^[\x20-\x7e]{0,1024}$")
+# Compatibility aliases for the historical private policy surface.
+_normalize_idempotency_key = normalize_idempotency_key
+_valid_command_replay = valid_command_replay
+# Compatibility aliases for the historical private policy surface.
+_output_text = output_text
+_bounded_seconds = bounded_seconds
+_retention_limit = retention_limit
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sonder_launcher_operations (
@@ -149,61 +167,6 @@ def _reachable(host="127.0.0.1", port=SERVER_PORT, timeout=0.4):
             return True
     except OSError:
         return False
-
-
-def normalize_context_size(value):
-    """Validate the bounded context syntax accepted by the main server."""
-    text = str(value or "8192").strip().lower()
-    match = _CONTEXT_SIZE.fullmatch(text)
-    if not match:
-        raise ValueError("invalid context_size")
-    try:
-        number = Decimal(match.group(1) + ("." + match.group(2) if match.group(2) else ""))
-    except InvalidOperation as exc:  # Defensive: the regular expression is stricter.
-        raise ValueError("invalid context_size") from exc
-    multiplier = {"": 1, "k": 1_000, "m": 1_000_000}[match.group(3)]
-    tokens = number * multiplier
-    if tokens < 1 or tokens > MAX_CONTEXT_TOKENS:
-        raise ValueError(
-            "context_size must resolve to between 1 and %s tokens"
-            % MAX_CONTEXT_TOKENS
-        )
-    if tokens != tokens.to_integral_value():
-        raise ValueError("context_size must resolve to a whole number of tokens")
-    return text
-
-
-def _output_text(*values):
-    chunks = []
-    for value in values:
-        if not value:
-            continue
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", errors="replace")
-        value = str(value).strip()
-        if value:
-            chunks.append(value)
-    output = "\n".join(chunks)
-    if len(output) <= MAX_OPERATION_OUTPUT:
-        return output
-    marker = "[output truncated]\n"
-    return marker + output[-(MAX_OPERATION_OUTPUT - len(marker)):]
-
-
-def _bounded_seconds(value, default, maximum):
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = float(default)
-    return max(1.0, min(parsed, float(maximum)))
-
-
-def _retention_limit(value):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = DEFAULT_OPERATION_RETENTION
-    return max(1, min(parsed, MAX_OPERATION_RETENTION))
 
 
 def _pid_alive(pid):
@@ -577,36 +540,6 @@ def _windows_terminate_pid(pid, identity=""):
             kernel32.CloseHandle(handle)
     except (AttributeError, ImportError, OSError, ValueError):
         return False
-
-
-def _normalize_idempotency_key(value):
-    key = str(value or "").strip()
-    if key and not _IDEMPOTENCY_KEY.fullmatch(key):
-        raise ValueError(
-            "Idempotency-Key must be 8-128 letters, numbers, or . _ : -"
-        )
-    return key
-
-
-def _valid_command_replay(value):
-    """Validate a durable response before it reaches BaseHTTPRequestHandler."""
-    if not isinstance(value, dict) or not set(value) <= {"status", "payload", "headers"}:
-        return False
-    status = value.get("status")
-    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
-        return False
-    if not isinstance(value.get("payload"), dict):
-        return False
-    headers = value.get("headers", {})
-    if not isinstance(headers, dict) or len(headers) > 16:
-        return False
-    return all(
-        isinstance(name, str)
-        and isinstance(header_value, str)
-        and _REPLAY_HEADER_NAME.fullmatch(name)
-        and _REPLAY_HEADER_VALUE.fullmatch(header_value)
-        for name, header_value in headers.items()
-    )
 
 
 def _write_private_file(path, value):

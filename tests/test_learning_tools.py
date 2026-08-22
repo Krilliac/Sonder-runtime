@@ -217,7 +217,9 @@ def test_record_outcome_uses_short_shared_distillation_budget(monkeypatch, tmp_p
     monkeypatch.setattr(
         server.master_orchestrator, "active_model_call_count", lambda: 0,
     )
-    monkeypatch.setattr(server, "_distillation_timeout_seconds", lambda: 7)
+    monkeypatch.setattr(
+        server, "_distillation_timeout_policy", lambda *_args: 7,
+    )
     calls = []
 
     def generate(prompt, **kwargs):
@@ -562,7 +564,7 @@ def test_pitfall_crash_is_reported_not_swallowed(monkeypatch, tmp_path):
 def test_record_outcome_routes_through_unit_of_work(monkeypatch, tmp_path):
     """SPEC-3: the outcome write + distillation claim go through the
     UnitOfWork port, bound to the server's database path."""
-    from sonder_runtime.adapters.strangler_services import LegacyUnitOfWork
+    from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter as LegacyUnitOfWork
 
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     conn = server._open_db()
@@ -594,7 +596,7 @@ def test_record_outcome_routes_through_unit_of_work(monkeypatch, tmp_path):
 def test_learn_from_example_routes_through_unit_of_work(monkeypatch, tmp_path):
     """SPEC-3: the example interaction write goes through the UnitOfWork
     port, bound to the server's database path."""
-    from sonder_runtime.adapters.strangler_services import LegacyUnitOfWork
+    from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter as LegacyUnitOfWork
 
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     monkeypatch.setattr(server.embeddings, "embed", lambda *a, **k: None)

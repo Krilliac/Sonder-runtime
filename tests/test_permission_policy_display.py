@@ -33,7 +33,7 @@ import pytest
 import permission_modes as pm
 import permission_rules
 import server
-import sonder_repl
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 from sonder_runtime.domain.execution import policy as execution_policy
 
 pytestmark = pytest.mark.unit

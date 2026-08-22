@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
-import workbench
+import sonder_runtime.adapters.filesystem.workbench as workbench
 from sonder_runtime.adapters import git_discovery
 
 

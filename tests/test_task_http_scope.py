@@ -1,8 +1,9 @@
 """Account boundaries for the HTTP task/checklist surface."""
+import json
 import re
 
 import server
-import sonder_serve as serve
+import sonder_runtime.interfaces.http.serve as serve
 
 
 def _account(name):
@@ -83,6 +84,35 @@ def test_scoped_task_show_events_alias_and_latest_checklist_use_updated_order(tm
     # Priority sorting puts "older" first in a normal task list; the bare
     # checklist command must instead choose its newest durable parent.
     assert "newer" in serve._handle_slash("/checklist", context=alice)
+
+
+def test_task_ledger_is_public_and_account_scoped(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+
+    public_plan = server.task_plan("public goal", '["research", "validate"]')
+    public_id = re.search(r"checklist ([0-9a-f]{8})", public_plan).group(1)
+    payload = json.loads(server.task_ledger(public_id))
+    assert payload["ledger"]["schema"] == "sonder.task-ledger.v1"
+    assert payload["digest"]
+    assert len(payload["ledger"]["items"]) == 2
+
+    alice = _account("alice")
+    scope = serve._task_account_scope(alice)
+    scoped_plan = server.scoped_task_tool_dispatch(
+        "task_plan", {"title": "Alice goal", "steps": ["one", "two"]},
+        account_scope=scope,
+    )
+    scoped_id = re.search(r"checklist ([0-9a-f]{8})", scoped_plan).group(1)
+    scoped_payload = json.loads(server.scoped_task_tool_dispatch(
+        "task_ledger", {"goal_id": scoped_id}, account_scope=scope,
+    ))
+    assert scoped_payload["ledger"]["goal_id"].startswith(scoped_id)
+    assert "Alice goal" not in json.dumps(
+        server.scoped_task_tool_dispatch(
+            "task_ledger", {"goal_id": public_id}, account_scope=scope,
+        )
+    )
 
 
 def test_task_scope_is_opaque_and_only_accounts_receive_one():

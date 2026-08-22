@@ -98,6 +98,28 @@ void main() {
     expect(status.plans, isEmpty);
   });
 
+  test('ExtensionRegistryStatus parses bounded registry projections', () {
+    final digest = List.filled(64, 'a').join();
+    final status = ExtensionRegistryStatus.fromJson({
+      'persistence': 'durable',
+      'records': [
+        {
+          'extension_id': 'sonder.worker',
+          'scope': 'global',
+          'version': '1.0.0',
+          'enabled': true,
+          'health_state': 'healthy',
+          'resources': {'memory_limit_bytes': 268435456},
+          'artifact': {'artifact_digest': digest},
+        },
+      ],
+    });
+    expect(status.persistence, 'durable');
+    expect(status.records.single.extensionId, 'sonder.worker');
+    expect(status.records.single.memoryLimitBytes, 268435456);
+    expect(status.records.single.artifactDigest, digest);
+  });
+
   test('reasoning never rides the wire back to the model', () {
     const m = ChatMessage(
       role: Role.assistant,

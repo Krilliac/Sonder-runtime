@@ -1,4 +1,4 @@
-import embeddings as e
+import sonder_runtime.adapters.embeddings as e
 from sonder_runtime.adapters import memory_rerank as m
 
 

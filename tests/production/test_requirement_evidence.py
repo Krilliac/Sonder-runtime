@@ -39,3 +39,27 @@ def test_checked_requirement_requires_verified_evidence(tmp_path):
     assert module.validate() == [
         "spec: checked requirement TEST-001 is not verified"
     ]
+
+
+def test_generated_status_rejects_stale_projection(tmp_path):
+    module = _checker()
+    module.SPEC = tmp_path / "spec.md"
+    module.LEDGER = tmp_path / "requirements.jsonl"
+    module.STATUS_JSON = tmp_path / "status.json"
+    module.STATUS_MD = tmp_path / "status.md"
+    module.SPEC.write_text(
+        "- [ ] **TEST-001 — Demonstration.** A planned claim.\n",
+        encoding="utf-8",
+    )
+    module.LEDGER.write_text(
+        '{"schema":"sonder-requirement-evidence-v1",'
+        '"requirement_id":"TEST-001","revision":1,'
+        '"status":"planned","claim":"Demonstration."}\n',
+        encoding="utf-8",
+    )
+    module.STATUS_JSON.write_text("{}\n", encoding="utf-8")
+    module.STATUS_MD.write_text("stale\n", encoding="utf-8")
+    assert module.generated_problems() == [
+        "generated: requirement-status.json is missing or stale",
+        "generated: requirement-status.md is missing or stale",
+    ]

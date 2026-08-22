@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import inspect
 import json
+from uuid import uuid4
 
+from ..loop.durable_control import DurableLoopControl
 from ..ports.tool_executor import ToolResult
+from ..ports.specialized_lifecycle import CleanupResult
 from ..ports.workflows import LoopRunner, WorkflowRepository
 
 
@@ -29,9 +33,21 @@ def _repository_failure(exc: Exception) -> ToolResult:
 
 
 class WorkflowService:
-    def __init__(self, repository: WorkflowRepository, runner: LoopRunner) -> None:
+    def __init__(
+        self,
+        repository: WorkflowRepository,
+        runner: LoopRunner,
+        *,
+        loop_control: DurableLoopControl | None = None,
+    ) -> None:
         self._repository = repository
         self._runner = runner
+        self._loop_control = loop_control or DurableLoopControl()
+
+    @property
+    def loop_control(self) -> DurableLoopControl:
+        """Expose the durable control plane for an owning job/request boundary."""
+        return self._loop_control
 
     def list(self) -> ToolResult:
         try:
@@ -82,22 +98,105 @@ class WorkflowService:
             return _repository_failure(exc)
         if workflow is None:
             return _failure("no workflow named '%s'." % name, "NOT_FOUND")
+        node_id = "workflow:%s:%s" % (
+            self._repository.normalize_name(name), uuid4().hex,
+        )
+        node = self._loop_control.cancellation.create_child(node_id=node_id)
+
+        def durable_cancel_check() -> bool:
+            if node.cancelled:
+                return True
+            if cancel_check is None:
+                return False
+            try:
+                requested = bool(cancel_check())
+            except Exception:
+                requested = True
+            if requested:
+                node.cancel(reason="workflow cancellation requested")
+            return node.cancelled
+
+        cleanup = getattr(self._runner, "cleanup", None)
+        if not callable(cleanup):
+            cleanup = lambda _timeout: CleanupResult(
+                "workflow-loop", True, True, "loop runner has no external resources"
+            )
+        self._loop_control.bind(
+            node_id,
+            "workflow-loop:%s" % node_id,
+            cancel=lambda _reason: True,
+            cleanup=cleanup,
+        )
+        options = {
+            "max_iterations": max_iterations,
+            "stop_on_failure": stop_on_failure,
+            "stop_on_success": stop_on_success,
+            "delay_seconds": delay_seconds,
+        }
         try:
-            options = {
-                "max_iterations": max_iterations,
-                "stop_on_failure": stop_on_failure,
-                "stop_on_success": stop_on_success,
-                "delay_seconds": delay_seconds,
-            }
-            if cancel_check is not None:
-                options["cancel_check"] = cancel_check
+            parameters = inspect.signature(self._runner.run).parameters
+            accepts_cancel_check = (
+                "cancel_check" in parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+            )
+        except (TypeError, ValueError):
+            accepts_cancel_check = True
+        if accepts_cancel_check:
+            options["cancel_check"] = durable_cancel_check
+        try:
             result = self._runner.run(
                 workflow["actions"],
                 dispatch,
                 **options,
             )
-        except (OSError, ValueError) as exc:
-            return _failure(exc, "WORKFLOW_ERROR")
+        except Exception as exc:
+            return _failure(
+                "workflow runner failed: %s: %s"
+                % (exc.__class__.__name__, exc),
+                "WORKFLOW_ERROR",
+            )
+        if not isinstance(result, dict):
+            return _failure(
+                "workflow runner returned an invalid result",
+                "WORKFLOW_ERROR",
+            )
+        cancellation_evidence = {}
+        cancellation_error = ""
+        if result.get("cancelled") is True:
+            if not node.cancelled:
+                node.cancel(reason="workflow loop reported cancellation")
+            cleanup_error = ""
+            try:
+                reports = self._loop_control.cancel_and_cleanup(
+                    node_id, reason="workflow cancellation cleanup", timeout=0
+                )
+                cleanup_complete = bool(reports) and all(
+                    report.conforms for report in reports
+                )
+            except Exception as exc:
+                reports = ()
+                cleanup_complete = False
+                cleanup_error = "%s: %s" % (exc.__class__.__name__, exc)
+            cancellation_evidence = {
+                "cancelled": True,
+                "cleanup_complete": cleanup_complete,
+                **({"cleanup_error": cleanup_error} if cleanup_error else {}),
+                "reports": [
+                    {
+                        "target_id": report.target_id,
+                        "cancelled": report.cancelled,
+                        "quiescent": report.quiescent,
+                        "resources_released": report.resources_released,
+                        "detail": report.detail,
+                    }
+                    for report in reports
+                ],
+            }
+            if not cleanup_complete:
+                cancellation_error = "CLEANUP_INCOMPLETE"
         header = "workflow: %s\n%s\n" % (
             self._repository.normalize_name(name),
             workflow.get("description") or "(no description)",
@@ -106,13 +205,16 @@ class WorkflowService:
         return ToolResult(
             ok=ok,
             output=header + self._runner.format(result),
-            error_code="" if ok else (
+            error_code="" if ok else (cancellation_error or (
                 "CANCELLED" if result.get("cancelled") else "WORKFLOW_FAILED"
-            ),
+            )),
             # Legacy MCP workflow_run returned the formatted loop report even
             # when an action failed; keep that wire text while exposing typed
             # failure to application callers.
-            evidence={"legacy_raw_output": True},
+            evidence={"legacy_raw_output": True, **(
+                {"workflow_cancellation": cancellation_evidence}
+                if cancellation_evidence else {}
+            )},
         )
 
     def delete(self, name: str) -> ToolResult:

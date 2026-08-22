@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass
 
 from ...domain.common.errors import InvalidInput, NotFound
+from ...domain.task_ledger import TaskLedger, build_task_ledger
 from ..ports.task_state import ChecklistEventPort, TaskRepository
 
 
@@ -241,6 +242,25 @@ class TaskService:
     def task_progress(self, project: str = "", *, account_scope: str | None = None) -> dict:
         return self._repository.progress(
             project=project, **self._scope_kwargs(account_scope)
+        )
+
+    def task_ledger(
+        self, goal_id: str, *, account_scope: str | None = None,
+        replan_count: int = 0, last_replan_reason: str | None = None,
+    ) -> TaskLedger:
+        """Return a deterministic manager-visible projection of one checklist."""
+        scope = self._scope_kwargs(account_scope)
+        goal = self._repository.get(goal_id, **scope)
+        if not goal:
+            raise NotFound("no task ledger goal '%s'" % goal_id)
+        tasks = self._repository.children(goal["id"], **scope)
+        dependencies = {
+            task["id"]: [row["id"] for row in self._repository.dependencies(task["id"], **scope)]
+            for task in tasks
+        }
+        return build_task_ledger(
+            goal["id"], tasks, dependencies,
+            replan_count=replan_count, last_replan_reason=last_replan_reason,
         )
 
     def plan_tasks(

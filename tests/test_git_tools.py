@@ -7,8 +7,14 @@ import pytest
 import command_router
 import git_tools
 import server
-import sonder_serve
-import sonder_repl
+import sonder_runtime.interfaces.http.serve as sonder_serve
+import sonder_runtime.interfaces.repl.repl as sonder_repl
+
+
+@pytest.fixture(autouse=True)
+def _inject_legacy_runtime(monkeypatch):
+    monkeypatch.setattr(sonder_repl, "_legacy_runtime", None)
+    sonder_repl.configure_legacy_runtime(server)
 
 
 def _git(repo, *args):

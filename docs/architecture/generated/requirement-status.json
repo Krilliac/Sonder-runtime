@@ -1,0 +1,1572 @@
+{
+  "families": {
+    "AGENT": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "API": {
+      "checked": 0,
+      "total": 8,
+      "verified": 0
+    },
+    "ARCH": {
+      "checked": 0,
+      "total": 13,
+      "verified": 0
+    },
+    "COMPACT": {
+      "checked": 0,
+      "total": 5,
+      "verified": 0
+    },
+    "CORE": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "CTX": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "DATA": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "DOC": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "EVAL": {
+      "checked": 0,
+      "total": 9,
+      "verified": 0
+    },
+    "EXEC": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "EXT": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "JOB": {
+      "checked": 0,
+      "total": 5,
+      "verified": 0
+    },
+    "LOOP": {
+      "checked": 0,
+      "total": 8,
+      "verified": 0
+    },
+    "MEM": {
+      "checked": 0,
+      "total": 8,
+      "verified": 0
+    },
+    "MODEL": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "OPS": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "REPO": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "SEAM": {
+      "checked": 0,
+      "total": 16,
+      "verified": 0
+    },
+    "SEC": {
+      "checked": 0,
+      "total": 9,
+      "verified": 0
+    },
+    "SELFMOD": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "SESSION": {
+      "checked": 0,
+      "total": 10,
+      "verified": 0
+    },
+    "SKILL": {
+      "checked": 0,
+      "total": 6,
+      "verified": 0
+    },
+    "TOOL": {
+      "checked": 0,
+      "total": 7,
+      "verified": 0
+    },
+    "TRAIN": {
+      "checked": 0,
+      "total": 9,
+      "verified": 0
+    },
+    "UPDATE": {
+      "checked": 0,
+      "total": 5,
+      "verified": 0
+    }
+  },
+  "overall": {
+    "checked": 0,
+    "statuses": {
+      "implemented_unverified": 204
+    },
+    "total": 204,
+    "verified": 0
+  },
+  "requirements": [
+    {
+      "checked": false,
+      "claim": "The packaged runtime exposes one lazy typed agent-registry boundary without importing or initializing the root master_orchestrator during composition.",
+      "requirement_id": "AGENT-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Existing agent modes are represented through the unified agent composition boundary.",
+      "requirement_id": "AGENT-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Agent presets provide typed role and budget selection.",
+      "requirement_id": "AGENT-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Built-in agent roles and dispatch integration are explicit and tested.",
+      "requirement_id": "AGENT-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Delegated work carries durable parent-child lineage.",
+      "requirement_id": "AGENT-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Child agents expose continuable durable state.",
+      "requirement_id": "AGENT-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Agent budgets are admitted and enforced at the application boundary.",
+      "requirement_id": "AGENT-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Delegated workspaces are isolated and bounded by parent context.",
+      "requirement_id": "AGENT-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Structured delegation validates lineage, workspace, budgets, and result evidence.",
+      "requirement_id": "AGENT-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Architect, editor, and reviewer roles are represented in the workbench review boundary.",
+      "requirement_id": "AGENT-010",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Protocol application composition exposes one typed event vocabulary for protocol-facing surfaces.",
+      "requirement_id": "API-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Resumable streams validate event identity, payloads, and monotonic watermarks at the protocol boundary.",
+      "requirement_id": "API-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The packaged native MCP entrypoint fails closed and reports a bounded refusal before configuration when the mandatory unsafe-lab safety gate rejects the host.",
+      "requirement_id": "API-003",
+      "revision": 5,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "OpenAI compatibility remains composed behind the provider-neutral protocol facade.",
+      "requirement_id": "API-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Editor and agent rule documents have a bounded, provider-neutral import/export contract.",
+      "requirement_id": "API-005",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The default control-plane graph exposes the typed memory policy matrix as bounded explanations without exposing memory content, identifiers, or recall results.",
+      "requirement_id": "API-006",
+      "revision": 12,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Mobile/client parity and bounded reconnect use the shared typed protocol graph.",
+      "requirement_id": "API-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The explicit runtime composition root exposes a protocol application facade whose client schema is bound to the same generated tool catalog and canonical snapshot-plus-events stream contract.",
+      "requirement_id": "API-008",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live application graph exposes typed provider-neutral training and update operation entrypoints that resolve scoped providers, fail closed when a lane is absent or lacks the capability, and return normalized deployment or activation evidence.",
+      "requirement_id": "ARCH-001",
+      "revision": 16,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The root fanout store is an identity compatibility alias.",
+      "requirement_id": "ARCH-002",
+      "revision": 6,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Fanout persistence ownership is ratcheted to the packaged adapter.",
+      "requirement_id": "ARCH-003",
+      "revision": 6,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Domain logic remains separated from adapters and interfaces.",
+      "requirement_id": "ARCH-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Application ports define the attended adaptive-training side-effect boundary.",
+      "requirement_id": "ARCH-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training infrastructure failures remain behind typed process, lock, journal, policy, and deployment ports.",
+      "requirement_id": "ARCH-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The remaining command, slash-menu, and permission-policy callers use packaged compatibility boundaries rather than importing root implementation modules directly.",
+      "requirement_id": "ARCH-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Import side effects are constrained at the package boundaries.",
+      "requirement_id": "ARCH-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Runtime configuration is represented through typed application boundaries.",
+      "requirement_id": "ARCH-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The architecture ratchet rejects reintroduced retired package paths while permitting only the exact reviewed Ollama compatibility shim during caller migration.",
+      "requirement_id": "ARCH-010",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Root compatibility paths are ratcheted against prohibited legacy exceptions.",
+      "requirement_id": "ARCH-011",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The typed ownership catalog is wired into generated architecture authority artifacts with deterministic layer-level package, state, port, provider, schema, and lifecycle records.",
+      "requirement_id": "ARCH-012",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Adaptive-training lifecycle sequencing is isolated from the oversized legacy root module.",
+      "requirement_id": "ARCH-013",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Non-destructive.",
+      "requirement_id": "COMPACT-001",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Source range.",
+      "requirement_id": "COMPACT-002",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Structured retention.",
+      "requirement_id": "COMPACT-003",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Validation.",
+      "requirement_id": "COMPACT-004",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Typed modalities.",
+      "requirement_id": "COMPACT-005",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The runtime has a stable packaged identity and version boundary.",
+      "requirement_id": "CORE-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The implementation is composed as a modular monolith with enforced package layers.",
+      "requirement_id": "CORE-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Operator authority is explicit and separated from ordinary model or client input.",
+      "requirement_id": "CORE-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Local execution is the default provider and cloud use is policy-gated.",
+      "requirement_id": "CORE-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Persistence and compatibility boundaries preserve data while retiring obsolete implementation paths.",
+      "requirement_id": "CORE-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Independent authorities for tools, startup capabilities, updates, and self-modification remain explicit.",
+      "requirement_id": "CORE-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training activation requires attended execution and qualification boundaries.",
+      "requirement_id": "CORE-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Deployment identities and model artifacts are immutable at activation boundaries.",
+      "requirement_id": "CORE-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Update activation requires trusted signed manifest verification.",
+      "requirement_id": "CORE-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The runtime uses explicit local ports and adapters rather than transplanting an external framework authority.",
+      "requirement_id": "CORE-010",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live application and runtime graphs expose one provider-neutral context-planning facade.",
+      "requirement_id": "CTX-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Context assembly applies typed section budgets and a bounded model input budget.",
+      "requirement_id": "CTX-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Priority selection and eviction are composed through the typed context selection policy.",
+      "requirement_id": "CTX-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Context records are deduplicated before prefix and replay manifests are built.",
+      "requirement_id": "CTX-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Context selection returns explainable typed selections rather than opaque concatenated text.",
+      "requirement_id": "CTX-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Complete context assemblies publish an isolated last-good snapshot for bounded recovery.",
+      "requirement_id": "CTX-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The context facade exposes bounded overflow preparation and recovery without provider calls.",
+      "requirement_id": "CTX-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Measured context capability can reduce the requested window without inventing hardware facts.",
+      "requirement_id": "CTX-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Stable prefix manifests and cache keys are composed from canonical retained context records.",
+      "requirement_id": "CTX-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Request replay manifests bind request identity, model, retained records, prefix key, and bounded metadata.",
+      "requirement_id": "CTX-010",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Persistence composition models per-domain SQLite ownership through a typed graph facade.",
+      "requirement_id": "DATA-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The persistence facade rejects cross-database transaction claims rather than implying distributed atomicity.",
+      "requirement_id": "DATA-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Typed record and outbox writes share one caller-owned SQLite transaction.",
+      "requirement_id": "DATA-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Revision compare-and-set is enforced by the SQLite persistence adapter.",
+      "requirement_id": "DATA-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Migration and ownership operations remain explicit typed persistence boundaries with fail-closed validation.",
+      "requirement_id": "DATA-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Epoch/adoption coordination remains represented by explicit persistence graph and CAS seams.",
+      "requirement_id": "DATA-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Immutable artifact manifests use deterministic canonical hashes at the persistence boundary.",
+      "requirement_id": "DATA-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "A documentation authority index identifies current sources of truth.",
+      "requirement_id": "DOC-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Historical architecture and program documents are explicitly labeled.",
+      "requirement_id": "DOC-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "New ADRs have a canonical date-prefixed namespace.",
+      "requirement_id": "DOC-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Focused contracts are documented in the generated inventory and architecture references.",
+      "requirement_id": "DOC-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Generated references are reproducible from typed runtime sources.",
+      "requirement_id": "DOC-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Requirement status and evidence are generated from the append-only ledger.",
+      "requirement_id": "DOC-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Documentation authority checks detect stale promises and out-of-date generated references.",
+      "requirement_id": "DOC-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Evaluation is exposed as a provider-neutral application service rather than a transport or evaluator implementation.",
+      "requirement_id": "EVAL-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The evaluation service accepts bounded repository/tool/memory corpus coverage through the typed inventory port.",
+      "requirement_id": "EVAL-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Evaluation suite and result metrics remain typed and provider-neutral at the application boundary.",
+      "requirement_id": "EVAL-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Versioned evaluation dimensions and suite identity are composed through an immutable catalog boundary.",
+      "requirement_id": "EVAL-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The application evaluation service exposes deterministic trajectory replay through an injected evaluator.",
+      "requirement_id": "EVAL-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Replay and proposal result contracts preserve divergence and provenance evidence at the application boundary.",
+      "requirement_id": "EVAL-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Promotion evidence requires explicit gates, replay equivalence, holdout success, rollback reference, and provenance before attended promotion.",
+      "requirement_id": "EVAL-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The evaluation service composes explicit shadow and canary observation transitions before promotion.",
+      "requirement_id": "EVAL-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Proposal creation, submission, evaluation, approval, promotion, rejection, withdrawal, and attended rollback are exposed through one typed service.",
+      "requirement_id": "EVAL-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Execution exposes one typed application facade for world binding, containment, jobs, and output handling.",
+      "requirement_id": "EXEC-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Execution containment and world policy remain explicit injected boundaries with fail-closed defaults.",
+      "requirement_id": "EXEC-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Persistent terminal and process-world seams are exposed through the typed execution facade.",
+      "requirement_id": "EXEC-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Execution output and spill references remain bounded injected services rather than unbounded in-memory text.",
+      "requirement_id": "EXEC-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Remote execution is represented only as an explicit provider seam and is not silently enabled.",
+      "requirement_id": "EXEC-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Execution isolation claims are carried by typed containment/world policy rather than inferred from a process call.",
+      "requirement_id": "EXEC-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Bounded extension registry and explicit production facade exposure are composed; artifact discovery and execution promotion remain out of scope.",
+      "requirement_id": "EXT-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Deterministic typed extension manifest identity/dependency validation and manifest-digest admission are implemented; cryptographic verification remains out of scope.",
+      "requirement_id": "EXT-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live bootstrap host factory preserves a typed extension memory budget and environment through the application experiment boundary before native host startup.",
+      "requirement_id": "EXT-003",
+      "revision": 4,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Durable extension registry state preserves fail-closed admission, quarantine, disable, update, repair diagnostics, and crash evidence across reconstruction.",
+      "requirement_id": "EXT-004",
+      "revision": 4,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live application composition publishes a durable, bounded extension inventory with manifest digest validation and repair visibility.",
+      "requirement_id": "EXT-005",
+      "revision": 4,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Ephemeral extension experiments use the bounded child host through live composition while remaining explicitly authorized and non-durable.",
+      "requirement_id": "EXT-006",
+      "revision": 4,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "No automatic promotion.",
+      "requirement_id": "EXT-007",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live HTTP job surface reads jobs created through the canonical application JobRegistryService and continues to resolve the same durable job after application reconstruction.",
+      "requirement_id": "JOB-001",
+      "revision": 4,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live HTTP job surface is composed over the canonical durable registry and exposes bounded list, poll, cancel, stream, and result operations alongside the application job service.",
+      "requirement_id": "JOB-002",
+      "revision": 5,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The canonical application job registry remains readable through the live HTTP adapter after an application restart, preserving durable job identity and state across reconstruction.",
+      "requirement_id": "JOB-003",
+      "revision": 5,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The composed subprocess provider uses the existing bounded process-tree cleanup contract and preserves incomplete cleanup truth.",
+      "requirement_id": "JOB-004",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Composed process output uses durable monotonic watermarks with bounded previews and durable spill references while output is live and after restart.",
+      "requirement_id": "JOB-005",
+      "revision": 4,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The loop facade composes typed turn admission and lifecycle state.",
+      "requirement_id": "LOOP-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Turn steps have typed open, transition, retry, completion, and reconciliation contracts.",
+      "requirement_id": "LOOP-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Interception and ephemeral live events are separated from durable session facts.",
+      "requirement_id": "LOOP-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The loop facade preserves an explicit durable/live event distinction and validates durable JSON facts.",
+      "requirement_id": "LOOP-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Steering commands are ordered, deduplicated, and applied through the loop facade.",
+      "requirement_id": "LOOP-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Loop cancellation binds child cleanup to a typed cancellation tree and reports cleanup conformance.",
+      "requirement_id": "LOOP-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Transport retries are bounded and fenced to loop cancellation and idempotency evidence.",
+      "requirement_id": "LOOP-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Retry execution and durable facts retain explicit operation identity for idempotent behavior.",
+      "requirement_id": "LOOP-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live application memory facade composes typed memory policy, recall, outcomes, and procedural learning classes.",
+      "requirement_id": "MEM-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Memory reads and writes cross explicit typed policy decisions before application services perform them.",
+      "requirement_id": "MEM-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The facade preserves evidence-backed typed memory and procedural-promotion candidates without fabricating support.",
+      "requirement_id": "MEM-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Outcome recording uses the existing typed source and interaction identity boundary for temporal learning truth.",
+      "requirement_id": "MEM-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Recall remains behind the application facade and bounded recall service instead of transport handlers reaching into storage.",
+      "requirement_id": "MEM-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The memory facade preserves the existing provider-neutral recall identity and scoped unit-of-work boundary.",
+      "requirement_id": "MEM-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Typed retrieval evaluation and bounded policy decisions remain available from the live memory application boundary.",
+      "requirement_id": "MEM-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Procedural promotion candidates are exposed through the memory facade with evidence and age/contradiction policy preserved.",
+      "requirement_id": "MEM-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The runtime graph composes one provider-neutral model gateway facade over the typed transport gateway.",
+      "requirement_id": "MODEL-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Model route health and logical role selection are owned by typed application contracts.",
+      "requirement_id": "MODEL-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The model facade exposes stable logical-role route bindings rather than transport-specific role names.",
+      "requirement_id": "MODEL-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Provider health publication is explicit and newly composed providers remain UNKNOWN until evidence is published.",
+      "requirement_id": "MODEL-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Capability routing remains an injected typed policy seam at the model facade.",
+      "requirement_id": "MODEL-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Model gateway composition preserves provider-neutral request/response contracts and local fail-closed behavior.",
+      "requirement_id": "MODEL-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Controlled escalation and capability routing remain explicit application policy seams rather than implicit provider fallback.",
+      "requirement_id": "MODEL-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Logical roles and gateway contracts provide separate budget/routing ownership points for model callers.",
+      "requirement_id": "MODEL-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Provider health snapshots are stable, typed, and available through the model facade.",
+      "requirement_id": "MODEL-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The model facade leaves NPU/accelerator selection behind the typed capability-routing boundary.",
+      "requirement_id": "MODEL-010",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Live HTTP requests can receive one typed operation context carrying correlation, principal, authority, deadline, and cancellation state.",
+      "requirement_id": "OPS-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Live HTTP chat operations emit bounded redacted typed trace records without making request handling depend on telemetry.",
+      "requirement_id": "OPS-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live lifecycle projects typed readiness, dependency, drain, recovery, admission, and bounded telemetry state into its health snapshot.",
+      "requirement_id": "OPS-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live lifecycle retains the typed startup-reconciliation and recovery boundary used by durable state adapters.",
+      "requirement_id": "OPS-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Graceful drain shares a fail-closed runtime admission gate with live HTTP mutation admission and retains bounded cleanup truth.",
+      "requirement_id": "OPS-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Live operation telemetry is bounded, redacted, and exposed only as a local diagnostic snapshot.",
+      "requirement_id": "OPS-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Repository intelligence exposes bounded incremental index deltas through an application facade.",
+      "requirement_id": "REPO-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The facade preserves typed language/file evidence records and ranked repository map contracts.",
+      "requirement_id": "REPO-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Repository map queries return bounded ranked projections through the CLI inspection boundary.",
+      "requirement_id": "REPO-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Multi-root repository navigation accepts provider-neutral injected LSP ports.",
+      "requirement_id": "REPO-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Repository navigation evidence and revisions remain typed at the application boundary.",
+      "requirement_id": "REPO-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Progressive evidence expansion is exposed as a bounded application operation.",
+      "requirement_id": "REPO-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The repository facade preserves multi-root ownership and navigation provider isolation.",
+      "requirement_id": "REPO-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Model gateway callers use a typed provider-neutral contract.",
+      "requirement_id": "SEAM-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Tool registry and execution callers use typed capability and audit boundaries.",
+      "requirement_id": "SEAM-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Filesystem callers use a typed, bounded application port.",
+      "requirement_id": "SEAM-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Subprocess and terminal operations are routed through the execution-world boundary.",
+      "requirement_id": "SEAM-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Sandbox operations use an explicit provider port and local adapter.",
+      "requirement_id": "SEAM-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Session repository and query operations are separated from session application services.",
+      "requirement_id": "SEAM-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Compaction is exposed through a typed non-destructive application boundary.",
+      "requirement_id": "SEAM-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Skill registry callers are isolated behind the skill application boundary.",
+      "requirement_id": "SEAM-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Subagent callers use the provider contract and durable delegation boundary.",
+      "requirement_id": "SEAM-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live application composition exposes the durable job registry, process provider, bounded recovery callback, process-tree cleanup contract, and session lifecycle linkage.",
+      "requirement_id": "SEAM-010",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "WebProvider/CredentialProvider",
+      "requirement_id": "SEAM-011",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Attachment and spill artifacts use explicit bounded storage boundaries.",
+      "requirement_id": "SEAM-012",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Telemetry sinks remain explicit ports owned outside domain logic.",
+      "requirement_id": "SEAM-013",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training, embedding, and update activation share explicit lifecycle ports.",
+      "requirement_id": "SEAM-014",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Scoped overrides are represented as explicit lifecycle configuration.",
+      "requirement_id": "SEAM-015",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Lifecycle transitions are composed atomically at the application boundary.",
+      "requirement_id": "SEAM-016",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Credential acquisition and release cross an opaque-handle provider boundary and fail closed when no provider is configured.",
+      "requirement_id": "SEC-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Credential authorization is re-evaluated for concrete URLs and released after requests, with unsafe header values rejected.",
+      "requirement_id": "SEC-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Filesystem races are handled through race-resistant path validation.",
+      "requirement_id": "SEC-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Package and archive safety semantics are preserved in the packaged artifact-grounding adapter.",
+      "requirement_id": "SEC-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Bounded provenance/trust records, deterministic SBOM and inventory tamper detection, fail-closed empty trust inventory, and quarantine admission are implemented; cryptographic verification is not claimed.",
+      "requirement_id": "SEC-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Prompt-injection handling preserves provenance and policy boundaries.",
+      "requirement_id": "SEC-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Secret scanning is an explicit adapter and testable boundary.",
+      "requirement_id": "SEC-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Security validation includes fuzz-oriented malformed-input handling.",
+      "requirement_id": "SEC-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Recovery evidence is stored through a bounded repository boundary.",
+      "requirement_id": "SEC-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Evidence first.",
+      "requirement_id": "SELFMOD-001",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Isolated candidate execution is wired through the live typed selfmod bridge and rejects a candidate workspace that resolves to the live repository.",
+      "requirement_id": "SELFMOD-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Verification.",
+      "requirement_id": "SELFMOD-003",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Review and deployment.",
+      "requirement_id": "SELFMOD-004",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Unrestricted execution records skipped verification, reproducer, review, and isolation gates as explicit bypasses instead of fabricating evidence.",
+      "requirement_id": "SELFMOD-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live typed selfmod bridge refuses automatic or remote push requests before invoking legacy deployment; approved deployment intent remains local-only.",
+      "requirement_id": "SELFMOD-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Live server turns use the typed session identity boundary for durable capture.",
+      "requirement_id": "SESSION-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Completed live turns append to the canonical SQLite event stream and remain visible after reopen.",
+      "requirement_id": "SESSION-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live bridge records the typed request, user message, and model response vocabulary.",
+      "requirement_id": "SESSION-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live bridge persists the model-visible prompt, system boundary, history, tier, and request identity before replay.",
+      "requirement_id": "SESSION-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "A reopened application can verify and deterministically replay a live captured turn; capture failure is fail-closed.",
+      "requirement_id": "SESSION-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The loop/session facade exposes bounded fork operations through canonical continuity service contracts.",
+      "requirement_id": "SESSION-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Resume and repair are exposed through the continuity boundary with fail-closed sequence verification.",
+      "requirement_id": "SESSION-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The live application composition path injects the canonical application-owned session facade into the HTTP adapter, preserving bounded administrator-gated query, export, replay, trajectory, checkpoint, fork, and repair access over the durable repository used by capture and restart recovery.",
+      "requirement_id": "SESSION-008",
+      "revision": 3,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Projection checkpoints are exposed through the typed session continuity facade.",
+      "requirement_id": "SESSION-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Retention candidates and execution remain behind the bounded privacy-aware continuity boundary.",
+      "requirement_id": "SESSION-010",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Skills are registered through a validated application registry.",
+      "requirement_id": "SKILL-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Skill discovery supports deterministic index, metadata, and content levels.",
+      "requirement_id": "SKILL-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Skill refresh is explicitly composed with plugin manifest updates.",
+      "requirement_id": "SKILL-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Skill trust and policy decisions are preserved as explicit registry facts.",
+      "requirement_id": "SKILL-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Health.",
+      "requirement_id": "SKILL-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Procedural skill publication validates and records promotion evidence.",
+      "requirement_id": "SKILL-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "The typed tool facade is the provider-neutral gateway boundary for tool execution.",
+      "requirement_id": "TOOL-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Tool execution composes schema, scope, policy, approval, deadline/cancellation, redaction, and receipt stages.",
+      "requirement_id": "TOOL-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Resource-aware tool policy remains an explicit fail-closed application decision.",
+      "requirement_id": "TOOL-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Tool decisions and approvals are represented as typed outcomes with explicit effects and resources.",
+      "requirement_id": "TOOL-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Tool startup authorities and executor availability remain explicit; absent authorities fail closed.",
+      "requirement_id": "TOOL-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Tool catalogs and generated artifact projections remain behind typed application catalog boundaries.",
+      "requirement_id": "TOOL-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Tool receipts preserve requester, resource, effect, world, redaction, digest, and truthful completion fields.",
+      "requirement_id": "TOOL-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training artifacts carry reproducible manifests and digests.",
+      "requirement_id": "TRAIN-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training qualification produces an explicit qualified lock.",
+      "requirement_id": "TRAIN-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training datasets retain provenance and validation metadata.",
+      "requirement_id": "TRAIN-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training activation is gated by evaluation and qualification outcomes.",
+      "requirement_id": "TRAIN-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Attended training execution carries immutable manifest and adapter evidence into a typed deployment seam.",
+      "requirement_id": "TRAIN-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Only an attended execution request may cross the training deployment port, after process and evidence gates.",
+      "requirement_id": "TRAIN-006",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training adapters are cataloged with deterministic compatibility checks.",
+      "requirement_id": "TRAIN-007",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Training routes prefer cheap bounded learning paths before expensive activation.",
+      "requirement_id": "TRAIN-008",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Activation failure attempts policy restoration and attended rollback, with recovery-required journal evidence when restoration fails.",
+      "requirement_id": "TRAIN-009",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Updates have one provider-neutral application service for bounded state and release evidence.",
+      "requirement_id": "UPDATE-001",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Platform activation remains behind an injected typed activator and explicit authority boundary.",
+      "requirement_id": "UPDATE-002",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Runtime-contract and signed-release evidence are checked before update activation can proceed.",
+      "requirement_id": "UPDATE-003",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Update activation and rollback remain atomic, durable, and fail closed through injected state/activation ports.",
+      "requirement_id": "UPDATE-004",
+      "revision": 2,
+      "status": "implemented_unverified"
+    },
+    {
+      "checked": false,
+      "claim": "Release evidence and verified backup are required inputs to the update application service.",
+      "requirement_id": "UPDATE-005",
+      "revision": 2,
+      "status": "implemented_unverified"
+    }
+  ],
+  "schema": "sonder-requirement-status-v1",
+  "source": {
+    "ledger_sha256": "b2bef7e4ecb2e0574d28a0f30c7392774c18a5b2639e97dbdc5ba0ee9ed0aa6e",
+    "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
+  }
+}

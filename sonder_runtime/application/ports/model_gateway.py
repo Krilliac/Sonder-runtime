@@ -8,6 +8,12 @@ from typing import Protocol, Sequence
 
 from ..context import OperationContext
 from ...domain.common.errors import DependencyUnavailable
+from ..security.prompt_provenance import (
+    ContextPacket,
+    ModelRequestProvenance,
+    PromptProvenanceBoundary,
+    ProvenanceError,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +24,25 @@ class ModelRequest:
     history: tuple = ()
     options: dict = field(default_factory=dict)
     stream: bool = False
+    provenance: ModelRequestProvenance | None = None
+    context_packet: ContextPacket | None = None
+
+    def __post_init__(self) -> None:
+        # Ordinary user-authored prompts may remain unlabelled.  Any request
+        # carrying prompt-visible external material must carry both halves of
+        # the binding; partial metadata is never treated as trustworthy.
+        if (self.provenance is None) != (self.context_packet is None):
+            raise ProvenanceError(
+                "model requests require both provenance and context_packet"
+            )
+        if self.provenance is not None and self.context_packet is not None:
+            PromptProvenanceBoundary().validate_model_request(
+                self.prompt,
+                system=self.system,
+                history=self.history,
+                context=self.context_packet,
+                binding=self.provenance,
+            )
 
 
 @dataclass(frozen=True)

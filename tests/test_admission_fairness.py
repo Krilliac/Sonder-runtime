@@ -18,8 +18,8 @@ import time
 
 import pytest
 
-import sonder_lifecycle
-from sonder_lifecycle import AdmissionRejected, RuntimeLifecycle
+import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+from sonder_runtime.adapters.web.lifecycle import AdmissionRejected, RuntimeLifecycle
 
 
 def _lifecycle(**kwargs):
@@ -255,14 +255,14 @@ class TestServeWiring:
     """The chat endpoint must derive and pass the opaque admission owner."""
 
     def test_local_open_deployment_has_no_admission_owner(self, monkeypatch):
-        import sonder_serve as ts
+        import sonder_runtime.interfaces.http.serve as ts
 
         for name in ("SONDER_AUTH_MODE", "SONDER_API_KEY", "SONDER_REQUIRE_ACCOUNT"):
             monkeypatch.delenv(name, raising=False)
         assert ts._admission_request_owner({}) == ""
 
     def test_pure_api_key_deployment_has_no_admission_owner(self, monkeypatch):
-        import sonder_serve as ts
+        import sonder_runtime.interfaces.http.serve as ts
 
         monkeypatch.setenv("SONDER_AUTH_MODE", "api-key")
         monkeypatch.setattr(ts.server, "_deployment_authenticates_callers", lambda: True)
@@ -272,7 +272,7 @@ class TestServeWiring:
         assert ts._admission_request_owner({"mode": "api-key", "api_key": True}) == ""
 
     def test_authenticated_owner_is_an_opaque_stable_digest(self, monkeypatch):
-        import sonder_serve as ts
+        import sonder_runtime.interfaces.http.serve as ts
 
         monkeypatch.setenv("SONDER_AUTH_MODE", "account")
         alice = {"account": {"username": "alice", "id": "a1"}}
@@ -288,7 +288,7 @@ class TestServeWiring:
     def test_chat_admission_passes_the_owner(self):
         import pathlib
 
-        import sonder_serve
+        import sonder_runtime.interfaces.http.serve as sonder_serve
 
         source = pathlib.Path(sonder_serve.__file__).read_text(encoding="utf-8")
         assert (

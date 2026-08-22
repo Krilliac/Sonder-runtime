@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import sonder_logging
 import sonder_paths
 import unsafe_lab

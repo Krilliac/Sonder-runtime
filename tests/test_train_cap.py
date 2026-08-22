@@ -1,5 +1,5 @@
-import sonder_repl
-import sonder_serve
+import sonder_runtime.interfaces.repl.repl as sonder_repl
+import sonder_runtime.interfaces.http.serve as sonder_serve
 
 
 def test_repl_train_cap_is_much_larger(monkeypatch):

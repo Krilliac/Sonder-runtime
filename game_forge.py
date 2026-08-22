@@ -12,8 +12,8 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import assetgen
-import code_runner
 import import_autofix
+from sonder_runtime.adapters.execution_tools import code_runner
 
 
 LANGUAGES = {"python", "javascript", "cpp", "csharp"}

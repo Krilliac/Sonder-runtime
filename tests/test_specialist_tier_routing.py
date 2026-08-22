@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 import server
 from sonder_runtime.domain.routing import capability_router as cr
 from sonder_runtime.domain.runtime_policy import rules

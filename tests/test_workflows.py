@@ -2,8 +2,8 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-import workflow_store
-from sonder_runtime.adapters.filesystem import workflow_store as packaged_workflow_store
+from sonder_runtime.adapters.filesystem import workflow_store
+from sonder_runtime.platform import paths as runtime_paths
 
 
 def test_ensure_workflows_creates_defaults(monkeypatch, tmp_path):
@@ -15,6 +15,16 @@ def test_ensure_workflows_creates_defaults(monkeypatch, tmp_path):
     assert "status_sweep" in workflows
     assert path == str(tmp_path / "state" / "workflows.json")
     assert not (tmp_path / "workflows.json").exists()
+
+
+def test_workflow_state_home_uses_canonical_platform_paths(monkeypatch, tmp_path):
+    state_home = tmp_path / "canonical-state"
+    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.setattr(runtime_paths, "ensure_home", lambda: state_home)
+    monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
+
+    assert workflow_store.default_path() == str(state_home / "workflows.json")
+    assert workflow_store.resolved_path() == str(state_home / "workflows.json")
 
 
 def test_default_workflows_copy_legacy_install_file_without_rewriting_it(monkeypatch, tmp_path):
@@ -92,10 +102,6 @@ def test_server_workflow_list(monkeypatch, tmp_path):
     monkeypatch.setenv("SONDER_HOME", str(tmp_path / "state"))
     out = server.workflow_list()
     assert "status_sweep" in out
-
-
-def test_root_workflow_store_is_package_compatibility_alias():
-    assert workflow_store is packaged_workflow_store
 
 
 def test_workflow_writes_are_atomic_and_preserve_prior_file(monkeypatch, tmp_path):

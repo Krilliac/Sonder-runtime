@@ -28,7 +28,7 @@ def test_ensemble_control_command_forwards_project(monkeypatch):
 
 
 def test_repl_routes_ensemble_as_a_control_command():
-    source = (Path(__file__).parents[1] / "sonder_repl.py").read_text(
+    source = (Path(__file__).parents[1] / "sonder_runtime/interfaces/repl/repl.py").read_text(
         encoding="utf-8"
     )
     assert '"/goal", "/goals", "/ensemble"' in source

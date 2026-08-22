@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import dependency_inventory as inventory
+from sonder_runtime.adapters.inspection import dependency_inventory as inventory
 
 
 def _run(root, **kwargs):

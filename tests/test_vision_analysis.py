@@ -4,7 +4,7 @@ import hashlib
 import pytest
 
 import server
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 
 
 def _png(tmp_path):

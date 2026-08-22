@@ -9,10 +9,18 @@ from __future__ import annotations
 
 import pytest
 
-from sonder_runtime.adapters.strangler_services import (
-    LegacyMemoryRepository,
-    LegacyUnitOfWork,
-)
+from sonder_runtime.adapters.memory_repository import MemoryRepositoryAdapter as LegacyMemoryRepository
+from sonder_runtime.adapters.unit_of_work import UnitOfWorkAdapter as LegacyUnitOfWork
+from sonder_runtime.adapters.memory_repository import MemoryRepositoryAdapter
+
+
+def test_memory_repository_has_canonical_packaged_owner():
+    assert LegacyMemoryRepository is MemoryRepositoryAdapter
+
+
+def test_unit_of_work_constructs_canonical_memory_repository(tmp_path):
+    with LegacyUnitOfWork(str(tmp_path / "memory.db")) as uow:
+        assert type(uow.memory) is MemoryRepositoryAdapter
 from sonder_runtime.bootstrap import app as bootstrap_app
 from sonder_runtime.domain.memory import rules as reward_rules
 

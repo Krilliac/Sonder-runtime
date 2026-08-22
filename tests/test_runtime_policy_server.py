@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 import server
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 
 
 @pytest.fixture

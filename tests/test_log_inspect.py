@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-import activity_tracker
-import file_ops
-import log_inspect
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters.inspection import log_inspect
 import server
 
 

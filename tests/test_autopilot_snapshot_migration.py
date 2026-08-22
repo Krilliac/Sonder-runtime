@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import autopilot_controller
-import autopilot_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 from sonder_runtime.bootstrap import app as bootstrap_app
 
 

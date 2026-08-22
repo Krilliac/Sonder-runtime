@@ -1,31 +1,9 @@
-"""Compatibility adapter for the historical evaluation-history contract."""
-from __future__ import annotations
+"""Compatibility import for the historical evaluation-history module name."""
 
-from typing import Mapping
+from .evaluation_history_reader import EvaluationHistoryReaderAdapter
 
 
-class LegacyEvaluationHistoryReader:
-    """Preserve the legacy dictionary shape behind the typed reader port."""
+# Preserve the public legacy name and exact class identity for existing users.
+LegacyEvaluationHistoryReader = EvaluationHistoryReaderAdapter
 
-    def status(
-        self,
-        *,
-        model: str = "",
-        model_digest: str = "",
-        suite: str = "",
-        suite_version: str = "",
-        suite_digest: str = "",
-        tolerance: float = 0.0,
-        max_records: int = 10_000,
-    ) -> Mapping[str, object]:
-        import sonder_runtime.adapters.evaluation_history_store as evaluation_history_store
-
-        return evaluation_history_store.history_status(
-            model=model,
-            model_digest=model_digest,
-            suite=suite,
-            suite_version=suite_version,
-            suite_digest=suite_digest,
-            tolerance=tolerance,
-            max_records=max_records,
-        )
+__all__ = ["LegacyEvaluationHistoryReader"]

@@ -1019,6 +1019,27 @@ def test_live_reload_migrates_old_cloud_general_unless_preserved(monkeypatch):
     assert server.TIERS["cloud-general"] == "gpt-oss:120b-cloud"
 
 
+def test_live_cloud_general_repair_uses_typed_projection(monkeypatch):
+    monkeypatch.delenv("SONDER_PRESERVE_LEGACY_CLOUD_GENERAL", raising=False)
+    monkeypatch.setitem(server.TIERS, "cloud-general", "gpt-oss:120b-cloud")
+    projection = server._RUNTIME_MODEL_CONFIGURATION
+    replacement = type(projection)(
+        stable_alias=projection.stable_alias,
+        local_code_model=projection.local_code_model,
+        default_cloud_code_model=projection.default_cloud_code_model,
+        default_cloud_general_model="replacement:cloud",
+        cloud_extra_usage_fallback_model=projection.cloud_extra_usage_fallback_model,
+        retired_cloud_models=projection.retired_cloud_models,
+        tier_bindings=projection.tier_bindings,
+        cloud_tiers=projection.cloud_tiers,
+    )
+    monkeypatch.setattr(server, "_RUNTIME_MODEL_CONFIGURATION", replacement)
+
+    server._refresh_live_cloud_tiers()
+
+    assert server.TIERS["cloud-general"] == "replacement:cloud"
+
+
 def test_kimi_k3_extra_usage_402_falls_back_once(monkeypatch):
     calls = []
 
@@ -1370,7 +1391,7 @@ def test_structured_answer_forwards_decoder_schema_and_rejects_invalid_model_tex
         server, "_serve_target",
         lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
 
     def fake_make_generate(*_args, **kwargs):
@@ -1401,7 +1422,7 @@ def test_structured_exact_cloud_model_does_not_substitute_on_billing_error(monke
         server, "_serve_target",
         lambda *_args, **_kwargs: ("kimi-k3:cloud", True, False, "model:kimi-k3:cloud"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
 
     def fake_make_generate(*_args, **kwargs):
@@ -1420,7 +1441,7 @@ def test_structured_answer_maps_deep_model_json_to_protocol_error(monkeypatch):
         server, "_serve_target",
         lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
     monkeypatch.setattr(
         server, "_make_generate",
@@ -1453,7 +1474,7 @@ def test_structured_answer_rejects_oversized_unique_array_before_pairwise_compar
         server, "_serve_target",
         lambda *_args, **_kwargs: ("local-model", False, False, "fast"),
     )
-    monkeypatch.setattr(server, "_context_requested", lambda _value: 2048)
+    monkeypatch.setattr(server, "_platform_requested_context", lambda _value, **_kwargs: 2048)
     monkeypatch.setattr(server, "_build_system", lambda *_args, **_kwargs: "system")
     monkeypatch.setattr(
         server, "_make_generate",
@@ -1589,7 +1610,7 @@ def test_improvement_report_uses_refreshed_learning_health(monkeypatch):
     )
     monkeypatch.setattr(server, "mcp_runtime_data", lambda: {})
     monkeypatch.setattr(server, "tool_manifest", lambda: "ground_artifact artifact_ground")
-    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: True)
 
     report = server.improvement_report_data()
 
@@ -1617,7 +1638,7 @@ def test_improvement_report_never_reports_unavailable_autopilot_as_zero(monkeypa
     monkeypatch.setattr(server, "_application", lambda: Application())
     monkeypatch.setattr(server, "mcp_runtime_data", lambda: {})
     monkeypatch.setattr(server, "tool_manifest", lambda: "ground_artifact artifact_ground")
-    monkeypatch.setattr(server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: False)
 
     report = server.improvement_report_data()
 
@@ -3092,6 +3113,28 @@ def test_game_campaign_preserves_single_axis_constraints(monkeypatch):
     ]
 
 
+def test_parallel_generation_paths_use_packaged_cloud_policy_directly():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"parallel_generate_run", "parallel_generate_run_languages"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "cloud_allowed"
+            for node in ast.walk(function)
+        )
+
+
 def test_parallel_generate_run_uses_generated_code(monkeypatch):
     def fake_make_generate(*args, **kwargs):
         def gen(prompt, history=None):
@@ -3288,11 +3331,11 @@ def test_offload_context_window_follows_the_context_policy(monkeypatch):
     search because the file was 32x its window."""
     seen = {}
 
-    def fake_options(temperature, num_predict, num_ctx):
+    def fake_options(temperature, num_predict, num_ctx, **_kwargs):
         seen["num_ctx"] = num_ctx
         return {}
 
-    monkeypatch.setattr(server, "_local_model_options", fake_options)
+    monkeypatch.setattr(server, "_platform_local_model_options", fake_options)
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
     monkeypatch.setattr(
         server, "_serve_target", lambda tier, strict=None: (None, False, False, None),
@@ -3308,7 +3351,7 @@ def test_offload_context_window_follows_the_context_policy(monkeypatch):
     # was 8192, which stopped being the default once the window started being
     # sized from the KV cache type, so the test failed on every machine
     # running a quantised KV cache and passed everywhere else.
-    assert "num_ctx" in seen, "offload never consulted _local_model_options"
+    assert "num_ctx" in seen, "offload never consulted the packaged option policy"
     assert seen["num_ctx"] == server.context_policy.native()
     # An explicit value still wins over the policy default.
     assert server.context_policy.native(4096) == 4096

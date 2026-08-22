@@ -7,4 +7,5 @@ if [ -z "${SONDER_PYTHON:-}" ]; then
   exit 3
 fi
 "$SONDER_PYTHON" "$SCRIPT_DIR/sonder_headless.py" engine
-exec "$SONDER_PYTHON" "$SCRIPT_DIR/sonder_serve.py" "$@"
+cd "$SCRIPT_DIR"
+exec "$SONDER_PYTHON" -m sonder_runtime serve "$@"

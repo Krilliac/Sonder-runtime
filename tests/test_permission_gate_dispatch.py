@@ -21,6 +21,7 @@ import asyncio
 import builtins
 import io
 import os
+import pathlib
 import sys
 
 import pytest
@@ -30,12 +31,20 @@ import command_catalog
 import permission_modes as pm
 import permission_rules
 import server
-import sonder_repl
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 import reloadable_mcp
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 from sonder_runtime.domain.execution import policy as execution_policy
 
 pytestmark = pytest.mark.unit
+
+
+def _source_path(name):
+    if name == "sonder_repl.py":
+        return pathlib.Path(sonder_repl.__file__)
+    if name == "sonder_serve.py":
+        return pathlib.Path(sonder_serve.__file__)
+    return pathlib.Path(server.__file__).parent / name
 
 
 class _Exploded(AssertionError):
@@ -132,7 +141,7 @@ def _tools_called_anywhere_in(path, function):
     an independent check on `command_catalog._branch_tool_calls`, whose whole
     job is the attribution this deliberately does not attempt.
     """
-    with open(os.path.join(os.path.dirname(server.__file__), path), encoding="utf-8") as handle:
+    with open(_source_path(path), encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
     scope = next(
         (
@@ -268,7 +277,7 @@ def test_plan_refuses_a_loop_action_and_never_runs_it(monkeypatch):
 
 
 def test_refused_loop_action_is_recorded_as_failed_activity(monkeypatch):
-    import activity_tracker
+    import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 
     activity_tracker.reset_for_tests()
     monkeypatch.setattr(server.code_runner, "run_code", _never_runs)
@@ -1546,13 +1555,11 @@ def test_the_exemption_set_is_consulted_in_exactly_one_place():
     name. Prose about a security-relevant set is not a use of it, and a test
     that cannot tell the difference trains people to reword comments.
     """
-    import pathlib
-
     root = pathlib.Path(server.__file__).parent
     uses = {}
     for name in ("server.py", "sonder_repl.py", "sonder_serve.py",
                  "reloadable_mcp.py", "permission_modes.py"):
-        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        tree = ast.parse(_source_path(name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             loaded = (
                 isinstance(node, ast.Name)
@@ -1565,34 +1572,21 @@ def test_the_exemption_set_is_consulted_in_exactly_one_place():
                 uses.setdefault(name, []).append(node.lineno)
 
     assert uses == {
-        # The one membership test, inside decide_for_caller.
+        # The one membership test, inside decide_for_caller. The REPL keeps a
+        # compatibility value obtained from the policy provider, but does not
+        # load or consult the gate set itself.
         "permission_modes.py": [permission_modes_check_line(root)],
-        # The console's public alias, which exists only so a test can pin the
-        # set to one name; it is not consulted at the gate any more.
-        "sonder_repl.py": [alias_line(root)],
     }, "the exemption is consulted outside decide_for_caller: %r" % uses
 
 
 def permission_modes_check_line(root):
     """The single line inside `decide_for_caller` that tests membership."""
-    import pathlib
-
     source = (root / "permission_modes.py").read_text(encoding="utf-8").splitlines()
     hits = [
         number for number, line in enumerate(source, 1)
         if "in GATE_CONTROL_TOOLS" in line and not line.strip().startswith("#")
     ]
     assert len(hits) == 1, "expected exactly one membership test, found %r" % hits
-    return hits[0]
-
-
-def alias_line(root):
-    source = (root / "sonder_repl.py").read_text(encoding="utf-8").splitlines()
-    hits = [
-        number for number, line in enumerate(source, 1)
-        if line.startswith("GATE_EXEMPT_TOOLS = ")
-    ]
-    assert len(hits) == 1
     return hits[0]
 
 

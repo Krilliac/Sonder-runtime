@@ -1,25 +1,19 @@
 """Preference adapters (SPEC-5 WP11, relocated from legacy)."""
 from __future__ import annotations
 
-import importlib
-
+from sonder_runtime.platform import paths as sonder_paths
 from ..application.ports.preferences import (
     ConnectionFactory,
-    PreferenceModuleProvider,
 )
+from .preference_codec import PreferenceCodecAdapter
 
 
 def _default_connection():
     import sonder_runtime.adapters.memory_store as memory_store
-    import sonder_paths
 
     return memory_store.connect(
         sonder_paths.memory_db_path(), check_same_thread=True
     )
-
-
-def _default_preference_module():
-    return importlib.import_module("preference_learning")
 
 
 class LegacyPreferenceRepository:
@@ -72,26 +66,7 @@ class LegacyPreferenceRepository:
             connection.close()
 
 
-class LegacyPreferenceCodec:
-    def __init__(
-        self, module_provider: PreferenceModuleProvider | None = None
-    ) -> None:
-        self._module_provider = module_provider or _default_preference_module
-
-    def extract(self, text):
-        return self._module_provider().extract_preferences(text)
-
-    def normalize(self, text):
-        return self._module_provider().normalize_preference(text)
-
-    def key(self, text):
-        return self._module_provider().preference_key(text)
-
-    def is_stable(self, text, source_text=None):
-        return self._module_provider().is_stable_preference(text, source_text)
-
-    def format(self, rows):
-        return self._module_provider().format_preferences(rows)
+LegacyPreferenceCodec = PreferenceCodecAdapter
 
 
 class NullPreferenceEventSink:

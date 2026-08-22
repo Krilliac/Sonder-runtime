@@ -2,8 +2,8 @@
 
 import server
 import served_action_receipts
-import sonder_lifecycle
-import sonder_serve as serve
+import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+import sonder_runtime.interfaces.http.serve as serve
 from types import SimpleNamespace
 
 
@@ -163,9 +163,9 @@ def test_direct_fanout_synthesis_retry_runs_once_and_binds_model(monkeypatch):
     calls = []
     handler, sent = _fanout_handler(monkeypatch, {"id": "fan-1"})
     monkeypatch.setattr(serve.admin_auth, "rate_limit", lambda *_args: (True, ""))
-    monkeypatch.setattr(server, "_open_db", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(serve.server, "_open_db", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(
-        server, "_fanout_synthesize_run",
+        serve.server, "_fanout_synthesize_run",
         lambda run, model: calls.append((run["id"], model)) or {"answer": model},
     )
 
@@ -196,14 +196,14 @@ def test_direct_fanout_resume_and_cancel_retries_do_not_repeat_actions(monkeypat
     calls = []
     handler, _sent = _fanout_handler(monkeypatch, {"id": "fan-2"})
     monkeypatch.setattr(
-        server, "fanout_store",
+        serve.server, "fanout_store",
         SimpleNamespace(
             request_cancel=lambda run_id: calls.append(("cancel", run_id)) or {},
             resume_run=lambda run_id, **kwargs: calls.append(("resume", run_id, kwargs)) or {},
         ),
     )
-    monkeypatch.setattr(server, "_execute_fanout_run", lambda run_id: calls.append(("execute", run_id)))
-    monkeypatch.setattr(server, "_fanout_receipt", lambda _run_id: {"ok": True})
+    monkeypatch.setattr(serve.server, "_execute_fanout_run", lambda run_id: calls.append(("execute", run_id)))
+    monkeypatch.setattr(serve.server, "_fanout_receipt", lambda _run_id: {"ok": True})
 
     for _ in range(2):
         assert serve.Handler._handle_fanout_post(

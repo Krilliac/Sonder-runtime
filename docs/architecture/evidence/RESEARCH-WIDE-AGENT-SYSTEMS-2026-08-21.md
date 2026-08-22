@@ -1,0 +1,162 @@
+# Wide agent-system research for Sonder
+
+Date: 2026-08-21  
+Branch: `agent/port-research-findings`
+
+This comparison expands the initial Qwen Sharp Templates, Zero, and Easy
+Agent review. It records externally documented patterns and the corresponding
+Sonder disposition so future ports remain evidence-driven rather than
+feature-shaped duplication.
+
+## Systems reviewed
+
+| System | Documented pattern | Sonder disposition |
+| --- | --- | --- |
+| OpenHands SDK / Agent Server | Stateless event-driven reasoning/action steps; condensers; security analysis; interchangeable local and remote workspaces; WebSocket event streaming | Existing session/event, compaction, security, and workspace boundaries cover much of this. Prioritize a typed step/interrupt envelope only where current events cannot express it. |
+| goose | MCP extensions; portable YAML recipes and subrecipes; ACP server/provider interoperability; parallel subagents; adversary reviewer | Existing MCP, skills, fanout, and subagent surfaces cover the core. Recipe manifests and ACP are candidate future adapters, not a reason to bypass current ports. |
+| SWE-agent | Durable `.traj` trajectories and CLI/web inspection for step-by-step debugging and evaluation | Existing session exports and evidence ledgers are adjacent. A trajectory projection that preserves tool/action/result linkage is a high-value next port. |
+| Aider | Repository map for context selection; explicit edit formats; separate stronger/cheaper model roles; test-oriented workflow | Existing repository intelligence, context manifests, model routing, and verification cover the design. Measure map selection quality before adding another mapper. |
+| Continue | Explicit Chat/Plan/Agent modes; mode-specific tool sets; per-tool Ask First/Automatic/Excluded policy; local rules blocks | Existing command/read-only policy and instruction/skill discovery cover the policy foundation. A typed mode-to-tool policy projection is a candidate port. |
+| LangGraph | Checkpointed interrupts; thread IDs as resume cursors; human decisions of approve/edit/reject; streamed interrupt state | Existing durable session repair/checkpoints and permission context cover persistence. The missing candidate is a typed approval decision envelope supporting edited arguments. |
+| PydanticAI | Typed dependency injection into prompts/tools/validators; durable execution integrations; streaming and MCP support | Existing composition-root injection and durable session ports cover the architecture. Keep this as a contract review target, not a new framework dependency. |
+| OpenAI Agents SDK | Runner-managed turns, sessions, guardrails, handoffs, and hierarchical traces covering generations, tools, handoffs, and custom events | Existing lifecycle hooks, approval envelopes, session events, and trajectory projection cover the primitives. Add no provider-specific runner; improve trace grouping only if a host needs cross-session workflow correlation. |
+| AutoGen Core / AgentChat | Event-driven standalone or distributed runtimes; explicit agent identity/lifecycle; teams with round-robin, selector, graph, swarm handoff, pause/resume, and reset semantics | Existing fanout and lifecycle hooks cover local coordination. Distributed identity and explicit pause/resume boundaries are the strongest future adapter candidates; avoid importing team-chat semantics into the core event model. |
+| Letta | Stateful agents with immutable recall history, editable in-context memory blocks, archival memory, skills, and background memory maintenance/dreaming | Existing memory classes, procedural promotion, session history, and skill registry cover the foundations. Add a bounded memory-maintenance projection only where it can remain evidence-backed and operator-visible; do not allow autonomous memory mutation to bypass provenance policy. |
+| CrewAI | Persisted/resumable flows with start/listen/router steps, streaming, unified memory, guardrails, and human-in-the-loop triggers | Existing jobs, workflows, lifecycle hooks, and memory ports cover the pieces. A typed task-ledger projection is a better seam than a CrewAI-compatible flow DSL. |
+| Browser Use | Session-oriented browser automation with explicit browser profiles, workspaces, long-running polling, and resumable result objects | Existing session/job/workspace boundaries are the right ownership seams. Any browser adapter must preserve credential/egress policy and never treat a browser profile as an implicit trust grant. |
+| Magentic-One / Magentic orchestration | A manager maintains a dynamic task ledger, delegates to specialists, tracks progress, and replans after errors | Existing goal/task stores and structured delegation are adjacent. Expose manager progress as durable task-ledger events before adding adaptive orchestration. |
+
+## Second-wave systems and standards
+
+The following systems and standards were reviewed after the first-wave ports.
+They are intentionally treated as interoperability and evidence inputs, not as
+new framework dependencies.
+
+| System or standard | Documented pattern | Sonder disposition |
+| --- | --- | --- |
+| MCP Tasks | A server can return a durable task handle instead of blocking; the client can poll progress, provide input, reconnect, and retrieve the final result. | The task ledger and job summaries are the correct foundation. Add an MCP-task adapter only when a concrete long-running tool needs reconnect semantics; preserve the existing approval, cancellation, and account-scope gates. |
+| OpenTelemetry GenAI semantic conventions | Standard agent, workflow, plan, and tool-execution spans with low-cardinality identity fields and explicit warnings that message content may contain sensitive data. | Map Sonder’s redacted trajectory/activity records to an optional export-neutral span projection. Keep the current local-only observability decision intact: no exporter, persistence, or network path belongs in the core contract. |
+| Temporal | Crash-proof workflow execution, durable workflow state, signals, updates, replay, and long-lived pause/resume across failures. | Treat Temporal as an external durable-execution adapter. Sonder’s workflow/checkpoint ports should remain usable without it; an adapter must not make model calls or authorization decisions replay-unsafe. |
+| Agent Client Protocol (ACP) | JSON-RPC over stdio for local editor agents, with a compatible remote direction; protocol types reuse MCP representations and add coding UX such as diffs. | The existing editor interop contract should target ACP-compatible session/update/permission mapping. Add capability negotiation, implementation metadata, and cancellation as explicit adapter features rather than leaking ACP types into the domain. |
+| ACP elicitation proposals | Structured user input with accept, decline, and cancel outcomes, including schema-backed forms and URL-based flows. | Extend the approval/control-plane boundary only if a host needs structured questions. Keep credentials and URL completion outside durable logs; distinguish decline from cancellation and require an authenticated session identity. |
+| A2A / Google ADK agent serving | Agent Cards plus JSON-RPC expose discoverable remote agents; task/session continuity and artifacts can cross service boundaries. | A2A is a future distributed-agent adapter. First define a capability-scoped remote-agent identity and artifact receipt; do not expose the local task ledger or filesystem directly to remote peers. |
+| Google agents-cli | Local persistent server mode, session-id continuation, remote A2A/ADK selection, artifact output, and optional OTel export are surfaced as CLI concerns. | Use this as a host-integration acceptance model: reconnecting clients need stable session IDs and explicit artifact references. It does not justify changing the core runtime’s local-only observability boundary. |
+
+## Third-wave systems reviewed
+
+| System | Documented pattern | Sonder disposition |
+| --- | --- | --- |
+| Dapr Workflows / Durable AI Agents | Durable execution across crashes and restarts, replayable workflow history, history propagation, versioning, concurrency limits, payload bounds, and optional cryptographic history signing. | Strengthens the existing workflow/checkpoint direction. Add explicit workflow-version and payload-bound fields to any future external adapter; keep model calls and authorization out of replay-sensitive workflow code. Do not add a Dapr dependency to the core runtime. |
+| Mastra | Separates open-ended agents from deterministic workflows; workflows use typed step inputs/outputs and support sequential, parallel, branching, looping, error handling, pause/resume, and agent calls from steps. | Confirms Sonder’s typed workflow/job ports and task-ledger projection. The useful port is schema-checked step output and resume evidence, not a second workflow DSL. |
+| Microsoft Semantic Kernel Agent Orchestration | Provides concurrent, sequential, handoff, group-chat, and Magentic orchestration behind a shared invocation shape, with an explicit in-process runtime; current orchestration APIs are experimental. | Treat orchestration patterns as host-level planners over existing fanout and lifecycle ports. Require explicit member identity, budget, cancellation, and terminal evidence; do not import experimental framework semantics into the domain. |
+| LlamaIndex AgentWorkflow | Event-driven workflows combine state management, streaming, human input, branching, loops, concurrency, and multi-agent handoffs. | The event/state combination is already represented by Sonder session events, approvals, and workflow checkpoints. Add a bounded event-to-task projection only when a concrete data-agent integration needs it; preserve provenance for retrieved context. |
+
+These sources broaden the comparison beyond Qwen templates, Zero, Easy Agent,
+and the first two research waves. They converge on three portable invariants:
+durable identity across reconnects, typed bounded step/state transitions, and
+explicit replay/authorization boundaries. They do not justify a framework
+dependency or autonomous orchestration in Sonder’s core.
+
+### Second-wave priority order
+
+1. Add an export-neutral trace/span projection that is redacted by construction
+   and can later be mapped to OpenTelemetry GenAI conventions.
+2. Define an MCP Tasks adapter contract over the existing job/task-ledger
+   primitives, including poll, input-required, cancellation, expiry, and
+   reconnect behavior.
+3. Expand the editor interop adapter toward ACP capability/implementation
+   negotiation and per-request cancellation. **Implemented:** bounded peer
+   metadata decoding and explicit client/server capability intersection are
+   now returned during editor initialization; elicitation remains deferred.
+4. Specify a capability-scoped A2A/remote-agent adapter with artifact receipts
+   and explicit identity/delegation boundaries.
+5. Keep Temporal and ACP elicitation as opt-in host adapters, gated by a real
+   integration need and operational evidence.
+
+## Priority order
+
+1. Trajectory projection: expose a bounded, redacted action/observation trace
+   that can be inspected and replayed without exposing secrets.
+2. Approval decision envelope: represent approve/edit/reject decisions with a
+   durable request identity and validated edited arguments.
+3. Mode/tool policy projection: make Chat/Plan/Agent tool availability
+   inspectable and testable at the existing policy boundary.
+4. Portable recipe import: implemented alongside serialization so recipes can
+   cross a transport boundary without bypassing schema and bounded-value checks.
+5. Recipe/ACP adapters: defer ACP until a concrete host integration needs it;
+   existing MCP and workflow contracts are the correct seams.
+6. Task-ledger projection: expose bounded manager goals, subgoals, ownership,
+   status, dependencies, and replanning evidence through existing durable task
+   and session surfaces.
+
+Implementation status on this branch: all six priority items have bounded
+application contracts, tests, and evidence records. The remaining research
+items are integration candidates rather than missing core abstractions: ACP
+elicitation or external editor adapters, distributed agent identity, browser
+execution, and default live control-plane provider composition each require a
+concrete host boundary and operational receipts before they should be
+promoted.
+
+## Fourth-wave research: durability and runtime boundaries
+
+The additional first-party review focused on systems that solve the failure
+modes that appear after an agent leaves a single request/response turn.
+
+| System | Newly useful pattern | Sonder disposition |
+| --- | --- | --- |
+| OpenAI Agents SDK durable integrations | Durable runners can preserve run state across long waits, retries, process restarts, human approval, handoffs, and sessions; tracing groups model/tool/handoff/custom events under a run. | Keep the runtime-owned job/session ledger as the source of truth. Add an explicit run correlation projection and approval-resume record where the existing event stream cannot associate a resumed operation with its original side effect. Do not make provider SDK state authoritative. |
+| LangGraph persistence and durability | Checkpointers are thread-scoped working state; stores are cross-thread memory. Durability modes make the persistence point explicit (`sync`, `async`, or `exit`), while interrupts carry resumable human decisions and edited state. | Preserve the separation between resumable workflow state and durable long-term memory. A future adapter must declare its persistence mode and never claim a completed side effect until the receipt is durable. The current checkpoint/task ports should gain this as metadata rather than adopting graph types. |
+| Dapr Workflows | Replayable histories, workflow versioning, bounded payloads, concurrency limits, and optional signed history provide operational controls for long-running workflows. | Add version and payload-bound metadata to external workflow adapters and enforce limits before enqueue. Keep authorization and non-deterministic model/tool calls in activities, outside replay-sensitive workflow code. No Dapr dependency belongs in the core runtime. |
+| Restate / DBOS durable-agent integrations | Lightweight durable execution can use a single runtime or SQLite/Postgres to preserve progress, approvals, handoffs, and sessions without requiring a large orchestration cluster. | This validates a local-first adapter tier: a SQLite-backed resume ledger is valuable even when Temporal/Dapr are unavailable. It must share Sonder’s idempotency keys, cancellation, receipt, and redaction contracts rather than introduce another state machine. |
+
+The cross-system result is a sharper boundary: workflow durability, transport
+reconnect, and agent memory are separate concerns. A reconnectable stream is
+not proof that the workflow state is durable; a checkpoint is not proof that an
+external side effect completed; and long-term memory must not be used as an
+implicit workflow journal. Sonder should represent these as separate typed
+records with explicit correlation, persistence point, idempotency key, and
+receipt status.
+
+## Sources
+
+- OpenHands architecture: <https://docs.openhands.dev/sdk/arch/agent>
+- OpenHands remote Agent Server: <https://docs.openhands.dev/sdk/guides/agent-server/overview>
+- goose architecture: <https://github.com/aaif-goose/goose/blob/main/documentation/docs/goose-architecture/goose-architecture.md>
+- SWE-agent trajectory inspector: <https://github.com/SWE-agent/SWE-agent/blob/main/docs/usage/inspector.md>
+- Aider usage and repo-map: <https://aider.chat/docs/usage.html>
+- Continue agent modes and tools: <https://docs.continue.dev/ide-extensions/agent/how-it-works>
+- LangGraph human-in-the-loop: <https://docs.langchain.com/oss/python/langchain/human-in-the-loop>
+- LangGraph persistence: <https://docs.langchain.com/oss/javascript/langgraph/persistence>
+- PydanticAI durable execution: <https://pydantic.dev/docs/ai/capabilities/durable_execution/overview/>
+- PydanticAI dependencies: <https://pydantic.dev/docs/ai/core-concepts/dependencies/>
+- OpenAI Agents SDK agents and orchestration: <https://openai.github.io/openai-agents-python/agents/>
+- OpenAI Agents SDK tracing: <https://openai.github.io/openai-agents-python/tracing/>
+- AutoGen runtime architecture: <https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/core-concepts/architecture.html>
+- AutoGen teams and termination: <https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/teams.html>
+- Letta memory documentation: <https://docs.letta.com/>
+- Letta memory and dreaming reference: <https://github.com/letta-ai/letta-docs-md/blob/main/configuration/memory/index.md>
+- CrewAI flows: <https://docs.crewai.com/index>
+- Browser Use agent sessions: <https://docs.browser-use.com/cloud/agent/quickstart>
+- Microsoft Magentic orchestration: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-orchestration/magentic>
+- MCP Tasks: <https://modelcontextprotocol.io/extensions/tasks/overview>
+- OpenTelemetry GenAI agent spans: <https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-agent-spans.md>
+- Temporal platform documentation: <https://docs.temporal.io/>
+- Temporal workflow execution: <https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/workflow/workflow-execution/workflow-execution.mdx>
+- Agent Client Protocol introduction: <https://agentclientprotocol.com/get-started/introduction>
+- Agent Client Protocol elicitation proposal: <https://agentclientprotocol.com/rfds/elicitation>
+- Agent Client Protocol cancellation proposal: <https://agentclientprotocol.com/rfds/request-cancellation>
+- Google agents-cli templates and A2A: <https://google.github.io/agents-cli/guide/templates/>
+- Google agents-cli CLI/session behavior: <https://google.github.io/agents-cli/cli/>
+- Dapr durable workflows and AI agents: <https://docs.dapr.io/>
+- Dapr workflow features, versioning, payload limits, and history signing: <https://docs.dapr.io/developing-applications/building-blocks/workflow/>
+- Mastra agents: <https://github.com/mastra-ai/mastra/blob/main/docs/src/content/en/docs/agents/overview.mdx>
+- Mastra workflows: <https://mastra.ai/ai-workflows>
+- Semantic Kernel agent orchestration: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-orchestration/>
+- Semantic Kernel agent architecture: <https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-architecture>
+- LlamaIndex workflows and agents: <https://docs.llamaindex.ai/en/stable/module_guides/workflow/>
+- OpenAI Agents SDK durable execution integrations: <https://github.com/openai/openai-agents-python/blob/main/docs/running_agents.md>
+- LangGraph persistence and checkpointers: <https://github.com/langchain-ai/docs/blob/main/src/oss/langgraph/persistence.mdx>
+- LangGraph durability modes and interrupts: <https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/types.py>
+- Dapr workflow durability and versioning: <https://docs.dapr.io/developing-applications/building-blocks/workflow/>
+- Restate durable execution: <https://docs.restate.dev/>
+- DBOS durable workflows: <https://docs.dbos.dev/>

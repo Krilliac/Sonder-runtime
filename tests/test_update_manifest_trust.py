@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-import sonder_updates
-from sonder_updates import (
+import sonder_runtime.adapters.updates.service as sonder_updates
+from sonder_runtime.adapters.updates.service import (
     BundleManifest,
     TrustError,
     build_bundle,
@@ -150,7 +150,7 @@ def test_publisher_signs_manifest_as_target(signed_bundle):
 def test_signed_manifest_installs_through_engine_without_unsigned_gate(
     signed_bundle, tmp_path, monkeypatch
 ):
-    import sonder_update_engine
+    import sonder_runtime.adapters.updates.engine as sonder_update_engine
 
     home = tmp_path / "home"
     monkeypatch.setenv("SONDER_HOME", str(home))
@@ -184,8 +184,8 @@ def test_unsigned_dev_path_unaffected_by_manifest_signing(
 # ---------------------------------------------------------------------------
 
 def _manager(tmp_path):
-    import sonder_update_engine
-    from sonder_updates import UpdateRepository
+    import sonder_runtime.adapters.updates.engine as sonder_update_engine
+    from sonder_runtime.adapters.updates.service import UpdateRepository
 
     return sonder_update_engine.UpdateManager(
         repository=UpdateRepository(str(tmp_path / "updates.db")),

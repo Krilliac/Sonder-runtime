@@ -4,9 +4,16 @@ import re
 
 import pytest
 
-import sonder_headless
-import sonder_repl
+from sonder_runtime.adapters.web import listener_probe
+import server
+import sonder_runtime.interfaces.repl.repl as sonder_repl
 import command_catalog
+
+
+@pytest.fixture(autouse=True)
+def _inject_legacy_runtime(monkeypatch):
+    monkeypatch.setattr(sonder_repl, "_legacy_runtime", None)
+    sonder_repl.configure_legacy_runtime(server)
 
 
 def test_piped_utf8_bom_does_not_hide_slash_command():
@@ -383,9 +390,9 @@ def test_terminal_endpoint_link_stays_plain_when_ansi_is_disabled(monkeypatch):
 
 def test_startup_banner_normalizes_wildcard_bind_for_dashboard_link(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    monkeypatch.setattr(sonder_headless, "DEFAULT_HOST", "0.0.0.0")
-    monkeypatch.setattr(sonder_headless, "DEFAULT_PORT", 11435)
-    monkeypatch.setattr(sonder_headless, "port_open", lambda *_args: True)
+    monkeypatch.setattr(listener_probe, "DEFAULT_HOST", "0.0.0.0")
+    monkeypatch.setattr(listener_probe, "DEFAULT_PORT", 11435)
+    monkeypatch.setattr(listener_probe, "port_open", lambda *_args: True)
 
     banner = sonder_repl._startup_banner(None, "coder", "default")
 
@@ -731,7 +738,11 @@ def _repl_with_cloud_tier(monkeypatch, lines, *, cloud_allowed, seen=None):
         "cloud-code": "kimi-k2:cloud",
         "cloud-general": "kimi-k2:cloud",
     })
-    monkeypatch.setattr(sonder_repl.server, "cloud_allowed", lambda: cloud_allowed)
+    monkeypatch.setattr(
+        sonder_repl.server,
+        "_cloud_allowed_policy",
+        lambda _environment: cloud_allowed,
+    )
     monkeypatch.setattr(sonder_repl, "_installed_models", lambda: [("gemma3:12b", "8 GB")])
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
@@ -799,7 +810,9 @@ def test_model_completer_does_not_offer_a_disabled_cloud_tier(monkeypatch):
     monkeypatch.setattr(sonder_repl.server, "TIERS", {
         "code": "qwen2.5-coder:7b", "cloud-code": "kimi-k2:cloud",
     })
-    monkeypatch.setattr(sonder_repl.server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(
+        sonder_repl.server, "_cloud_allowed_policy", lambda _environment: False,
+    )
     completer = sonder_repl._ModelArgumentCompleter()
 
     completer.refresh([("cloud-ready:12b", "8 GB")])
@@ -822,7 +835,9 @@ def test_route_still_recommends_a_cloud_tier_when_cloud_is_enabled(monkeypatch, 
     monkeypatch.setattr(sonder_repl.server, "TIERS", {
         "code": "qwen2.5-coder:7b", "cloud-general": "kimi-k2:cloud",
     })
-    monkeypatch.setattr(sonder_repl.server, "cloud_allowed", lambda: True)
+    monkeypatch.setattr(
+        sonder_repl.server, "_cloud_allowed_policy", lambda _environment: True,
+    )
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)

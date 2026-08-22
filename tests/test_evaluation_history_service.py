@@ -1,13 +1,16 @@
 """Typed evaluation-history boundary and compatibility coverage."""
 from __future__ import annotations
 
-import importlib
+from pathlib import Path
 
 import pytest
 
 from sonder_runtime.adapters import evaluation_history_store
 from sonder_runtime.adapters.eval_history_reader import (
     LegacyEvaluationHistoryReader,
+)
+from sonder_runtime.adapters.evaluation_history_reader import (
+    EvaluationHistoryReaderAdapter,
 )
 from sonder_runtime.application.evaluation_history import EvaluationHistoryService
 
@@ -62,19 +65,13 @@ def test_legacy_reader_resolves_store_lazily(monkeypatch):
     assert calls[0]["model"] == "local"
 
 
-def test_root_compatibility_module_is_true_store_alias():
-    legacy = importlib.import_module("eval_history")
-
-    assert legacy is evaluation_history_store
+def test_legacy_reader_is_identity_compatible_with_canonical_adapter():
+    assert LegacyEvaluationHistoryReader is EvaluationHistoryReaderAdapter
 
 
-def test_root_compatibility_alias_survives_real_reload_with_identity():
-    legacy = importlib.import_module("eval_history")
-
-    reloaded = importlib.reload(legacy)
-
-    assert reloaded is legacy
-    assert importlib.import_module("eval_history") is reloaded
+def test_root_evaluation_history_module_is_retired():
+    package_root = Path(evaluation_history_store.__file__).resolve().parents[2]
+    assert not (package_root / "eval_history.py").exists()
 
 
 @pytest.mark.parametrize("payload", [None, "ERROR: legitimate payload", {"groups": {}}])

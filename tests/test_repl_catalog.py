@@ -1,9 +1,17 @@
 """The REPL reaches the whole catalogued command surface, not just its branches."""
 import builtins
 
+import pytest
+
 import command_catalog
 import server
-import sonder_repl
+import sonder_runtime.interfaces.repl.repl as sonder_repl
+
+
+@pytest.fixture(autouse=True)
+def _inject_legacy_runtime(monkeypatch):
+    monkeypatch.setattr(sonder_repl, "_legacy_runtime", None)
+    sonder_repl.configure_legacy_runtime(server)
 
 
 def test_every_tool_typed_as_a_slash_command_dispatches():

@@ -6,6 +6,28 @@ import pytest
 import server
 
 
+def test_ensemble_and_synthesis_paths_do_not_call_root_model_error_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"ensemble_answer", "model_fanout_synthesize"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_format_model_call_error"
+            for node in ast.walk(function)
+        )
+
+
 # --- local thinking budget ----------------------------------------------------
 #
 # A reasoning model spends num_predict on thought before writing any content, so
@@ -65,12 +87,12 @@ def test_named_cloud_tiers_join_only_when_cloud_is_enabled(monkeypatch):
     Disabled cloud is reported in `unknown`, not swallowed: consult's cloud
     leg must see WHY its tier is absent instead of a generic empty poll.
     """
-    monkeypatch.setattr(server, "cloud_allowed", lambda: False)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: False)
     targets, unknown = server._ensemble_targets("cloud-code,cloud-general")
     assert targets == []
     assert unknown and all("cloud disabled" in item for item in unknown)
 
-    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: True)
     targets, unknown = server._ensemble_targets("cloud-general")
     assert [tier for tier, _model in targets] == ["cloud-general"]
     assert unknown == []
@@ -78,7 +100,7 @@ def test_named_cloud_tiers_join_only_when_cloud_is_enabled(monkeypatch):
 
 def test_implicit_default_never_includes_cloud(monkeypatch):
     """Only NAMED cloud tiers may leave the box; the default poll never does."""
-    monkeypatch.setattr(server, "cloud_allowed", lambda: True)
+    monkeypatch.setattr(server, "_cloud_allowed_policy", lambda _environment: True)
     targets, _ = server._ensemble_targets("")
     assert all(not server._is_cloud_tier(tier, model) for tier, model in targets)
 

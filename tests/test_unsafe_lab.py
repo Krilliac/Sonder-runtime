@@ -15,7 +15,7 @@ import selfmod
 import server
 import sonder_config
 import sonder_logging
-import sonder_serve
+import sonder_runtime.interfaces.http.serve as sonder_serve
 import unsafe_lab
 import verifiers
 
@@ -225,7 +225,7 @@ def test_http_startup_refuses_unsafe_elevation_before_listener(monkeypatch):
     monkeypatch.setattr(unsafe_lab, "is_privileged", lambda: True)
     monkeypatch.setattr(sonder_serve, "HOST", "127.0.0.1")
     monkeypatch.setattr(sonder_serve, "ThreadingHTTPServer", lambda *a: listeners.append(a))
-    monkeypatch.setattr(sys, "argv", ["sonder_serve.py"])
+    monkeypatch.setattr(sys, "argv", ["python -m sonder_runtime serve"])
 
     with pytest.raises(unsafe_lab.UnsafeLabError, match="root or elevated"):
         sonder_serve.main()

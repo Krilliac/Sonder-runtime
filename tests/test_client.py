@@ -2,6 +2,7 @@ import json
 import urllib.error
 
 import sonder_client as tc
+from sonder_runtime.adapters import client_fallback
 
 
 def test_build_request_with_key():
@@ -66,3 +67,7 @@ def test_send_prompt_does_not_fallback_on_http_error(monkeypatch):
         assert e.code == 401
     else:
         raise AssertionError("expected HTTPError")
+
+
+def test_packaged_fallback_adapter_owns_orchestration():
+    assert tc._send_prompt_with_fallback is client_fallback.send_prompt_with_fallback

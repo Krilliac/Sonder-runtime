@@ -1,6 +1,6 @@
 import hashlib
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import memory_store as ms
 import seed_merge
 

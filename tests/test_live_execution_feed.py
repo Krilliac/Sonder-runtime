@@ -14,8 +14,8 @@ import threading
 
 import pytest
 
-import activity_tracker as at
-import sonder_serve as ts
+import sonder_runtime.adapters.observability.activity_tracker as at
+import sonder_runtime.interfaces.http.serve as ts
 
 
 @pytest.fixture(autouse=True)

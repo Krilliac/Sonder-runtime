@@ -22,12 +22,47 @@ get deterministic advice back with no host access at all.
 from __future__ import annotations
 
 import os
-import platform
 import json
-import re
 import subprocess
 import threading
 from pathlib import Path
+
+from sonder_runtime.domain.model_sizing import (
+    band_fits,
+    decode_band,
+    estimated_footprint_gb,
+    band_for_capacity,
+    largest_model_class,
+    MODEL_FOOTPRINTS,
+    memory_band,
+    params_from_model_tag,
+)
+from sonder_runtime.platform.hardware_identity import (
+    accelerator_record,
+    looks_integrated,
+)
+from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
+from sonder_runtime.adapters.accelerators.inventory import dedupe_accelerators
+from sonder_runtime.platform.hardware_probe import (
+    parse_memory_gb,
+    probe_cpu_count,
+    probe_platform,
+    probe_total_ram_gb,
+    read_text,
+)
+from sonder_runtime.platform.hardware_identity import vendor_from_text
+
+# Legacy private name retained for callers that exercised the old probe helper.
+_parse_memory_gb = parse_memory_gb
+# Legacy private names retained for callers that exercised the old probe helpers.
+_probe_platform = probe_platform
+_probe_cpu_count = probe_cpu_count
+_read_text = read_text
+_probe_total_ram_gb = probe_total_ram_gb
+_probe_gpu = probe_nvidia_gpu
+_dedupe_accelerators = dedupe_accelerators
+_band_for = band_for_capacity
+_largest_model_class = largest_model_class
 
 
 # --- model sizing thresholds --------------------------------------------------
@@ -80,13 +115,7 @@ _PROFILE_CACHE: dict | None = None
 # classes, not promises: exact architectures, quantizers, and context lengths
 # vary. The explicit ladder is more useful than the broad legacy bands when a
 # user is deciding whether CPU/unified-memory spill can make a model runnable.
-_MODEL_FOOTPRINTS = (
-    (3.0, "3-4B"),
-    (6.0, "7-8B"),
-    (10.0, "14B"),
-    (20.0, "32B"),
-    (40.0, "70B"),
-)
+_MODEL_FOOTPRINTS = MODEL_FOOTPRINTS
 
 
 # --- mixture-of-experts: two parameter counts, two different questions --------
@@ -109,233 +138,12 @@ _MODEL_FOOTPRINTS = (
 # One ladder, deliberately applied to two different counts: the *total* decides
 # which memory class the weights land in, the *active* decides how fast it
 # answers. Same question ("how big is this many parameters"), asked twice.
-_PARAM_BANDS = (
-    (5.0, "3-4B"),
-    (13.0, "7B"),
-    (40.0, "13-34B"),
-    (float("inf"), "70B+"),
-)
-# Ascending, so two bands can be compared to answer "does this model fit here".
-_BAND_ORDER = tuple(label for _ceiling, label in _PARAM_BANDS)
-
-# Ollama/Qwen spell an MoE tag as "<total>b-a<active>b" -- qwen3-coder:30b-a3b,
-# qwen3:235b-a22b, qwen3-coder:480b-a35b. A dense tag carries a single "<n>b".
-# Quantization suffixes (-q4_K_M, -fp16, -instruct) trail the size and are
-# ignored. Anything unrecognised returns None rather than a guess, because a
-# wrong parameter count is worse here than an absent one: absent falls back to
-# today's hardware-derived behavior, wrong silently changes the advice.
-_MOE_TAG_RE = re.compile(r"(?<![0-9a-z])([0-9]+(?:\.[0-9]+)?)b-a([0-9]+(?:\.[0-9]+)?)b(?![0-9a-z])")
-_DENSE_TAG_RE = re.compile(r"(?<![0-9a-z])([0-9]+(?:\.[0-9]+)?)b(?![0-9a-z])")
-
-
-def params_from_model_tag(tag) -> tuple[float, float] | None:
-    """Parse ``(total_params_b, active_params_b)`` out of an Ollama model tag.
-
-    Returns ``None`` when the tag carries no usable size, which is the common
-    case for an alias like ``sonder:latest``. For a dense tag both numbers are
-    the same; for an MoE tag they differ, and that difference is the whole point
-    of this function.
-    """
-    text = str(tag or "").strip().lower()
-    # Only the tag carries size metadata. Searching the whole identifier lets a
-    # repository *name* masquerade as one: "custom-70b-model:latest" would parse
-    # as 70B and silently change the advice, even though ":latest" says nothing
-    # about size. No tag means no size, which falls back to the hardware band --
-    # the safe direction, and the same answer an alias already gives.
-    _name, separator, tag_part = text.rpartition(":")
-    if not separator:
-        return None
-    text = tag_part.strip()
-    if not text:
-        return None
-    moe = _MOE_TAG_RE.search(text)
-    if moe:
-        total = float(moe.group(1))
-        active = float(moe.group(2))
-        # An "active" count above the total is a malformed tag, not an MoE;
-        # refuse it rather than reporting a model faster than it can be.
-        # active == total is degenerate but harmless -- it simply reads dense.
-        if total > 0 and 0 < active <= total:
-            return total, active
-        return None
-    dense = _DENSE_TAG_RE.search(text)
-    if dense:
-        total = float(dense.group(1))
-        if total > 0:
-            return total, total
-    return None
-
-
-def decode_band(active_params_b) -> str | None:
-    """Return the band whose *decode speed* an ``active_params_b`` model matches.
-
-    ``None`` when the active count is unknown or nonsensical, so callers keep
-    their existing hardware-derived band instead of acting on a bad number.
-    """
-    try:
-        active = float(active_params_b)
-    except (TypeError, ValueError):
-        return None
-    if active <= 0:
-        return None
-    return _band_for(active, _PARAM_BANDS)
-
-
-def memory_band(total_params_b) -> str | None:
-    """Return the memory class a model's *total* parameter count lands in.
-
-    This is the model's own footprint, independent of the host: every expert has
-    to be resident whether or not the card can hold them. Pairing it with the
-    hardware band is what answers "does this fit here", which a hardware-derived
-    band alone cannot -- that one only ever reports the largest model that would
-    fit, so it silently agrees with whatever you point at it.
-    """
-    try:
-        total = float(total_params_b)
-    except (TypeError, ValueError):
-        return None
-    if total <= 0:
-        return None
-    return _band_for(total, _PARAM_BANDS)
-
-
-def band_fits(model_band: str, capacity_band: str) -> bool | None:
-    """Whether ``model_band`` fits inside ``capacity_band``. None if unknown."""
-    if model_band not in _BAND_ORDER or capacity_band not in _BAND_ORDER:
-        return None
-    return _BAND_ORDER.index(model_band) <= _BAND_ORDER.index(capacity_band)
-
-
-# Measured, not assumed: qwen3-coder:30b-a3b at Q4_K_M reports 18.56 GB of
-# weights and `ollama ps` shows 19 GB resident, i.e. ~0.62 GB per billion
-# parameters. That lines up with the _MODEL_FOOTPRINTS ladder above (32B -> 20
-# GB) and with the module's stated convention of quoting sizes at roughly 4-bit.
-_Q4_GB_PER_BILLION = 0.62
-
-
-def estimated_footprint_gb(total_params_b) -> float | None:
-    """Approximate resident size, in GB, of a Q4-class model of this size.
-
-    A planning estimate, not a promise: the real number moves with quantization,
-    KV cache type, and context length. It exists because comparing *bands* is too
-    coarse to answer "does this fit" -- the ``13-34B`` band spans roughly 8 GB to
-    20 GB, so a 16 GB card and a 30B model land in the same band while the model
-    genuinely does not fit. Confirmed on exactly that pair: 19 GB resident
-    against 16 GB of VRAM, which Ollama served at a 23%/77% CPU/GPU split.
-    """
-    try:
-        total = float(total_params_b)
-    except (TypeError, ValueError):
-        return None
-    if total <= 0:
-        return None
-    return round(total * _Q4_GB_PER_BILLION, 1)
-
-
 # --- default host probes ------------------------------------------------------
 #
 # These are the only functions that actually look at the machine. They are never
 # called at import, and every one is overridable through ``detect_hardware``'s
 # ``probes`` argument so tests can inject fakes. Each swallows its own failures
 # and returns a conservative "unknown" rather than raising.
-
-def _probe_cpu_count() -> int | None:
-    try:
-        return os.cpu_count()
-    except Exception:
-        return None
-
-
-def _probe_total_ram_gb() -> float | None:
-    """Total physical RAM in GB, via stdlib only, or ``None`` if unknown."""
-    # POSIX (Linux, and most BSD/macOS): pages * page size.
-    try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        if pages > 0 and page_size > 0:
-            return round(pages * page_size / 1e9, 1)
-    except (ValueError, AttributeError, OSError):
-        pass
-    # Windows: GlobalMemoryStatusEx via ctypes, guarded hard.
-    try:
-        import ctypes
-
-        class _MemStatus(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        status = _MemStatus()
-        status.dwLength = ctypes.sizeof(_MemStatus)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return round(status.ullTotalPhys / 1e9, 1)
-    except Exception:
-        pass
-    return None
-
-
-def _probe_gpu() -> tuple[bool, float | None]:
-    """Return ``(gpu_present, vram_gb)`` by shelling out to ``nvidia-smi``.
-
-    Kept behind a timeout and a blanket ``except`` so a missing binary, a hung
-    driver, or a machine without an NVIDIA card all resolve to ``(False, None)``
-    instead of raising. Non-NVIDIA accelerators are simply not detected here;
-    callers can inject a probe that knows about them.
-
-    The timeout is generous and one retry follows a timeout. On a laptop with
-    switchable graphics the discrete GPU idles powered down, and the first
-    ``nvidia-smi`` after an idle stretch blocks while the driver wakes it --
-    can take several seconds, with the next call returning quickly. A tight
-    timeout therefore fails exactly when
-    the GPU is cold, which is precisely when nothing else has warmed it: the
-    host then reports "no GPU", sizes the band for CPU inference, and advises
-    a short keep_alive with speculation dormant -- all on a machine with a
-    working CUDA device. Retrying once converts that intermittent miss into a
-    hit, because the timed-out probe is itself the wake-up call.
-    """
-    out = None
-    for timeout_s in (8.0, 8.0):
-        try:
-            out = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=memory.total",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-            )
-            break
-        except subprocess.TimeoutExpired:
-            continue  # cold GPU; the probe that just timed out did the waking
-        except Exception:
-            return (False, None)
-    if out is None:
-        return (False, None)
-    if out.returncode != 0:
-        return (False, None)
-    best_mib = 0.0
-    for line in out.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            best_mib = max(best_mib, float(line))
-        except ValueError:
-            continue
-    if best_mib <= 0:
-        return (False, None)
-    return (True, round(best_mib / 1024.0, 1))
-
 
 _PCI_VENDORS = {
     "0x1002": "AMD",
@@ -346,64 +154,13 @@ _PCI_VENDORS = {
 }
 
 
-def _vendor_from_text(*values: object) -> str:
-    """Normalize a display-adapter vendor without claiming backend support."""
-    text = " ".join(str(value or "") for value in values).lower()
-    if "nvidia" in text or "ven_10de" in text:
-        return "NVIDIA"
-    if "advanced micro devices" in text or "amd" in text or "ati " in text or "ven_1002" in text:
-        return "AMD"
-    if "intel" in text or "ven_8086" in text:
-        return "Intel"
-    if "apple" in text or "ven_106b" in text:
-        return "Apple"
-    return "unknown"
+# Legacy private names retained for callers that exercised the old
+# classification helpers.  The packaged platform boundary owns the policy.
+_vendor_from_text = vendor_from_text
+_looks_integrated = looks_integrated
 
 
-def _looks_integrated(name: str, vendor: str) -> bool | None:
-    lowered = (name or "").lower()
-    if vendor == "Apple":
-        return True
-    if vendor == "NVIDIA":
-        return False
-    if vendor == "Intel":
-        if any(marker in lowered for marker in (" arc a", " arc b", "arc pro", "data center gpu flex")):
-            return False
-        if any(marker in lowered for marker in ("uhd graphics", "iris", "hd graphics")):
-            return True
-        return None
-    if vendor == "AMD":
-        if any(marker in lowered for marker in ("radeon graphics", "780m", "760m", "740m", "680m", "660m", "890m")):
-            return True
-        if any(marker in lowered for marker in ("radeon rx", "radeon pro", "instinct")):
-            return False
-    return None
-
-
-def _accelerator(
-    *, name: str, vendor: str = "unknown", memory_gb: float | None = None,
-    memory_kind: str = "unknown", integrated: bool | None = None, probe: str,
-    device_id: str = "",
-    presence_verified: bool | None = True,
-) -> dict:
-    if integrated is None:
-        integrated = _looks_integrated(name, vendor)
-    return {
-        "name": str(name or "display adapter"),
-        "vendor": vendor,
-        "memory_gb": round(float(memory_gb), 1) if memory_gb else None,
-        "memory_kind": memory_kind,
-        "integrated": integrated if isinstance(integrated, bool) else None,
-        "probe": probe,
-        "device_id": str(device_id or ""),
-        "presence_verified": (
-            presence_verified if isinstance(presence_verified, bool) else None
-        ),
-        # Detection proves only that the OS enumerates a device. Ollama/backend
-        # readiness requires a separate runtime probe and is intentionally not
-        # inferred from a vendor name or installed display driver.
-        "runtime_ready": None,
-    }
+_accelerator = accelerator_record
 
 
 def _probe_windows_accelerators(registry=None) -> list[dict]:
@@ -478,13 +235,6 @@ def _probe_windows_accelerators(registry=None) -> list[dict]:
     return _dedupe_accelerators(records)
 
 
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace").strip()
-    except (OSError, ValueError):
-        return ""
-
-
 def _probe_linux_accelerators(
     root: Path = Path("/sys/class/drm"), nvidia_probe=None,
 ) -> list[dict]:
@@ -537,15 +287,6 @@ def _probe_linux_accelerators(
     return _dedupe_accelerators(records)
 
 
-def _parse_memory_gb(value: object) -> float | None:
-    text = str(value or "").strip().lower().replace(",", ".")
-    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(gb|mb)", text)
-    if not match:
-        return None
-    amount = float(match.group(1))
-    return amount if match.group(2) == "gb" else amount / 1024.0
-
-
 def _probe_nvidia_accelerators(runner=None) -> list[dict]:
     runner = runner or subprocess.run
     result = None
@@ -587,25 +328,6 @@ def _probe_nvidia_accelerators(runner=None) -> list[dict]:
             device_id=uuid or ("nvidia-index:%s" % index),
         ))
     return records
-
-
-def _dedupe_accelerators(records: list[dict]) -> list[dict]:
-    """Drop exact/stale duplicates while retaining distinct physical adapters."""
-    result = []
-    seen = set()
-    for item in records:
-        device_id = str(item.get("device_id") or "").lower()
-        key = (str(item.get("probe") or ""), device_id) if device_id else (
-            str(item.get("vendor") or "unknown").lower(),
-            str(item.get("name") or "display adapter").lower(),
-            item.get("memory_gb"),
-            item.get("integrated"),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-    return result
 
 
 def _probe_macos_accelerators(runner=None) -> list[dict]:
@@ -657,13 +379,6 @@ def _probe_accelerators() -> list[dict]:
     if system == "darwin":
         return _probe_macos_accelerators()
     return []
-
-
-def _probe_platform() -> str:
-    try:
-        return platform.system() or "unknown"
-    except Exception:
-        return "unknown"
 
 
 _DEFAULT_PROBES = {
@@ -788,13 +503,6 @@ def profile_text(*, workload: str = "general", refresh: bool = False,
     return render(profile["hardware"], profile["recommendation"])
 
 
-def _band_for(capacity_gb: float, ladder) -> str:
-    for ceiling, band in ladder:
-        if capacity_gb < ceiling:
-            return band
-    return ladder[-1][1]
-
-
 def _capacity(hw: dict) -> tuple[float, str]:
     """Return ``(usable_gb, basis)`` where basis is ``'vram'`` or ``'ram'``.
 
@@ -819,15 +527,6 @@ def _capacity(hw: dict) -> tuple[float, str]:
         return float(hw["vram_gb"]), "vram"
     ram = hw.get("total_ram_gb")
     return (float(ram) if ram else 0.0), "ram"
-
-
-def _largest_model_class(usable_gb: float) -> str:
-    chosen = "below 3B"
-    for footprint, label in _MODEL_FOOTPRINTS:
-        if usable_gb + 1e-9 < footprint:
-            break
-        chosen = label
-    return chosen
 
 
 def _execution_plan(hw: dict) -> dict:

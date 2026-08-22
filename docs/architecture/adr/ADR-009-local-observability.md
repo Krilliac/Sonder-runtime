@@ -37,8 +37,9 @@ their conversion hooks.
   observability never claims delivery attestation.
 - There is no telemetry exporter, network/cloud path, persistence, background
   daemon, or agent-facing mutation tool.
-- Read inspection is by direct host-side Python calls to `snapshot()` and
-  `recent_events()` only.
+- Read inspection is by direct host-side Python calls to `snapshot()`,
+  `recent_events()`, and the read-only `trace_projection()` adapter. The latter
+  consumes only the already-redacted retained event view and does not export it.
 
 The module is under the already packaged `sonder_runtime` tree, so the existing
 manifest-only packager includes it without adding a broader package allowlist.

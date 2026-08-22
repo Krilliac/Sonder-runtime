@@ -1,9 +1,8 @@
 """Stable model-transport error adapter.
 
 The concrete transport exception lives in the adapters layer because it
-inherits from ``urllib.error.URLError``.  Application code sees only the
-typed ``ModelGateway`` port and domain error taxonomy; the root
-``model_transport`` module lazily re-exports this class for compatibility.
+inherits from ``urllib.error.URLError``. Application code sees only the typed
+``ModelGateway`` port and domain error taxonomy.
 """
 from __future__ import annotations
 
@@ -47,10 +46,6 @@ class ModelCallError(urllib.error.URLError):
         super().__init__(self.detail)
 
 
-# Preserve the historical public type path used by repr/pickle consumers while
-# the implementation moves behind the package adapter boundary.  The root shim
-# resolves this exact object, so ``model_transport.ModelCallError is
-# sonder_runtime.adapters.model_transport.ModelCallError`` remains true.
-ModelCallError.__module__ = "model_transport"
+ModelCallError.__module__ = __name__
 
 __all__ = ["ModelCallError"]

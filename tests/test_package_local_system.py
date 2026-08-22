@@ -63,19 +63,20 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     build = json.loads((dest / "sonder_build.json").read_text(encoding="utf-8"))
     assert build["version"]
     assert build["commit_sha"] == "unknown" or len(build["commit_sha"]) == 40
-    assert "runtime_policy.py" in entries
+    assert "runtime_policy.py" not in entries
+    assert "sonder_runtime/adapters/runtime_policy.py" in entries
     assert "learning_health.py" in entries
     assert "sonder_health.py" in entries
     assert "sonder_runtime/adapters/inspection_executor.py" in entries
     assert {
-        "sonder_backup.py",
+        "sonder_runtime/adapters/backup.py",
         "sonder_runtime/adapters/backup.py",
         "sonder_runtime/adapters/backup_gateway.py",
         "sonder_runtime/application/backup/__init__.py",
         "sonder_runtime/application/backup/use_cases.py",
         "sonder_runtime/application/ports/backup.py",
     } <= set(entries)
-    assert "recall.py" in entries
+    assert "recall.py" not in entries
     assert {
         "sonder_runtime/adapters/recall_gateway.py",
         "sonder_runtime/adapters/recall.py",
@@ -85,7 +86,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     } <= set(entries)
     assert "sonder_runtime/adapters/git_discovery.py" in entries
     assert {
-        "sonder_preflight.py",
+        "sonder_runtime/adapters/preflight.py",
         "sonder_runtime/adapters/preflight_executor.py",
         "sonder_runtime/adapters/preflight.py",
         "sonder_runtime/application/ports/preflight.py",
@@ -101,22 +102,34 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     } <= set(entries)
     assert "memory_store.py" in entries
     assert "sonder_runtime/adapters/memory_store.py" in entries
-    assert "process_liveness.py" in entries
+    assert "eval_history.py" not in entries
+    assert "sonder_runtime/adapters/evaluation_history_store.py" in entries
+    assert "sonder_runtime/application/evaluation_history/__init__.py" in entries
+    assert "sonder_runtime/application/evaluation_history/use_cases.py" in entries
+    assert "sonder_runtime/application/ports/evaluation_history.py" in entries
+    assert "process_liveness.py" not in entries
     assert "artifact_grounding.py" in entries
     assert {
-        "artifact_risk.py", "pdf_risk.py", "process_risk.py", "unsafe_lab.py",
+        "sonder_runtime/adapters/artifact_risk.py", "unsafe_lab.py",
     } <= set(entries)
+    assert "pdf_risk.py" not in entries
+    assert "pdf_risk.py" in package.RETIRED_ROOT_FILES
     assert "media_assets.py" in entries
-    assert "model_transport.py" in entries
     assert "sonder_runtime/adapters/model_transport.py" in entries
-    assert "ollama_endpoint.py" in entries
+    assert "ollama_endpoint.py" not in entries
+    assert "sonder_runtime/adapters/inference/ollama_endpoint.py" in entries
+    assert "sonder_runtime/adapters/embedding_cache.py" in entries
+    assert "sonder_runtime/adapters/embeddings.py" in entries
+    assert "sonder_runtime/adapters/accelerators/npu/contract.py" in entries
+    assert "sonder_runtime/adapters/accelerators/npu/manifest.py" in entries
+    assert "sonder_runtime/adapters/accelerators/npu/providers.py" in entries
+    assert "sonder_runtime/adapters/accelerators/npu/npu_broker.py" in entries
+    assert "sonder_runtime/adapters/accelerators/npu/npu_worker.py" in entries
     assert "model_assets.py" in entries
     assert "ooxml_assets.py" in entries
     assert "requirements-runtime.txt" in entries
     assert {
-        "workflow_store.py",
         "sonder_runtime/adapters/filesystem/workflow_store.py",
-        "sonder_runtime/adapters/workflow_adapters.py",
         "sonder_runtime/application/ports/workflows.py",
         "sonder_runtime/application/workflows/__init__.py",
         "sonder_runtime/application/workflows/loop.py",
@@ -131,7 +144,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
         "sonder-runtime.sh",
         "sonder-serve.cmd",
         "sonder-serve.sh",
-        "sonder_serve.py",
+        "sonder_runtime/interfaces/http/serve.py",
     } <= package.REQUIRED_FILES
     bundled_readme = (dest / "BUNDLED_SYSTEM_README.txt").read_text(
         encoding="utf-8"
@@ -407,8 +420,8 @@ def test_empty_package_marker_is_scannable_not_oversized(tmp_path):
 
 
 def test_layered_package_ships_so_the_served_app_can_actually_start():
-    """The flat modules alone are not a runnable server. recall.py,
-    runtime_policy.py, and others import sonder_runtime.*, so omitting that
+    """The flat modules alone are not a runnable server. runtime_policy.py
+    and other entry modules import sonder_runtime.*, so omitting that
     directory produced bundles whose server died on first import with
     ModuleNotFoundError before binding a port -- and the desktop app showed
     only "cannot reach server", because the crash lands in a detached

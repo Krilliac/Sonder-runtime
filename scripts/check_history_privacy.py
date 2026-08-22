@@ -164,7 +164,8 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
             try:
                 process = subprocess.Popen(
                 [
-                    executable, "--no-pager", "--no-replace-objects", "-C",
+                    executable, "-c", "safe.directory=%s" % repo,
+                    "--no-pager", "--no-replace-objects", "-C",
                     str(repo), *arguments,
                 ],
                 cwd=repo,

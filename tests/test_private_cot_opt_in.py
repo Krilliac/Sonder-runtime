@@ -10,10 +10,10 @@ same reasoning record ``reasoning_show`` serves, and nothing else.
 import pathlib
 import re
 
-import activity_tracker as at
+import sonder_runtime.adapters.observability.activity_tracker as at
 import permission_rules
 import server
-import sonder_serve as ts
+import sonder_runtime.interfaces.http.serve as ts
 from sonder_runtime.domain.execution import policy
 
 import pytest
@@ -303,7 +303,7 @@ def test_no_surface_still_calls_the_refusal_unconditional():
     can be, so each must name the condition instead.
     """
     import command_registry
-    import sonder_repl
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
 
     surfaces = {
         "tool docstring": server.admin_private_chain_of_thought.__doc__,
@@ -337,7 +337,7 @@ def test_cot_is_developer_gated_on_the_http_surface():
     deployment can return a turn's reasoning it belongs with them. An omission
     justified by a refusal outlives the refusal, silently.
     """
-    import sonder_serve as ts
+    import sonder_runtime.interfaces.http.serve as ts
 
     for name in ("/cot", "/chainofthought", "/thoughts"):
         assert ts._dangerous_http_slash(name), name
@@ -455,7 +455,7 @@ def test_docstring_admits_the_token_gate_is_inert_on_local_open():
 
 def test_opt_in_flag_is_named_on_every_surface_that_refuses():
     """An operator must be able to find the switch from the refusal itself."""
-    import sonder_repl
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
 
     assert "SONDER_ALLOW_PRIVATE_COT" in server.admin_private_chain_of_thought()
     assert "SONDER_ALLOW_PRIVATE_COT" in (

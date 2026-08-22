@@ -10,8 +10,8 @@ from dataclasses import dataclass  # noqa: F401 - legacy star-import surface
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import sonder_migrations
-from sonder_config import SonderConfig
+import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from sonder_runtime.platform.config import SonderConfig
 
 from ..application.ports.preflight import CheckResult, PreflightReport
 
@@ -86,7 +86,7 @@ def _check_schema_versions(config: SonderConfig) -> list[CheckResult]:
 
 def _check_runtime_policy() -> CheckResult:
     try:
-        import runtime_policy
+        import sonder_runtime.adapters.runtime_policy as runtime_policy
 
         policy = runtime_policy.load()
         return CheckResult(

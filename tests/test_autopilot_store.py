@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-import autopilot_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 
 
 @pytest.fixture(autouse=True)
@@ -183,12 +183,12 @@ def test_second_process_can_request_pause(isolated_autopilot_db):
     env = dict(os.environ)
     env["SONDER_AUTOPILOT_DB"] = str(isolated_autopilot_db)
     code = (
-        "import autopilot_store; "
+        "import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store; "
         "row=autopilot_store.request_pause(%r); "
         "print(row['pause_requested'])" % run["id"]
     )
     result = subprocess.run(
-        [sys.executable, "-c", code], cwd=os.path.dirname(autopilot_store.__file__),
+        [sys.executable, "-c", code], cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(autopilot_store.__file__)))),
         env=env, text=True, capture_output=True, timeout=15, check=False,
     )
     assert result.returncode == 0, result.stderr
