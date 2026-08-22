@@ -783,8 +783,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _openSettings() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => SettingsScreen(
+      PageRouteBuilder<void>(
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, __, ___) => SettingsScreen(
           settings: widget.settings,
           onChanged: widget.onSettingsChanged,
         ),
