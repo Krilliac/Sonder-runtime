@@ -22,7 +22,7 @@ that declaration through durable registry state.
 
 Command:
 
-`python -m pytest -q tests/test_extension_host.py tests/test_extension_memory_limits.py --basetemp C:\\Users\\Nathan\\Documents\\Codex\\pytest-extension-memory-1`
+`python -m pytest -q tests/test_extension_host.py tests/test_extension_memory_limits.py --basetemp <fresh-temp>`
 
 Result: **9 passed, 1 skipped** (the unsupported-platform branch is skipped on
 Windows; the live Windows Job Object attachment test is exercised there).
