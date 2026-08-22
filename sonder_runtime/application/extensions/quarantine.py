@@ -23,8 +23,12 @@ class QuarantineDecision:
 
 class QuarantineRegistry:
     def __init__(self) -> None:
-        self._crashes: dict[str, int] = {}
+        self._crashes: dict[object, int] = {}
         self._decisions: dict[str, QuarantineDecision] = {}
+
+    @staticmethod
+    def _installation_key(extension_id: str, installation_key: object | None) -> object:
+        return extension_id if installation_key is None else installation_key
 
     def evaluate(
         self, manifest: ExtensionManifest, *, protocol: str,
@@ -41,10 +45,11 @@ class QuarantineRegistry:
         self._decisions[manifest.extension_id] = decision
         return decision
 
-    def record_crash(self, manifest: ExtensionManifest) -> QuarantineDecision:
+    def record_crash(self, manifest: ExtensionManifest, *, installation_key: object | None = None) -> QuarantineDecision:
         extension_id = manifest.extension_id
-        count = self._crashes.get(extension_id, 0) + 1
-        self._crashes[extension_id] = count
+        key = self._installation_key(extension_id, installation_key)
+        count = self._crashes.get(key, 0) + 1
+        self._crashes[key] = count
         quarantined = count >= manifest.health.crash_limit
         reasons = (QuarantineReason.REPEATED_CRASH.value,) if quarantined else ()
         decision = QuarantineDecision(
@@ -57,11 +62,12 @@ class QuarantineRegistry:
     def decision(self, extension_id: str) -> QuarantineDecision | None:
         return self._decisions.get(extension_id)
 
-    def crash_count(self, extension_id: str) -> int:
-        return self._crashes.get(extension_id, 0)
+    def crash_count(self, extension_id: str, *, installation_key: object | None = None) -> int:
+        return self._crashes.get(self._installation_key(extension_id, installation_key), 0)
 
-    def restore_crash_count(self, extension_id: str, count: int) -> None:
+    def restore_crash_count(self, extension_id: str, count: int, *, installation_key: object | None = None) -> None:
         """Restore durable crash evidence without weakening its monotonicity."""
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise ValueError("crash count must be a non-negative integer")
-        self._crashes[extension_id] = max(self._crashes.get(extension_id, 0), count)
+        key = self._installation_key(extension_id, installation_key)
+        self._crashes[key] = max(self._crashes.get(key, 0), count)

@@ -5506,15 +5506,19 @@ class Handler(BaseHTTPRequestHandler):
 def main(config=None):
     if config is not None:
         configure_typed_config(config)
+    application = None
     if _SESSION_FACADE is None:
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.application.session.http_facade import HttpSessionFacade
 
-        configure_session_facade(default_app().session_http_facade())
+        application = default_app(config=config)
+        configure_session_facade(application.session_http_facade())
     if _CONTROL_PLANE_SERVICE is None:
         from sonder_runtime.bootstrap.app import default_app
 
-        configure_control_plane_service(default_app().control_plane_snapshot_service)
+        if application is None:
+            application = default_app(config=config)
+        configure_control_plane_service(application.control_plane_snapshot_service)
     port = DEFAULT_PORT if config is None else CONFIGURED_PORT
     if len(sys.argv) > 1:
         try:

@@ -67,3 +67,15 @@ def test_repeated_crashes_quarantine_only_at_manifest_threshold():
     assert decision.quarantined
     assert decision.reasons == (QuarantineReason.REPEATED_CRASH.value,)
     assert registry.crash_count(manifest.extension_id) == 2
+
+
+def test_crash_counters_are_isolated_by_installation_slot():
+    manifest = _manifest()
+    registry = QuarantineRegistry()
+    first = ("project", "alpha", manifest.extension_id)
+    second = ("project", "beta", manifest.extension_id)
+
+    assert not registry.record_crash(manifest, installation_key=first).quarantined
+    assert not registry.record_crash(manifest, installation_key=second).quarantined
+    assert registry.crash_count(manifest.extension_id, installation_key=first) == 1
+    assert registry.crash_count(manifest.extension_id, installation_key=second) == 1
