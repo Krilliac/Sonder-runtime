@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,11 @@ from sonder_runtime.application.security.race_resistant_paths import (
 
 def test_capability_report_is_truthful_and_fail_closed():
     report = platform_path_capabilities()
-    assert report.platform == "nt"
+    assert report.platform == os.name
     assert report.fail_closed is True
-    assert report.race_resistant_destructive_ops is False
+    assert report.race_resistant_destructive_ops == (
+        os.name == "posix" and report.directory_handles and report.no_follow
+    )
     assert report.reason
 
 
@@ -44,9 +47,13 @@ def test_destructive_open_intent_fails_closed_on_windows(tmp_path: Path):
     target.write_text("x", encoding="utf-8")
     read_intent = build_open_intent(target, [root], "read")
     assert read_intent.destructive is False
-    assert read_intent.no_follow is False
-    with pytest.raises(PlatformCapabilityError):
-        build_open_intent(target, [root], "delete")
+    assert read_intent.no_follow == bool(getattr(os, "O_NOFOLLOW", 0))
+    if os.name == "nt":
+        with pytest.raises(PlatformCapabilityError):
+            build_open_intent(target, [root], "delete")
+    else:
+        delete_intent = build_open_intent(target, [root], "delete")
+        assert delete_intent.destructive is True
 
 
 def test_destructive_targets_are_bounded_before_capability_gate(tmp_path: Path):

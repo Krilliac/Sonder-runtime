@@ -21,7 +21,13 @@ def _unique_paths(paths) -> tuple[Path, ...]:
     result: list[Path] = []
     seen: set[str] = set()
     for path in paths:
-        candidate = Path(path).expanduser().resolve(strict=False)
+        # Preserve Path instances supplied by callers.  Besides avoiding an
+        # unnecessary reconstruction, this keeps tests and embedders that
+        # probe Windows case-folding from asking pathlib to instantiate a
+        # WindowsPath on a POSIX host.
+        candidate = (
+            path if isinstance(path, Path) else Path(path)
+        ).expanduser().resolve(strict=False)
         key = os.path.normcase(str(candidate))
         if key not in seen:
             seen.add(key)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 from pathlib import Path
 
 import command_catalog
@@ -66,8 +67,8 @@ def test_packaged_catalog_keeps_lazy_server_access():
 
 def test_source_derived_catalog_prefers_packaged_dispatch_sources():
     assert command_catalog._source_path("sonder_repl.py").endswith(
-        "sonder_runtime\\interfaces\\repl\\repl.py"
+        os.path.join("sonder_runtime", "interfaces", "repl", "repl.py")
     )
     assert command_catalog._source_path("sonder_serve.py").endswith(
-        "sonder_runtime\\interfaces\\http\\serve.py"
+        os.path.join("sonder_runtime", "interfaces", "http", "serve.py")
     )
