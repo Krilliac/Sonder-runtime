@@ -444,14 +444,15 @@ _RULES = [
     # guarded path prefixes while avoiding a free-form prompt becoming a tool
     # argument by accident.
     _rule(r"^(?:inspect|check|scan)\s+(?:the\s+)?artifact\s+risk"
-          r"(?:\s+(?:at|in))?\s+(?P<arg>\S+)\s*[?!.]*$",
+          r"(?:\s+(?:at|in))?\s+(?P<arg>\S+?)[?!.]*$",
           _with_arg("/artifact_risk_inspect")),
     _rule(r"^(?:verify|check)\s+(?:the\s+)?artifact\s+file"
           r"(?:\s+(?:integrity|signature|manifest))?\s+(?P<arg>\S+)\s*[?!.]*$",
           _with_arg("/verify_artifact")),
     _rule(r"^(?:probe|check)\s+(?:the\s+)?local\s+service\s+"
           r"(?P<arg>https?://(?:localhost|127\.0\.0\.1|\[::1\])"
-          r"(?::\d+)?\S*)\s*[?!.]*$", _with_arg("/local_service_probe")),
+          r":\d{1,5}(?:[/?#]\S*)?)\s*[?!.]*$",
+          _with_arg("/local_service_probe")),
     _rule(r"^(?:inspect|check)\s+(?:the\s+)?process\s+(?P<arg>\d+)"
           r"\s+memory\s+risk\s*[?!.]*$",
           _with_arg("/process_memory_risk_inspect")),
