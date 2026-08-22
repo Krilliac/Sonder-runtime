@@ -19,6 +19,8 @@ import 'package:sonder_runtime/system_screen.dart';
 void main() {
   testWidgets('App boots to the chat screen', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    final semantics = tester.ensureSemantics();
+    addTearDown(semantics.dispose);
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
