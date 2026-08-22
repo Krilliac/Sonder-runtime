@@ -49,11 +49,8 @@ def test_server_compatibility_delegate_preserves_runtime_summary_shape(monkeypat
 
     monkeypatch.setattr(server, "SESSION_NUM_CTX", 4096)
     monkeypatch.setattr(server.context_policy, "requested", lambda _value: 8192)
-    monkeypatch.setattr(
-        server,
-        "_local_model_options",
-        lambda *_args: {"num_thread": 4, "num_ctx": 4096},
-    )
+    monkeypatch.setattr(server, "_platform_local_model_options",
+                        lambda *_args, **_kwargs: {"num_thread": 4, "num_ctx": 4096})
     assert server._local_runtime_summary() == {
         "num_thread": 4,
         "num_gpu": "ollama-default",
