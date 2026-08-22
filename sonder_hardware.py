@@ -469,26 +469,24 @@ def detect_profile(probes=None) -> dict:
         and item.get("presence_verified") is True
     ]
     detected_vram = max(known_memory) if known_memory else None
-    live_free = [
-        float(item["free_memory_gb"])
-        for item in accelerators
-        if item.get("free_memory_gb") is not None
-        and item.get("integrated") is False
-        and item.get("presence_verified") is True
-    ]
     primary = max(
         (item for item in accelerators if item.get("integrated") is False),
         key=lambda item: float(item.get("memory_gb") or 0),
         default={},
     )
+    primary_free = primary.get("free_memory_gb")
+    try:
+        primary_free = float(primary_free) if primary_free is not None else None
+    except (TypeError, ValueError):
+        primary_free = None
     primary_vendor = str(primary.get("vendor") or "unknown")
     return {
         "cpu_count": cpu_count,
         "total_ram_gb": total_ram_gb,
         "gpu_present": bool(accelerators),
         "vram_gb": round(detected_vram, 1) if detected_vram else None,
-        "vram_free_gb": round(max(live_free), 1) if live_free else None,
-        "vram_availability_live": bool(live_free),
+        "vram_free_gb": round(primary_free, 1) if primary_free is not None else None,
+        "vram_availability_live": primary_free is not None,
         "gpu_name": str(primary.get("name") or ""),
         "gpu_vendor": primary_vendor,
         "cuda_available": primary_vendor.casefold() == "nvidia",
@@ -536,17 +534,20 @@ def get_profile(*, workload: str = "general", refresh: bool = False,
     capabilities = build_hardware_capabilities(hardware)
     selected_model = str(model or "").strip()
     params = params_from_model_tag(selected_model)
-    profile_kwargs = {"model": selected_model or DEFAULT_30B_MODEL}
-    if params:
-        profile_kwargs.update(
-            total_params_b=params[0], active_params_b=params[1],
-        )
-    model_profile = default_30b_profile(**profile_kwargs)
-    execution = plan_model_execution(capabilities, model_profile)
+    model_profile = None
+    execution = None
+    if not selected_model or params:
+        profile_kwargs = {"model": selected_model or DEFAULT_30B_MODEL}
+        if params:
+            profile_kwargs.update(
+                total_params_b=params[0], active_params_b=params[1],
+            )
+        model_profile = default_30b_profile(**profile_kwargs)
+        execution = plan_model_execution(capabilities, model_profile)
     recommendation = recommend(hardware, workload=workload, model=model)
     recommendation["capabilities"] = capabilities.to_dict()
-    recommendation["model_profile"] = model_profile.to_dict()
-    recommendation["model_execution"] = execution.to_dict()
+    recommendation["model_profile"] = model_profile.to_dict() if model_profile else None
+    recommendation["model_execution"] = execution.to_dict() if execution else None
     return {
         "hardware": hardware,
         "recommendation": recommendation,
@@ -894,20 +895,23 @@ def render(hw: dict, rec: dict) -> str:
     )
     model_profile = rec.get("model_profile")
     execution = rec.get("model_execution")
-    if not model_profile:
+    if model_profile is None and execution is None:
         selected = rec.get("model") or DEFAULT_30B_MODEL
         try:
             params = params_from_model_tag(selected)
-            profile_kwargs = {"model": selected}
-            if params:
-                profile_kwargs.update(
-                    total_params_b=params[0], active_params_b=params[1],
-                )
-            model_profile = default_30b_profile(**profile_kwargs).to_dict()
-            execution = plan_model_execution(
-                build_hardware_capabilities(hw),
-                default_30b_profile(**profile_kwargs),
-            ).to_dict()
+            if not selected or params:
+                profile_kwargs = {"model": selected}
+                if params:
+                    profile_kwargs.update(
+                        total_params_b=params[0], active_params_b=params[1],
+                    )
+                model_profile = default_30b_profile(**profile_kwargs).to_dict()
+                execution = plan_model_execution(
+                    build_hardware_capabilities(hw),
+                    default_30b_profile(**profile_kwargs),
+                ).to_dict()
+            else:
+                model_profile, execution = {}, {}
         except ValueError:
             model_profile, execution = {}, {}
     if model_profile:
