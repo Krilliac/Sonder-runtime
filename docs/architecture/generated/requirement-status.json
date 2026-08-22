@@ -263,9 +263,9 @@
     },
     {
       "checked": false,
-      "claim": "The live provider registry and application graph expose scoped cooperative cancellation alongside redacted health for published specialized providers.",
+      "claim": "The production application graph can publish injected attended training and update providers alongside embedding, expose typed health, propagate cooperative cancellation, and close all published providers through the application lifecycle boundary.",
       "requirement_id": "ARCH-001",
-      "revision": 14,
+      "revision": 15,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "5d3a3de9355ffe5f965eeb300a3ba366e86da1617ad39faf53068271f3ef1ace",
+    "ledger_sha256": "a900ea01b7a979062e3ef33829cba1e2cec5a74ee8d88a66f44ce945bde950eb",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
