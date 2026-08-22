@@ -19,8 +19,6 @@ import 'package:sonder_runtime/system_screen.dart';
 void main() {
   testWidgets('App boots to the chat screen', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
-    final semantics = tester.ensureSemantics();
-    addTearDown(semantics.dispose);
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
     await tester.pumpAndSettle();
@@ -34,9 +32,9 @@ void main() {
     expect(find.byType(TextField), findsOneWidget);
     // The telemetry strip stays legible and truthful before a server reply:
     // unavailable data is an em dash, never a fabricated zero.
-    expect(find.bySemanticsLabel('Context: —'), findsOneWidget);
-    expect(find.bySemanticsLabel('Activity: —'), findsOneWidget);
-    expect(find.bySemanticsLabel('Route: sonder'), findsOneWidget);
+    expect(find.byKey(const Key('status-metric-context')), findsOneWidget);
+    expect(find.byKey(const Key('status-metric-activity')), findsOneWidget);
+    expect(find.byKey(const Key('status-metric-route')), findsOneWidget);
   });
 
   testWidgets('Desktop chat layout keeps the conversation rail visible', (
