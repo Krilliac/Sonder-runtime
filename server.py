@@ -340,12 +340,12 @@ def _local_model_options(temperature, num_predict, num_ctx):
 
 def _local_runtime_summary():
     """Compatibility delegate for the packaged local-runtime summary."""
-    # Keep this compatibility seam layered on the public option delegate so
-    # callers and existing integrations can override the same policy point.
-    options = _local_model_options(
+    options = _platform_local_model_options(
         0.2,
         1,
         SESSION_NUM_CTX,
+        native_context=context_policy.native,
+        environ=os.environ,
     )
     return _platform_local_runtime_summary(
         options,

@@ -9,7 +9,7 @@ from sonder_runtime.application.vision import VisionService
 
 class Inputs:
     def load(self, path, context):
-        return VisionInput(Path("C:/workspace/image.png"), b"bytes", "image/png", "a" * 64)
+        return VisionInput(Path.cwd() / "image.png", b"bytes", "image/png", "a" * 64)
 
 
 class Gateway:
