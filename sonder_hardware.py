@@ -37,6 +37,14 @@ from sonder_runtime.domain.model_sizing import (
     memory_band,
     params_from_model_tag,
 )
+from sonder_runtime.domain.inference_profiles import (
+    DEFAULT_30B_CONTEXT,
+    DEFAULT_30B_MODEL,
+    DEFAULT_30B_QUANTIZATION,
+    build_hardware_capabilities,
+    default_30b_profile,
+    plan_model_execution,
+)
 from sonder_runtime.platform.hardware_identity import (
     accelerator_record,
     looks_integrated,
@@ -295,7 +303,7 @@ def _probe_nvidia_accelerators(runner=None) -> list[dict]:
             result = runner(
                 [
                     "nvidia-smi",
-                    "--query-gpu=index,uuid,name,memory.total",
+                    "--query-gpu=index,uuid,name,memory.total,memory.free,compute_cap",
                     "--format=csv,noheader,nounits",
                 ],
                 capture_output=True, text=True, timeout=8.0,
@@ -315,18 +323,33 @@ def _probe_nvidia_accelerators(runner=None) -> list[dict]:
         if len(parts) < 4:
             continue
         index, uuid = parts[0], parts[1]
-        name = ",".join(parts[2:-1]).strip()
-        raw_memory = parts[-1]
+        # Keep compatibility with old/fake nvidia-smi output while consuming
+        # live free VRAM and compute capability when the driver provides them.
+        if len(parts) >= 6:
+            name = ",".join(parts[2:-3]).strip()
+            raw_memory, raw_free, capability = parts[-3:]
+        else:
+            name = ",".join(parts[2:-1]).strip()
+            raw_memory, raw_free, capability = parts[-1], "", ""
         try:
             memory_gb = float(raw_memory) / 1024.0
         except ValueError:
             continue
-        records.append(_accelerator(
+        record = _accelerator(
             name=name.strip() or "NVIDIA GPU", vendor="NVIDIA",
             memory_gb=memory_gb, memory_kind="dedicated VRAM",
             integrated=False, probe="nvidia-smi",
             device_id=uuid or ("nvidia-index:%s" % index),
-        ))
+        )
+        try:
+            free_gb = float(raw_free) / 1024.0
+        except ValueError:
+            free_gb = None
+        if free_gb is not None and free_gb >= 0:
+            record["free_memory_gb"] = round(min(memory_gb, free_gb), 1)
+        if capability:
+            record["compute_capability"] = capability.strip()[:32]
+        records.append(record)
     return records
 
 
@@ -446,11 +469,31 @@ def detect_profile(probes=None) -> dict:
         and item.get("presence_verified") is True
     ]
     detected_vram = max(known_memory) if known_memory else None
+    live_free = [
+        float(item["free_memory_gb"])
+        for item in accelerators
+        if item.get("free_memory_gb") is not None
+        and item.get("integrated") is False
+        and item.get("presence_verified") is True
+    ]
+    primary = max(
+        (item for item in accelerators if item.get("integrated") is False),
+        key=lambda item: float(item.get("memory_gb") or 0),
+        default={},
+    )
+    primary_vendor = str(primary.get("vendor") or "unknown")
     return {
         "cpu_count": cpu_count,
         "total_ram_gb": total_ram_gb,
         "gpu_present": bool(accelerators),
         "vram_gb": round(detected_vram, 1) if detected_vram else None,
+        "vram_free_gb": round(max(live_free), 1) if live_free else None,
+        "vram_availability_live": bool(live_free),
+        "gpu_name": str(primary.get("name") or ""),
+        "gpu_vendor": primary_vendor,
+        "cuda_available": primary_vendor.casefold() == "nvidia",
+        "rocm_available": primary_vendor.casefold() == "amd",
+        "compute_capability": str(primary.get("compute_capability") or ""),
         "platform": plat if isinstance(plat, str) else "unknown",
         "accelerators": accelerators,
         "accelerator_count": len(accelerators),
@@ -490,9 +533,23 @@ def get_profile(*, workload: str = "general", refresh: bool = False,
         hardware["accelerators"] = [
             dict(item) for item in _PROFILE_CACHE.get("accelerators", [])
         ]
+    capabilities = build_hardware_capabilities(hardware)
+    selected_model = str(model or "").strip()
+    params = params_from_model_tag(selected_model)
+    profile_kwargs = {"model": selected_model or DEFAULT_30B_MODEL}
+    if params:
+        profile_kwargs.update(
+            total_params_b=params[0], active_params_b=params[1],
+        )
+    model_profile = default_30b_profile(**profile_kwargs)
+    execution = plan_model_execution(capabilities, model_profile)
+    recommendation = recommend(hardware, workload=workload, model=model)
+    recommendation["capabilities"] = capabilities.to_dict()
+    recommendation["model_profile"] = model_profile.to_dict()
+    recommendation["model_execution"] = execution.to_dict()
     return {
         "hardware": hardware,
-        "recommendation": recommend(hardware, workload=workload, model=model),
+        "recommendation": recommendation,
     }
 
 
@@ -824,6 +881,57 @@ def render(hw: dict, rec: dict) -> str:
     lines.append(
         f"  speculation : {'likely engages' if rec.get('speculation_likely') else 'dormant'}"
     )
+    capabilities = rec.get("capabilities") or build_hardware_capabilities(hw).to_dict()
+    lines.append(
+        "  backends    : %s (readiness is %s)"
+        % (
+            ", ".join(capabilities.get("backend_candidates") or ("cpu",)),
+            ", ".join(
+                "%s=%s" % item
+                for item in (capabilities.get("backend_readiness") or ())
+            ) or "unknown",
+        )
+    )
+    model_profile = rec.get("model_profile")
+    execution = rec.get("model_execution")
+    if not model_profile:
+        selected = rec.get("model") or DEFAULT_30B_MODEL
+        try:
+            params = params_from_model_tag(selected)
+            profile_kwargs = {"model": selected}
+            if params:
+                profile_kwargs.update(
+                    total_params_b=params[0], active_params_b=params[1],
+                )
+            model_profile = default_30b_profile(**profile_kwargs).to_dict()
+            execution = plan_model_execution(
+                build_hardware_capabilities(hw),
+                default_30b_profile(**profile_kwargs),
+            ).to_dict()
+        except ValueError:
+            model_profile, execution = {}, {}
+    if model_profile:
+        lines.append(
+            "  model profile: %s %s, ~%s GB required at ctx=%s"
+            % (
+                model_profile.get("model", DEFAULT_30B_MODEL),
+                model_profile.get("quantization", DEFAULT_30B_QUANTIZATION),
+                model_profile.get("required_gb", "?"),
+                model_profile.get("context_size", DEFAULT_30B_CONTEXT),
+            )
+        )
+    if execution:
+        lines.append(
+            "  30B plan    : %s via %s; gpu_layers=%s%s"
+            % (
+                execution.get("mode", "unknown"), execution.get("backend", "unknown"),
+                execution.get("gpu_layers", "auto"),
+                " (fallback=%s)" % execution.get("fallback_model")
+                if execution.get("mode") != "gpu-resident" else "",
+            )
+        )
+        for warning in execution.get("warnings") or ():
+            lines.append("  30B warning : %s" % warning)
     lines.append("")
     lines.append("Why")
     lines.append("---")
