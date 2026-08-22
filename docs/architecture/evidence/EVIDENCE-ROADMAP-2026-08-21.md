@@ -9,7 +9,7 @@ implementation cluster. It does not modify the master specification,
 - Remaining unproven formal rows: 42 — `CORE-001`–`CORE-010`,
   `ARCH-001`–`ARCH-013`, `COMPACT-001`–`COMPACT-005`, `EXT-001`–`EXT-007`,
   `SELFMOD-001`–`SELFMOD-006`, and `API-003`.
-- Formal ledger: 204 latest records, all `planned`; 0 `verified`.
+- Formal ledger: 204 latest records, all `implemented_unverified`; 0 `verified`.
 - Master checklist: 0 of 204 checked.
 - Existing scoped audit: 162 `PROVEN-CONTRACT`, 1 `PARTIAL` (`API-003`),
   0 `MISSING`; this is contract evidence, not formal completion evidence.
