@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 207,
+      "file_count": 208,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -160,6 +160,7 @@
         "sonder_runtime/adapters/observability/run_result_formatting.py",
         "sonder_runtime/adapters/observability/trace_buffer.py",
         "sonder_runtime/adapters/ollama/__init__.py",
+        "sonder_runtime/adapters/ollama/gateway.py",
         "sonder_runtime/adapters/ollama_lifecycle.py",
         "sonder_runtime/adapters/openai_compat/__init__.py",
         "sonder_runtime/adapters/operations_event_sink.py",
@@ -726,5 +727,161 @@
       ]
     }
   ],
+  "ownership": {
+    "records": [
+      {
+        "lifecycle": {
+          "name": "adapters.lifecycle",
+          "owner": "sonder_runtime.adapters"
+        },
+        "package": {
+          "name": "sonder_runtime.adapters"
+        },
+        "provider": {
+          "name": "adapters.providers",
+          "owner": "sonder_runtime.adapters"
+        },
+        "public_port": {
+          "name": "adapters.ports",
+          "owner": "sonder_runtime.adapters"
+        },
+        "schema": {
+          "name": "adapters.schemas",
+          "owner": "sonder_runtime.adapters"
+        },
+        "state": {
+          "name": "adapters.state",
+          "owner": "sonder_runtime.adapters"
+        }
+      },
+      {
+        "lifecycle": {
+          "name": "application.lifecycle",
+          "owner": "sonder_runtime.application"
+        },
+        "package": {
+          "name": "sonder_runtime.application"
+        },
+        "provider": {
+          "name": "application.providers",
+          "owner": "sonder_runtime.application"
+        },
+        "public_port": {
+          "name": "application.ports",
+          "owner": "sonder_runtime.application"
+        },
+        "schema": {
+          "name": "application.schemas",
+          "owner": "sonder_runtime.application"
+        },
+        "state": {
+          "name": "application.state",
+          "owner": "sonder_runtime.application"
+        }
+      },
+      {
+        "lifecycle": {
+          "name": "bootstrap.lifecycle",
+          "owner": "sonder_runtime.bootstrap"
+        },
+        "package": {
+          "name": "sonder_runtime.bootstrap"
+        },
+        "provider": {
+          "name": "bootstrap.providers",
+          "owner": "sonder_runtime.bootstrap"
+        },
+        "public_port": {
+          "name": "bootstrap.ports",
+          "owner": "sonder_runtime.bootstrap"
+        },
+        "schema": {
+          "name": "bootstrap.schemas",
+          "owner": "sonder_runtime.bootstrap"
+        },
+        "state": {
+          "name": "bootstrap.state",
+          "owner": "sonder_runtime.bootstrap"
+        }
+      },
+      {
+        "lifecycle": {
+          "name": "domain.lifecycle",
+          "owner": "sonder_runtime.domain"
+        },
+        "package": {
+          "name": "sonder_runtime.domain"
+        },
+        "provider": {
+          "name": "domain.providers",
+          "owner": "sonder_runtime.domain"
+        },
+        "public_port": {
+          "name": "domain.ports",
+          "owner": "sonder_runtime.domain"
+        },
+        "schema": {
+          "name": "domain.schemas",
+          "owner": "sonder_runtime.domain"
+        },
+        "state": {
+          "name": "domain.state",
+          "owner": "sonder_runtime.domain"
+        }
+      },
+      {
+        "lifecycle": {
+          "name": "interfaces.lifecycle",
+          "owner": "sonder_runtime.interfaces"
+        },
+        "package": {
+          "name": "sonder_runtime.interfaces"
+        },
+        "provider": {
+          "name": "interfaces.providers",
+          "owner": "sonder_runtime.interfaces"
+        },
+        "public_port": {
+          "name": "interfaces.ports",
+          "owner": "sonder_runtime.interfaces"
+        },
+        "schema": {
+          "name": "interfaces.schemas",
+          "owner": "sonder_runtime.interfaces"
+        },
+        "state": {
+          "name": "interfaces.state",
+          "owner": "sonder_runtime.interfaces"
+        }
+      },
+      {
+        "lifecycle": {
+          "name": "platform.lifecycle",
+          "owner": "sonder_runtime.platform"
+        },
+        "package": {
+          "name": "sonder_runtime.platform"
+        },
+        "provider": {
+          "name": "platform.providers",
+          "owner": "sonder_runtime.platform"
+        },
+        "public_port": {
+          "name": "platform.ports",
+          "owner": "sonder_runtime.platform"
+        },
+        "schema": {
+          "name": "platform.schemas",
+          "owner": "sonder_runtime.platform"
+        },
+        "state": {
+          "name": "platform.state",
+          "owner": "sonder_runtime.platform"
+        }
+      }
+    ],
+    "schema": "sonder-ownership-catalog-v1",
+    "source": "sonder_runtime.application.architecture.ownership_catalog.default_layer_ownership_catalog"
+  },
   "schema": "sonder-architecture-map-v1"
 }

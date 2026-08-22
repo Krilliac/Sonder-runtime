@@ -14,6 +14,7 @@ from sonder_runtime.application.architecture.ownership_catalog import (
     PublicPortOwnership,
     SchemaOwnership,
     StateOwnership,
+    default_layer_ownership_catalog,
 )
 
 
@@ -97,3 +98,21 @@ def test_catalog_entry_and_count_are_bounded():
         OwnershipCatalog((object(),))
     with pytest.raises(OwnershipValidationError, match="exceeds"):
         OwnershipCatalog(row(f"package-{index}", f"suffix-{index}") for index in range(513))
+
+
+def test_default_layer_catalog_is_complete_and_deterministic():
+    catalog = default_layer_ownership_catalog(("platform", "domain", "application"))
+
+    assert [row["package"]["name"] for row in catalog.snapshot()] == [
+        "sonder_runtime.application", "sonder_runtime.domain", "sonder_runtime.platform",
+    ]
+    assert catalog.snapshot()[0]["lifecycle"] == {
+        "name": "application.lifecycle", "owner": "sonder_runtime.application",
+    }
+
+
+def test_default_layer_catalog_rejects_duplicate_or_blank_names():
+    with pytest.raises(OwnershipValidationError, match="unique"):
+        default_layer_ownership_catalog(("domain", "domain"))
+    with pytest.raises(OwnershipValidationError, match="non-empty"):
+        default_layer_ownership_catalog(("domain", " "))

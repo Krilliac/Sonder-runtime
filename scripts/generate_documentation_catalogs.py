@@ -125,11 +125,22 @@ def _architecture_map() -> dict[str, Any]:
     for directory in sorted(path for path in PACKAGE.iterdir() if path.is_dir()):
         files = sorted(path.relative_to(ROOT).as_posix() for path in directory.rglob("*.py"))
         layers.append({"name": directory.name, "python_files": files, "file_count": len(files)})
+    ownership_module = importlib.import_module(
+        "sonder_runtime.application.architecture.ownership_catalog"
+    )
+    ownership = ownership_module.default_layer_ownership_catalog(
+        row["name"] for row in layers if row["name"] != "__pycache__"
+    )
     return {
         "schema": "sonder-architecture-map-v1",
         "authority": "docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md",
         "composition_roots": ["sonder_runtime/__main__.py", "sonder_runtime/bootstrap/", "sonder_runtime/interfaces/"],
         "layers": layers,
+        "ownership": {
+            "schema": "sonder-ownership-catalog-v1",
+            "source": "sonder_runtime.application.architecture.ownership_catalog.default_layer_ownership_catalog",
+            "records": ownership.snapshot(),
+        },
         "focused_contracts": [{"path": path, "summary": summary} for path, summary in FOCUSED_CONTRACTS],
         "historical_documents": list(HISTORICAL_DOCUMENTS),
     }
@@ -184,6 +195,15 @@ def _architecture_markdown(value: dict[str, Any]) -> str:
     lines = ["# Generated architecture map", "", "Generated; do not edit manually.", "", f"Authority: `{value['authority']}`", "", "## Package layers", "", "| Layer | Python files |", "|---|---:|"]
     lines += [f"| `{row['name']}` | {row['file_count']} |" for row in value["layers"]]
     lines += ["", "## Composition roots", ""] + [f"- `{item}`" for item in value["composition_roots"]]
+    lines += ["", "## Layer ownership", "", "| Package | State | Public port | Provider | Schema | Lifecycle |", "|---|---|---|---|---|---|"]
+    for row in value["ownership"]["records"]:
+        lines.append(
+            "| `{package}` | `{state}` | `{public_port}` | `{provider}` | `{schema}` | `{lifecycle}` |".format(
+                package=row["package"]["name"], state=row["state"]["name"],
+                public_port=row["public_port"]["name"], provider=row["provider"]["name"],
+                schema=row["schema"]["name"], lifecycle=row["lifecycle"]["name"],
+            )
+        )
     return "\n".join(lines) + "\n"
 
 

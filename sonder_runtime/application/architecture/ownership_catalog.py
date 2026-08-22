@@ -214,6 +214,37 @@ class OwnershipCatalog:
         return tuple(sorted(rows, key=lambda row: row["package"]["name"]))
 
 
+def default_layer_ownership_catalog(
+    layers: Iterable[str] = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap"),
+) -> OwnershipCatalog:
+    """Build the deterministic layer-level inventory used by generated maps.
+
+    This is intentionally a composition projection, not filesystem discovery:
+    callers supply the layer names from the authoritative package map and the
+    catalog supplies one complete ownership row for each.  Resource-level
+    ownership can be added later without changing the record shape.
+    """
+    names = tuple(layers)
+    if not names or any(not isinstance(name, str) or not name.strip() for name in names):
+        raise OwnershipValidationError("ownership layers must be non-empty names")
+    if len(set(names)) != len(names):
+        raise OwnershipValidationError("ownership layers must be unique")
+    records = []
+    for layer in sorted(name.strip() for name in names):
+        owner = f"sonder_runtime.{layer}"
+        records.append(
+            OwnershipRecord(
+                package=PackageOwnership(owner),
+                state=StateOwnership(f"{layer}.state", owner),
+                public_port=PublicPortOwnership(f"{layer}.ports", owner),
+                provider=ProviderOwnership(f"{layer}.providers", owner),
+                schema=SchemaOwnership(f"{layer}.schemas", owner),
+                lifecycle=LifecycleOwnership(f"{layer}.lifecycle", owner),
+            )
+        )
+    return OwnershipCatalog(records)
+
+
 __all__ = [
     "LifecycleOwnership",
     "OwnershipCatalog",
@@ -225,4 +256,5 @@ __all__ = [
     "PublicPortOwnership",
     "SchemaOwnership",
     "StateOwnership",
+    "default_layer_ownership_catalog",
 ]
