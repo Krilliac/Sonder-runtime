@@ -787,6 +787,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Settings'), findsOneWidget);
+    debugPrint(
+      'SETTINGS_TEXTS=${find.byType(Text).evaluate().map((element) => (element.widget as Text).data).whereType<String>().toList()}',
+    );
     expect(find.text('Runtime architecture'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
