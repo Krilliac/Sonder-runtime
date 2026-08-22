@@ -367,19 +367,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.maxWidth > 720
-              ? 720.0
-              : constraints.maxWidth;
-          return Align(
-            alignment: Alignment.topCenter,
-            child: SizedBox(
-              width: width,
-              height: constraints.maxHeight,
-              child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
-            children: [
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -656,11 +646,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             'only when you enable or invoke them.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
-              ],
-            ),
-          ),
-          );
-        },
+        ],
       ),
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.fromLTRB(20, 8, 20, 12),
