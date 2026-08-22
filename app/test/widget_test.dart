@@ -793,6 +793,13 @@ void main() {
       'all=${find.text('Runtime architecture', skipOffstage: false).evaluate().length} '
       'lists=${find.byType(ListView, skipOffstage: false).evaluate().length}',
     );
+    debugPrint(
+      find
+          .text('Runtime architecture', skipOffstage: false)
+          .evaluate()
+          .single
+          .toStringDeep(),
+    );
     expect(find.text('Runtime architecture'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
