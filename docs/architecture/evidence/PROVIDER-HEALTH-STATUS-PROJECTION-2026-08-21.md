@@ -12,6 +12,10 @@ The HTTP `/v1/sonder/status` administrator payload includes this projection;
 the existing restricted account payload remains unchanged and does not expose
 host-wide provider state.
 
+The same composition boundary now exposes cooperative provider cancellation.
+Resolution honors the published scoped override, forwards only the typed
+reason, and requires the provider to return a boolean activity result.
+
 ## Evidence
 
 Focused commands:
@@ -21,8 +25,9 @@ python -m pytest -q --basetemp .pytest-provider-health tests/production/test_com
 ```
 
 The composition test proves the live graph publishes the embedding provider
-through the stable redacted shape. The lifecycle tests continue to prove typed
-health and cleanup behavior.
+through the stable redacted shape and exposes its cancellation port. The
+lifecycle tests prove scoped cancellation resolution, typed health, and
+cleanup behavior.
 
 ## Limitations
 

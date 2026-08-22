@@ -263,9 +263,9 @@
     },
     {
       "checked": false,
-      "claim": "The live application graph publishes a redacted provider-health projection for the administrator operations status surface and fails closed to explicit unhealthy state when a typed health probe raises.",
+      "claim": "The live provider registry and application graph expose scoped cooperative cancellation alongside redacted health for published specialized providers.",
       "requirement_id": "ARCH-001",
-      "revision": 13,
+      "revision": 14,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "d483d1dd28bf979df8e8c5a93655840348793e10b74e4fd25a0bb70358a0e367",
+    "ledger_sha256": "102d7a5df183d3f376673079da522cfd88ffa3318e0146d7110d422bacc5e10c",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }

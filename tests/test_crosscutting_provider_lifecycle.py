@@ -81,3 +81,25 @@ def test_override_targets_are_validated_and_removed_with_provider():
         registry.publish_override(ScopedProviderOverride("scope", "base", "replacement"))
     registry.unregister("replacement")
     assert registry.resolve("base", ("scope",)).provider_id == "base"
+
+
+def test_cancellation_resolves_the_scoped_provider_and_returns_activity_state():
+    class Cancellable(FakeProvider):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.reasons = []
+
+        def cancel(self, *, reason="cancellation requested"):
+            self.reasons.append(reason)
+            return True
+
+    registry = ScopedProviderRegistry()
+    base = Cancellable("base", "chat")
+    replacement = Cancellable("replacement", "chat-replacement")
+    registry.register(base)
+    registry.register(replacement)
+    registry.publish_override(ScopedProviderOverride("scope", "base", "replacement"))
+
+    assert registry.cancel("base", reason="stop", scopes=("scope",)) is True
+    assert base.reasons == []
+    assert replacement.reasons == ["stop"]

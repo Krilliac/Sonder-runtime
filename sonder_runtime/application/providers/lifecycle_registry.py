@@ -156,6 +156,28 @@ class ScopedProviderRegistry:
     def health(self, provider_id: str, scopes: Sequence[str] | None = None) -> HealthReport:
         return self.resolve(provider_id, scopes).provider.health()
 
+    def cancel(
+        self, provider_id: str, *, reason: str = "cancellation requested",
+        scopes: Sequence[str] | None = None,
+    ) -> bool:
+        """Forward cooperative cancellation through the published provider.
+
+        Cancellation is deliberately an operation on the resolved provider,
+        not a registry mutation.  Scoped overrides therefore receive the same
+        lifecycle signal as health and capability resolution without exposing
+        provider internals to callers.
+        """
+        provider = self.resolve(provider_id, scopes).provider
+        cancel = getattr(provider, "cancel", None)
+        if not callable(cancel):
+            raise ProviderLifecycleError(
+                f"provider {provider_id!r} does not support cancellation"
+            )
+        result = cancel(reason=reason)
+        if not isinstance(result, bool):
+            raise ProviderLifecycleError("provider cancellation returned a non-boolean result")
+        return result
+
     def unregister(self, provider_id: str, timeout: float | None = None) -> ProviderRegistration:
         with self._lock:
             registration = self._providers.get(provider_id)

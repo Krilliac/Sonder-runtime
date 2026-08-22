@@ -128,6 +128,12 @@ def test_composition_root_exposes_redacted_provider_health_projection():
     assert all(row["status"] in {"healthy", "degraded", "unhealthy", "unknown"} for row in rows)
 
 
+def test_composition_root_exposes_cooperative_provider_cancellation():
+    application = bootstrap_app.build_application()
+
+    assert application.cancel_provider("embedding", reason="test stop") is False
+
+
 def test_composition_root_exposes_lazy_cached_durable_session_repository(
     tmp_path, monkeypatch
 ):

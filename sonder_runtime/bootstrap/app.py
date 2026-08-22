@@ -181,6 +181,12 @@ class Application:
                 })
         return tuple(rows)
 
+    def cancel_provider(
+        self, provider_id: str, *, reason: str = "cancellation requested",
+    ) -> bool:
+        """Request cooperative cancellation through the composed provider port."""
+        return self.provider_registry.cancel(provider_id, reason=reason)
+
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce and unpublish composed providers before process shutdown."""
         self.specialized_providers.close(timeout=timeout)
