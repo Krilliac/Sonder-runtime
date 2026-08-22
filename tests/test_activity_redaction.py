@@ -106,6 +106,18 @@ def test_agent_activity_json_encoded_argv_masks_secret_pairs():
     assert "script-secret" not in at._safe_command(script_raw)
 
 
+def test_agent_activity_deep_json_argv_falls_back_without_raising():
+    """Malformed/deep argv JSON must not abort activity recording."""
+    deep = "[" * 1100 + "0" + "]" * 1100
+
+    for tool_name, args in (
+        ("workspace_run", {"program": "python", "args_json": deep}),
+        ("script_run", {"path": "build.py", "args_json": deep}),
+    ):
+        raw = server._agent_activity_command(tool_name, args)
+        assert raw.startswith(("python ", "build.py "))
+
+
 def test_program_prefixed_json_argv_handles_a_bracket_in_the_program_path():
     secret = "bracketed-path-secret"
     out = at._safe_command(

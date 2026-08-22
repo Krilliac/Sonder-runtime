@@ -17702,9 +17702,16 @@ def _activity_argv(value):
     if isinstance(value, str):
         try:
             decoded = json.loads(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             decoded = value
         if isinstance(decoded, list):
+            try:
+                # json.loads can accept a nesting depth that json.dumps cannot
+                # serialize on the activity path.  Keep the original text so
+                # recording the failed tool call never raises from finally.
+                json.dumps(decoded, ensure_ascii=False)
+            except (TypeError, ValueError, RecursionError):
+                return value
             return decoded
     return value
 
