@@ -58,6 +58,11 @@ class _SystemScreenState extends State<SystemScreen>
   int _launcherActionEpoch = 0;
   String _ignoredLauncherOperationId = '';
   Timer? _pollTimer;
+  final _systemRuntimeKey = GlobalKey();
+  final _systemAutopilotKey = GlobalKey();
+  final _systemActivityKey = GlobalKey();
+  final _systemLearningKey = GlobalKey();
+  final _systemPolicyKey = GlobalKey();
 
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
@@ -79,6 +84,17 @@ class _SystemScreenState extends State<SystemScreen>
     _autopilotGoal.dispose();
     _pollTimer?.cancel();
     super.dispose();
+  }
+
+  void _scrollToSection(GlobalKey key) {
+    final target = key.currentContext;
+    if (target == null) return;
+    Scrollable.ensureVisible(
+      target,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+      alignment: 0.08,
+    );
   }
 
   @override
@@ -665,10 +681,24 @@ class _SystemScreenState extends State<SystemScreen>
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final wide = constraints.maxWidth >= 900;
+          final content = ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+          if (!wide)
+            _SystemCompactNav(
+              onSelect: _scrollToSection,
+              runtimeKey: _systemRuntimeKey,
+              autopilotKey: _systemAutopilotKey,
+              activityKey: _systemActivityKey,
+              learningKey: _systemLearningKey,
+              policyKey: _systemPolicyKey,
+            ),
+          if (!wide) const SizedBox(height: 12),
           _Section(
+            key: _systemRuntimeKey,
             title: 'Runtime architecture',
             child: Text(
               'Sonder Runtime is the orchestration layer, not a standalone '
@@ -941,6 +971,7 @@ class _SystemScreenState extends State<SystemScreen>
           ),
           const SizedBox(height: 12),
           _Section(
+            key: _systemAutopilotKey,
             title: 'Autopilot',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1063,6 +1094,7 @@ class _SystemScreenState extends State<SystemScreen>
           ),
           const SizedBox(height: 12),
           _Section(
+            key: _systemActivityKey,
             title: 'Server Actions',
             child: Wrap(
               spacing: 8,
@@ -1212,6 +1244,7 @@ class _SystemScreenState extends State<SystemScreen>
             const SizedBox(height: 12),
             if (info.runtimePolicy != null) ...[
               _Section(
+                key: _systemPolicyKey,
                 title: 'Local Runtime Policy',
                 child: _RuntimePolicyPanel(policy: info.runtimePolicy!),
               ),
@@ -1233,6 +1266,7 @@ class _SystemScreenState extends State<SystemScreen>
             ],
             if (info.learningHealth != null) ...[
               _Section(
+                key: _systemLearningKey,
                 title: 'Learning Quality',
                 child: _LearningHealthPanel(health: info.learningHealth!),
               ),
@@ -1351,7 +1385,23 @@ class _SystemScreenState extends State<SystemScreen>
             'exposing a remote shell.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
-        ],
+            ],
+          );
+          if (!wide) return content;
+          return Row(
+            children: [
+              _SystemRail(
+                onSelect: _scrollToSection,
+                runtimeKey: _systemRuntimeKey,
+                autopilotKey: _systemAutopilotKey,
+                activityKey: _systemActivityKey,
+                learningKey: _systemLearningKey,
+                policyKey: _systemPolicyKey,
+              ),
+              Expanded(child: content),
+            ],
+          );
+        },
       ),
     );
   }
@@ -2856,11 +2906,104 @@ class _StatusRow extends StatelessWidget {
   }
 }
 
+class _SystemRail extends StatelessWidget {
+  final ValueChanged<GlobalKey> onSelect;
+  final GlobalKey runtimeKey;
+  final GlobalKey autopilotKey;
+  final GlobalKey activityKey;
+  final GlobalKey learningKey;
+  final GlobalKey policyKey;
+
+  const _SystemRail({
+    required this.onSelect,
+    required this.runtimeKey,
+    required this.autopilotKey,
+    required this.activityKey,
+    required this.learningKey,
+    required this.policyKey,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final destinations = [
+      (label: 'Runtime', icon: Icons.tune_outlined, key: runtimeKey),
+      (label: 'Autopilot', icon: Icons.rocket_launch_outlined, key: autopilotKey),
+      (label: 'Activity', icon: Icons.timeline_outlined, key: activityKey),
+      (label: 'Learning', icon: Icons.school_outlined, key: learningKey),
+      (label: 'Policy', icon: Icons.security_outlined, key: policyKey),
+    ];
+    return NavigationRail(
+      key: const Key('system-section-rail'),
+      extended: MediaQuery.sizeOf(context).width >= 1200,
+      selectedIndex: null,
+      onDestinationSelected: (index) => onSelect(destinations[index].key),
+      labelType: NavigationRailLabelType.all,
+      destinations: [
+        for (final destination in destinations)
+          NavigationRailDestination(
+            icon: Icon(destination.icon),
+            label: Text(destination.label),
+          ),
+      ],
+    );
+  }
+}
+
+class _SystemCompactNav extends StatelessWidget {
+  final ValueChanged<GlobalKey> onSelect;
+  final GlobalKey runtimeKey;
+  final GlobalKey autopilotKey;
+  final GlobalKey activityKey;
+  final GlobalKey learningKey;
+  final GlobalKey policyKey;
+
+  const _SystemCompactNav({
+    required this.onSelect,
+    required this.runtimeKey,
+    required this.autopilotKey,
+    required this.activityKey,
+    required this.learningKey,
+    required this.policyKey,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final destinations = [
+      (label: 'Runtime', icon: Icons.tune_outlined, key: runtimeKey),
+      (label: 'Autopilot', icon: Icons.rocket_launch_outlined, key: autopilotKey),
+      (label: 'Activity', icon: Icons.timeline_outlined, key: activityKey),
+      (label: 'Learning', icon: Icons.school_outlined, key: learningKey),
+      (label: 'Policy', icon: Icons.security_outlined, key: policyKey),
+    ];
+    return Semantics(
+      container: true,
+      label: 'System sections',
+      child: SizedBox(
+        key: const Key('system-section-nav'),
+        height: 52,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: destinations.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          itemBuilder: (context, index) {
+            final destination = destinations[index];
+            return ActionChip(
+              avatar: Icon(destination.icon, size: 17),
+              label: Text(destination.label),
+              onPressed: () => onSelect(destination.key),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
 class _Section extends StatelessWidget {
   final String title;
   final Widget child;
 
-  const _Section({required this.title, required this.child});
+  const _Section({super.key, required this.title, required this.child});
 
   @override
   Widget build(BuildContext context) {
