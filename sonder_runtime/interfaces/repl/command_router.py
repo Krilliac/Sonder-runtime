@@ -92,7 +92,8 @@ def _web_search_action(match):
     arg = (match.group("arg") or "").strip()
     if re.search(
         r"\b(?:and|then)\s+(?:summarize|describe|explain|open|fetch|run|"
-        r"show|list|check|verify|validate)\b",
+        r"show|list|check|verify|validate|download|put|import|save|write|"
+        r"copy|move|tell)\b",
         arg,
         re.I,
     ):
