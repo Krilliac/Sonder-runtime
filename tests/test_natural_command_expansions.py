@@ -51,8 +51,8 @@ def test_read_only_argument_phrases_reach_the_matching_catalog_tool():
         "/checklist_show plan-123"
     assert cr.resolve("show evaluation history") == \
         "/evaluation_history_status"
-    assert cr.resolve("verify generated artifact report.json") == \
-        "/artifact_verify report.json"
+    assert cr.resolve("verify generated artifact pack report") == \
+        "/artifact_verify report"
     assert cr.resolve("check weather for Chicago") == "/weather Chicago"
     assert cr.resolve("show the workspace inventory") == "/inventory"
     assert cr.resolve("list the workspace tree") == "/tree"
@@ -76,7 +76,7 @@ def test_local_prompt_wrappers_preserve_the_complete_prompt():
     assert cr.resolve("run a local workbench agent on fix the failing tests") == \
         "/work fix the failing tests"
     assert cr.resolve("work on this task: inspect the failing test") == \
-        "/work inspect the failing test"
+        None
 
 
 def test_local_prompt_wrappers_require_a_prompt_and_explicit_lane():
@@ -84,3 +84,5 @@ def test_local_prompt_wrappers_require_a_prompt_and_explicit_lane():
     assert cr.resolve("offload to a local model") is None
     assert cr.resolve("work on this task") is None
     assert cr.resolve("ask several models to compare parser strategies") is None
+    assert cr.resolve("verify generated file report.json") is None
+    assert cr.resolve("check weather for Chicago and tell me what to wear") is None
