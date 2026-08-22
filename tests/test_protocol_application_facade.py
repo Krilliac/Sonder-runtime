@@ -97,3 +97,22 @@ def test_default_protocol_policy_rejects_stream_creation():
     protocol = ProtocolApplicationFacade.compose(catalogs)
     with pytest.raises(ProtocolAuthorizationError):
         protocol.open_stream("session-2", client_id="mobile-2")
+
+
+def test_authorized_host_can_close_stream_and_future_resume_is_rejected():
+    events = []
+    auth = Authorizer(True)
+    protocol, _ = facade(auth, events)
+    protocol.open_stream("session-2", client_id="mobile-2")
+    protocol.close_stream("session-2", client_id="mobile-2", reason="finished")
+
+    response = protocol.reconnect(
+        ReconnectRequest("mobile-2", protocol.schema.digest,
+                         (ResumeCursor("session-2", 0),))
+    )
+    assert not response.resumed
+    assert response.results[0].reason == "unknown stream"
+    assert events[-2] == {
+        "kind": "stream.closed", "stream_id": "session-2",
+        "client_id": "mobile-2", "reason": "finished",
+    }

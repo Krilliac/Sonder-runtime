@@ -107,6 +107,21 @@ class ProtocolApplicationFacade:
                     "client_id": client_id, "capacity": capacity})
         return stream
 
+    def close_stream(self, stream_id: str, *, client_id: str, reason: str = "closed") -> None:
+        """Close one host-owned stream and remove it from future resumes."""
+        if not isinstance(client_id, str) or not client_id.strip():
+            raise ProtocolAuthorizationError("client identity is required")
+        if self._authorization.authorize("protocol.stream.close", client_id) is not True:
+            raise ProtocolAuthorizationError("protocol stream closure is not authorized")
+        streams = self._graph.streams
+        if not isinstance(streams, dict):
+            raise ValueError("protocol stream registry is not mutable")
+        if stream_id not in streams:
+            raise ValueError("unknown protocol stream")
+        del streams[stream_id]
+        self._emit({"kind": "stream.closed", "stream_id": stream_id,
+                    "client_id": client_id, "reason": str(reason)[:256]})
+
     def reconnect(self, request: ReconnectRequest, *, client_id: str | None = None) -> ReconnectResponse:
         """Authorize and execute one bounded reconnect plan."""
         if not isinstance(request, ReconnectRequest):
