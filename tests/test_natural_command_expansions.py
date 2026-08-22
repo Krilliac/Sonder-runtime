@@ -1,6 +1,7 @@
 """Focused natural-language expansions for catalog commands with aliases."""
 
 import command_router as cr
+from sonder_runtime.adapters import command_catalog
 
 
 def test_read_only_catalog_phrases_choose_the_intended_tool():
@@ -98,3 +99,28 @@ def test_local_prompt_wrappers_require_a_prompt_and_explicit_lane():
     assert cr.resolve("inspect artifact risk report.bin and explain it") is None
     assert cr.resolve("probe local service https://example.com") is None
     assert cr.resolve("inspect process abc memory risk") is None
+
+
+def test_explicit_structured_catalog_calls_cover_canonical_commands():
+    for command in command_catalog.catalog():
+        required = [param for param in command.params if param.required]
+        if not required:
+            phrase = "use the %s command" % command.name.lstrip("/")
+            expected = command.name
+        elif len(required) == 1 and required[0].type == "str":
+            phrase = "use the %s tool with probe" % command.name.lstrip("/")
+            expected = "%s probe" % command.name
+        else:
+            args = " ".join("%s=probe" % param.name for param in required)
+            phrase = "use the %s tool with %s" % (
+                command.name.lstrip("/"), args,
+            )
+            expected = "%s %s" % (command.name, args)
+        assert cr.resolve(phrase) == expected, phrase
+
+
+def test_structured_catalog_calls_require_a_known_command_and_arguments():
+    assert cr.resolve("use the not_a_real_tool tool") is None
+    assert cr.resolve("use the artifact_risk_inspect tool") is None
+    assert cr.resolve("use the file_read tool with path=README.md") == \
+        "/file_read path=README.md"
