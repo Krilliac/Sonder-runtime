@@ -788,6 +788,11 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('Settings'), findsOneWidget);
+    debugPrint(
+      'SETTINGS_DEBUG default=${find.text('Runtime architecture').evaluate().length} '
+      'all=${find.text('Runtime architecture', skipOffstage: false).evaluate().length} '
+      'lists=${find.byType(ListView, skipOffstage: false).evaluate().length}',
+    );
     expect(find.text('Runtime architecture'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
