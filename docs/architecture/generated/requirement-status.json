@@ -263,9 +263,9 @@
     },
     {
       "checked": false,
-      "claim": "Provider lifecycle publication is composed into the live model/embedding path with fail-closed optional training and update lanes.",
+      "claim": "The live application graph publishes a redacted provider-health projection for the administrator operations status surface and fails closed to explicit unhealthy state when a typed health probe raises.",
       "requirement_id": "ARCH-001",
-      "revision": 12,
+      "revision": 13,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "5b6d5db27f518563ef6ac8fed9dda1b5795c1682a3b0d92a23d8046cf0bae609",
+    "ledger_sha256": "d483d1dd28bf979df8e8c5a93655840348793e10b74e4fd25a0bb70358a0e367",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }

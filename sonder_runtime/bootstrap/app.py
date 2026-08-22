@@ -158,6 +158,29 @@ class Application:
             for item in self.provider_registry.providers()
         )
 
+    def provider_health_data(self):
+        """Return a redacted operator projection of published provider health."""
+        rows = []
+        for item in self.provider_registry.providers():
+            try:
+                report = self.provider_registry.health(item.provider_id)
+                rows.append({
+                    "provider_id": report.provider_id,
+                    "status": report.status.value,
+                    "detail": report.detail,
+                    "checked_at": report.checked_at,
+                })
+            except Exception as exc:
+                # A health probe must never make the control-plane status
+                # endpoint disappear or imply readiness from an exception.
+                rows.append({
+                    "provider_id": item.provider_id,
+                    "status": "unhealthy",
+                    "detail": f"health probe failed: {type(exc).__name__}",
+                    "checked_at": "",
+                })
+        return tuple(rows)
+
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce and unpublish composed providers before process shutdown."""
         self.specialized_providers.close(timeout=timeout)

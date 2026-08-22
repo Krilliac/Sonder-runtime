@@ -4088,8 +4088,11 @@ class Handler(BaseHTTPRequestHandler):
             activity = server.activity_tracker.public_snapshot(
                 activity_source, include_detail=detail_allowed,
             )
+            from sonder_runtime.bootstrap.app import default_app
+            application = default_app()
             payload = {
                 "status": server.status(),
+                "providers": list(application.provider_health_data()),
                 "stats": server.sonder_stats(),
                 "learn_tiers": server.learn_tiers(),
                 "improvements": server.system_improvement_report(),

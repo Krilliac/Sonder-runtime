@@ -117,6 +117,17 @@ def test_composition_root_exposes_typed_web_provider():
     assert callable(application.web_provider.health)
 
 
+def test_composition_root_exposes_redacted_provider_health_projection():
+    application = bootstrap_app.build_application()
+
+    rows = application.provider_health_data()
+
+    assert rows
+    assert {row["provider_id"] for row in rows} >= {"embedding"}
+    assert all(set(row) == {"provider_id", "status", "detail", "checked_at"} for row in rows)
+    assert all(row["status"] in {"healthy", "degraded", "unhealthy", "unknown"} for row in rows)
+
+
 def test_composition_root_exposes_lazy_cached_durable_session_repository(
     tmp_path, monkeypatch
 ):
