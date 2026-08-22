@@ -51,9 +51,36 @@ def test_read_only_argument_phrases_reach_the_matching_catalog_tool():
         "/checklist_show plan-123"
     assert cr.resolve("show evaluation history") == \
         "/evaluation_history_status"
+    assert cr.resolve("verify generated artifact report.json") == \
+        "/artifact_verify report.json"
+    assert cr.resolve("check weather for Chicago") == "/weather Chicago"
+    assert cr.resolve("show the workspace inventory") == "/inventory"
+    assert cr.resolve("list the workspace tree") == "/tree"
 
 
 def test_argument_expansions_leave_follow_on_work_for_the_agent():
     assert cr.resolve("inspect image logo.png and describe the colors") is None
     assert cr.resolve("search the web for Sonder Runtime and summarize it") is None
     assert cr.resolve("discover tests in ./tests then run them") is None
+
+
+def test_local_prompt_wrappers_preserve_the_complete_prompt():
+    assert cr.resolve("ask several local models: compare parser strategies") == \
+        "/ensemble compare parser strategies"
+    assert cr.resolve("ask multiple local models to review this design") == \
+        "/ensemble review this design"
+    assert cr.resolve("offload to a local model: normalize this JSON") == \
+        "/offload normalize this JSON"
+    assert cr.resolve("offload this local task: draft a test matrix") == \
+        "/offload draft a test matrix"
+    assert cr.resolve("run a local workbench agent on fix the failing tests") == \
+        "/work fix the failing tests"
+    assert cr.resolve("work on this task: inspect the failing test") == \
+        "/work inspect the failing test"
+
+
+def test_local_prompt_wrappers_require_a_prompt_and_explicit_lane():
+    assert cr.resolve("ask several local models") is None
+    assert cr.resolve("offload to a local model") is None
+    assert cr.resolve("work on this task") is None
+    assert cr.resolve("ask several models to compare parser strategies") is None
