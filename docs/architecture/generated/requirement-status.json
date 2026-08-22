@@ -326,9 +326,9 @@
     },
     {
       "checked": false,
-      "claim": "Architecture enforcement checks are present and executable.",
+      "claim": "The architecture ratchet rejects reintroduced retired package paths while permitting only the exact reviewed Ollama compatibility shim during caller migration.",
       "requirement_id": "ARCH-010",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "8387572d4cab438f36090fbb362c685c4046f6f7b9167395aadb3407a3c9ca02",
+    "ledger_sha256": "3c06aea6e29048cb29cc1e4d3e6ab7c840ef5a15c2d9c8b82c5deba7310e4775",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
