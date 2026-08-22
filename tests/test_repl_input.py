@@ -372,6 +372,35 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     assert "/help" in text
 
 
+def test_startup_banner_surfaces_permission_mode_and_elevation(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "permission_mode_data", lambda: {
+        "mode": "acceptEdits",
+        "label": "Accept edits",
+        "blurb": "file changes proceed; programs still ask",
+        "elevated": True,
+        "elevationReason": "operator override",
+    })
+
+    text = sonder_repl._startup_banner(None, "coder", "default")
+
+    assert "mode" in text and "Accept edits" in text
+    assert "elevation" in text and "operator override" in text
+
+
+def test_startup_banner_omits_unknown_permission_state(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(
+        sonder_repl.server, "permission_mode_data",
+        lambda: (_ for _ in ()).throw(RuntimeError("not available")),
+    )
+
+    text = sonder_repl._startup_banner(None, "coder", "default")
+
+    assert "\n  mode:" not in text
+    assert "\n  elevation:" not in text
+
+
 def test_terminal_endpoint_link_is_clickable_without_affecting_layout(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
 
@@ -426,6 +455,35 @@ def test_composer_title_uses_live_tier_and_execution_status(monkeypatch):
     })
 
     assert title == "Sonder code (coder:14b)  [lanes 1 | agents 0]"
+
+
+def test_composer_title_surfaces_permission_mode_and_elevation(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    permission = {
+        "mode": "auto",
+        "label": "Auto",
+        "elevated": True,
+        "elevationReason": "operator override",
+    }
+    status = {"known": True, "running_lanes": 0, "running_agents": 0}
+
+    wide = sonder_repl._composer_title("code", status, permission=permission)
+    compact = sonder_repl._composer_title("code", status, width=80,
+                                           permission=permission)
+
+    assert "mode Auto  ELEVATED (operator override)" in wide
+    assert "M:auto" in compact and "E!" in compact
+
+
+def test_composer_title_compact_permission_mode_is_visible_after_pin(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    status = {"known": True, "running_lanes": 0, "running_agents": 0}
+    permission = {"mode": "acceptEdits", "label": "Accept edits"}
+
+    title = sonder_repl._composer_title("code", status, width=80,
+                                        permission=permission)
+
+    assert "M:edits" in title
 
 
 def test_composer_title_shows_approximate_context_and_last_turn_metrics(monkeypatch):
@@ -956,6 +1014,34 @@ def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
     sonder_repl.main()
 
     assert offered_history == [[], [], ["hello"]]
+
+
+def test_interactive_login_reads_password_outside_the_composer(monkeypatch):
+    lines = iter(("/login", "nate", "hello", "/exit"))
+    login = []
+
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(
+        sonder_repl.getpass,
+        "getpass",
+        lambda _prompt: "correct-horse-battery-staple",
+    )
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sonder_repl.server,
+        "admin_login",
+        lambda username, password: login.append((username, password)) or "logged in",
+    )
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+
+    sonder_repl.main()
+
+    assert login == [("nate", "correct-horse-battery-staple")]
 
 
 def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):

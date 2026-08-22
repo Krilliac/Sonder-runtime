@@ -37,6 +37,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _status;
   bool _statusOk = false;
   bool _testing = false;
+  bool _dirty = false;
+  late final List<TextEditingController> _trackedControllers;
 
   @override
   void initState() {
@@ -53,10 +55,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _allowHosted = widget.settings.allowHosted;
     _keepServerRunning = widget.settings.keepServerRunning;
     _allowApproximateLocation = widget.settings.allowApproximateLocation;
+    _trackedControllers = [
+      _server,
+      _key,
+      _model,
+      _contextSize,
+      _username,
+      _password,
+      _launcherUrl,
+      _launcherToken,
+    ];
+    for (final controller in _trackedControllers) {
+      controller.addListener(_markDirty);
+    }
   }
 
   @override
   void dispose() {
+    for (final controller in _trackedControllers) {
+      controller.removeListener(_markDirty);
+    }
     _server.dispose();
     _key.dispose();
     _model.dispose();
@@ -66,6 +84,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _launcherUrl.dispose();
     _launcherToken.dispose();
     super.dispose();
+  }
+
+  void _markDirty() {
+    if (mounted && !_dirty) setState(() => _dirty = true);
+  }
+
+  Future<bool> _confirmDiscard() async {
+    if (!_dirty || !mounted) return true;
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Discard unsaved settings?'),
+        content: const Text(
+          'Changes to connection, privacy, or appearance settings have not '
+          'been saved.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Keep editing'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Discard changes'),
+          ),
+        ],
+      ),
+    );
+    return discard == true;
+  }
+
+  Future<void> _leaveSettings() async {
+    if (!await _confirmDiscard() || !mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  void _changeBool(ValueChanged<bool> change, bool value) {
+    setState(() {
+      change(value);
+      _dirty = true;
+    });
   }
 
   Settings _current() => Settings(
@@ -256,6 +315,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     if (!mounted) return;
     widget.onChanged(s);
+    setState(() => _dirty = false);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Settings saved')),
     );
@@ -269,24 +329,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
         automaticallyImplyLeading: false,
         leading: IconButton(
           tooltip: 'Back to chat',
-          onPressed: () => Navigator.of(context).maybePop(),
+          onPressed: _leaveSettings,
           icon: const Icon(Icons.arrow_back),
         ),
-        title: const Text('Settings'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Settings'),
+            if (_dirty) ...[
+              const SizedBox(width: 8),
+              Semantics(
+                label: 'Unsaved changes',
+                child: Icon(
+                  Icons.circle,
+                  size: 9,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            ],
+          ],
+        ),
         actions: [
           Tooltip(
             message: 'Return to main chat',
             child: TextButton.icon(
-              onPressed: () => Navigator.of(context).maybePop(),
+                onPressed: _leaveSettings,
               icon: const Icon(Icons.chat_bubble_outline, size: 18),
               label: const Text('Chat'),
             ),
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
+      body: Column(
         children: [
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(20),
+              children: [
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -406,6 +485,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               border: OutlineInputBorder(),
             ),
           ),
+          Text(
+            'Privacy & autonomy',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 4),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('Allow hosted/cloud tiers'),
@@ -413,7 +497,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               'Opt-in only. Prompts sent to cloud tiers leave this machine.',
             ),
             value: _allowHosted,
-            onChanged: (v) => setState(() => _allowHosted = v),
+            onChanged: (v) => _changeBool((value) => _allowHosted = value, v),
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
@@ -423,7 +507,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               'should stop its local server on exit.',
             ),
             value: _keepServerRunning,
-            onChanged: (v) => setState(() => _keepServerRunning = v),
+            onChanged: (v) =>
+                _changeBool((value) => _keepServerRunning = value, v),
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
@@ -435,7 +520,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               'to Sonder Runtime, displayed, or retained.',
             ),
             value: _allowApproximateLocation,
-            onChanged: (v) => setState(() => _allowApproximateLocation = v),
+            onChanged: (v) => _changeBool(
+              (value) => _allowApproximateLocation = value,
+              v,
+            ),
           ),
           const Divider(height: 40),
           Text('Account', style: Theme.of(context).textTheme.titleMedium),
@@ -544,13 +632,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             contentPadding: EdgeInsets.zero,
             title: const Text('Dark mode'),
             value: _dark,
-            onChanged: (v) => setState(() => _dark = v),
-          ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: _save,
-            icon: const Icon(Icons.save_outlined),
-            label: const Text('Save'),
+            onChanged: (v) => _changeBool((value) => _dark = value, v),
           ),
           const SizedBox(height: 24),
           Text(
@@ -559,6 +641,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
             'web tools, and approximate location contact external services '
             'only when you enable or invoke them.',
             style: Theme.of(context).textTheme.bodySmall,
+          ),
+              ],
+            ),
+          ),
+          SafeArea(
+            minimum: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 720),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    key: const Key('settings-save'),
+                    onPressed: _dirty ? _save : null,
+                    icon: const Icon(Icons.save_outlined),
+                    label: const Text('Save'),
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
