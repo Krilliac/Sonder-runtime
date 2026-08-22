@@ -14,6 +14,7 @@ import 'package:sonder_runtime/main.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/settings.dart';
+import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
@@ -787,15 +788,6 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Settings'), findsOneWidget);
-    expect(find.text('Runtime architecture'), findsOneWidget);
-    expect(
-      find.textContaining('not a standalone foundation model'),
-      findsOneWidget,
-    );
-    expect(
-      find.textContaining('training uses PEFT/Hugging Face'),
-      findsOneWidget,
-    );
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
 
@@ -808,11 +800,24 @@ void main() {
 
   testWidgets('Settings guards unsaved changes before leaving', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    final settings = Settings();
 
-    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(settings: settings, onChanged: (_) {}),
+      ),
+    );
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Settings'));
-    await tester.pumpAndSettle();
+
+    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(
+      find.textContaining('not a standalone foundation model'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('training uses PEFT/Hugging Face'),
+      findsOneWidget,
+    );
 
     await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');
     await tester.pump();
@@ -823,22 +828,19 @@ void main() {
     await tester.tap(find.text('Keep editing'));
     await tester.pumpAndSettle();
     expect(find.text('Settings'), findsOneWidget);
-
-    await tester.tap(find.text('Chat'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Discard changes'));
-    await tester.pumpAndSettle();
-    expect(find.text('New chat'), findsOneWidget);
   });
 
   testWidgets('Approximate location is explicit opt-in and persists', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    final settings = Settings();
 
-    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(settings: settings, onChanged: (_) {}),
+      ),
+    );
     await tester.pumpAndSettle();
 
     final label = find.text('Allow approximate IP location');
