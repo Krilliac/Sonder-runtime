@@ -27,6 +27,10 @@ because they extract arguments the generic path cannot. The generic path is
 deliberately narrow -- see ``_catalog_match`` -- because its failure mode is
 hijacking a real coding question.
 
+An explicit structured form ("use the file_read tool with path=README.md")
+provides a natural-language bridge for every canonical catalog name without
+inventing a synonym or weakening the generic matcher's refusal behavior.
+
 Stdlib only.
 """
 import importlib
@@ -55,6 +59,13 @@ intents = _LazyService("sonder_runtime.adapters.content_services", "intents")
 project_scaffold = _LazyService("sonder_runtime.adapters.repl_services", "project_scaffold")
 
 _TIER_COMMANDS = {"consult", "route", "refactor"}
+_STRUCTURED_CALL_RE = re.compile(
+    r"^(?:use|call|invoke|run)\s+(?:the\s+)?"
+    r"(?P<name>/?[A-Za-z][A-Za-z0-9_-]*)\s+"
+    r"(?:tool|command)"
+    r"(?:\s+(?:with|using|for)\s+(?P<arg>\S.*))?\s*$",
+    re.I,
+)
 
 
 def _scaffold_action(match):
@@ -116,6 +127,24 @@ def _weather_action(match):
 
 def _rule(pattern, action):
     return (re.compile(pattern, re.I), action)
+
+
+def _structured_catalog_match(value):
+    """Resolve an explicitly named catalog command with a preserved argument."""
+    match = _STRUCTURED_CALL_RE.fullmatch(value)
+    if not match:
+        return None
+    name = "/" + (match.group("name") or "").lstrip("/")
+    command = command_catalog.by_name(name)
+    if command is None:
+        return None
+    arg = (match.group("arg") or "").strip()
+    required = [param for param in command.params if param.required]
+    if not arg and required:
+        return None
+    if arg:
+        return "%s %s" % (command.name, arg)
+    return command.name
 
 
 # Ordered; first match wins. Specific patterns precede looser ones. Each pattern
@@ -402,6 +431,8 @@ _RULES = [
           _fixed("/tool_manifest")),
     _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?tools\s*[?!.]*$",
           _fixed("/tool_manifest")),
+    _rule(r"^(?:show|check|inspect)\s+(?:the\s+)?(?:NPU|neural\s+processing\s+unit)"
+          r"(?:\s+status)?\s*[?!.]*$", _fixed("/npu_status")),
     _rule(r"^(?:show|list|inspect)\s+(?:the\s+)?workspace\s+inventory\s*[?!.]*$",
           _fixed("/inventory")),
     _rule(r"^(?:show|list|inspect)\s+(?:the\s+)?workspace\s+tree\s*[?!.]*$",
@@ -412,6 +443,19 @@ _RULES = [
     # path.  Keep the captured value to one contiguous token: it preserves
     # guarded path prefixes while avoiding a free-form prompt becoming a tool
     # argument by accident.
+    _rule(r"^(?:inspect|check|scan)\s+(?:the\s+)?artifact\s+risk"
+          r"(?:\s+(?:at|in))?\s+(?P<arg>\S+?)[?!.]*$",
+          _with_arg("/artifact_risk_inspect")),
+    _rule(r"^(?:verify|check)\s+(?:the\s+)?artifact\s+file"
+          r"(?:\s+(?:integrity|signature|manifest))?\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/verify_artifact")),
+    _rule(r"^(?:probe|check)\s+(?:the\s+)?local\s+service\s+"
+          r"(?P<arg>https?://(?:localhost|127\.0\.0\.1|\[::1\])"
+          r":\d{1,5}(?:[/?#]\S*)?)\s*[?!.]*$",
+          _with_arg("/local_service_probe")),
+    _rule(r"^(?:inspect|check)\s+(?:the\s+)?process\s+(?P<arg>\d+)"
+          r"\s+memory\s+risk\s*[?!.]*$",
+          _with_arg("/process_memory_risk_inspect")),
     _rule(r"^(?:inspect|check|show)\s+(?:the\s+)?image\s+(?P<arg>\S+)\s*[?!.]*$",
           _with_arg("/image_inspect")),
     _rule(r"^(?:inspect|preview|show)\s+(?:the\s+)?data\s+(?P<arg>\S+)\s*[?!.]*$",
@@ -910,6 +954,10 @@ def resolve(text):
     tier = intents.classify_command(value)
     if tier and tier.get("command") in _TIER_COMMANDS:
         return ("/%s %s" % (tier["command"], tier["arg"])).strip()
+
+    structured = _structured_catalog_match(value)
+    if structured:
+        return structured.strip()
 
     for pattern, action in _RULES:
         # A natural-language command must consume the whole turn. Prefix
