@@ -345,12 +345,21 @@ def check() -> list[str]:
             REPO_ROOT / str(retired).replace("/", "\\"),
             _repo_relative_path(REPO_ROOT, retired),
         )
-        present_path = next((path for path in retired_paths if path.is_file()), None)
-        if retired in tracked or present_path is not None:
-            if present_path is not None and is_approved_retired_shim(present_path):
+        present_paths = [path for path in retired_paths if path.is_file()]
+        if retired in tracked or present_paths:
+            non_shim_paths = [
+                path for path in present_paths
+                if not is_approved_retired_shim(path)
+            ]
+            if not non_shim_paths and present_paths:
                 continue
+            present_path = non_shim_paths[0] if non_shim_paths else None
+            display_path = (
+                present_path.relative_to(REPO_ROOT)
+                if present_path is not None else retired
+            )
             violations.append(
-                f"{retired}: retired root module was reintroduced"
+                f"{display_path}: retired root module was reintroduced"
             )
     unexpected_legacy = ROOT_LEGACY_MODULES - BASELINE_ROOT_LEGACY_MODULES
     if unexpected_legacy:

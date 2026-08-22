@@ -4307,7 +4307,11 @@ class Handler(BaseHTTPRequestHandler):
                 or not parts[0] or len(parts[0]) > 80):
             return False
         run_id, action = parts
-        runtime = _legacy_runtime()
+        # Use the injected compatibility namespace rather than reaching
+        # around it directly.  Besides keeping the route bound to the
+        # composition-time runtime, this preserves the established patch seam
+        # for callers that replace a single legacy operation in tests.
+        runtime = server
         if not context["authorized"]:
             self._send_auth_error()
             return True
