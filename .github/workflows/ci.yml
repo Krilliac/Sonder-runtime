@@ -32,4 +32,4 @@ jobs:
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json
       - name: Run test suite
-        run: python -m pytest -q
+        run: python -m pytest -q -n 2 --dist load --durations=20
