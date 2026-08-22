@@ -75,6 +75,28 @@ def test_legacy_adapter_maps_malformed_internal_calls_to_typed_failure():
     assert result.error_code == "KeyError"
 
 
+def test_inspection_adapter_uses_defaults_for_optional_directory_bounds(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname='probe'\n", encoding="utf-8")
+    context = local_owner_context(
+        correlation_id="optional-inspection-bounds",
+        workspace_roots=(tmp_path,),
+        auth_level="user",
+    )
+    adapter = InspectionExecutorAdapter()
+
+    detected = adapter.execute(
+        ToolCall(tool="project_detect", arguments={"path": str(root)}), context
+    )
+    digested = adapter.execute(
+        ToolCall(tool="directory_digest", arguments={"path": str(root)}), context
+    )
+
+    assert detected.ok is True
+    assert digested.ok is True
+
+
 def test_server_bridge_carries_authorization_roots_and_preserves_typed_text(
     monkeypatch, tmp_path
 ):
