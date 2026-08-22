@@ -211,7 +211,9 @@ def classify(status: int, body: str) -> str:
             return "model_fallthrough"
     if any(token in lowered for token in ("failed:", "not callable", "traceback")):
         return "handler_failure"
-    if lowered.startswith("refused ") or "permission" in lowered:
+    if (lowered.startswith("refused ") or lowered.startswith("permission denied")
+            or "permission gate refused" in lowered
+            or "caller is not allowed" in lowered):
         return "gated"
     return "handled"
 
