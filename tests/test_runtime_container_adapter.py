@@ -33,3 +33,11 @@ def test_runtime_container_selects_openai_compatible_gateway():
     runtime = build_runtime(_config("openai-compatible"), RuntimeCapabilities())
     assert isinstance(runtime, Runtime)
     assert runtime.model_gateway.__class__.__name__ == "OpenAICompatibleGateway"
+
+
+def test_runtime_container_derives_protocol_schema_from_the_tool_catalog():
+    runtime = build_runtime(_config(), RuntimeCapabilities())
+
+    assert runtime.protocol is not None
+    assert runtime.protocol.schema.source_catalog_digest == runtime.tools.catalogs.digest
+    assert runtime.protocol.schema.stream["kind"] == "snapshot-plus-events"

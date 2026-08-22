@@ -16,6 +16,7 @@ from ..application.model_gateway import ModelGatewayFacade
 from ..application.execution.facade import ExecutionApplicationFacade
 from ..application.ports.tool_registry import InMemoryToolRegistry
 from ..application.tools.facade import ToolApplicationFacade
+from ..application.protocol.facade import ProtocolApplicationFacade
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class Runtime:
     context_planning: ContextPlanningFacade | None = None
     execution: ExecutionApplicationFacade | None = None
     tools: ToolApplicationFacade | None = None
+    protocol: ProtocolApplicationFacade | None = None
 
     @property
     def model_gateway_facade(self) -> ModelGatewayFacade:
@@ -60,6 +62,10 @@ def build_runtime(
     # adapters.  Its policy and executor defaults remain fail-closed.
     execution = ExecutionApplicationFacade.local()
     tools = ToolApplicationFacade.compose(InMemoryToolRegistry())
+    # Derive the portable client/SDK schema from the same tool catalog.  No
+    # live streams are invented here: hosts add authorized stream instances
+    # through the protocol facade when they own a reconnectable session.
+    protocol = ProtocolApplicationFacade.compose(tools.catalogs)
 
     agent_registry: UnifiedAgentRegistryService | None = None
 
@@ -81,4 +87,5 @@ def build_runtime(
         context_planning=ContextPlanningFacade(),
         execution=execution,
         tools=tools,
+        protocol=protocol,
     )
