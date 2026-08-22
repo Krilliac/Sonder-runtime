@@ -20,4 +20,12 @@ def test_one_word_required_arguments_preserve_path_like_tokens():
     assert cr.resolve("get weather in Chicago") == "/weather Chicago"
     assert cr.resolve("inspect artifactcheck report.json") == \
         "/artifactcheck report.json"
+    assert cr.resolve("inspect artifactcheck /tmp/report.json") == \
+        "/artifactcheck /tmp/report.json"
+    assert cr.resolve("inspect artifactcheck ./report.json") == \
+        "/artifactcheck ./report.json"
+    assert cr.resolve("inspect artifactcheck ../report.json") == \
+        "/artifactcheck ../report.json"
+    assert cr.resolve("inspect artifactcheck ~/report.json") == \
+        "/artifactcheck ~/report.json"
     assert cr.resolve("inspect artifactcheck report.json and summarize it") is None

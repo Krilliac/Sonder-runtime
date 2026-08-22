@@ -664,10 +664,14 @@ def _single_word_argument(value, matched):
             suffix = parts[1].strip() if len(parts) == 2 else ""
         if not suffix:
             return None
-        raw = token_re.findall(suffix)
-        if len(raw) != 1 or raw[0].lower() in {"and", "then"}:
+        argument = re.fullmatch(
+            r"(?:~[\\/]|\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/])?"
+            r"[A-Za-z0-9_.:/\\-]+",
+            suffix,
+        )
+        if not argument or argument.group(0).lower() in {"and", "then"}:
             return None
-        return raw[0]
+        return argument.group(0)
     return None
 
 
