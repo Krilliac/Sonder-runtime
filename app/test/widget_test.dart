@@ -787,6 +787,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Settings'), findsOneWidget);
+    debugDumpApp();
     expect(find.text('Runtime architecture'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
