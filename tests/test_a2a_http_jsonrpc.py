@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     build_application_a2a_handler,
@@ -140,6 +142,11 @@ def test_default_application_handler_admits_bounded_text_message_as_durable_task
     second = handler("SendMessage", params)["task"]
     assert first["status"]["state"] == "TASK_STATE_COMPLETED"
     assert first["artifacts"][0]["parts"][0]["text"] == "hello from Sonder"
+    assert first["artifacts"][0]["lastChunk"] is True
+    assert first["artifacts"][0]["metadata"] == {
+        "mimeType": "text/plain",
+        "sha256": hashlib.sha256(b"hello from Sonder").hexdigest(),
+    }
     assert second == first
     assert len(application.jobs.records) == 1
 

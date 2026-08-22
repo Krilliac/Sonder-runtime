@@ -87,9 +87,16 @@ def build_application_a2a_handler(
         }
         result = getattr(record, "result", None)
         if isinstance(result, Mapping) and isinstance(result.get("response_text"), str):
+            response_text = result["response_text"]
+            digest = hashlib.sha256(response_text.encode("utf-8")).hexdigest()
             task["artifacts"] = [{
                 "artifactId": f"{identity.job_id}-response",
-                "parts": [{"text": result["response_text"]}],
+                "parts": [{"text": response_text}],
+                "lastChunk": True,
+                "metadata": {
+                    "mimeType": "text/plain",
+                    "sha256": digest,
+                },
             }]
         return task
 
