@@ -59,6 +59,8 @@ def test_read_only_argument_phrases_reach_the_matching_catalog_tool():
     assert cr.resolve("list the workspace tree") == "/tree"
     assert cr.resolve("inspect artifact risk at report.bin") == \
         "/artifact_risk_inspect report.bin"
+    assert cr.resolve("inspect artifact risk report.bin?") == \
+        "/artifact_risk_inspect report.bin"
     assert cr.resolve("check artifact file integrity report.json") == \
         "/verify_artifact report.json"
     assert cr.resolve("show NPU status") == "/npu_status"
@@ -98,6 +100,9 @@ def test_local_prompt_wrappers_require_a_prompt_and_explicit_lane():
     assert cr.resolve("check weather for Chicago and tell me what to wear") is None
     assert cr.resolve("inspect artifact risk report.bin and explain it") is None
     assert cr.resolve("probe local service https://example.com") is None
+    assert cr.resolve("probe local service http://localhost.evil:11435/health") is None
+    assert cr.resolve("probe local service http://127.0.0.1@evil.example:11435/health") is None
+    assert cr.resolve("probe local service http://127.0.0.1/health") is None
     assert cr.resolve("inspect process abc memory risk") is None
 
 
