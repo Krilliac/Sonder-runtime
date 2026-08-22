@@ -161,6 +161,7 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("workspace_compare.py"),
     Path("sonder_runtime/adapters/strangler_services.py"),
     Path("sonder_runtime/adapters/legacy_model_gateway.py"),
+    Path("sonder_runtime/adapters/ollama/gateway.py"),
     Path("sonder_runtime/adapters/openai_compat/gateway.py"),
     Path("sonder_runtime/adapters/ollama/endpoint.py"),
     Path("text_patch.py"),
@@ -170,6 +171,34 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("process_risk.py"),
     Path("live_reload.py"),
 })
+
+# A retired package path may remain as a deliberately tiny import shim while
+# downstream callers finish moving to the canonical adapter.  The shim is
+# allowlisted by exact normalized source, so a reintroduced implementation (or
+# a file that merely happens to use the same path) still trips the ratchet.
+APPROVED_RETIRED_SHIMS = {
+    Path("sonder_runtime/adapters/ollama/gateway.py"): (
+        '"""Compatibility import for the canonical Ollama gateway adapter."""\n\n'
+        "from ..inference.ollama_gateway import OllamaGateway\n\n"
+        '__all__ = ["OllamaGateway"]\n'
+    ),
+}
+
+
+def is_approved_retired_shim(path: Path) -> bool:
+    """Return whether a retired package path is its exact reviewed shim."""
+    try:
+        key = path.relative_to(REPO_ROOT)
+    except ValueError:
+        key = path
+    expected = APPROVED_RETIRED_SHIMS.get(key)
+    if expected is None or not path.is_file():
+        return False
+    try:
+        actual = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    except OSError:
+        return False
+    return actual == expected
 
 # Applied migrations are immutable historical artifacts. They may retain an
 # import that production code has since moved behind a compatibility adapter;
@@ -301,6 +330,8 @@ def check() -> list[str]:
     }
     for retired in sorted(RETIRED_ROOT_MODULES, key=Path.as_posix):
         if retired in tracked:
+            if is_approved_retired_shim(REPO_ROOT / retired):
+                continue
             violations.append(
                 f"{retired}: retired root module was reintroduced"
             )
