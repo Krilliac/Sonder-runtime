@@ -9,6 +9,7 @@ from sonder_runtime.bootstrap.native_mcp import native_tool_registry, run_native
 from sonder_runtime.application.protocol.mcp_compatibility import SubscriptionNotificationRouter
 from sonder_runtime.interfaces.mcp.transport import StdioMcpTransport
 from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
+from sonder_runtime.adapters.inspection import content_digest
 
 
 class _Executor:
@@ -16,6 +17,25 @@ class _Executor:
         from sonder_runtime.application.ports.tool_executor import ToolResult
         assert context.source == "mcp"
         return ToolResult(ok=True, output=call.tool + ":ok", evidence={"tool": call.tool})
+
+
+def test_bounded_digest_fits_standard_mcp_frame_after_json_duplication():
+    data = {
+        "manifest": [
+            {"path": "雪-%04d.txt" % index, "bytes": 1, "sha256": "a" * 64}
+            for index in range(2_000)
+        ],
+        "errors": [], "complete": True, "truncated": False,
+        "truncation_reasons": [],
+    }
+    rendered = content_digest.format_digest(data, max_output_bytes=48_000)
+    structured = {"output": rendered, "isError": False, "error": None, "evidence": {}}
+    frame = {
+        "jsonrpc": "2.0", "id": 1,
+        "result": StdioMcpTransport._standard_tool_result(structured),
+    }
+
+    assert len(json.dumps(frame, separators=(",", ":"), ensure_ascii=True).encode()) <= 256_000
 
 
 def _app():

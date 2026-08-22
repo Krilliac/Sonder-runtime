@@ -77,6 +77,14 @@ def test_format_digest_bounds_rendered_manifest_without_invalid_json():
     assert len(parsed["manifest"]) < len(data["manifest"])
 
 
+def test_format_digest_rejects_cap_smaller_than_metadata_envelope():
+    with pytest.raises(ValueError, match="too small"):
+        content_digest.format_digest(
+            {"manifest": [], "errors": [], "complete": True},
+            max_output_bytes=10,
+        )
+
+
 def test_file_and_directory_digests_change_after_mutation(project):
     target = project / "state.dat"
     target.write_bytes(b"before")
