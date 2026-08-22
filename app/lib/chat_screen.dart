@@ -1296,6 +1296,7 @@ class _StatusMetricView extends StatelessWidget {
     final textTheme = Theme.of(context).textTheme;
     final cs = Theme.of(context).colorScheme;
     return Semantics(
+      key: ValueKey('status-metric-${metric.label.toLowerCase()}'),
       label: '${metric.label}: ${metric.value}',
       child: Row(
         mainAxisSize: MainAxisSize.min,
