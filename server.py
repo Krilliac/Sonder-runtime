@@ -17691,6 +17691,31 @@ def _agent_dispatch(
     return "ERROR: unknown tool '%s'." % tool_name
 
 
+def _activity_argv(value):
+    """Normalize JSON-encoded argv before the activity renderer sees it.
+
+    ``workspace_run`` and ``script_run`` accept ``args_json`` as a string.
+    Serializing that string again would turn a secret-bearing argv into a
+    JSON string literal, preventing the activity redactor from recognizing
+    flag/value pairs as separate argv items.
+    """
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, RecursionError):
+            decoded = value
+        if isinstance(decoded, list):
+            try:
+                # json.loads can accept a nesting depth that json.dumps cannot
+                # serialize on the activity path.  Keep the original text so
+                # recording the failed tool call never raises from finally.
+                json.dumps(decoded, ensure_ascii=False)
+            except (TypeError, ValueError, RecursionError):
+                return value
+            return decoded
+    return value
+
+
 def _agent_activity_command(tool_name, args):
     args = args if isinstance(args, dict) else {}
     if tool_name == "file_batch_write":
@@ -17708,12 +17733,18 @@ def _agent_activity_command(tool_name, args):
     if tool_name == "workspace_run":
         return "%s %s" % (
             args.get("program", ""),
-            json.dumps(args.get("args_json", args.get("args", [])), ensure_ascii=False),
+            json.dumps(
+                _activity_argv(args.get("args_json", args.get("args", []))),
+                ensure_ascii=False,
+            ),
         )
     if tool_name == "script_run":
         return "%s %s" % (
             args.get("path", ""),
-            json.dumps(args.get("args_json", args.get("args", [])), ensure_ascii=False),
+            json.dumps(
+                _activity_argv(args.get("args_json", args.get("args", []))),
+                ensure_ascii=False,
+            ),
         )
     if tool_name in {"file_copy", "file_move"}:
         return "%s -> %s" % (
