@@ -854,6 +854,8 @@ void main() {
     );
     expect(tester.widget<SwitchListTile>(tile).value, isFalse);
 
+    await tester.ensureVisible(tile);
+    await tester.pumpAndSettle();
     await tester.tap(tile);
     await tester.pump();
     expect(tester.widget<SwitchListTile>(tile).value, isTrue);
