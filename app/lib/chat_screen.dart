@@ -1405,7 +1405,8 @@ class _LiveStatusBar extends StatelessWidget {
         : '${agentInfo.tokensIn}/${agentInfo.tokensOut}';
     final turnText = responseInfo == null
         ? null
-        : '+${responseInfo.linesAdded} −${responseInfo.linesDeleted} · '
+        : '+${responseInfo.linesAdded} ~${responseInfo.linesEdited} '
+            '−${responseInfo.linesDeleted} · '
             '$turnTokens tok';
     final segments = <_StatusMetric>[
       _StatusMetric('Context', contextText),
