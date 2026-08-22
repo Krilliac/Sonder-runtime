@@ -135,8 +135,9 @@ def test_composition_root_exposes_cooperative_provider_cancellation():
 
 
 def test_composition_root_publishes_attended_training_and_update_lanes():
+    from sonder_runtime.application.context import local_owner_context
     from sonder_runtime.application.ports.specialized_lifecycle import (
-        ActivationResult, DeploymentResult,
+        ActivationRequest, ActivationResult, DeploymentResult, TrainingRequest,
     )
 
     class Training:
@@ -163,9 +164,31 @@ def test_composition_root_publishes_attended_training_and_update_lanes():
         assert {row.provider_id for row in application.provider_health()} == {
             "embedding", "training", "update",
         }
+        context = local_owner_context(correlation_id="composition-specialized")
+        deployment = application.train_provider(
+            TrainingRequest("run-1", "base-model", "rev-1", "d" * 64), context,
+        )
+        assert deployment.provider_id == "training"
+        activation = application.activate_provider(
+            ActivationRequest("activation-1", "release-1", "1.0.0", "a" * 64), context,
+        )
+        assert activation.provider_id == "update"
         assert application.cancel_provider("training", reason="operator stop") is False
     finally:
         application.close_providers(timeout=1)
+
+
+def test_composition_root_specialized_operations_fail_closed_when_lane_is_absent():
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.specialized_lifecycle import TrainingRequest
+    from sonder_runtime.application.providers import ProviderLifecycleError
+
+    application = bootstrap_app.build_application()
+    with pytest.raises(ProviderLifecycleError, match="unknown provider"):
+        application.train_provider(
+            TrainingRequest("run-1", "base-model", "rev-1", "d" * 64),
+            local_owner_context(correlation_id="composition-absent"),
+        )
 
 
 def test_composition_root_exposes_lazy_cached_durable_session_repository(

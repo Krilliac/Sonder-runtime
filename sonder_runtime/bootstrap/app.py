@@ -8,7 +8,7 @@ no hardware, and contacts no services; construction happens inside
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import importlib
 import os
@@ -79,9 +79,16 @@ from ..application.ports.preferences import (
 from ..application.ports.clock import Clock
 from ..application.ports.event_sink import EventSink
 from ..application.ports.model_gateway import ModelGateway
+from ..application.ports.specialized_lifecycle import (
+    ActivationRequest,
+    ActivationResult,
+    DeploymentResult,
+    TrainingRequest,
+)
 from ..application.provider_overrides import ProviderOverrideService
 from ..application.providers import (
     EmbeddingLifecycleAdapter,
+    ProviderLifecycleError,
     ScopedProviderRegistry,
     SpecializedProviderBundle,
     TrainingLifecycleAdapter,
@@ -100,6 +107,7 @@ from ..application.runtime_policy.use_cases import RuntimePolicyService
 from ..application.workflows.use_cases import WorkflowService
 from ..application.context_integration import ContextPlanningFacade
 from ..application.control_plane import ControlPlaneSnapshotService
+from ..application.context import OperationContext
 from ..platform.config import SonderConfig
 from ..platform import paths as runtime_paths
 from ..adapters.inference import ollama_endpoint
@@ -186,6 +194,46 @@ class Application:
     ) -> bool:
         """Request cooperative cancellation through the composed provider port."""
         return self.provider_registry.cancel(provider_id, reason=reason)
+
+    def train_provider(
+        self,
+        request: TrainingRequest,
+        context: OperationContext,
+        *,
+        provider_id: str = "training",
+        scopes: Sequence[str] | None = None,
+    ) -> DeploymentResult:
+        """Run an attended training operation through the provider boundary."""
+        provider = self.provider_registry.resolve(provider_id, scopes).provider
+        operation = getattr(provider, "train", None)
+        if not callable(operation):
+            raise ProviderLifecycleError(
+                f"provider {provider_id!r} does not support training"
+            )
+        result = operation(request, context)
+        if not isinstance(result, DeploymentResult):
+            raise ProviderLifecycleError("training provider returned an invalid result")
+        return result
+
+    def activate_provider(
+        self,
+        request: ActivationRequest,
+        context: OperationContext,
+        *,
+        provider_id: str = "update",
+        scopes: Sequence[str] | None = None,
+    ) -> ActivationResult:
+        """Activate a verified release through the provider boundary."""
+        provider = self.provider_registry.resolve(provider_id, scopes).provider
+        operation = getattr(provider, "activate", None)
+        if not callable(operation):
+            raise ProviderLifecycleError(
+                f"provider {provider_id!r} does not support activation"
+            )
+        result = operation(request, context)
+        if not isinstance(result, ActivationResult):
+            raise ProviderLifecycleError("update provider returned an invalid result")
+        return result
 
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce and unpublish composed providers before process shutdown."""

@@ -26,30 +26,33 @@ fail-closed.
   boundary.
 - The production composition test also injects attended training and update
   backends, verifies all three published provider health rows, exercises the
-  cooperative cancellation boundary, and closes the bundle through the live
-  `Application` graph.
+  cooperative cancellation boundary, invokes both typed operation entrypoints,
+  and closes the bundle through the live `Application` graph.
+- `Application.train_provider()` and `Application.activate_provider()` resolve
+  the requested scoped provider, reject missing capabilities through the typed
+  registry error, and expose only `TrainingRequest`/`DeploymentResult` and
+  `ActivationRequest`/`ActivationResult` at the application boundary. Backend
+  classes do not cross this seam.
 - The live Ollama model gateway consumes the typed embedding provider when the
   composition root supplies one; legacy module-shaped embedding providers remain
   compatible.
 
 ## Verification
 
-Focused provider/lifecycle suite:
+Focused provider/lifecycle and composition suite:
 
-    python -m pytest tests/test_remaining_specialized_providers.py tests/test_crosscutting_provider_lifecycle.py -q
+    python -m pytest tests/production/test_composition_root.py tests/test_remaining_specialized_providers.py tests/test_crosscutting_provider_lifecycle.py -q
 
-Result: 11 passed.
-
-The composition-root suite could not be collected in this workspace because an
-unrelated pre-existing import mismatch references `JobRecoveryReport` from
-`sonder_runtime.application.jobs.durable_registry`, where that symbol is not
-present. No session/job implementation files were changed to work around it.
+Result: 33 passed.
 
 ## Limitations
 
 - No concrete default training backend or update activator is selected; both
   remain explicit injection seams and are absent by default. The injected live
   composition path is covered by `tests/production/test_composition_root.py`.
+- The application entrypoints require already-composed provider-neutral
+  requests and an explicit `OperationContext`; they do not manufacture
+  authorization, consent, or backend credentials.
 - Provider health is exposed on the typed `Application` object and projected
   into the administrator `/v1/sonder/status` payload; ordinary account status
   remains restricted from host-wide provider details.
