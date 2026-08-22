@@ -530,6 +530,37 @@ class Command:
         }
 
 
+# Native console branches predate the MCP schema registry, but several still
+# have a real positional contract.  Publishing that contract keeps /help,
+# completion, the HTTP catalog, and bounded probes from advertising a bare
+# command that can only answer with a usage error.  These are syntax-only
+# descriptions; the branch remains the authority for validation and policy.
+_NATIVE_PARAM_SPECS = {
+    "/artifactcheck": (
+        Param("path", "str", True), Param("recipe", "str", False, "auto"),
+    ),
+    "/asset": (
+        Param("name", "str", True), Param("brief", "str", True),
+    ),
+    "/weather": (Param("location", "str", True),),
+    "/ensemble": (Param("question", "str", True),),
+    "/work": (Param("prompt", "str", True),),
+    "/agentcancel": (Param("agent_id", "str", True),),
+    "/agentretry": (
+        Param("agent_id", "str", True), Param("tier", "str", False, ""),
+    ),
+    "/capacity": (Param("requested_agents", "int", False, 0),),
+    # The branch parses `language dimension name | concept` as one command
+    # line, so a single named field documents the actual free-form grammar.
+    "/game": (Param("spec", "str", True),),
+    "/gamefleet": (Param("spec", "str", True),),
+}
+
+
+def _native_params(name: str) -> tuple:
+    return _NATIVE_PARAM_SPECS.get(name, ())
+
+
 # --- derivation -----------------------------------------------------------
 
 
@@ -1287,6 +1318,9 @@ def catalog() -> tuple[CatalogCommand, ...]:
             category = _LEGACY_CATEGORY.get(raw, raw)
         if category not in CATEGORIES:
             category = _category_for(tool or stem)
+        schema_params = _params_from_schema(getattr(row, "parameters", {})) if row else ()
+        if not schema_params:
+            schema_params = _native_params(canonical)
         commands.append(Command(
             name=canonical,
             aliases=aliases,
@@ -1301,7 +1335,7 @@ def catalog() -> tuple[CatalogCommand, ...]:
             # before falling back to the registry.
             risk=_native_risk(group, tool, hit, server, tools_by_name),
             summary=_summarize(getattr(row, "description", "")) if row else "",
-            params=_params_from_schema(getattr(row, "parameters", {})) if row else (),
+            params=schema_params,
             native=True,
         ))
         claimed.update(group)

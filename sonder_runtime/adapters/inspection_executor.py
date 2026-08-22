@@ -9,6 +9,13 @@ from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
 
 
+# Native MCP includes rendered output in both content[].text and
+# structuredContent, then escapes it again in the JSON-RPC frame. Keep enough
+# headroom for that duplication and non-ASCII filenames under the 256 KiB
+# transport frame limit.
+_MCP_DIGEST_OUTPUT_BYTES = 48_000
+
+
 def _packaged_module(name: str):
     """Resolve an inspection implementation owned by the packaged adapter."""
     return importlib.import_module(
@@ -245,12 +252,17 @@ class InspectionExecutorAdapter:
                 args["path"], **options,
                 extra_roots=_authorized_roots(context) if _authorized(context) else "",
             )
+            output = content_digest.format_digest(
+                data, max_output_bytes=_MCP_DIGEST_OUTPUT_BYTES,
+            )
+            rendered_data = json.loads(output)
+            complete = bool(rendered_data.get("complete", data["complete"]))
             summary = "%d file(s), %d byte(s)%s" % (
-                len(data["manifest"]), data["bytes"],
-                " complete" if data["complete"] else " incomplete",
+                len(rendered_data.get("manifest") or []), rendered_data.get("bytes", 0),
+                " complete" if complete else " incomplete",
             )
             return _result(
-                output=content_digest.format_digest(data), ok=data["complete"],
+                output=output, ok=complete,
                 summary=summary, audit_args=audit_args,
                 activity={"summary": summary, "path": data["root"]},
             )

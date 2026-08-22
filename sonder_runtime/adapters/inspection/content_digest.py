@@ -407,8 +407,49 @@ def digest_directory(
     return result
 
 
-def format_digest(data: dict) -> str:
-    rendered = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+def format_digest(data: dict, max_output_bytes: int | None = None) -> str:
+    """Render a digest with an optional protocol-safe output bound."""
+    def render(value: dict) -> str:
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
+    rendered = render(data)
+    if max_output_bytes is not None:
+        if isinstance(max_output_bytes, bool) or max_output_bytes <= 0:
+            raise ValueError("max_output_bytes must be a positive integer")
+        if len(rendered.encode("utf-8", errors="backslashreplace")) > max_output_bytes:
+            bounded = dict(data)
+            bounded["complete"] = False
+            bounded["truncated"] = True
+            reasons = list(bounded.get("truncation_reasons") or [])
+            if "max_output_bytes" not in reasons:
+                reasons.append("max_output_bytes")
+            bounded["truncation_reasons"] = reasons
+            manifest = list(bounded.get("manifest") or [])
+            errors = list(bounded.get("errors") or [])
+            total_entries = len(manifest) + len(errors)
+
+            def candidate(count: int) -> dict:
+                # Keep a deterministic prefix while retaining the fixed
+                # metadata envelope. Binary search avoids serializing the
+                # full manifest once per discarded row.
+                bounded["manifest"] = manifest[:min(len(manifest), count)]
+                bounded["errors"] = errors[:max(0, count - len(manifest))]
+                return bounded
+
+            empty = candidate(0)
+            if len(render(empty).encode("utf-8", errors="backslashreplace")) > max_output_bytes:
+                raise ValueError("max_output_bytes is too small for digest metadata")
+            low, high = 0, total_entries
+            while low < high:
+                midpoint = (low + high + 1) // 2
+                value = candidate(midpoint)
+                if len(render(value).encode("utf-8", errors="backslashreplace")) <= max_output_bytes:
+                    low = midpoint
+                else:
+                    high = midpoint - 1
+            rendered = render(candidate(low))
+            if len(rendered.encode("utf-8", errors="backslashreplace")) > max_output_bytes:
+                raise ValueError("max_output_bytes cannot contain digest output")
     # Preserve ordinary Unicode for humans while escaping POSIX surrogateescape
     # code points into valid, transport-safe JSON sequences.
     return rendered.encode("utf-8", errors="backslashreplace").decode("utf-8")
