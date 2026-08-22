@@ -256,9 +256,9 @@
     },
     {
       "checked": false,
-      "claim": "Client schema generation is composed from the catalog through the protocol facade.",
+      "claim": "The explicit runtime composition root exposes a protocol application facade whose client schema is bound to the same generated tool catalog and canonical snapshot-plus-events stream contract.",
       "requirement_id": "API-008",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "102d7a5df183d3f376673079da522cfd88ffa3318e0146d7110d422bacc5e10c",
+    "ledger_sha256": "c58ebed9638bd9c79cab3d40a50d32971bae8e29df2db547bac9db9a9ed215f6",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
