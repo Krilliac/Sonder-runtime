@@ -28,7 +28,10 @@ def _unique_paths(paths) -> tuple[Path, ...]:
         candidate = (
             path if isinstance(path, Path) else Path(path)
         ).expanduser().resolve(strict=False)
-        key = os.path.normcase(str(candidate))
+        key = (
+            str(candidate).casefold()
+            if os.name == "nt" else os.path.normcase(str(candidate))
+        )
         if key not in seen:
             seen.add(key)
             result.append(candidate)

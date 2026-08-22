@@ -1222,12 +1222,14 @@ def _bearer_token(auth_header):
 
 def _auth_account(auth_header):
     token = _bearer_token(auth_header)
-    if not token or (API_KEY and hmac.compare_digest(token, API_KEY)):
+    if not token:
         return None
     return server._admin_account_from_token(token)
 
 
 def _effective_auth_mode():
+    if REQUIRE_ACCOUNT and not API_KEY and AUTH_MODE in ("local-open", "api-key"):
+        return "account"
     if AUTH_MODE == "local-open":
         if API_KEY:
             return "api-key"

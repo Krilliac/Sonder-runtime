@@ -491,6 +491,10 @@ def test_emergency_recovery_preflights_every_backup_before_mutating(isolated):
     second_backup = Path(manifest["files"][1]["backup_path"])
     corrupted = bytearray(second_backup.read_bytes())
     corrupted[0] ^= 0x01
+    # The production backup bundle is deliberately sealed read-only.  This
+    # test is explicitly simulating tampering, so reopen only this fixture
+    # member before writing the corrupt bytes.
+    os.chmod(second_backup, 0o600)
     second_backup.write_bytes(corrupted)  # preserve size; digest is the failure
 
     with pytest.raises(RuntimeError, match="backup checksum failed"):

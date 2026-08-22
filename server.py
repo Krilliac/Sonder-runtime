@@ -1806,7 +1806,7 @@ def _serve_target(tier, strict):
         return resolve_sonder_model(strict_eff), False, True, "sonder"
     if t in TIERS:
         model = TIERS[t]
-        if _is_cloud_tier(t, model) and not cloud_allowed():
+        if _is_cloud_tier(t, model) and not _cloud_allowed_policy(os.environ):
             return None, True, False, "cloud-disabled"
         return model, _is_cloud_tier(t, model), t == "code", t
     # A caller may name an installed/discovered model directly.  Exact catalog
@@ -1824,7 +1824,7 @@ def _serve_target(tier, strict):
         if _fanout_nonchat_reason(record):
             return None, False, False, None
         cloud = _is_cloud_model_name(model)
-        if cloud and not cloud_allowed():
+        if cloud and not _cloud_allowed_policy(os.environ):
             return None, True, False, "cloud-disabled"
         return model, cloud, False, "model:%s" % model
     return None, False, True, None
