@@ -1232,6 +1232,7 @@ class _LiveStatusBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final contextInfo = info?.context;
+    final agentInfo = info?.agents;
     final activityInfo = info?.activity;
     final responseInfo = activityInfo?.displayResponse;
     final contextText = contextInfo == null
@@ -1239,10 +1240,13 @@ class _LiveStatusBar extends StatelessWidget {
         : '${contextInfo.contextPercent.toStringAsFixed(1)}% · '
             '${contextInfo.nativeContextLimit} native';
     final routeText = model.trim().isEmpty ? '—' : model;
+    final turnTokens = agentInfo == null
+        ? '—'
+        : '${agentInfo.tokensIn}/${agentInfo.tokensOut}';
     final turnText = responseInfo == null
         ? null
         : '+${responseInfo.linesAdded} −${responseInfo.linesDeleted} · '
-            '${responseInfo.tokensIn}/${responseInfo.tokensOut} tok';
+            '$turnTokens tok';
     final segments = <_StatusMetric>[
       _StatusMetric('Context', contextText),
       _StatusMetric('Activity', info?.executionSummary ?? '—'),
