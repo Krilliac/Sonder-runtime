@@ -32,71 +32,103 @@ void main() {
     expect(find.byType(TextField), findsOneWidget);
   });
 
+  testWidgets('Desktop chat layout keeps the conversation rail visible', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+
+    // Wide windows get a persistent rail instead of hiding chat navigation
+    // behind the mobile drawer gesture.
+    expect(find.textContaining('Local-first workspace'), findsOneWidget);
+    expect(find.text('Chats'), findsOneWidget);
+  });
+
   testWidgets(
-      'Commands browser opens on categories and searches the whole catalog',
-      (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1200, 900));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    SharedPreferences.setMockInitialValues(<String, Object>{});
+    'Commands browser opens on categories and searches the whole catalog',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Commands'));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Commands'));
+      await tester.pumpAndSettle();
 
-    // No server in a widget test, so this is the offline fallback catalog --
-    // and it says so rather than passing a short list off as the real surface.
-    expect(find.byKey(const Key('command-browser')), findsOneWidget);
-    expect(find.byKey(const Key('command-browser-categories')), findsOneWidget);
-    expect(find.byKey(const Key('command-category-quick')), findsOneWidget);
-    expect(find.textContaining('Server catalog unavailable'), findsOneWidget);
+      // No server in a widget test, so this is the offline fallback catalog --
+      // and it says so rather than passing a short list off as the real surface.
+      expect(find.byKey(const Key('command-browser')), findsOneWidget);
+      expect(
+        find.byKey(const Key('command-browser-categories')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('command-category-quick')), findsOneWidget);
+      expect(find.textContaining('Server catalog unavailable'), findsOneWidget);
 
-    // Search cuts across every category, not just the open one.
-    await tester.enterText(
-        find.byKey(const Key('command-browser-search')), 'asset');
-    await tester.pumpAndSettle();
+      // Search cuts across every category, not just the open one.
+      await tester.enterText(
+        find.byKey(const Key('command-browser-search')),
+        'asset',
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.textContaining('/asset office-suite'), findsOneWidget);
-    expect(find.textContaining('/asset media-suite'), findsOneWidget);
-    expect(find.textContaining('/asset rigged-character'), findsOneWidget);
-    expect(find.text('Generate a grounded editable media kit'), findsOneWidget);
-    expect(find.text('Generate a grounded animated humanoid character'),
-        findsOneWidget);
-  });
+      expect(find.textContaining('/asset office-suite'), findsOneWidget);
+      expect(find.textContaining('/asset media-suite'), findsOneWidget);
+      expect(find.textContaining('/asset rigged-character'), findsOneWidget);
+      expect(
+        find.text('Generate a grounded editable media kit'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Generate a grounded animated humanoid character'),
+        findsOneWidget,
+      );
+    },
+  );
 
-  testWidgets('Commands browser drills into a category and fills the composer',
-      (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1200, 900));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    SharedPreferences.setMockInitialValues(<String, Object>{});
+  testWidgets(
+    'Commands browser drills into a category and fills the composer',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Commands'));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Commands'));
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const Key('command-category-quick')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('command-category-quick')));
+      await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('command-browser-commands')), findsOneWidget);
-    expect(find.byKey(const Key('command-browser-categories')), findsNothing);
+      expect(find.byKey(const Key('command-browser-commands')), findsOneWidget);
+      expect(find.byKey(const Key('command-browser-categories')), findsNothing);
 
-    // Scoped to the dialog: the empty state behind it also offers "/stats".
-    await tester.tap(find.descendant(
-      of: find.byKey(const Key('command-browser')),
-      matching: find.text('/stats'),
-    ));
-    await tester.pumpAndSettle();
+      // Scoped to the dialog: the empty state behind it also offers "/stats".
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const Key('command-browser')),
+          matching: find.text('/stats'),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    // Picking loads the command into the composer rather than sending it,
-    // because most commands still need arguments typed.
-    expect(find.byKey(const Key('command-browser')), findsNothing);
-    final field = tester.widget<TextField>(find.byType(TextField));
-    expect(field.controller!.text, '/stats ');
-  });
+      // Picking loads the command into the composer rather than sending it,
+      // because most commands still need arguments typed.
+      expect(find.byKey(const Key('command-browser')), findsNothing);
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller!.text, '/stats ');
+    },
+  );
 
-  testWidgets('Typing "/" browses popular commands, more characters narrow',
-      (tester) async {
+  testWidgets('Typing "/" browses popular commands, more characters narrow', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -107,9 +139,9 @@ void main() {
     // The empty state also offers a "/stats" chip, so every palette
     // assertion is scoped to the palette itself.
     Finder inPalette(Finder matching) => find.descendant(
-          of: find.byKey(const Key('command-palette')),
-          matching: matching,
-        );
+      of: find.byKey(const Key('command-palette')),
+      matching: matching,
+    );
 
     await tester.enterText(find.byType(TextField), '/');
     await tester.pumpAndSettle();
@@ -140,8 +172,9 @@ void main() {
     expect(inPalette(find.text('/privacy')), findsOneWidget);
   });
 
-  testWidgets('Palette keeps arrow/Enter selection and shows usage lines',
-      (tester) async {
+  testWidgets('Palette keeps arrow/Enter selection and shows usage lines', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -172,8 +205,9 @@ void main() {
     expect(find.textContaining('/asset office-suite DOCX'), findsOneWidget);
   });
 
-  testWidgets('Palette prefers the server catalog when one is reachable',
-      (tester) async {
+  testWidgets('Palette prefers the server catalog when one is reachable', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     final client = MockClient((request) async {
       if (request.url.path == '/v1/commands') {
@@ -219,8 +253,9 @@ void main() {
     }, () => client);
   });
 
-  testWidgets('System always has an explicit return to main chat',
-      (tester) async {
+  testWidgets('System always has an explicit return to main chat', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
@@ -231,10 +266,14 @@ void main() {
 
     expect(find.text('System'), findsOneWidget);
     expect(find.text('Runtime architecture'), findsOneWidget);
-    expect(find.textContaining('not a standalone foundation model'),
-        findsOneWidget);
-    expect(find.textContaining('training runs through PEFT/Hugging Face'),
-        findsOneWidget);
+    expect(
+      find.textContaining('not a standalone foundation model'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('training runs through PEFT/Hugging Face'),
+      findsOneWidget,
+    );
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
 
@@ -245,8 +284,9 @@ void main() {
     expect(find.text('New chat'), findsOneWidget);
   });
 
-  testWidgets('System exposes persistent autopilot goal controls',
-      (tester) async {
+  testWidgets('System exposes persistent autopilot goal controls', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
@@ -385,7 +425,9 @@ void main() {
     expect(find.text('fast  qwen2.5:3b'), findsOneWidget);
     expect(find.text('review  general'), findsOneWidget);
     expect(
-        find.textContaining('/runtime set workbench=general'), findsOneWidget);
+      find.textContaining('/runtime set workbench=general'),
+      findsOneWidget,
+    );
 
     await tester.scrollUntilVisible(
       find.byKey(const Key('mcp-runtime-panel')),
@@ -418,8 +460,9 @@ void main() {
 
     if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
-        final boundary = captureKey.currentContext!.findRenderObject()!
-            as RenderRepaintBoundary;
+        final boundary =
+            captureKey.currentContext!.findRenderObject()!
+                as RenderRepaintBoundary;
         final image = await boundary.toImage(pixelRatio: 1);
         final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
         final output = File('build/ui-smoke-runtime-policy.png');
@@ -430,8 +473,9 @@ void main() {
     }
   });
 
-  testWidgets('System shows caller-judged work, never the blended rate alone',
-      (tester) async {
+  testWidgets('System shows caller-judged work, never the blended rate alone', (
+    tester,
+  ) async {
     // The blend is dominated by autograded outcomes -- the runtime marking its
     // own curriculum. On the real store it reads 96% where caller-judged work
     // succeeds 53% of the time, and this screen is what a non-CLI user looks
@@ -502,8 +546,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('System learning quality surfaces hygiene warnings',
-      (tester) async {
+  testWidgets('System learning quality surfaces hygiene warnings', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final info = SystemInfo.fromJson({
@@ -562,8 +607,9 @@ void main() {
     expect(find.textContaining('1 privacy flags'), findsOneWidget);
   });
 
-  testWidgets('Completed autopilot run renders its persisted ledger',
-      (tester) async {
+  testWidgets('Completed autopilot run renders its persisted ledger', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1280, 1800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final info = SystemInfo.fromJson({
@@ -578,8 +624,7 @@ void main() {
         'total_listed': 1,
         'latest': {
           'id': 'auto-885ca53e8ef6',
-          'objective':
-              'Inspect the autonomous controller and verify its completion gates.',
+          'objective': 'Inspect the autonomous controller and verify its completion gates.',
           'project': 'sonder',
           'tier': 'code',
           'policy': 'observe',
@@ -635,7 +680,7 @@ void main() {
           {
             'event_id': 3,
             'kind': 'completed',
-            'message': 'evidence gates passed'
+            'message': 'evidence gates passed',
           },
         ],
       },
@@ -687,8 +732,9 @@ void main() {
 
     if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
-        final boundary = captureKey.currentContext!.findRenderObject()!
-            as RenderRepaintBoundary;
+        final boundary =
+            captureKey.currentContext!.findRenderObject()!
+                as RenderRepaintBoundary;
         final image = await boundary.toImage(pixelRatio: 1);
         final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
         final output = File('build/ui-smoke-autopilot.png');
@@ -699,8 +745,9 @@ void main() {
     }
   });
 
-  testWidgets('Settings always has an explicit return to main chat',
-      (tester) async {
+  testWidgets('Settings always has an explicit return to main chat', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
@@ -711,10 +758,14 @@ void main() {
 
     expect(find.text('Settings'), findsOneWidget);
     expect(find.text('Runtime architecture'), findsOneWidget);
-    expect(find.textContaining('not a standalone foundation model'),
-        findsOneWidget);
-    expect(find.textContaining('training uses PEFT/Hugging Face'),
-        findsOneWidget);
+    expect(
+      find.textContaining('not a standalone foundation model'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('training uses PEFT/Hugging Face'),
+      findsOneWidget,
+    );
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
 
@@ -725,8 +776,9 @@ void main() {
     expect(find.text('New chat'), findsOneWidget);
   });
 
-  testWidgets('Approximate location is explicit opt-in and persists',
-      (tester) async {
+  testWidgets('Approximate location is explicit opt-in and persists', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
     await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
@@ -761,39 +813,42 @@ void main() {
   });
 
   testWidgets(
-      'Assistant messages render markdown and collapse activity evidence',
-      (tester) async {
-    final now = DateTime(2026, 7, 10);
-    final thread = ChatThread(
-      id: 'markdown-test',
-      title: 'Rendered response',
-      project: 'ui',
-      createdAt: now,
-      updatedAt: now,
-      messages: const [
-        ChatMessage(role: Role.user, content: 'show formatting'),
-        ChatMessage(
-          role: Role.assistant,
-          content: '**Bold answer**\n\n```python\nprint("ok")\n```\n\n'
-              '=== ACTIVITY (observable work) ===\ntool calls: 1\n=== END ACTIVITY ===',
-        ),
-      ],
-    );
-    SharedPreferences.setMockInitialValues(<String, Object>{
-      'sonder_chat_threads_v1': jsonEncode([thread.toJson()]),
-    });
+    'Assistant messages render markdown and collapse activity evidence',
+    (tester) async {
+      final now = DateTime(2026, 7, 10);
+      final thread = ChatThread(
+        id: 'markdown-test',
+        title: 'Rendered response',
+        project: 'ui',
+        createdAt: now,
+        updatedAt: now,
+        messages: const [
+          ChatMessage(role: Role.user, content: 'show formatting'),
+          ChatMessage(
+            role: Role.assistant,
+            content:
+                '**Bold answer**\n\n```python\nprint("ok")\n```\n\n'
+                '=== ACTIVITY (observable work) ===\ntool calls: 1\n=== END ACTIVITY ===',
+          ),
+        ],
+      );
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'sonder_chat_threads_v1': jsonEncode([thread.toJson()]),
+      });
 
-    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
 
-    expect(find.byType(MarkdownBody), findsOneWidget);
-    expect(find.text('Bold answer'), findsOneWidget);
-    expect(find.text('Activity evidence'), findsOneWidget);
-    expect(find.textContaining('**Bold answer**'), findsNothing);
-  });
+      expect(find.byType(MarkdownBody), findsOneWidget);
+      expect(find.text('Bold answer'), findsOneWidget);
+      expect(find.text('Activity evidence'), findsOneWidget);
+      expect(find.textContaining('**Bold answer**'), findsNothing);
+    },
+  );
 
-  testWidgets('Workbench activity panel renders checklist and exact actions',
-      (tester) async {
+  testWidgets('Workbench activity panel renders checklist and exact actions', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final response = ActivityResponse.fromJson({
@@ -825,17 +880,19 @@ void main() {
       },
     });
 
-    await tester.pumpWidget(MaterialApp(
-      theme: ThemeData.dark(useMaterial3: true),
-      home: Scaffold(
-        body: SingleChildScrollView(
-          child: WorkbenchActivityPanel(
-            response: response,
-            totalToolCalls: 7,
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: WorkbenchActivityPanel(
+              response: response,
+              totalToolCalls: 7,
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Build demo'), findsOneWidget);
@@ -845,8 +902,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Live execution feed bounds rows and shows unknown or offline',
-      (tester) async {
+  testWidgets('Live execution feed bounds rows and shows unknown or offline', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(900, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final events = List<Map<String, dynamic>>.generate(
@@ -926,30 +984,30 @@ void main() {
       'events': const [],
     });
 
-    await tester.pumpWidget(MaterialApp(
-      theme: ThemeData.dark(useMaterial3: true),
-      home: Scaffold(
-        body: SingleChildScrollView(
-          child: Column(
-            children: [
-              LiveExecutionFeed(feed: feed),
-              const LiveExecutionFeed(feed: null),
-              LiveExecutionFeed(feed: unknown),
-              LiveExecutionFeed(feed: noDetails),
-              LiveExecutionFeed(feed: errored),
-              LiveExecutionFeed(feed: feed, offline: true),
-            ],
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: Column(
+              children: [
+                LiveExecutionFeed(feed: feed),
+                const LiveExecutionFeed(feed: null),
+                LiveExecutionFeed(feed: unknown),
+                LiveExecutionFeed(feed: noDetails),
+                LiveExecutionFeed(feed: errored),
+                LiveExecutionFeed(feed: feed, offline: true),
+              ],
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
 
     final primaryFeed = find.byType(LiveExecutionFeed).first;
-    Finder inPrimary(Finder matching) => find.descendant(
-          of: primaryFeed,
-          matching: matching,
-        );
+    Finder inPrimary(Finder matching) =>
+        find.descendant(of: primaryFeed, matching: matching);
     expect(find.text('bounded event 0'), findsNothing);
     expect(find.text('bounded event 1'), findsNothing);
     // SelectableText owns both a visible Text and an internal EditableText;
@@ -972,23 +1030,24 @@ void main() {
     expect(find.textContaining('private-value'), findsNothing);
     expect(find.byType(SelectableText), findsWidgets);
     expect(find.text('Unavailable'), findsNWidgets(2));
-    expect(find.text('The runtime reported an execution feed error.'),
-        findsOneWidget);
+    expect(
+      find.text('The runtime reported an execution feed error.'),
+      findsOneWidget,
+    );
     expect(find.text('Details disabled'), findsOneWidget);
     expect(find.text('Unknown'), findsOneWidget);
     expect(find.text('Offline'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('System keeps one return affordance and no stacked tooltip',
-      (tester) async {
+  testWidgets('System keeps one return affordance and no stacked tooltip', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(
-      MaterialApp(
-        home: SystemScreen(settings: Settings(), liveUpdates: false),
-      ),
+      MaterialApp(home: SystemScreen(settings: Settings(), liveUpdates: false)),
     );
     await tester.pumpAndSettle();
 
@@ -1001,15 +1060,14 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('System start control is idle until an action runs',
-      (tester) async {
+  testWidgets('System start control is idle until an action runs', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(
-      MaterialApp(
-        home: SystemScreen(settings: Settings(), liveUpdates: false),
-      ),
+      MaterialApp(home: SystemScreen(settings: Settings(), liveUpdates: false)),
     );
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
@@ -1026,8 +1084,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Permission mode chip is visible at the composer and switches',
-      (tester) async {
+  testWidgets('Permission mode chip is visible at the composer and switches', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -1053,8 +1112,10 @@ void main() {
       // composer before anything is typed.
       final chip = find.byKey(const Key('permission-mode-chip'));
       expect(chip, findsOneWidget);
-      expect(find.descendant(of: chip, matching: find.text('manual')),
-          findsOneWidget);
+      expect(
+        find.descendant(of: chip, matching: find.text('manual')),
+        findsOneWidget,
+      );
 
       await tester.tap(chip);
       await tester.pumpAndSettle();
@@ -1078,14 +1139,17 @@ void main() {
       // reported back, not what was optimistically requested.
       expect(posted, ['plan']);
       expect(find.byKey(const Key('permission-mode-picker')), findsNothing);
-      expect(find.descendant(of: chip, matching: find.text('plan')),
-          findsOneWidget);
+      expect(
+        find.descendant(of: chip, matching: find.text('plan')),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
     }, () => client);
   });
 
-  testWidgets('Elevation renders as its own badge, never as the mode label',
-      (tester) async {
+  testWidgets('Elevation renders as its own badge, never as the mode label', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -1095,11 +1159,13 @@ void main() {
         return http.Response('{}', 503);
       }
       return http.Response(
-        jsonEncode(_permissionModeBody(
-          'auto',
-          elevated: true,
-          elevationReason: 'installing a driver',
-        )),
+        jsonEncode(
+          _permissionModeBody(
+            'auto',
+            elevated: true,
+            elevationReason: 'installing a driver',
+          ),
+        ),
         200,
       );
     });
@@ -1116,10 +1182,14 @@ void main() {
       // Two axes, two widgets: the badge is outside the mode chip, and the
       // chip's label is the mode alone -- no "auto +admin" hybrid.
       expect(find.descendant(of: chip, matching: badge), findsNothing);
-      expect(find.descendant(of: badge, matching: find.text('ADMIN')),
-          findsOneWidget);
+      expect(
+        find.descendant(of: badge, matching: find.text('ADMIN')),
+        findsOneWidget,
+      );
       final labels = tester
-          .widgetList<Text>(find.descendant(of: chip, matching: find.byType(Text)))
+          .widgetList<Text>(
+            find.descendant(of: chip, matching: find.byType(Text)),
+          )
           .map((t) => t.data)
           .toList();
       expect(labels, ['auto']);
@@ -1127,8 +1197,9 @@ void main() {
     }, () => client);
   });
 
-  testWidgets('Chip stays hidden on a server without the mode route',
-      (tester) async {
+  testWidgets('Chip stays hidden on a server without the mode route', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -1189,8 +1260,7 @@ Map<String, dynamic> _permissionModeBody(
     'plan': 'reads only - no writes, no commands',
     'manual': 'ask before anything that is not a read',
     'acceptEdits': 'file changes proceed; running programs still asks',
-    'auto':
-        'file changes and programs proceed; destructive still asks at the console',
+    'auto': 'file changes and programs proceed; destructive still asks at the console',
   };
   const labels = <String, String>{
     'plan': 'plan',
@@ -1206,11 +1276,7 @@ Map<String, dynamic> _permissionModeBody(
     'elevationReason': elevationReason,
     'modes': [
       for (final entry in blurbs.entries)
-        {
-          'name': entry.key,
-          'label': labels[entry.key],
-          'blurb': entry.value,
-        },
+        {'name': entry.key, 'label': labels[entry.key], 'blurb': entry.value},
     ],
     'matrix': const {
       'safe': 'allow',

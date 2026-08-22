@@ -17,7 +17,11 @@ import time
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
-from sonder_runtime.adapters.observability.repl_formatting import elapsed_label as _elapsed_label
+from sonder_runtime.adapters.observability.repl_formatting import (
+    elapsed_label as _elapsed_label,
+    response_footer as _response_footer,
+    response_status_label as _response_status_label,
+)
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.content_services import intents, training_tasks
@@ -1261,11 +1265,13 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
         return
 
     box = _box_chars()
-    title = "%s %s " % (box["tl"], label)
+    title = "%s %s " % (
+        box["tl"], _response_status_label(label, error=error),
+    )
     tone = _Ansi.red if error else _Ansi.teal
     print(_paint(title + box["h"] * 8, tone, _Ansi.bold))
     print(answer)
-    footer = "%s %s  %s" % (box["bl"], timing, "(/pass or /fail)" if offer_feedback else "")
+    footer = _response_footer(box, timing, offer_feedback=offer_feedback)
     print(_paint(footer, _Ansi.muted))
 
 
