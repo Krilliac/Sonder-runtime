@@ -139,6 +139,29 @@ Models/tiers: `SONDER_FAST`, `SONDER_CODE`, `SONDER_GENERAL`,
 that specialist tier unbound, in which case reasoning/vision work falls back
 to a base tier.
 
+### Hardware-aware 30B planning
+
+`/hardware` and `hardware_profile` report live free VRAM when the platform
+probe can obtain it, but keep driver detection, provider readiness, and model
+fit as separate facts. The built-in Qwen3-Coder 30B-A3B planning profile is
+equivalent to:
+
+```toml
+[models.sonder_30b]
+name = "qwen3-coder:30b-a3b-q4_K_M"
+quantization = "Q4_K_M"
+backend = "ollama"
+gpu_layers = "auto"
+context_size = 8192
+```
+
+Its fit estimate includes quantized weights, KV-cache growth, runtime
+overhead, and a safety margin. A 16 GB card therefore receives an explicit
+`gpu+ram-hybrid`/fallback warning for this profile; Sonder does not claim full
+GPU residency until both the measured fit and backend readiness are present.
+The profile is advisory and does not change Ollama settings or download a
+model. CPU fallback remains available when GPU state is unknown or unsafe.
+
 Behavior toggles: `SONDER_SPECULATION` (0 disables speculative execution),
 `SONDER_METRICS`, `OLLAMA_HOST`.
 
