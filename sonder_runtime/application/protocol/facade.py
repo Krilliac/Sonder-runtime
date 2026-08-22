@@ -83,6 +83,30 @@ class ProtocolApplicationFacade:
                     "event_id": event.event_id})
         return event
 
+    def open_stream(
+        self, stream_id: str, *, client_id: str, capacity: int = 256,
+    ) -> ResumableStream:
+        """Open one bounded reconnectable stream for an authorized host.
+
+        Stream creation is an explicit application operation.  The default
+        authorization policy denies it, and the facade never creates a stream
+        merely because a client presents a reconnect cursor.
+        """
+        if not isinstance(client_id, str) or not client_id.strip():
+            raise ProtocolAuthorizationError("client identity is required")
+        if self._authorization.authorize("protocol.stream.create", client_id) is not True:
+            raise ProtocolAuthorizationError("protocol stream creation is not authorized")
+        streams = self._graph.streams
+        if stream_id in streams:
+            raise ValueError("protocol stream already exists")
+        if not isinstance(streams, dict):
+            raise ValueError("protocol stream registry is not mutable")
+        stream = ResumableStream(stream_id, capacity=capacity)
+        streams[stream_id] = stream
+        self._emit({"kind": "stream.opened", "stream_id": stream_id,
+                    "client_id": client_id, "capacity": capacity})
+        return stream
+
     def reconnect(self, request: ReconnectRequest, *, client_id: str | None = None) -> ReconnectResponse:
         """Authorize and execute one bounded reconnect plan."""
         if not isinstance(request, ReconnectRequest):

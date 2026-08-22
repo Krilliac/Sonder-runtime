@@ -7,22 +7,22 @@ The explicit SPEC-5 runtime container now composes a
 used by the runtime's tool boundary. The protocol schema retains two distinct
 identities: `source_catalog_digest` binds it to the catalog, while the schema
 digest covers the complete schema plus the snapshot/event stream contract.
-No unauthorised live stream is invented by the inert runtime container;
-authorized hosts can add reconnectable stream instances through the protocol
-facade.
+No unauthorized live stream is invented by the inert runtime container;
+authorized hosts can add bounded reconnectable stream instances through the
+facade's explicit `protocol.stream.create` operation.
 
 ## Evidence
 
 ```text
 python -m pytest -q --basetemp <fresh-user-temp> tests/test_runtime_container_adapter.py tests/test_protocol_application_facade.py tests/test_remaining_client_schema.py
-13 passed
+15 passed
 ```
 
 The composition test proves the runtime exposes the protocol facade, binds its
 source catalog digest to the tool catalog, and carries the canonical
-snapshot-plus-events stream contract. Existing facade tests prove authorized
-reconnect, identity matching, bounded event publication, and fail-closed
-authorization.
+snapshot-plus-events stream contract. Facade tests prove authorized stream
+creation, reconnect, identity matching, bounded event publication, and
+fail-closed authorization.
 
 ## Limitations
 

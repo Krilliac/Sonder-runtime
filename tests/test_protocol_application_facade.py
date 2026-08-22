@@ -70,3 +70,30 @@ def test_composed_facade_rejects_identity_confusion_before_authorizer():
             client_id="mobile-2",
         )
     assert auth.calls == []
+
+
+def test_authorized_host_can_open_one_bounded_stream_and_reconnect_to_it():
+    events = []
+    auth = Authorizer(True)
+    protocol, stream = facade(auth, events)
+    opened = protocol.open_stream("session-2", client_id="mobile-2", capacity=4)
+    assert opened.stream_id == "session-2"
+    protocol.publish("session-2", ProtocolEventType.SESSION_UPDATED,
+                     {"state": "ready"}, event_id="e2")
+    response = protocol.reconnect(
+        ReconnectRequest("mobile-2", protocol.schema.digest,
+                         (ResumeCursor("session-2", 0),))
+    )
+    assert response.resumed
+    assert response.results[0].batch.events[0].event_id == "e2"
+    assert events[0]["kind"] == "stream.opened"
+    assert opened.watermark == 1
+
+
+def test_default_protocol_policy_rejects_stream_creation():
+    catalogs = GeneratedCatalogs.generate(
+        InMemoryToolRegistry((ToolDescriptor("status"),)), commands=("status",)
+    )
+    protocol = ProtocolApplicationFacade.compose(catalogs)
+    with pytest.raises(ProtocolAuthorizationError):
+        protocol.open_stream("session-2", client_id="mobile-2")
