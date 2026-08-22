@@ -4488,8 +4488,11 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         context = self._request_auth_context()
-        self._operation_context = sonder_lifecycle.get().operation_context(
-            self._correlation(), context,
+        lifecycle = sonder_lifecycle.get()
+        operation_context = getattr(lifecycle, "operation_context", None)
+        self._operation_context = (
+            operation_context(self._correlation(), context)
+            if callable(operation_context) else None
         )
         if path == "/a2a":
             if not context["authorized"]:
