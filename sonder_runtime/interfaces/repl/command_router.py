@@ -27,6 +27,10 @@ because they extract arguments the generic path cannot. The generic path is
 deliberately narrow -- see ``_catalog_match`` -- because its failure mode is
 hijacking a real coding question.
 
+An explicit structured form ("use the file_read tool with path=README.md")
+provides a natural-language bridge for every canonical catalog name without
+inventing a synonym or weakening the generic matcher's refusal behavior.
+
 Stdlib only.
 """
 import importlib
@@ -55,6 +59,13 @@ intents = _LazyService("sonder_runtime.adapters.content_services", "intents")
 project_scaffold = _LazyService("sonder_runtime.adapters.repl_services", "project_scaffold")
 
 _TIER_COMMANDS = {"consult", "route", "refactor"}
+_STRUCTURED_CALL_RE = re.compile(
+    r"^(?:use|call|invoke|run)\s+(?:the\s+)?"
+    r"(?P<name>/?[A-Za-z][A-Za-z0-9_-]*)\s+"
+    r"(?:tool|command)"
+    r"(?:\s+(?:with|using|for)\s+(?P<arg>\S.*))?\s*$",
+    re.I,
+)
 
 
 def _scaffold_action(match):
@@ -116,6 +127,24 @@ def _weather_action(match):
 
 def _rule(pattern, action):
     return (re.compile(pattern, re.I), action)
+
+
+def _structured_catalog_match(value):
+    """Resolve an explicitly named catalog command with a preserved argument."""
+    match = _STRUCTURED_CALL_RE.fullmatch(value)
+    if not match:
+        return None
+    name = "/" + (match.group("name") or "").lstrip("/")
+    command = command_catalog.by_name(name)
+    if command is None:
+        return None
+    arg = (match.group("arg") or "").strip()
+    required = [param for param in command.params if param.required]
+    if not arg and required:
+        return None
+    if arg:
+        return "%s %s" % (command.name, arg)
+    return command.name
 
 
 # Ordered; first match wins. Specific patterns precede looser ones. Each pattern
@@ -924,6 +953,10 @@ def resolve(text):
     tier = intents.classify_command(value)
     if tier and tier.get("command") in _TIER_COMMANDS:
         return ("/%s %s" % (tier["command"], tier["arg"])).strip()
+
+    structured = _structured_catalog_match(value)
+    if structured:
+        return structured.strip()
 
     for pattern, action in _RULES:
         # A natural-language command must consume the whole turn. Prefix
