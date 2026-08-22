@@ -340,9 +340,13 @@ def check() -> list[str]:
         # test) that does not carry the original .git metadata.  A retired
         # production path is a violation by presence; the Git inventory is
         # still authoritative for dependency and packaging checks below.
-        retired_path = _repo_relative_path(REPO_ROOT, retired)
-        if retired in tracked or retired_path.is_file():
-            if is_approved_retired_shim(retired_path):
+        retired_paths = (
+            REPO_ROOT / str(retired),
+            _repo_relative_path(REPO_ROOT, retired),
+        )
+        present_path = next((path for path in retired_paths if path.is_file()), None)
+        if retired in tracked or present_path is not None:
+            if present_path is not None and is_approved_retired_shim(present_path):
                 continue
             violations.append(
                 f"{retired}: retired root module was reintroduced"

@@ -19,4 +19,4 @@ def test_local_server_log_tail_uses_packaged_default_home(monkeypatch, tmp_path)
     log_path.write_text("server started\n", encoding="utf-8")
     monkeypatch.setattr(serve.runtime_paths, "default_home", lambda: tmp_path)
 
-    assert serve._local_server_log_tail() == "server started?\n"
+    assert serve._local_server_log_tail() == "server started\n"
