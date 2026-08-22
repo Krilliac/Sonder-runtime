@@ -87,6 +87,19 @@ def _with_arg(slash):
     return build
 
 
+def _web_search_action(match):
+    """Keep a follow-on instruction in the normal agent path."""
+    arg = (match.group("arg") or "").strip()
+    if re.search(
+        r"\b(?:and|then)\s+(?:summarize|describe|explain|open|fetch|run|"
+        r"show|list|check|verify|validate)\b",
+        arg,
+        re.I,
+    ):
+        return None
+    return ("/web_search %s" % arg).strip() if arg else None
+
+
 def _rule(pattern, action):
     return (re.compile(pattern, re.I), action)
 
@@ -352,6 +365,40 @@ _RULES = [
           _fixed("/tool_manifest")),
     _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?tools\s*[?!.]*$",
           _fixed("/tool_manifest")),
+
+    # Read-only tools with a required path/query argument.  These are exact
+    # whole-turn forms so a larger request still belongs to the normal agent
+    # path.  Keep the captured value to one contiguous token: it preserves
+    # guarded path prefixes while avoiding a free-form prompt becoming a tool
+    # argument by accident.
+    _rule(r"^(?:inspect|check|show)\s+(?:the\s+)?image\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/image_inspect")),
+    _rule(r"^(?:inspect|preview|show)\s+(?:the\s+)?data\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/data_inspect")),
+    _rule(r"^(?:inspect|list|show)\s+(?:the\s+)?archive\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/archive_list")),
+    _rule(r"^(?:inspect|check|show)\s+(?:the\s+)?log\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/log_inspect")),
+    _rule(r"^(?:show|get|check)\s+(?:the\s+)?file\s+(?:digest|hash)\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/file_digest")),
+    _rule(r"^(?:show|get|check)\s+(?:the\s+)?directory\s+(?:digest|hash)\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/directory_digest")),
+    _rule(r"^(?:discover|find|list)\s+(?:the\s+)?tests\s+(?:in|under|at)\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/test_discover")),
+    _rule(r"^(?:search|find)\s+(?:the\s+)?web\s+(?:for\s+)?(?P<arg>.+?)\s*[?!.]*$",
+          _web_search_action),
+    _rule(r"^(?:fetch|open|read)\s+(?:the\s+)?url\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/web_fetch")),
+    _rule(r"^(?:show|inspect|explain)\s+(?:the\s+)?policy\s+(?:for\s+)?(?P<arg>[A-Za-z][A-Za-z0-9_.:-]{0,127})\s*[?!.]*$",
+          _with_arg("/policy_explain")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?task\s+ledger\s+(?P<arg>[A-Za-z0-9_-]+)\s*[?!.]*$",
+          _with_arg("/task_ledger")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?task\s+(?P<arg>(?!progress\b|list\b|ledger\b|plan\b|status\b)[A-Za-z0-9_-]+)\s*[?!.]*$",
+          _with_arg("/task_show")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?checklist\s+(?P<arg>[A-Za-z0-9_-]+)\s*[?!.]*$",
+          _with_arg("/checklist_show")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?evaluation\s+history\s*[?!.]*$",
+          _fixed("/evaluation_history_status")),
 
     # The local-model report, not the model *switch*: "/model <tier>" keeps
     # its own rules above and stays the way to change anything.
