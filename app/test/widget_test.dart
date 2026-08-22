@@ -806,6 +806,31 @@ void main() {
     expect(find.text('New chat'), findsOneWidget);
   });
 
+  testWidgets('Settings guards unsaved changes before leaving', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');
+    await tester.pump();
+    await tester.tap(find.text('Chat'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Discard unsaved settings?'), findsOneWidget);
+    await tester.tap(find.text('Keep editing'));
+    await tester.pumpAndSettle();
+    expect(find.text('Settings'), findsOneWidget);
+
+    await tester.tap(find.text('Chat'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Discard changes'));
+    await tester.pumpAndSettle();
+    expect(find.text('New chat'), findsOneWidget);
+  });
+
   testWidgets('Approximate location is explicit opt-in and persists', (
     tester,
   ) async {
