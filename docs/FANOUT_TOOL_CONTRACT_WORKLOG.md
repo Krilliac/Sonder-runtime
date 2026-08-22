@@ -260,3 +260,22 @@ to a machine-load flake backlog, not to this change.
   remove the class.
 - `tool_capabilities.py` descriptor completion remains future work by
   design (non-goal).
+
+### M6 — JSON-encoded argv redaction (verified 2026-08-22)
+
+The previously open `workspace_run`/`script_run` activity-rendering gap is
+closed. Their `args_json` input is a JSON string, and serializing that string
+again produced a JSON string literal such as
+`python "[\"--token\", \"secret\"]"`; the activity argv redactor could not
+recognize the flag/value pair in that shape. The server activity projection
+now decodes valid JSON lists before rendering, while invalid input retains the
+existing text-redaction path.
+
+Evidence:
+
+- `tests/test_activity_redaction.py` proves both `workspace_run` and
+  `script_run` render structured argv and mask their secret values.
+- Final activity-redaction suite: **25 passed**.
+- Related activity/agent suite: **138 passed**.
+- Architecture, error-signal, and history-privacy gates pass with no new
+  history debt.
