@@ -781,23 +781,23 @@
     },
     {
       "checked": false,
-      "claim": "Generic durable jobs can be started and polled through the composed SQLite registry.",
+      "claim": "The live HTTP job surface reads jobs created through the canonical application JobRegistryService and continues to resolve the same durable job after application reconstruction.",
       "requirement_id": "JOB-001",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "The composed subprocess provider publishes bounded stdout and stderr output incrementally through the durable monotonic job-output stream before terminal completion.",
+      "claim": "The live HTTP job surface is composed over the canonical durable registry and exposes bounded list, poll, cancel, stream, and result operations alongside the application job service.",
       "requirement_id": "JOB-002",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
       "checked": false,
-      "claim": "Durable restart reconciliation has a real subprocess rehearsal: a reopened SQLite registry cleans the persisted process identity through the typed supervisor and records interrupted state only after a complete receipt.",
+      "claim": "The canonical application job registry remains readable through the live HTTP adapter after an application restart, preserving durable job identity and state across reconstruction.",
       "requirement_id": "JOB-003",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b0f81d15711225605314c22e7f6068f288b049c3573dbef6d1f770e350addc78",
+    "ledger_sha256": "b2bef7e4ecb2e0574d28a0f30c7392774c18a5b2639e97dbdc5ba0ee9ed0aa6e",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
