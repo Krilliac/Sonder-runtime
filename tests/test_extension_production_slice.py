@@ -49,6 +49,33 @@ def test_sqlite_registry_state_survives_reconstruction_and_retains_quarantine(tm
     assert restored_record.crash_count == 1
 
 
+def test_sqlite_registry_keeps_project_crash_budgets_independent(tmp_path):
+    manifest = _manifest(crash_limit=2)
+    repository = SQLiteExtensionStateRepository(tmp_path / "extensions.db")
+    registry = ExtensionRegistry(provenance=_trusted(manifest), repository=repository)
+    registry.install(manifest, scope="project", project_id="alpha", signatures_verified=True)
+    registry.install(manifest, scope="project", project_id="beta", signatures_verified=True)
+
+    registry.record_crash(manifest.extension_id, scope="project", project_id="alpha")
+    beta = registry.record_crash(manifest.extension_id, scope="project", project_id="beta")
+
+    assert beta.health_state is ExtensionHealthState.HEALTHY
+    assert beta.crash_count == 1
+    assert registry.get(manifest.extension_id, scope="project", project_id="alpha").crash_count == 1
+
+
+def test_sqlite_registry_persists_operator_disable(tmp_path):
+    manifest = _manifest()
+    repository = SQLiteExtensionStateRepository(tmp_path / "extensions.db")
+    registry = ExtensionRegistry(provenance=_trusted(manifest), repository=repository)
+    registry.install(manifest, scope="global", signatures_verified=True)
+
+    registry.disable(manifest.extension_id, scope="global")
+
+    restored = ExtensionRegistry(provenance=_trusted(manifest), repository=repository)
+    assert restored.get(manifest.extension_id, scope="global").enabled is False
+
+
 def test_sqlite_registry_persists_verified_artifact_receipt(tmp_path):
     manifest = _manifest()
     repository = SQLiteExtensionStateRepository(tmp_path / "extensions.db")

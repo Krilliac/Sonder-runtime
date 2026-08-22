@@ -169,7 +169,7 @@ class ExtensionRegistry:
                 if not isinstance(record, ExtensionInstallRecord):
                     raise ExtensionRegistryError("persisted extension state is invalid")
                 self._records[record.key] = record
-                self._quarantine.restore_crash_count(record.extension_id, record.crash_count)
+                self._quarantine.restore_crash_count(record.extension_id, record.crash_count, installation_key=record.key)
 
     def install(
         self,
@@ -282,14 +282,14 @@ class ExtensionRegistry:
         self, extension_id: str, *, scope: ExtensionScope | str, project_id: str | None = None
     ) -> ExtensionInstallRecord:
         record = self._get(extension_id, scope, project_id)
-        decision = self._quarantine.record_crash(record.manifest)
+        decision = self._quarantine.record_crash(record.manifest, installation_key=record.key)
         health_state = ExtensionHealthState.QUARANTINED if decision.quarantined else record.health_state
         reasons = decision.reasons if decision.quarantined else record.health_reasons
         updated = ExtensionInstallRecord(
             record.extension_id, record.scope, record.project_id, record.version,
             record.manifest_digest, record.manifest, record.enabled and not decision.quarantined,
             health_state, tuple(reasons), decision if decision.quarantined else record.quarantine,
-            self._quarantine.crash_count(record.extension_id),
+            self._quarantine.crash_count(record.extension_id, installation_key=record.key),
             record.artifact,
         )
         self._records[record.key] = updated
@@ -373,6 +373,7 @@ class ExtensionRegistry:
             record.artifact,
         )
         self._records[record.key] = updated
+        self._persist()
         return updated
 
     def _get(self, extension_id: str, scope: ExtensionScope | str, project_id: str | None) -> ExtensionInstallRecord:
