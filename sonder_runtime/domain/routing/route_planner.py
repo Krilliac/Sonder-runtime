@@ -30,6 +30,11 @@ from ..runtime_policy.rules import (
     ROUTING_LANES,
     bound_tiers,
 )
+from ..inference_profiles import (
+    HardwareCapabilityReport,
+    QuantizedModelProfile,
+    plan_model_execution,
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,7 @@ class ModelRoute:
     task_class: str = "simple"
     confidence: float = 0.0
     ladder: tuple[str, ...] = ()
+    routing_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,8 @@ class AvailableModels:
     """What models are available in the current runtime policy."""
     tier_models: dict[str, str] = field(default_factory=dict)
     provider: str = "ollama"
+    hardware: HardwareCapabilityReport | None = None
+    model_profiles: dict[str, QuantizedModelProfile] = field(default_factory=dict)
 
     @property
     def available_tiers(self) -> frozenset[str]:
@@ -123,22 +131,44 @@ class RoutePlanner:
         if request.has_image:
             capabilities.add("vision")
 
+        memory_mode = "full"
+        routing_reason = "capability route"
+        model_profile = available.model_profiles.get(model)
+        if available.hardware is not None and model_profile is not None:
+            execution = plan_model_execution(available.hardware, model_profile)
+            memory_mode = execution.mode
+            routing_reason = (
+                "memory plan: %s; %s"
+                % (execution.mode, "; ".join(execution.warnings) or "measured fit")
+            )
+            capabilities.add("memory:%s" % execution.mode)
+
         return ModelRoute(
             lane=request.lane,
             tier=tier,
             model=model,
             provider=available.provider,
             capabilities=frozenset(capabilities),
+            memory_mode=memory_mode,
             task_class=cap_route.task,
             confidence=cap_route.confidence,
             ladder=cap_route.ladder,
+            routing_reason=routing_reason,
         )
 
     @staticmethod
-    def from_policy(policy: dict, provider: str = "ollama") -> AvailableModels:
+    def from_policy(
+        policy: dict,
+        provider: str = "ollama",
+        *,
+        hardware: HardwareCapabilityReport | None = None,
+        model_profiles: dict[str, QuantizedModelProfile] | None = None,
+    ) -> AvailableModels:
         """Build AvailableModels from a runtime policy dict."""
         models = policy.get("local_models", {})
         return AvailableModels(
             tier_models={t: models.get(t, "") for t in LOCAL_TIERS},
             provider=provider,
+            hardware=hardware,
+            model_profiles=dict(model_profiles or {}),
         )

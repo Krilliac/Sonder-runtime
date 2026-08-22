@@ -540,7 +540,7 @@
       ]
     },
     {
-      "file_count": 104,
+      "file_count": 106,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -588,6 +588,7 @@
         "sonder_runtime/domain/extensions/manifest.py",
         "sonder_runtime/domain/fanout_policy.py",
         "sonder_runtime/domain/health_formatting.py",
+        "sonder_runtime/domain/inference_profiles.py",
         "sonder_runtime/domain/interaction_footer.py",
         "sonder_runtime/domain/launcher_health.py",
         "sonder_runtime/domain/learning_tier.py",
@@ -603,6 +604,7 @@
         "sonder_runtime/domain/model_sizing.py",
         "sonder_runtime/domain/model_usage.py",
         "sonder_runtime/domain/model_usage_formatting.py",
+        "sonder_runtime/domain/multimodal_scheduler.py",
         "sonder_runtime/domain/native_tool_policy.py",
         "sonder_runtime/domain/ollama_policy.py",
         "sonder_runtime/domain/permission_context.py",

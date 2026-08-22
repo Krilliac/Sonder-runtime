@@ -77,6 +77,8 @@ REQUIRED_FILES = {
     "sonder_runtime/domain/context/__init__.py",
     "sonder_runtime/domain/context/overflow.py",
     "sonder_runtime/domain/context/compaction.py",
+    "sonder_runtime/domain/inference_profiles.py",
+    "sonder_runtime/domain/multimodal_scheduler.py",
     "creative_router.py",
     "command_recovery.py",
     "command_catalog.py",

@@ -157,6 +157,17 @@ those remain host-enforced.
 
 ## 4. Residency: you usually cannot hold them all
 
+### Quantized 30B on a 16 GB workstation GPU
+
+The checked-in `sonder_30b` planning profile uses
+`qwen3-coder:30b-a3b-q4_K_M`. Its approximate Q4 weight envelope is 18.6 GB;
+at an 8k context the conservative total is about 22.1 GB after KV cache,
+runtime overhead, and safety margin. On a 16 GB card this is a hybrid/partial
+offload candidate, not a full-residency recommendation. Use the `/hardware`
+report and the provider's residency telemetry before pinning GPU layers. A
+smaller local fallback such as `qwen3:14b` is named in the report when the
+larger profile cannot fit safely.
+
 Ollama keeps a limited set of models resident and swaps the rest on demand, so
 routing between tiers can cost a reload. The pattern that works at any size:
 
