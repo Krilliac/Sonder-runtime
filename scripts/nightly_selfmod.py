@@ -120,6 +120,17 @@ CANDIDATE_FILES = (
 _FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
 
+def _test_python() -> str:
+    """Return the candidate-worktree interpreter, with a portable fallback."""
+    venv_python = REPO / "venv" / "Scripts" / "python.exe"
+    if venv_python.is_file():
+        return str(venv_python)
+    # Worktrees do not copy ignored virtualenv directories.  The interpreter
+    # that launched this worker is the correct fallback because the runner's
+    # dependencies were already importable from it.
+    return sys.executable
+
+
 def _ask(server, prompt, num_predict=1200, model=""):
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
@@ -605,7 +616,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model=""):
         return "candidate made no change"
 
     selfmod.begin_testing(run_id)
-    py = str(REPO / "venv" / "Scripts" / "python.exe")
+    py = _test_python()
     results = []
     # The kind NAMES matter: review() checks recorded kinds against a required
     # set ("reproducer_before", "syntax", "targeted", "regression", "smoke"),

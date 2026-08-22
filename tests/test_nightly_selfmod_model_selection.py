@@ -1,5 +1,7 @@
 """Focused contract tests for the bounded selfmod worker's model pin."""
 
+import sys
+
 from scripts import nightly_selfmod
 
 
@@ -42,3 +44,9 @@ def test_selfmod_without_model_pin_keeps_using_code_tier():
     nightly_selfmod._ask(server, "inspect", num_predict=32)
 
     assert server.calls[0]["tiers"] == "code"
+
+
+def test_selfmod_uses_worker_interpreter_when_worktree_has_no_venv(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+
+    assert nightly_selfmod._test_python() == sys.executable
