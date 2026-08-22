@@ -1417,6 +1417,20 @@ def _a2a_discovery_base_url():
     return ""
 
 
+def _selected_listener_port(config=None, argv=None):
+    """Resolve the port the direct entrypoint will actually bind."""
+    port = DEFAULT_PORT if config is None else CONFIGURED_PORT
+    arguments = sys.argv if argv is None else argv
+    if len(arguments) > 1:
+        try:
+            port = int(arguments[1])
+        except (TypeError, ValueError):
+            pass
+    elif config is None:
+        port = int(os.environ.get("SONDER_PORT", DEFAULT_PORT))
+    return port
+
+
 def _http_server_location_lookup_allowed(context):
     """Allow server-IP location lookup only for genuinely local-open use."""
     return (
@@ -5519,6 +5533,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(config=None):
+    global CONFIGURED_PORT
     if config is not None:
         configure_typed_config(config)
     application = None
@@ -5534,14 +5549,11 @@ def main(config=None):
         if application is None:
             application = default_app(config=config)
         configure_control_plane_service(application.control_plane_snapshot_service)
-    port = DEFAULT_PORT if config is None else CONFIGURED_PORT
-    if len(sys.argv) > 1:
-        try:
-            port = int(sys.argv[1])
-        except ValueError:
-            pass
-    elif config is None:
-        port = int(os.environ.get("SONDER_PORT", DEFAULT_PORT))
+    port = _selected_listener_port(config)
+    # Discovery reads the bound-listener value. Keep it synchronized when the
+    # direct compatibility entrypoint overrides the typed configuration with a
+    # positional argument or SONDER_PORT.
+    CONFIGURED_PORT = port
 
     _validate_bind_security(HOST)
     lifecycle = sonder_lifecycle.get()
