@@ -637,7 +637,11 @@ def cmd_mcp(args) -> int:
     if getattr(args, "native", False):
         from sonder_runtime.adapters.security import unsafe_lab
 
-        unsafe_lab.require_startup()
+        try:
+            unsafe_lab.require_startup()
+        except unsafe_lab.UnsafeLabError as exc:
+            print(f"native MCP startup refused: {exc}", file=sys.stderr)
+            return 2
         try:
             config = _load_config(args)
         except sonder_config.ConfigError as exc:
