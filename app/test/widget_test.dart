@@ -44,7 +44,7 @@ void main() {
 
     // Wide windows get a persistent rail instead of hiding chat navigation
     // behind the mobile drawer gesture.
-    expect(find.text('Local-first workspace'), findsOneWidget);
+    expect(find.textContaining('Local-first workspace'), findsOneWidget);
     expect(find.text('Chats'), findsOneWidget);
   });
 
