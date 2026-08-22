@@ -238,13 +238,6 @@ to a machine-load flake backlog, not to this change.
   `workflow_*`, `memory_privacy_*`, `memory_quality_*`, plus the exact
   names in `_AUTHORITY_GRAMMAR_NAMES`) and left out of every declared set
   still needs a human to classify it.
-- `workspace_run`/`script_run` render `"%s %s" % (program, json.dumps(args))`
-  into the (detail-gated) command field; a secret VALUE inside that JSON
-  array form can survive `_safe_command`'s argv rule. Needs a rendering
-  change, not a vocabulary change; not taken here.
-- `_loop_dispatch` records a refused action into the in-memory activity
-  ledger before the gate refuses it (shows `ok=True` "queued"). Cosmetic;
-  follow-up candidate.
 - The three `test_sonder_storage.py` timing budgets fail on this loaded
   16 GB box on pre-change code too; if they persist on a quiet machine,
   they deserve their own issue.
@@ -260,3 +253,22 @@ to a machine-load flake backlog, not to this change.
   remove the class.
 - `tool_capabilities.py` descriptor completion remains future work by
   design (non-goal).
+
+### M6 — JSON-encoded argv redaction (verified 2026-08-22)
+
+The previously open `workspace_run`/`script_run` activity-rendering gap is
+closed. Their `args_json` input is a JSON string, and serializing that string
+again produced a JSON string literal such as
+`python "[\"--token\", \"secret\"]"`; the activity argv redactor could not
+recognize the flag/value pair in that shape. The server activity projection
+now decodes valid JSON lists before rendering, while invalid input retains the
+existing text-redaction path.
+
+Evidence:
+
+- `tests/test_activity_redaction.py` proves both `workspace_run` and
+  `script_run` render structured argv and mask their secret values.
+- Final activity-redaction suite: **25 passed**.
+- Related activity/agent suite: **138 passed**.
+- Architecture, error-signal, and history-privacy gates pass with no new
+  history debt.
