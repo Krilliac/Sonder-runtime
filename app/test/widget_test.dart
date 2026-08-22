@@ -785,9 +785,9 @@ void main() {
     await tester.tap(find.byTooltip('Settings'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('Settings'), findsOneWidget);
-    debugDumpApp();
     expect(find.text('Runtime architecture'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
@@ -814,6 +814,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 300));
 
     await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');
     await tester.pump();
@@ -841,6 +842,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 300));
 
     final label = find.text('Allow approximate IP location');
     expect(find.byType(ListView), findsOneWidget);
