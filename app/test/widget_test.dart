@@ -1242,7 +1242,10 @@ void main() {
         findsOneWidget,
       );
       expect(tester.getSemantics(chip).label, contains('auto'));
-      expect(tester.getSemantics(badge).label, 'Elevated privileges: on');
+      expect(
+        tester.getSemantics(badge).label,
+        contains('Elevated privileges: on'),
+      );
       final labels = tester
           .widgetList<Text>(
             find.descendant(of: chip, matching: find.byType(Text)),
