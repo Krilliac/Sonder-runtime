@@ -30,6 +30,11 @@ void main() {
     expect(find.textContaining('served locally by Ollama'), findsOneWidget);
     // Empty state shows the message composer.
     expect(find.byType(TextField), findsOneWidget);
+    // The telemetry strip stays legible and truthful before a server reply:
+    // unavailable data is an em dash, never a fabricated zero.
+    expect(find.bySemanticsLabel('Context: —'), findsOneWidget);
+    expect(find.bySemanticsLabel('Activity: —'), findsOneWidget);
+    expect(find.bySemanticsLabel('Route: sonder'), findsOneWidget);
   });
 
   testWidgets('Desktop chat layout keeps the conversation rail visible', (

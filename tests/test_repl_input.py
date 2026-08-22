@@ -372,6 +372,35 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
     assert "/help" in text
 
 
+def test_startup_banner_surfaces_permission_mode_and_elevation(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(sonder_repl.server, "permission_mode_data", lambda: {
+        "mode": "acceptEdits",
+        "label": "Accept edits",
+        "blurb": "file changes proceed; programs still ask",
+        "elevated": True,
+        "elevationReason": "operator override",
+    })
+
+    text = sonder_repl._startup_banner(None, "coder", "default")
+
+    assert "mode" in text and "Accept edits" in text
+    assert "elevation" in text and "operator override" in text
+
+
+def test_startup_banner_omits_unknown_permission_state(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    monkeypatch.setattr(
+        sonder_repl.server, "permission_mode_data",
+        lambda: (_ for _ in ()).throw(RuntimeError("not available")),
+    )
+
+    text = sonder_repl._startup_banner(None, "coder", "default")
+
+    assert "\n  mode:" not in text
+    assert "\n  elevation:" not in text
+
+
 def test_terminal_endpoint_link_is_clickable_without_affecting_layout(monkeypatch):
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
 
@@ -426,6 +455,35 @@ def test_composer_title_uses_live_tier_and_execution_status(monkeypatch):
     })
 
     assert title == "Sonder code (coder:14b)  [lanes 1 | agents 0]"
+
+
+def test_composer_title_surfaces_permission_mode_and_elevation(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    permission = {
+        "mode": "auto",
+        "label": "Auto",
+        "elevated": True,
+        "elevationReason": "operator override",
+    }
+    status = {"known": True, "running_lanes": 0, "running_agents": 0}
+
+    wide = sonder_repl._composer_title("code", status, permission=permission)
+    compact = sonder_repl._composer_title("code", status, width=80,
+                                           permission=permission)
+
+    assert "mode Auto  ELEVATED (operator override)" in wide
+    assert "M:auto" in compact and "E!" in compact
+
+
+def test_composer_title_compact_permission_mode_is_visible_after_pin(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    status = {"known": True, "running_lanes": 0, "running_agents": 0}
+    permission = {"mode": "acceptEdits", "label": "Accept edits"}
+
+    title = sonder_repl._composer_title("code", status, width=80,
+                                        permission=permission)
+
+    assert "M:edits" in title
 
 
 def test_composer_title_shows_approximate_context_and_last_turn_metrics(monkeypatch):
