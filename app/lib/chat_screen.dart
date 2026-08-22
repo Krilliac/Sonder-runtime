@@ -395,7 +395,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     final key = event.logicalKey;
     if (_paletteMatches.isEmpty && key == LogicalKeyboardKey.enter) {
-      if (event.isShiftPressed) {
+      if (HardwareKeyboard.instance.isShiftPressed) {
         final value = _input.value;
         final start = value.selection.start < 0
             ? value.text.length
