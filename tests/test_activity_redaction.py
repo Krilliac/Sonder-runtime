@@ -8,6 +8,7 @@ same shapes; these pin the shapes that were measured passing through it.
 import json
 
 import sonder_runtime.adapters.observability.activity_tracker as at
+import server
 
 
 def test_aws_style_env_names_are_redacted():
@@ -84,6 +85,25 @@ def test_program_prefixed_json_argv_masks_secret_pairs():
 
     assert secret not in out
     assert 'python ["build.py", "--token", "<redacted>", "--verbose"]' == out
+
+
+def test_agent_activity_json_encoded_argv_masks_secret_pairs():
+    """The server's args_json bridge must preserve argv structure for masking."""
+    raw = server._agent_activity_command(
+        "workspace_run",
+        {"program": "python", "args_json": '["--token", "json-secret"]'},
+    )
+
+    assert raw == 'python ["--token", "json-secret"]'
+    assert "json-secret" not in at._safe_command(raw)
+    assert at._safe_command(raw) == 'python ["--token", "<redacted>"]'
+
+    script_raw = server._agent_activity_command(
+        "script_run",
+        {"path": "build.py", "args_json": '["--password", "script-secret"]'},
+    )
+    assert script_raw == 'build.py ["--password", "script-secret"]'
+    assert "script-secret" not in at._safe_command(script_raw)
 
 
 def test_program_prefixed_json_argv_handles_a_bracket_in_the_program_path():
