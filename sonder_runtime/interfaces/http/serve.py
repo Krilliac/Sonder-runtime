@@ -1402,6 +1402,35 @@ def _is_loopback_host(host):
         return False
 
 
+def _a2a_discovery_base_url():
+    """Resolve the safe local A2A URL used by agent-card discovery.
+
+    A workstation listener already has an unambiguous loopback address. Keep
+    proxy/non-loopback deployments explicit so discovery never invents an
+    externally reachable scheme or authority.
+    """
+    configured = os.environ.get("SONDER_A2A_BASE_URL", "").strip()
+    if configured:
+        return configured
+    if _is_loopback_host(HOST):
+        return "http://%s:%d" % (HOST, CONFIGURED_PORT)
+    return ""
+
+
+def _selected_listener_port(config=None, argv=None):
+    """Resolve the port the direct entrypoint will actually bind."""
+    port = DEFAULT_PORT if config is None else CONFIGURED_PORT
+    arguments = sys.argv if argv is None else argv
+    if len(arguments) > 1:
+        try:
+            port = int(arguments[1])
+        except (TypeError, ValueError):
+            pass
+    elif config is None:
+        port = int(os.environ.get("SONDER_PORT", DEFAULT_PORT))
+    return port
+
+
 def _http_server_location_lookup_allowed(context):
     """Allow server-IP location lookup only for genuinely local-open use."""
     return (
@@ -4026,7 +4055,7 @@ class Handler(BaseHTTPRequestHandler):
                     status=403,
                 )
                 return
-            base_url = os.environ.get("SONDER_A2A_BASE_URL", "").strip()
+            base_url = _a2a_discovery_base_url()
             if not base_url:
                 self._send_json_payload(
                     {"error": "a2a_discovery_unavailable"}, status=503
@@ -5504,6 +5533,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(config=None):
+    global CONFIGURED_PORT
     if config is not None:
         configure_typed_config(config)
     application = None
@@ -5519,14 +5549,11 @@ def main(config=None):
         if application is None:
             application = default_app(config=config)
         configure_control_plane_service(application.control_plane_snapshot_service)
-    port = DEFAULT_PORT if config is None else CONFIGURED_PORT
-    if len(sys.argv) > 1:
-        try:
-            port = int(sys.argv[1])
-        except ValueError:
-            pass
-    elif config is None:
-        port = int(os.environ.get("SONDER_PORT", DEFAULT_PORT))
+    port = _selected_listener_port(config)
+    # Discovery reads the bound-listener value. Keep it synchronized when the
+    # direct compatibility entrypoint overrides the typed configuration with a
+    # positional argument or SONDER_PORT.
+    CONFIGURED_PORT = port
 
     _validate_bind_security(HOST)
     lifecycle = sonder_lifecycle.get()
