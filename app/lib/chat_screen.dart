@@ -865,7 +865,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           embedded: desktop,
         );
         return Shortcuts(
-          shortcuts: <ShortcutActivator, Intent>{
+          shortcuts: const <ShortcutActivator, Intent>{
             const SingleActivator(LogicalKeyboardKey.keyK, control: true):
                 const _OpenCommandBrowserIntent(),
             const SingleActivator(LogicalKeyboardKey.keyN, control: true):
