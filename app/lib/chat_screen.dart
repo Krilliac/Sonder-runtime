@@ -151,22 +151,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// payload in the name, which is what gets inserted into the composer.
   static final CommandCatalog _fallbackCatalog = CommandCatalog(
     commands: _quickCommands.entries
-        .map((e) => SonderCommand(
-              name: e.key,
-              category: 'quick',
-              summary: e.value,
-              native: true,
-              usage: e.key,
-            ))
+        .map(
+          (e) => SonderCommand(
+            name: e.key,
+            category: 'quick',
+            summary: e.value,
+            native: true,
+            usage: e.key,
+          ),
+        )
         .toList(growable: false),
     categories: const {'quick': 'Built-in quick commands (offline fallback)'},
     popular: _fallbackPopular,
   );
 
   SonderApi get _api => SonderApi(
-        baseUrl: widget.settings.serverUrl,
-        apiKey: widget.settings.apiKey,
-      );
+    baseUrl: widget.settings.serverUrl,
+    apiKey: widget.settings.apiKey,
+  );
 
   @override
   void initState() {
@@ -301,15 +303,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         matches = _catalog.popularCommands;
         grouped = true;
       } else {
-        matches =
-            _catalog.commands.where((c) => c.matchesPrefix(query)).toList();
+        matches = _catalog.commands
+            .where((c) => c.matchesPrefix(query))
+            .toList();
         // Nothing starts with it -- fall back to matching the summary and
         // category too, so "/memory" still finds the quality and privacy
         // audits.
         if (matches.isEmpty) {
           final needle = query.substring(1);
-          matches =
-              _catalog.commands.where((c) => c.matchesLoose(needle)).toList();
+          matches = _catalog.commands
+              .where((c) => c.matchesLoose(needle))
+              .toList();
         }
       }
     }
@@ -351,14 +355,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.arrowDown) {
-      setState(() => _paletteSelected =
-          (_paletteSelected + 1) % _paletteMatches.length);
+      setState(
+        () =>
+            _paletteSelected = (_paletteSelected + 1) % _paletteMatches.length,
+      );
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp) {
-      setState(() => _paletteSelected =
-          (_paletteSelected - 1 + _paletteMatches.length) %
-              _paletteMatches.length);
+      setState(
+        () => _paletteSelected =
+            (_paletteSelected - 1 + _paletteMatches.length) %
+            _paletteMatches.length,
+      );
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.tab) {
@@ -403,8 +411,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     List<ChatMessage>? messages,
   }) async {
     if (_currentThreadId.isEmpty) return;
-    final nextMessages =
-        (messages ?? _messages).where((m) => !m.pending).toList();
+    final nextMessages = (messages ?? _messages)
+        .where((m) => !m.pending)
+        .toList();
     final nextTitle = title ?? _titleForMessages(nextMessages);
     final nextProject = (project ?? _project).trim().isEmpty
         ? 'default'
@@ -417,8 +426,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         messages: nextMessages,
         updatedAt: DateTime.now(),
       );
-    }).toList()
-      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    }).toList()..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     setState(() {
       _threads = updated;
       _project = nextProject;
@@ -429,8 +437,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String _titleForMessages(List<ChatMessage> messages) {
     final userMessages = messages.where((m) => m.role == Role.user);
     if (userMessages.isEmpty) return _currentThread.title;
-    final text =
-        userMessages.first.content.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final text = userMessages.first.content
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
     if (text.isEmpty) return 'New chat';
     if (text.length <= 42) return text;
     return '${text.substring(0, 42)}...';
@@ -459,10 +468,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _openCommandBrowser() async {
     final picked = await showDialog<String>(
       context: context,
-      builder: (_) => _CommandBrowser(
-        catalog: _catalog,
-        fromServer: _catalogFromServer,
-      ),
+      builder: (_) =>
+          _CommandBrowser(catalog: _catalog, fromServer: _catalogFromServer),
     );
     if (picked == null || !mounted) return;
     _pickCommand(picked);
@@ -487,14 +494,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _recordPassive(String command) async {
     try {
-      await _api.chat([
-        ChatMessage(role: Role.user, content: command),
-      ],
-          model: _model,
-          contextSize: widget.settings.contextSize,
-          sessionId: _currentThreadId,
-          project: _project,
-          allowApproximateLocation: widget.settings.allowApproximateLocation);
+      await _api.chat(
+        [ChatMessage(role: Role.user, content: command)],
+        model: _model,
+        contextSize: widget.settings.contextSize,
+        sessionId: _currentThreadId,
+        project: _project,
+        allowApproximateLocation: widget.settings.allowApproximateLocation,
+      );
     } catch (_) {
       // Passive learning should never interrupt the chat UI.
     }
@@ -535,13 +542,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final t = text.trim().toLowerCase();
 
     bool wantsOn(String s) =>
-        s.contains(' on') || s.contains('enable') || s.contains('show') ||
+        s.contains(' on') ||
+        s.contains('enable') ||
+        s.contains('show') ||
         s.contains('turn on');
     bool wantsOff(String s) =>
-        s.contains(' off') || s.contains('disable') || s.contains('hide') ||
+        s.contains(' off') ||
+        s.contains('disable') ||
+        s.contains('hide') ||
         s.contains('turn off');
 
-    final isVerboseTopic = t.startsWith('/verbose') ||
+    final isVerboseTopic =
+        t.startsWith('/verbose') ||
         t.startsWith('/errors') ||
         (RegExp(r'\b(raw|verbose|full|detailed)\b').hasMatch(t) &&
             RegExp(r'\b(error|errors|exception|exceptions|traceback)\b')
@@ -571,8 +583,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (localReply != null) {
       setState(() {
         _messages.add(ChatMessage(role: Role.user, content: text));
-        _messages.add(
-            ChatMessage(role: Role.assistant, content: localReply));
+        _messages.add(ChatMessage(role: Role.assistant, content: localReply));
         if (preset == null) _input.clear();
       });
       _scrollToEnd();
@@ -583,7 +594,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     setState(() {
       _messages.add(ChatMessage(role: Role.user, content: text));
       _messages.add(
-          const ChatMessage(role: Role.assistant, content: '', pending: true));
+        const ChatMessage(role: Role.assistant, content: '', pending: true),
+      );
       _sending = true;
       if (preset == null) _input.clear();
     });
@@ -662,8 +674,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _deleteThread(ChatThread thread) async {
     final remaining = _threads.where((t) => t.id != thread.id).toList();
-    final next =
-        remaining.isEmpty ? [ChatThread.fresh(project: _project)] : remaining;
+    final next = remaining.isEmpty
+        ? [ChatThread.fresh(project: _project)]
+        : remaining;
     final current = thread.id == _currentThreadId ? next.first : _currentThread;
     setState(() {
       _threads = next;
@@ -708,12 +721,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openSettings() async {
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => SettingsScreen(
-        settings: widget.settings,
-        onChanged: widget.onSettingsChanged,
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          settings: widget.settings,
+          onChanged: widget.onSettingsChanged,
+        ),
       ),
-    ));
+    );
     setState(() {
       // Pick up server/key/model changes; re-fetch the model list if it moved.
       _model = widget.settings.model;
@@ -724,148 +739,184 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openSystem() async {
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => SystemScreen(settings: widget.settings),
-    ));
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SystemScreen(settings: widget.settings),
+      ),
+    );
   }
 
   String _modelLabel(String m) => m == 'sonder' ? 'sonder (local route)' : m;
 
   @override
   Widget build(BuildContext context) {
-    final currentTitle =
-        _loadingThreads ? 'Loading chats...' : _currentThread.displayTitle;
-    return Scaffold(
-      drawer: _ChatDrawer(
-        threads: _threads,
-        currentThreadId: _currentThreadId,
-        onNew: _newChat,
-        onSelect: _switchThread,
-        onDelete: _deleteThread,
-      ),
-      appBar: AppBar(
-        title: Row(
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primaryContainer,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(
-                Icons.hub_outlined,
-                size: 19,
-                color: Theme.of(context).colorScheme.onPrimaryContainer,
-              ),
-            ),
-            const SizedBox(width: 10),
-            // Model picker: switch which LLM answers, per conversation.
-            PopupMenuButton<String>(
-              tooltip: 'Choose inference route or model',
-              onSelected: _selectModel,
-              itemBuilder: (_) => _models
-                  .map((m) => PopupMenuItem<String>(
-                        value: m,
-                        child: Row(
-                          children: [
-                            if (m == _model)
-                              const Icon(Icons.check, size: 18)
-                            else
-                              const SizedBox(width: 18),
-                            const SizedBox(width: 8),
-                            Text(_modelLabel(m)),
-                          ],
-                        ),
-                      ))
-                  .toList(),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: Text(
-                      _modelLabel(_model),
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontSize: 17, fontWeight: FontWeight.w700),
-                    ),
+    final currentTitle = _loadingThreads
+        ? 'Loading chats...'
+        : _currentThread.displayTitle;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Keep the drawer gesture-first on phones, but make the conversation
+        // workspace feel like a real desktop app once there is room for a
+        // persistent chat rail.  The same widget and callbacks are used in
+        // both modes, so thread selection has one source of truth.
+        final desktop = constraints.maxWidth >= 1000;
+        final drawer = _ChatDrawer(
+          threads: _threads,
+          currentThreadId: _currentThreadId,
+          onNew: _newChat,
+          onSelect: _switchThread,
+          onDelete: _deleteThread,
+          embedded: desktop,
+        );
+        return Scaffold(
+          drawer: desktop ? null : drawer,
+          appBar: AppBar(
+            title: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                  const Icon(Icons.arrow_drop_down),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'Commands',
-            icon: const Icon(Icons.bolt_outlined),
-            onPressed: _openCommandBrowser,
-          ),
-          IconButton(
-            tooltip: 'New chat',
-            icon: const Icon(Icons.add_comment_outlined),
-            onPressed: _newChat,
-          ),
-          IconButton(
-            tooltip: 'System',
-            icon: const Icon(Icons.dashboard_customize_outlined),
-            onPressed: _openSystem,
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: _openSettings,
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          _ChatHeader(
-            title: currentTitle,
-            project: _project,
-            messageCount: _messages.where((m) => !m.pending).length,
-            onEditProject: _editProject,
-          ),
-          Expanded(
-            child: _messages.isEmpty
-                ? _EmptyState(
-                    serverUrl: widget.settings.serverUrl,
-                    onQuick: _send,
-                  )
-                : ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(16, 18, 16, 20),
-                    itemCount: _messages.length,
-                    itemBuilder: (_, i) => Center(
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 1080),
-                        child: _Bubble(
-                          message: _messages[i],
-                          onPassive: _recordPassive,
+                  child: Icon(
+                    Icons.hub_outlined,
+                    size: 19,
+                    color: Theme.of(context).colorScheme.onPrimaryContainer,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // Model picker: switch which LLM answers, per conversation.
+                PopupMenuButton<String>(
+                  tooltip: 'Choose inference route or model',
+                  onSelected: _selectModel,
+                  itemBuilder: (_) => _models
+                      .map(
+                        (m) => PopupMenuItem<String>(
+                          value: m,
+                          child: Row(
+                            children: [
+                              if (m == _model)
+                                const Icon(Icons.check, size: 18)
+                              else
+                                const SizedBox(width: 18),
+                              const SizedBox(width: 8),
+                              Text(_modelLabel(m)),
+                            ],
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          _modelLabel(_model),
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
                       ),
-                    ),
+                      const Icon(Icons.arrow_drop_down),
+                    ],
                   ),
+                ),
+              ],
+            ),
+            actions: [
+              IconButton(
+                tooltip: 'Commands',
+                icon: const Icon(Icons.bolt_outlined),
+                onPressed: _openCommandBrowser,
+              ),
+              IconButton(
+                tooltip: 'New chat',
+                icon: const Icon(Icons.add_comment_outlined),
+                onPressed: _newChat,
+              ),
+              IconButton(
+                tooltip: 'System',
+                icon: const Icon(Icons.dashboard_customize_outlined),
+                onPressed: _openSystem,
+              ),
+              IconButton(
+                tooltip: 'Settings',
+                icon: const Icon(Icons.settings_outlined),
+                onPressed: _openSettings,
+              ),
+            ],
           ),
-          _InputBar(
-            controller: _input,
-            focusNode: _inputFocus,
-            sending: _sending,
-            onSend: () => _send(),
-            paletteMatches: _paletteMatches,
-            paletteSelected: _paletteSelected,
-            paletteGrouped: _paletteGrouped,
-            paletteCategories: _catalog.categories,
-            onPalettePick: _pickCommand,
-            onKey: _onComposerKey,
-            permissionMode: _permissionMode,
-            permissionModeBusy: _switchingMode,
-            onTapPermissionMode: _openPermissionModePicker,
+          body: Row(
+            children: [
+              if (desktop) SizedBox(width: 304, child: drawer),
+              Expanded(
+                child: Column(
+                  children: [
+                    _ChatHeader(
+                      title: currentTitle,
+                      project: _project,
+                      messageCount: _messages.where((m) => !m.pending).length,
+                      onEditProject: _editProject,
+                    ),
+                    Expanded(
+                      child: _messages.isEmpty
+                          ? _EmptyState(
+                              serverUrl: widget.settings.serverUrl,
+                              onQuick: _send,
+                            )
+                          : ListView.builder(
+                              controller: _scroll,
+                              padding: const EdgeInsets.fromLTRB(
+                                16,
+                                18,
+                                16,
+                                20,
+                              ),
+                              itemCount: _messages.length,
+                              itemBuilder: (_, i) => Center(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 1080,
+                                  ),
+                                  child: _Bubble(
+                                    message: _messages[i],
+                                    onPassive: _recordPassive,
+                                  ),
+                                ),
+                              ),
+                            ),
+                    ),
+                    _InputBar(
+                      controller: _input,
+                      focusNode: _inputFocus,
+                      sending: _sending,
+                      onSend: () => _send(),
+                      paletteMatches: _paletteMatches,
+                      paletteSelected: _paletteSelected,
+                      paletteGrouped: _paletteGrouped,
+                      paletteCategories: _catalog.categories,
+                      onPalettePick: _pickCommand,
+                      onKey: _onComposerKey,
+                      permissionMode: _permissionMode,
+                      permissionModeBusy: _switchingMode,
+                      onTapPermissionMode: _openPermissionModePicker,
+                    ),
+                    _LiveStatusBar(
+                      info: _systemInfo,
+                      model: _model,
+                      project: _project,
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          _LiveStatusBar(info: _systemInfo, model: _model, project: _project),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -915,9 +966,9 @@ class _EmptyState extends StatelessWidget {
                   Text(
                     'Sonder Runtime',
                     style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.5,
-                        ),
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.5,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Text(
@@ -930,9 +981,7 @@ class _EmptyState extends StatelessWidget {
                   const SizedBox(height: 8),
                   Text(
                     'Connected to $serverUrl',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
+                    style: Theme.of(context).textTheme.bodySmall
                         ?.copyWith(color: cs.outline),
                     textAlign: TextAlign.center,
                   ),
@@ -993,16 +1042,14 @@ class _ChatHeader extends StatelessWidget {
                   title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
+                  style: Theme.of(context).textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   '$messageCount messages',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: cs.outline,
-                      ),
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: cs.outline),
                 ),
               ],
             ),
@@ -1024,6 +1071,7 @@ class _ChatDrawer extends StatelessWidget {
   final VoidCallback onNew;
   final ValueChanged<ChatThread> onSelect;
   final ValueChanged<ChatThread> onDelete;
+  final bool embedded;
 
   const _ChatDrawer({
     required this.threads,
@@ -1031,6 +1079,7 @@ class _ChatDrawer extends StatelessWidget {
     required this.onNew,
     required this.onSelect,
     required this.onDelete,
+    this.embedded = false,
   });
 
   @override
@@ -1041,6 +1090,37 @@ class _ChatDrawer extends StatelessWidget {
       child: SafeArea(
         child: Column(
           children: [
+            if (embedded)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: cs.primaryContainer,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(
+                        Icons.hub_outlined,
+                        size: 18,
+                        color: cs.onPrimaryContainer,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Sonder Runtime\nLocal-first workspace',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          height: 1.25,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
               child: Row(
@@ -1136,10 +1216,7 @@ class _Suggestion extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ActionChip(
-      label: Text(text),
-      onPressed: () => onTap(text),
-    );
+    return ActionChip(label: Text(text), onPressed: () => onTap(text));
   }
 }
 
@@ -1164,8 +1241,9 @@ class _LiveStatusBar extends StatelessWidget {
     final activeProject = project.trim().isEmpty
         ? (contextInfo?.project ?? 'unknown')
         : project.trim();
-    final projectText =
-        activeProject == 'none' ? 'project: none' : 'project: $activeProject';
+    final projectText = activeProject == 'none'
+        ? 'project: none'
+        : 'project: $activeProject';
     final path = info?.stateHome ?? '';
     var latest = 'idle';
     if (agentInfo != null) {
@@ -1245,11 +1323,7 @@ class _Bubble extends StatelessWidget {
 
     Widget content;
     if (message.pending) {
-      content = const SizedBox(
-        height: 18,
-        width: 40,
-        child: _TypingDots(),
-      );
+      content = const SizedBox(height: 18, width: 40, child: _TypingDots());
     } else {
       content = isUser
           ? SelectableText(
@@ -1307,10 +1381,10 @@ class _Bubble extends StatelessWidget {
                   Text(
                     'Sonder Runtime',
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          color: cs.onSurfaceVariant,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.1,
-                        ),
+                      color: cs.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.1,
+                    ),
                   ),
                 ],
               ),
@@ -1331,13 +1405,19 @@ class _Bubble extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.copy_all_outlined,
-                              size: 14, color: fg.withValues(alpha: 0.6)),
+                          Icon(
+                            Icons.copy_all_outlined,
+                            size: 14,
+                            color: fg.withValues(alpha: 0.6),
+                          ),
                           const SizedBox(width: 4),
-                          Text('copy',
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: fg.withValues(alpha: 0.6))),
+                          Text(
+                            'copy',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: fg.withValues(alpha: 0.6),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -1353,13 +1433,19 @@ class _Bubble extends StatelessWidget {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.check_circle_outline,
-                                size: 14, color: fg.withValues(alpha: 0.6)),
+                            Icon(
+                              Icons.check_circle_outline,
+                              size: 14,
+                              color: fg.withValues(alpha: 0.6),
+                            ),
                             const SizedBox(width: 4),
-                            Text('useful',
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: fg.withValues(alpha: 0.6))),
+                            Text(
+                              'useful',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: fg.withValues(alpha: 0.6),
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -1368,13 +1454,19 @@ class _Bubble extends StatelessWidget {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.edit_outlined,
-                                size: 14, color: fg.withValues(alpha: 0.6)),
+                            Icon(
+                              Icons.edit_outlined,
+                              size: 14,
+                              color: fg.withValues(alpha: 0.6),
+                            ),
                             const SizedBox(width: 4),
-                            Text('edited',
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: fg.withValues(alpha: 0.6))),
+                            Text(
+                              'edited',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: fg.withValues(alpha: 0.6),
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -1409,42 +1501,41 @@ class _AssistantContent extends StatelessWidget {
     final answer =
         (markerIndex < 0 ? content : content.substring(0, markerIndex))
             .trimRight();
-    final activity =
-        markerIndex < 0 ? '' : content.substring(markerIndex).trim();
-    final body = Theme.of(context).textTheme.bodyMedium?.copyWith(
-          color: color,
-          height: 1.48,
+    final activity = markerIndex < 0
+        ? ''
+        : content.substring(markerIndex).trim();
+    final body = Theme.of(context).textTheme.bodyMedium
+        ?.copyWith(color: color, height: 1.48);
+    final markdownStyle = MarkdownStyleSheet.fromTheme(Theme.of(context))
+        .copyWith(
+          p: body,
+          strong: body?.copyWith(fontWeight: FontWeight.w700),
+          a: body?.copyWith(
+            color: cs.primary,
+            decoration: TextDecoration.underline,
+            decorationColor: cs.primary.withValues(alpha: 0.6),
+          ),
+          code: body?.copyWith(
+            fontFamily: 'Consolas',
+            fontSize: 13,
+            color: cs.onSurface,
+            backgroundColor: cs.surfaceContainerHighest,
+          ),
+          codeblockPadding: const EdgeInsets.all(14),
+          codeblockDecoration: BoxDecoration(
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.88),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: cs.outlineVariant),
+          ),
+          blockquoteDecoration: BoxDecoration(
+            color: cs.primaryContainer.withValues(alpha: 0.22),
+            borderRadius: BorderRadius.circular(10),
+            border: Border(left: BorderSide(color: cs.primary, width: 3)),
+          ),
+          blockquotePadding: const EdgeInsets.fromLTRB(14, 10, 12, 10),
+          blockSpacing: 10,
+          listIndent: 24,
         );
-    final markdownStyle =
-        MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-      p: body,
-      strong: body?.copyWith(fontWeight: FontWeight.w700),
-      a: body?.copyWith(
-        color: cs.primary,
-        decoration: TextDecoration.underline,
-        decorationColor: cs.primary.withValues(alpha: 0.6),
-      ),
-      code: body?.copyWith(
-        fontFamily: 'Consolas',
-        fontSize: 13,
-        color: cs.onSurface,
-        backgroundColor: cs.surfaceContainerHighest,
-      ),
-      codeblockPadding: const EdgeInsets.all(14),
-      codeblockDecoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.88),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.outlineVariant),
-      ),
-      blockquoteDecoration: BoxDecoration(
-        color: cs.primaryContainer.withValues(alpha: 0.22),
-        borderRadius: BorderRadius.circular(10),
-        border: Border(left: BorderSide(color: cs.primary, width: 3)),
-      ),
-      blockquotePadding: const EdgeInsets.fromLTRB(14, 10, 12, 10),
-      blockSpacing: 10,
-      listIndent: 24,
-    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1507,9 +1598,9 @@ class _CollapsedDetail extends StatelessWidget {
           title: Text(
             label,
             style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: cs.onSurfaceVariant,
-                  fontWeight: FontWeight.w700,
-                ),
+              color: cs.onSurfaceVariant,
+              fontWeight: FontWeight.w700,
+            ),
           ),
           children: [
             Container(
@@ -1545,8 +1636,9 @@ class _TypingDots extends StatefulWidget {
 class _TypingDotsState extends State<_TypingDots>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 900))
-    ..repeat();
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat();
 
   @override
   void dispose() {
@@ -1770,9 +1862,7 @@ class _PaletteRow {
   /// of however many headings were interleaved.
   final int matchIndex;
 
-  const _PaletteRow.heading(this.heading)
-      : command = null,
-        matchIndex = -1;
+  const _PaletteRow.heading(this.heading) : command = null, matchIndex = -1;
   const _PaletteRow.command(this.command, this.matchIndex) : heading = null;
 }
 
@@ -1842,7 +1932,9 @@ class _CommandPalette extends StatelessWidget {
             return Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
               child: Text(
-                blurb.isEmpty ? key.toUpperCase() : '${key.toUpperCase()} — $blurb',
+                blurb.isEmpty
+                    ? key.toUpperCase()
+                    : '${key.toUpperCase()} — $blurb',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w700,
@@ -1961,8 +2053,8 @@ class _CommandBrowserState extends State<_CommandBrowser> {
                       showingCategories
                           ? 'Commands'
                           : (_query.isNotEmpty
-                              ? 'Search results'
-                              : _category ?? 'Commands'),
+                                ? 'Search results'
+                                : _category ?? 'Commands'),
                       style: const TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.w700,
@@ -2026,7 +2118,7 @@ class _CommandBrowserState extends State<_CommandBrowser> {
                 widget.fromServer
                     ? '$total commands published by this server.'
                     : 'Server catalog unavailable — showing $total built-in '
-                        'commands.',
+                          'commands.',
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               ),
             ],
@@ -2127,7 +2219,9 @@ class _InputBar extends StatelessWidget {
                             filled: true,
                             fillColor: cs.surfaceContainerHighest,
                             contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 12),
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(24),
                               borderSide: BorderSide.none,
@@ -2144,8 +2238,7 @@ class _InputBar extends StatelessWidget {
                           ? const SizedBox(
                               width: 18,
                               height: 18,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2),
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.arrow_upward),
                     ),
@@ -2302,7 +2395,7 @@ class _ElevatedBadge extends StatelessWidget {
     return Tooltip(
       message: reason.trim().isEmpty
           ? 'Elevated privileges are on. This is separate from the mode — no '
-              'mode turns it on.'
+                'mode turns it on.'
           : 'Elevated privileges are on: ${reason.trim()}',
       child: Container(
         key: const Key('permission-elevated-badge'),
@@ -2363,7 +2456,9 @@ class _PermissionModeDialog extends StatelessWidget {
                         ? cs.primary.withValues(alpha: 0.10)
                         : null,
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 20, vertical: 10),
+                      horizontal: 20,
+                      vertical: 10,
+                    ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -2412,9 +2507,9 @@ class _PermissionModeDialog extends StatelessWidget {
                 child: Text(
                   state.elevated
                       ? 'Privilege: elevated — a separate switch. No mode '
-                          'grants it, and changing mode does not turn it off.'
+                            'grants it, and changing mode does not turn it off.'
                       : 'Privilege: normal. Elevation is a separate switch — '
-                          'no mode grants it.',
+                            'no mode grants it.',
                   style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                 ),
               ),

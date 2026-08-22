@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'chat_screen.dart';
 import 'local_manager.dart';
 import 'settings.dart';
+import 'theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,7 +19,8 @@ class SonderRuntimeApp extends StatefulWidget {
   State<SonderRuntimeApp> createState() => _SonderRuntimeAppState();
 }
 
-class _SonderRuntimeAppState extends State<SonderRuntimeApp> with WidgetsBindingObserver {
+class _SonderRuntimeAppState extends State<SonderRuntimeApp>
+    with WidgetsBindingObserver {
   Settings? _settings;
   bool _startedLocalServer = false;
   bool _startingLocalServer = false;
@@ -93,93 +95,18 @@ class _SonderRuntimeAppState extends State<SonderRuntimeApp> with WidgetsBinding
   @override
   Widget build(BuildContext context) {
     final settings = _settings;
-    const seed = Color(0xFF63D6C8); // Sonder signal teal
-
-    ThemeData buildTheme(Brightness brightness) {
-      final dark = brightness == Brightness.dark;
-      final scheme = ColorScheme.fromSeed(
-        seedColor: seed,
-        brightness: brightness,
-      );
-      return ThemeData(
-        useMaterial3: true,
-        brightness: brightness,
-        colorScheme: scheme,
-        scaffoldBackgroundColor:
-            dark ? const Color(0xFF0B1117) : const Color(0xFFF5F8F8),
-        canvasColor: dark ? const Color(0xFF0B1117) : const Color(0xFFF5F8F8),
-        appBarTheme: AppBarTheme(
-          backgroundColor: dark ? const Color(0xFF0B1117) : scheme.surface,
-          foregroundColor: scheme.onSurface,
-          elevation: 0,
-          scrolledUnderElevation: 0,
-          titleTextStyle: TextStyle(
-            color: scheme.onSurface,
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        cardTheme: CardThemeData(
-          elevation: 0,
-          margin: EdgeInsets.zero,
-          color: dark ? const Color(0xFF121B23) : Colors.white,
-          surfaceTintColor: Colors.transparent,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-            side: BorderSide(
-              color: dark ? const Color(0xFF24343D) : const Color(0xFFDDE7E7),
-            ),
-          ),
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: dark ? const Color(0xFF121B23) : Colors.white,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 14,
-          ),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: scheme.outlineVariant),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: scheme.outlineVariant),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: scheme.primary, width: 1.5),
-          ),
-        ),
-        chipTheme: ChipThemeData(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-            side: BorderSide(color: scheme.outlineVariant),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-        ),
-        dividerTheme: DividerThemeData(
-          color: scheme.outlineVariant.withValues(alpha: 0.65),
-          space: 1,
-        ),
-      );
-    }
 
     return MaterialApp(
       title: 'Sonder Runtime',
       debugShowCheckedModeBanner: false,
-      theme: buildTheme(Brightness.light),
-      darkTheme: buildTheme(Brightness.dark),
-      themeMode:
-          (settings?.darkMode ?? true) ? ThemeMode.dark : ThemeMode.light,
+      theme: SonderTheme.light,
+      darkTheme: SonderTheme.dark,
+      themeMode: (settings?.darkMode ?? true)
+          ? ThemeMode.dark
+          : ThemeMode.light,
       home: settings == null
-          ? const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            )
-          : ChatScreen(
-              settings: settings,
-              onSettingsChanged: _update,
-            ),
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          : ChatScreen(settings: settings, onSettingsChanged: _update),
     );
   }
 }
