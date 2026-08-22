@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import 'api.dart';
@@ -321,16 +319,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return PopScope(
-      canPop: !_dirty,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop || !_dirty) return;
-        final navigator = Navigator.of(context);
-        unawaited(_confirmDiscard().then((discard) {
-          if (!discard || !mounted) return;
-          navigator.pop();
-        }));
-      },
+    return WillPopScope(
+      onWillPop: _confirmDiscard,
       child: Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
