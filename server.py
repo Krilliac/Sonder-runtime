@@ -22273,6 +22273,24 @@ def status() -> str:
             )
         ),
     ]
+    try:
+        hardware_report = sonder_hardware.get_profile(workload="general")
+        hardware = hardware_report.get("hardware") or {}
+        capabilities = (hardware_report.get("recommendation") or {}).get("capabilities") or {}
+        execution = (hardware_report.get("recommendation") or {}).get("model_execution") or {}
+        backend_names = ",".join(capabilities.get("backend_candidates") or ("cpu",))
+        free_vram = capabilities.get("vram_free_gb")
+        vram_text = "%s GB free VRAM" % free_vram if free_vram is not None else "VRAM unknown"
+        lines.append(
+            "hardware: %s %s; %s; backends=%s; 30B=%s"
+            % (
+                capabilities.get("gpu_vendor", hardware.get("gpu_vendor", "unknown")),
+                capabilities.get("gpu_name", hardware.get("gpu_name", "")) or "GPU unknown",
+                vram_text, backend_names, execution.get("mode", "unknown"),
+            )
+        )
+    except Exception:
+        lines.append("hardware: unknown (capability report unavailable)")
     mcp_state = mcp_runtime_data()
     provenance = mcp_state.get("provenance") or {}
     if provenance.get("issue"):
