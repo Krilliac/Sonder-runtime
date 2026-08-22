@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
+from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
 from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
 from sonder_runtime.application.execution.process_jobs import ProcessJobRequest
 from sonder_runtime.application.jobs.durable_registry import (
@@ -155,6 +158,39 @@ def test_wait_publishes_terminal_truth_after_process_exit():
     assert waited.timed_out is False
     assert waited.record.status is JobStatus.FAILED
     assert waited.record.error == "process exited with a non-zero status"
+
+
+def test_running_process_publishes_incremental_output_before_wait(tmp_path):
+    cleanup = _Cleanup(complete=True)
+    provider = SubprocessJobProvider(
+        SQLiteDurableJobRegistry(tmp_path / "jobs.db"),
+        process_cleanup=cleanup,
+    )
+    request = ProcessJobRequest(
+        JobIdentity("job-live-output", "process", "execute", "idem-live-output"),
+        (
+            sys.executable, "-u", "-c",
+            "import sys,time; print('first', flush=True); time.sleep(.25); print('second', flush=True)",
+        ),
+        max_descendants=4,
+    )
+
+    started = provider.start(request)
+    deadline = time.monotonic() + 5
+    page = provider._registry.stream(started.record.identity.job_id)
+    while not page.events and time.monotonic() < deadline:
+        time.sleep(.02)
+        page = provider._registry.stream(started.record.identity.job_id)
+
+    assert [event.data for event in page.events] == ["first\n"]
+    assert provider._registry.poll("job-live-output").is_terminal is False
+
+    waited = provider.wait("job-live-output", timeout=5)
+    assert waited.record.status is JobStatus.SUCCEEDED
+    tail = provider._registry.stream(
+        "job-live-output", after=page.next_watermark,
+    )
+    assert [event.data for event in tail.events] == ["second\n"]
 
 
 def test_request_rejects_empty_argv():

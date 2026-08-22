@@ -788,9 +788,9 @@
     },
     {
       "checked": false,
-      "claim": "Composed jobs support bounded poll/stream reads, monotonic output watermarks, durable inline previews, and spill references.",
+      "claim": "The composed subprocess provider publishes bounded stdout and stderr output incrementally through the durable monotonic job-output stream before terminal completion.",
       "requirement_id": "JOB-002",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -809,9 +809,9 @@
     },
     {
       "checked": false,
-      "claim": "Composed process output uses durable monotonic watermarks with bounded previews and durable spill references across restart.",
+      "claim": "Composed process output uses durable monotonic watermarks with bounded previews and durable spill references while output is live and after restart.",
       "requirement_id": "JOB-005",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "c594e0346119d56cf3607762236b9fa33827a40c6aa70e13d81008f56a5fd129",
+    "ledger_sha256": "5b6d5db27f518563ef6ac8fed9dda1b5795c1682a3b0d92a23d8046cf0bae609",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,6 +51,7 @@ class SubprocessJobProvider:
         self._inline_output_bytes = inline_output_bytes
         self._processes: dict[str, Any] = {}
         self._limits: dict[str, int] = {}
+        self._output_threads: dict[str, tuple[threading.Thread, ...]] = {}
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
         if not isinstance(request, ProcessJobRequest):
@@ -87,12 +89,22 @@ class SubprocessJobProvider:
             raise
         self._processes[request.identity.job_id] = process
         self._limits[request.identity.job_id] = request.max_descendants
+        self._start_output_readers(request.identity.job_id, process)
         return ProcessJobStart(record, process_id, process_group_id)
 
     def wait(self, job_id: str, *, timeout: float | None = None) -> ProcessJobWait:
         process = self._process(job_id)
         try:
-            if callable(getattr(process, "communicate", None)):
+            readers = self._output_threads.get(job_id, ())
+            if readers:
+                # Reader threads own the pipes once live output publication is
+                # enabled.  Waiting on the process keeps output available to
+                # stream consumers before completion and avoids racing a
+                # second consumer through ``communicate``.
+                exit_code = process.wait(timeout=timeout)
+                for reader in readers:
+                    reader.join(timeout=1)
+            elif callable(getattr(process, "communicate", None)):
                 stdout, stderr = process.communicate(timeout=timeout)
                 exit_code = getattr(process, "returncode", None)
                 if exit_code is None:
@@ -114,6 +126,7 @@ class SubprocessJobProvider:
             self._jobs._lifecycle.record(record)
         self._processes.pop(job_id, None)
         self._limits.pop(job_id, None)
+        self._output_threads.pop(job_id, None)
         return ProcessJobWait(record, exit_code)
 
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
@@ -124,12 +137,50 @@ class SubprocessJobProvider:
         if result.cleanup_completed:
             process = self._processes.pop(job_id, None)
             self._limits.pop(job_id, None)
+            self._output_threads.pop(job_id, None)
             if process is not None:
                 try:
                     process.wait(timeout=0)
                 except (subprocess.TimeoutExpired, OSError):
                     pass
         return result
+
+    def _start_output_readers(self, job_id: str, process: Any) -> None:
+        """Publish stdout/stderr incrementally when the process exposes pipes.
+
+        The provider still supports lightweight process doubles that only
+        implement ``wait``/``communicate``.  Real ``Popen`` instances use
+        daemon readers so a running job can be streamed through the durable
+        registry before ``wait`` finalizes its status.
+        """
+        readers: list[threading.Thread] = []
+        for stream_name, stream in (
+            (OutputStream.STDOUT, getattr(process, "stdout", None)),
+            (OutputStream.STDERR, getattr(process, "stderr", None)),
+        ):
+            if not callable(getattr(stream, "readline", None)):
+                continue
+            reader = threading.Thread(
+                target=self._read_output,
+                args=(job_id, stream_name, stream),
+                name=f"sonder-job-output-{job_id}-{stream_name.value}",
+                daemon=True,
+            )
+            reader.start()
+            readers.append(reader)
+        if readers:
+            self._output_threads[job_id] = tuple(readers)
+
+    def _read_output(self, job_id: str, stream: OutputStream, pipe: Any) -> None:
+        try:
+            for chunk in iter(pipe.readline, ""):
+                if chunk:
+                    self._record_output(job_id, stream, chunk)
+        except (OSError, ValueError):
+            # Process teardown can close a pipe while its reader is waking.
+            # The durable job status and already-published watermark remain
+            # authoritative; do not turn a normal close into a false failure.
+            return
 
     def _record_output(self, job_id: str, stream: OutputStream, data: str | None) -> None:
         if not data:
