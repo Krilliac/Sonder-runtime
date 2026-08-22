@@ -36,6 +36,10 @@ Collection-only verification for the process and spill modules collected all
 start/poll, watermarked spill output and session linkage, and restart cleanup
 with a complete receipt. Existing focused tests cover process-tree cleanup,
 SQLite reopen/recovery, bounded output truncation, and spill integrity.
+The API-003 restart rehearsal additionally launches a real child process,
+reopens the SQLite registry under a new provider owner, cleans the persisted
+process identity through the platform supervisor, and verifies the interrupted
+durable state.
 
 ## Limitations
 
@@ -44,4 +48,4 @@ specification, run the full repository suite, or claim provider security,
 automatic generic-job scheduling, or silent restart resumption. Process
 provider implementation files and session repository implementation files are
 outside this slice. The Windows process-tree adapter still reports the truth
-returned by `taskkill`; production deployment receipts remain outstanding.
+returned by `taskkill`; a full deployment matrix remains outstanding.
