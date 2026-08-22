@@ -9,6 +9,9 @@ from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
 
 
+_MCP_DIGEST_OUTPUT_BYTES = 96_000
+
+
 def _packaged_module(name: str):
     """Resolve an inspection implementation owned by the packaged adapter."""
     return importlib.import_module(
@@ -250,7 +253,9 @@ class InspectionExecutorAdapter:
                 " complete" if data["complete"] else " incomplete",
             )
             return _result(
-                output=content_digest.format_digest(data), ok=data["complete"],
+                output=content_digest.format_digest(
+                    data, max_output_bytes=_MCP_DIGEST_OUTPUT_BYTES,
+                ), ok=data["complete"],
                 summary=summary, audit_args=audit_args,
                 activity={"summary": summary, "path": data["root"]},
             )
