@@ -263,9 +263,9 @@
     },
     {
       "checked": false,
-      "claim": "The production application graph can publish injected attended training and update providers alongside embedding, expose typed health, propagate cooperative cancellation, and close all published providers through the application lifecycle boundary.",
+      "claim": "The live application graph exposes typed provider-neutral training and update operation entrypoints that resolve scoped providers, fail closed when a lane is absent or lacks the capability, and return normalized deployment or activation evidence.",
       "requirement_id": "ARCH-001",
-      "revision": 15,
+      "revision": 16,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "a900ea01b7a979062e3ef33829cba1e2cec5a74ee8d88a66f44ce945bde950eb",
+    "ledger_sha256": "ec6d0825a44bae12fcd565a5554a59f882e442c1c6d46045a9c89990339acedd",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
