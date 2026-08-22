@@ -261,7 +261,14 @@
       "category": "agents",
       "name": "/agentcancel",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "agent_id",
+          "required": true,
+          "type": "str"
+        }
+      ],
       "risk": "ask",
       "summary": "Cooperatively cancel an active agent/master prefix or all active agents.",
       "tool": ""
@@ -273,7 +280,20 @@
       "category": "agents",
       "name": "/agentretry",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "agent_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "tier",
+          "required": false,
+          "type": "str"
+        }
+      ],
       "risk": "ask",
       "summary": "Explicitly rerun an interrupted, failed, or cancelled persisted master task.",
       "tool": ""
@@ -780,7 +800,20 @@
       "category": "creative",
       "name": "/artifactcheck",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "path",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "auto",
+          "name": "recipe",
+          "required": false,
+          "type": "str"
+        }
+      ],
       "risk": "safe",
       "summary": "Ground an artifact path with inferred or explicit format-specific validation recipes.",
       "tool": ""
@@ -794,7 +827,20 @@
       "category": "creative",
       "name": "/asset",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "name",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "brief",
+          "required": true,
+          "type": "str"
+        }
+      ],
       "risk": "mutation",
       "summary": "Generate icons, media, textured morphing multi-clip GLB models, scenes, and packs from a brief.",
       "tool": ""
@@ -1149,7 +1195,14 @@
       "category": "agents",
       "name": "/capacity",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": 0,
+          "name": "requested_agents",
+          "required": false,
+          "type": "int"
+        }
+      ],
       "risk": "safe",
       "summary": "Show queued fleet ceiling and current RAM/CPU-bounded worker slots.",
       "tool": ""
@@ -2340,7 +2393,14 @@
       "category": "agents",
       "name": "/ensemble",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "question",
+          "required": true,
+          "type": "str"
+        }
+      ],
       "risk": "ask",
       "summary": "Ask several local models the same question, then compound their answers into one, naming any disagreement.",
       "tool": ""
@@ -3340,7 +3400,14 @@
       "category": "creative",
       "name": "/game",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "spec",
+          "required": true,
+          "type": "str"
+        }
+      ],
       "risk": "execution",
       "summary": "Generate, execute, repair, and ground a persistent 2D/2.5D/3D game.",
       "tool": ""
@@ -3541,7 +3608,14 @@
       "category": "creative",
       "name": "/gamefleet",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "spec",
+          "required": true,
+          "type": "str"
+        }
+      ],
       "risk": "execution",
       "summary": "Run a bounded parallel game campaign with optional language/dimension targets.",
       "tool": ""
@@ -8047,7 +8121,14 @@
       "category": "web",
       "name": "/weather",
       "native": true,
-      "params": [],
+      "params": [
+        {
+          "default": null,
+          "name": "location",
+          "required": true,
+          "type": "str"
+        }
+      ],
       "risk": "ask",
       "summary": "Get sourced live conditions and a short forecast for a city or ZIP.",
       "tool": ""
@@ -8976,7 +9057,7 @@
     "events": 43,
     "tools": 205
   },
-  "digest": "938083b01133e7f3d42a3742f9703ea87e09f05617c1b6a90abcb1fc11a1edbf",
+  "digest": "701cfacf473b029ccff0d8140fb57f1930b4cd89bba786bd4d437a800983c867",
   "events": [
     {
       "name": "session.started",

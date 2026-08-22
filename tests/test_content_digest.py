@@ -55,6 +55,36 @@ def test_unicode_relative_paths_and_json_are_deterministic(project):
     assert json.loads(rendered) == first
 
 
+def test_format_digest_bounds_rendered_manifest_without_invalid_json():
+    data = {
+        "manifest": [
+            {"path": "file-%04d.txt" % index, "bytes": 1, "sha256": "a" * 64}
+            for index in range(500)
+        ],
+        "errors": [],
+        "complete": True,
+        "truncated": False,
+        "truncation_reasons": [],
+    }
+
+    rendered = content_digest.format_digest(data, max_output_bytes=2_000)
+    parsed = json.loads(rendered)
+
+    assert len(rendered.encode("utf-8")) <= 2_000
+    assert parsed["complete"] is False
+    assert parsed["truncated"] is True
+    assert parsed["truncation_reasons"] == ["max_output_bytes"]
+    assert len(parsed["manifest"]) < len(data["manifest"])
+
+
+def test_format_digest_rejects_cap_smaller_than_metadata_envelope():
+    with pytest.raises(ValueError, match="too small"):
+        content_digest.format_digest(
+            {"manifest": [], "errors": [], "complete": True},
+            max_output_bytes=10,
+        )
+
+
 def test_file_and_directory_digests_change_after_mutation(project):
     target = project / "state.dat"
     target.write_bytes(b"before")

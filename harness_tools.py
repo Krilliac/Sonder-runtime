@@ -263,7 +263,11 @@ def _run_git(root, args, *, timeout=10):
 # ---------------------------------------------------------------------------
 
 _TEST_FRAMEWORKS = {
-    "pytest": {"cmd": [sys.executable, "-m", "pytest"], "marker_files": ["pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py"]},
+    # The runtime venv is intentionally minimal on some installations.  The
+    # command is selected at call time by _pytest_cmd(), which falls back to
+    # the venv's base interpreter when the embedded pytest package is only a
+    # namespace directory (no pytest.__main__).
+    "pytest": {"cmd": [], "marker_files": ["pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py"]},
     "unittest": {"cmd": [sys.executable, "-m", "unittest", "discover"], "marker_files": []},
     "jest": {"cmd": ["npx", "jest"], "marker_files": ["jest.config.js", "jest.config.ts", "jest.config.mjs"]},
     "vitest": {"cmd": ["npx", "vitest", "run"], "marker_files": ["vitest.config.ts", "vitest.config.js", "vitest.config.mts"]},
@@ -272,6 +276,30 @@ _TEST_FRAMEWORKS = {
     "go": {"cmd": ["go", "test", "./..."], "marker_files": ["go.mod"]},
     "dotnet": {"cmd": ["dotnet", "test"], "marker_files": ["*.csproj", "*.sln"]},
 }
+
+
+def _pytest_cmd():
+    """Return a Python interpreter that can actually launch pytest.
+
+    Sonder's embedded ``.runtime`` may be present without a complete pytest
+    installation.  ``import pytest`` then succeeds as a namespace package,
+    but ``python -m pytest`` fails with ``pytest.__main__`` missing.  Prefer
+    the runtime interpreter when healthy and use its base interpreter as a
+    local, deterministic fallback; never install packages or invoke a shell.
+    """
+    candidates = [sys.executable]
+    base = Path(sys.base_prefix)
+    base_python = base / ("python.exe" if os.name == "nt" else "bin/python")
+    if str(base_python) not in candidates and base_python.exists():
+        candidates.append(str(base_python))
+    for executable in candidates:
+        result = _run(
+            [executable, "-c", "import pytest.__main__"],
+            cwd=Path.cwd(), timeout=5,
+        )
+        if result.get("ok"):
+            return executable
+    return sys.executable
 
 
 def _detect_test_framework(root):
@@ -306,7 +334,7 @@ def test_discover(root=".", framework="auto", extra_roots=""):
 
     if framework == "pytest":
         result = _run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header"],
+            [_pytest_cmd(), "-m", "pytest", "--collect-only", "-q", "--no-header"],
             cwd=root, timeout=30,
         )
         if result["ok"]:
@@ -365,6 +393,8 @@ def test_run(
         framework = _detect_test_framework(root)
 
     base = list(_TEST_FRAMEWORKS.get(framework, {}).get("cmd", []))
+    if framework == "pytest":
+        base = [_pytest_cmd(), "-m", "pytest"]
     if not base:
         return {"ok": False, "error": "unknown framework: %s" % framework, "framework": framework}
 
