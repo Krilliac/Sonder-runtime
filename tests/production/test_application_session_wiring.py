@@ -9,6 +9,8 @@ from sonder_runtime.application.security.prompt_provenance import PromptProvenan
 from sonder_runtime.application.session import SessionCaptureService
 from sonder_runtime.bootstrap import app as bootstrap_app
 from sonder_runtime.domain.common.ids import SessionId, TurnId
+from sonder_runtime.interfaces.http import serve
+from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 
 
 class _Gateway:
@@ -66,3 +68,37 @@ def test_canonical_session_capture_does_not_persist_raw_provenance(tmp_path):
     assert "user:password" not in encoded
     assert "untrusted source bytes" not in encoded
     assert payloads[0]["provenance"]["item_count"] == 1
+
+
+def test_live_http_session_facade_uses_application_repository_after_restart(tmp_path, monkeypatch):
+    database = tmp_path / "http-session.db"
+    monkeypatch.setenv("SONDER_SESSIONS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    first = bootstrap_app.build_application()
+    session_id = SessionId.new()
+    first.chat._gateway = _Gateway()
+    first.chat.complete(
+        ChatCommand(
+            content="http durable turn", session_id=session_id, turn_id=TurnId.new(),
+        ),
+        local_owner_context(correlation_id="http-session", source="test"),
+    )
+
+    facade = first.session_http_facade()
+    assert facade is first.session_http_facade()
+    assert serve.configure_session_facade(facade) is facade
+    route = dispatch_session_route(
+        serve._SESSION_FACADE,
+        f"/v1/sessions/{session_id.serialize()}/replay",
+    )
+    assert route.status_code == 200
+    assert route.body["integrity_valid"] is True
+
+    bootstrap_app.reset_for_tests()
+    reopened = bootstrap_app.build_application()
+    reopened_route = dispatch_session_route(
+        reopened.session_http_facade(),
+        f"/v1/sessions/{session_id.serialize()}/trajectory",
+    )
+    assert reopened_route.status_code == 200
+    assert reopened_route.body["session_id"] == session_id.serialize()

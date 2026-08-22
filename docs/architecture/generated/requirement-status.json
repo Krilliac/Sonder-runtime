@@ -1355,9 +1355,9 @@
     },
     {
       "checked": false,
-      "claim": "The live composition path retains bounded administrator-gated query, export, and replay access over the same durable repository.",
+      "claim": "The live application composition path injects the canonical application-owned session facade into the HTTP adapter, preserving bounded administrator-gated query, export, replay, trajectory, checkpoint, fork, and repair access over the durable repository used by capture and restart recovery.",
       "requirement_id": "SESSION-008",
-      "revision": 2,
+      "revision": 3,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "ec6d0825a44bae12fcd565a5554a59f882e442c1c6d46045a9c89990339acedd",
+    "ledger_sha256": "b0f81d15711225605314c22e7f6068f288b049c3573dbef6d1f770e350addc78",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
