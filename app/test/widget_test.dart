@@ -14,6 +14,7 @@ import 'package:sonder_runtime/main.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/settings.dart';
+import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
@@ -30,6 +31,28 @@ void main() {
     expect(find.textContaining('served locally by Ollama'), findsOneWidget);
     // Empty state shows the message composer.
     expect(find.byType(TextField), findsOneWidget);
+    // The telemetry strip stays legible and truthful before a server reply:
+    // unavailable data is an em dash, never a fabricated zero.
+    expect(find.byKey(const Key('status-metric-context')), findsOneWidget);
+    expect(find.byKey(const Key('status-metric-activity')), findsOneWidget);
+    expect(find.byKey(const Key('status-metric-route')), findsOneWidget);
+  });
+
+  testWidgets('Desktop command shortcut opens the command browser', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(TextField));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('command-browser')), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('Desktop chat layout keeps the conversation rail visible', (
@@ -276,6 +299,14 @@ void main() {
     );
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
+    expect(find.byKey(const Key('system-section-nav')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('system-section-nav')),
+        matching: find.text('Learning'),
+      ),
+      findsOneWidget,
+    );
 
     await tester.tap(find.byTooltip('Back to chat'));
     await tester.pump();
@@ -757,15 +788,6 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Settings'), findsOneWidget);
-    expect(find.text('Runtime architecture'), findsOneWidget);
-    expect(
-      find.textContaining('not a standalone foundation model'),
-      findsOneWidget,
-    );
-    expect(
-      find.textContaining('training uses PEFT/Hugging Face'),
-      findsOneWidget,
-    );
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
 
@@ -776,14 +798,49 @@ void main() {
     expect(find.text('New chat'), findsOneWidget);
   });
 
+  testWidgets('Settings guards unsaved changes before leaving', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final settings = Settings();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(settings: settings, onChanged: (_) {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(
+      find.textContaining('not a standalone foundation model'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('training uses PEFT/Hugging Face'),
+      findsOneWidget,
+    );
+
+    await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');
+    await tester.pump();
+    await tester.tap(find.text('Chat'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Discard unsaved settings?'), findsOneWidget);
+    await tester.tap(find.text('Keep editing'));
+    await tester.pumpAndSettle();
+    expect(find.text('Settings'), findsOneWidget);
+  });
+
   testWidgets('Approximate location is explicit opt-in and persists', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    final settings = Settings();
 
-    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(settings: settings, onChanged: (_) {}),
+      ),
+    );
     await tester.pumpAndSettle();
 
     final label = find.text('Allow approximate IP location');
@@ -797,6 +854,8 @@ void main() {
     );
     expect(tester.widget<SwitchListTile>(tile).value, isFalse);
 
+    await tester.ensureVisible(tile);
+    await tester.pumpAndSettle();
     await tester.tap(tile);
     await tester.pump();
     expect(tester.widget<SwitchListTile>(tile).value, isTrue);
@@ -1185,6 +1244,11 @@ void main() {
       expect(
         find.descendant(of: badge, matching: find.text('ADMIN')),
         findsOneWidget,
+      );
+      expect(tester.getSemantics(chip).label, contains('auto'));
+      expect(
+        tester.getSemantics(badge).label,
+        contains('Elevated privileges: on'),
       );
       final labels = tester
           .widgetList<Text>(
