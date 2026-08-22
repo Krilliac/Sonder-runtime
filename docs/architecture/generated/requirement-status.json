@@ -221,9 +221,9 @@
     },
     {
       "checked": false,
-      "claim": "The native MCP composition exposes negotiated durable task get, update, and cancellation dispatch through the application job service while preserving bounded protocol errors and redacted task views.",
+      "claim": "The packaged native MCP entrypoint fails closed and reports a bounded refusal before configuration when the mandatory unsafe-lab safety gate rejects the host.",
       "requirement_id": "API-003",
-      "revision": 4,
+      "revision": 5,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "65dcbf9f0b327e560dc822d54bcee288d8c01b9fe2104401165e8fb13c1040af",
+    "ledger_sha256": "b38eb36380990d7d8e51d4808e51ff87ad0a870e4020cd2a336f3acd1a3d8c97",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }

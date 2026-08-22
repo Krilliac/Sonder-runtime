@@ -471,3 +471,22 @@ def test_native_entrypoint_fences_safety_before_configuration(monkeypatch):
 
     assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 0
     assert calls == ["safety", "config", "build", "run"]
+
+
+def test_native_entrypoint_reports_safety_refusal_without_traceback(monkeypatch, capsys):
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.adapters.security.unsafe_lab as unsafe_lab
+
+    monkeypatch.setattr(
+        unsafe_lab,
+        "require_startup",
+        lambda: (_ for _ in ()).throw(unsafe_lab.UnsafeLabError("elevated host")),
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "_load_config",
+        lambda _args: pytest.fail("configuration must not load after safety refusal"),
+    )
+
+    assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 2
+    assert capsys.readouterr().err == "native MCP startup refused: elevated host\n"
