@@ -45,8 +45,9 @@ present. No session/job implementation files were changed to work around it.
 
 - No concrete production training backend or update activator is selected by
   this slice; both remain explicit injection seams and are absent by default.
-- Provider health is exposed on the typed `Application` object, not yet as a
-  new HTTP route; existing server lifecycle routes were left unchanged.
+- Provider health is exposed on the typed `Application` object and projected
+  into the administrator `/v1/sonder/status` payload; ordinary account status
+  remains restricted from host-wide provider details.
 - The existing model gateway has no general model-provider lifecycle port, so
   chat generation remains governed by its established gateway/context policy.
 - Formal requirement promotion, deployment receipts, and full-repository tests
