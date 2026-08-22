@@ -14,7 +14,6 @@ import 'package:sonder_runtime/main.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/settings.dart';
-import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
@@ -786,25 +785,8 @@ void main() {
     await tester.tap(find.byTooltip('Settings'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('Settings'), findsOneWidget);
-    debugPrint(
-      'SETTINGS_DEBUG default=${find.text('Runtime architecture').evaluate().length} '
-      'all=${find.text('Runtime architecture', skipOffstage: false).evaluate().length} '
-      'lists=${find.byType(ListView, skipOffstage: false).evaluate().length} '
-      'settings=${find.byType(SettingsScreen, skipOffstage: false).evaluate().length}',
-    );
-    final settingsElement =
-        find.byType(SettingsScreen, skipOffstage: false).evaluate().single;
-    debugPrint(
-      find
-          .text('Runtime architecture', skipOffstage: false)
-          .evaluate()
-          .single
-          .toStringDeep(),
-    );
-    debugPrint('SETTINGS_ROUTE_CURRENT=${ModalRoute.of(settingsElement)?.isCurrent}');
     expect(find.text('Runtime architecture'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
@@ -831,7 +813,6 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
-    await tester.pump(const Duration(milliseconds: 300));
 
     await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');
     await tester.pump();
@@ -859,7 +840,6 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
-    await tester.pump(const Duration(milliseconds: 300));
 
     final label = find.text('Allow approximate IP location');
     expect(find.byType(ListView), findsOneWidget);
