@@ -14,6 +14,7 @@ import 'package:sonder_runtime/main.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/settings.dart';
+import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
@@ -791,7 +792,8 @@ void main() {
     debugPrint(
       'SETTINGS_DEBUG default=${find.text('Runtime architecture').evaluate().length} '
       'all=${find.text('Runtime architecture', skipOffstage: false).evaluate().length} '
-      'lists=${find.byType(ListView, skipOffstage: false).evaluate().length}',
+      'lists=${find.byType(ListView, skipOffstage: false).evaluate().length} '
+      'settings=${find.byType(SettingsScreen, skipOffstage: false).evaluate().length}',
     );
     debugPrint(
       find
