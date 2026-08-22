@@ -47,11 +47,43 @@ def _isolate_fleet_ledger():
     Clearing before each test keeps the suite order-independent.
     """
     try:
-        import fleet_store
+        import sonder_runtime.adapters.persistence.fleet_store as fleet_store
         fleet_store.clear_all()
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _configure_http_legacy_boundary(monkeypatch):
+    """Exercise the same explicit runtime injection as the serve bootstrap."""
+    import server
+    from sonder_runtime.interfaces.http import serve
+    from sonder_runtime.interfaces.repl import repl
+
+    # Rebind through monkeypatch so tests that exercise reloads or substitute
+    # a small runtime double cannot leak that process-global composition state
+    # into the next test (especially under xdist workers).
+    monkeypatch.setattr(serve, "_LEGACY_RUNTIME", server)
+    monkeypatch.setattr(repl, "_legacy_runtime", server)
+    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+
+    OllamaGateway.configure_default_providers(
+        target_resolver=lambda tier, strict=False: _legacy_model_target(
+            server, tier, strict
+        ),
+        generate_factory=lambda model, system, temperature, num_predict, num_ctx, **kwargs: server._make_generate(
+            model, system, temperature, num_predict, num_ctx, **kwargs
+        ),
+    )
+    yield
+
+
+def _legacy_model_target(server, tier, strict):
+    from sonder_runtime.application.ports.model_target import ModelTarget
+
+    model, cloud, augment, tier_label = server._serve_target(tier, strict)
+    return ModelTarget(model, cloud, tier_label, augment)
 
 
 @pytest.fixture

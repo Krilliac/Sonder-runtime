@@ -43,19 +43,107 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert len(module.ROOT_LEGACY_MODULES) <= module.ROOT_LEGACY_MODULE_LIMIT
+    assert module.ROOT_LEGACY_MODULES == {"server"}
+    assert module.BASELINE_ROOT_LEGACY_MODULES == frozenset({"server"})
+    assert "autopilot_store" not in module.ROOT_LEGACY_MODULES
     assert "memory_store" not in module.ROOT_LEGACY_MODULES
-    assert "sonder_preflight" not in module.ROOT_LEGACY_MODULES
+    assert Path("sonder_preflight.py") in module.RETIRED_ROOT_MODULES
+    assert Path("model_transport.py") in module.RETIRED_ROOT_MODULES
+    assert Path("text_patch.py") in module.RETIRED_ROOT_MODULES
+    assert Path("artifact_risk.py") in module.RETIRED_ROOT_MODULES
+    assert Path("pdf_risk.py") in module.RETIRED_ROOT_MODULES
+    assert Path("live_reload.py") in module.RETIRED_ROOT_MODULES
+    assert module.COMPATIBILITY_ROOT_MODULES["archive_create"] == Path(
+        "archive_create.py"
+    )
+    assert module.COMPATIBILITY_ROOT_MODULES["code_runner"] == Path(
+        "code_runner.py"
+    )
+    assert module.COMPATIBILITY_ROOT_MODULES["command_catalog"] == Path(
+        "command_catalog.py"
+    )
+    assert module.COMPATIBILITY_ROOT_MODULES["fanout_store"] == Path(
+        "fanout_store.py"
+    )
+    assert module.COMPATIBILITY_ROOT_MODULES["learning_health"] == Path(
+        "learning_health.py"
+    )
     assert "model_transport" not in module.ROOT_LEGACY_MODULES
+    assert "runtime_policy" not in module.ROOT_LEGACY_MODULES
     assert "eval_history" not in module.ROOT_LEGACY_MODULES
     assert "unsafe_lab" not in module.ROOT_LEGACY_MODULES
     assert module.ROOT_LEGACY_MODULES <= module.BASELINE_ROOT_LEGACY_MODULES
-
     removed = next(iter(module.ROOT_LEGACY_MODULES))
     module.ROOT_LEGACY_MODULES = (
         module.ROOT_LEGACY_MODULES - {removed}
     ) | {"new_accidental_legacy"}
     violations = module.check()
     assert any("new_accidental_legacy" in row for row in violations)
+
+
+def test_web_search_ownership_is_packaged():
+    module = _architecture_module()
+    assert module.WEB_SEARCH_CANONICAL_MODULE == "sonder_runtime.adapters.web_search"
+    assert module.WEB_SEARCH_COMPATIBILITY_ROOT == Path("web_tools.py")
+
+
+def test_web_fetch_ownership_is_packaged():
+    module = _architecture_module()
+    assert module.WEB_FETCH_CANONICAL_MODULE == "sonder_runtime.adapters.web_fetch"
+    assert module.WEB_FETCH_COMPATIBILITY_ROOT == Path("web_tools.py")
+
+
+def test_weather_and_location_ownership_is_packaged():
+    module = _architecture_module()
+    assert module.WEATHER_CANONICAL_MODULE == "sonder_runtime.adapters.weather"
+    assert module.LOCATION_CANONICAL_MODULE == "sonder_runtime.adapters.location"
+    assert module.WEATHER_LOCATION_COMPATIBILITY_ROOT == Path("web_tools.py")
+
+
+def test_unsafe_lab_stateful_owner_is_security_adapter(monkeypatch):
+    """The compatibility module must preserve identity without app ownership."""
+    import inspect
+    import sys
+
+    import unsafe_lab
+
+    source = Path(inspect.getsourcefile(unsafe_lab)).resolve()
+    assert source == (
+        _REPO_ROOT / "sonder_runtime" / "adapters" / "security" / "unsafe_lab.py"
+    ).resolve()
+    assert not (
+        _REPO_ROOT / "sonder_runtime" / "application" / "security" / "unsafe_lab.py"
+    ).exists()
+    assert sys.modules["unsafe_lab"] is unsafe_lab
+
+    marker = []
+    monkeypatch.setattr(unsafe_lab, "active", lambda: marker.append(True) or True)
+    assert unsafe_lab.active() is True
+    assert marker == [True]
+
+
+def test_version_root_allowance_is_removed_after_packaged_ownership():
+    module = _architecture_module()
+    assert "sonder_version" not in module.ROOT_PLATFORM_MODULES
+
+    offenders = []
+    package_root = _REPO_ROOT / "sonder_runtime"
+    for path in package_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == "sonder_version" for alias in node.names
+            ):
+                offenders.append(str(path.relative_to(_REPO_ROOT)))
+                break
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module == "sonder_version"
+            ):
+                offenders.append(str(path.relative_to(_REPO_ROOT)))
+                break
+    assert offenders == []
 
 
 def test_production_callers_use_the_memory_adapter():
@@ -67,7 +155,16 @@ def test_production_callers_use_the_memory_adapter():
     ) == ()
 
 
-def test_recall_root_module_is_compatibility_only_and_ratchet_shrank():
+def test_autopilot_root_is_migration_only():
+    module = _architecture_module()
+    assert module.compatibility_import_offenders(
+        "autopilot_store",
+        Path("autopilot_store.py"),
+        allowed_paths=module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS["autopilot_store"],
+    ) == ()
+
+
+def test_recall_root_module_is_retired_and_ratchet_shrank():
     import importlib.util
 
     checker = _REPO_ROOT / "scripts" / "check_architecture.py"
@@ -75,11 +172,10 @@ def test_recall_root_module_is_compatibility_only_and_ratchet_shrank():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert "recall" not in module.ROOT_LEGACY_MODULES
-    assert module.ROOT_LEGACY_MODULE_LIMIT == 16
+    assert module.ROOT_LEGACY_MODULE_LIMIT == 1
 
-    assert module.compatibility_import_offenders(
-        "recall", Path("recall.py")
-    ) == ()
+    assert Path("recall.py") in module.RETIRED_ROOT_MODULES
+    assert "recall" not in module.COMPATIBILITY_ROOT_MODULES
 
 
 def test_recall_use_case_depends_only_on_its_narrow_port():
@@ -136,15 +232,15 @@ def test_the_ratchet_scan_covers_source_and_excludes_vendored_trees():
     assert len(scanned) > 100, "the exclusion filter swallowed the source tree"
 
 
-def test_backup_root_module_is_compatibility_only_and_ratchet_shrank():
+def test_backup_root_module_is_retired_and_ratchet_shrank():
     import importlib.util
 
     checker = _REPO_ROOT / "scripts" / "check_architecture.py"
     spec = importlib.util.spec_from_file_location("backup_architecture", checker)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert "sonder_backup" not in module.ROOT_LEGACY_MODULES
-    assert module.ROOT_LEGACY_MODULE_LIMIT == 16
+    assert Path("sonder_backup.py") in module.RETIRED_ROOT_MODULES
+    assert module.ROOT_LEGACY_MODULE_LIMIT == 1
 
     offenders = []
     for path in _REPO_ROOT.rglob("*.py"):
@@ -168,6 +264,11 @@ def test_backup_root_module_is_compatibility_only_and_ratchet_shrank():
     assert offenders == []
 
 
+def test_storage_root_module_is_retired_and_ratchet_shrank():
+    module = _architecture_module()
+    assert Path("sonder_storage.py") in module.RETIRED_ROOT_MODULES
+
+
 def test_backup_use_case_depends_only_on_its_narrow_port():
     service = (
         _REPO_ROOT / "sonder_runtime" / "application" / "backup" / "use_cases.py"
@@ -185,7 +286,18 @@ def test_applied_memory_baseline_remains_byte_for_byte_immutable():
     immutable_baseline = Path("migrations/memory/0001_baseline.py")
     module = _architecture_module()
     assert module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS == {
+        "command_catalog": frozenset({
+            Path("command_registry.py"),
+            Path("command_router.py"),
+            Path("permission_modes.py"),
+            Path("reloadable_mcp.py"),
+            Path("slash_menu.py"),
+        }),
+        "learning_health": frozenset({Path("server.py")}),
         "memory_store": frozenset({immutable_baseline}),
+        "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
+        "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),
+        "queued_actions": frozenset({Path("migrations/queued_actions/0001_baseline.py")}),
     }
 
     # Never rewrite an already-applied migration merely to satisfy the
@@ -260,7 +372,53 @@ def test_checker_detects_a_violation(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "root_module", ["context_overflow.py", "mmr_rerank.py", "reward.py"],
+    "root_module", [
+        "context_overflow.py",
+        "mmr_rerank.py",
+        "reward.py",
+        "execution_status.py",
+        "process_liveness.py",
+        "eval_history.py",
+        "sonder_backup.py",
+        "sonder_preflight.py",
+        "workflow_store.py",
+        "sonder_storage.py",
+        "model_transport.py",
+        "runtime_policy.py",
+        "ollama_endpoint.py",
+        "embed_cache.py",
+        "embeddings.py",
+        "npu_contract.py",
+        "npu_manifest.py",
+        "npu_providers.py",
+        "npu_broker.py",
+        "npu_worker.py",
+        "npu_service.py",
+        "activity_tracker.py",
+        "sonder_operations_store.py",
+        "file_ops.py",
+        "workbench.py",
+        "sonder_secrets.py",
+        "sonder_updates.py",
+        "sonder_update_engine.py",
+        "sonder_lifecycle.py",
+        "sonder_serve.py",
+        "sonder_repl.py",
+        "sonder_migrations.py",
+        "sonder_metrics.py",
+        "archive_tools.py",
+        "content_digest.py",
+        "data_query.py",
+        "dependency_inventory.py",
+        "log_inspect.py",
+        "project_detect.py",
+        "workspace_compare.py",
+        "sonder_runtime\\adapters\\strangler_services.py",
+        "sonder_runtime\\adapters\\legacy_model_gateway.py",
+        "sonder_runtime\\adapters\\ollama\\gateway.py",
+        "sonder_runtime\\adapters\\openai_compat\\gateway.py",
+        "sonder_runtime\\adapters\\ollama\\endpoint.py",
+    ],
 )
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
     """A completed root migration is a permanent shrink-only boundary."""
@@ -295,7 +453,7 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
         / "inspection_executor.py"
     )
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    resolved = {
+    legacy = {
         node.args[0].value
         for node in ast.walk(tree)
         if (
@@ -307,14 +465,30 @@ def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
             and isinstance(node.args[0].value, str)
         )
     }
-    assert resolved == {
-        "archive_tools", "content_digest", "data_query",
-        "dependency_inventory", "file_ops", "log_inspect", "project_detect",
-        "workspace_compare",
-    }
-    assert not resolved & {
+    assert legacy == set()
+    assert not legacy & {
+        "archive_tools", "content_digest", "data_query", "dependency_inventory",
         "archive_extract", "archive_create", "data_convert", "json_patch_tool",
+        "log_inspect", "project_detect",
         "sqlite_mutate", "text_patch", "workbench",
+    }
+
+    packaged = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_packaged_module"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        )
+    }
+    assert packaged == {
+        "archive_tools", "content_digest", "data_query", "dependency_inventory",
+        "log_inspect", "project_detect", "workspace_compare",
+        "sonder_runtime.adapters.filesystem.file_ops",
     }
 
 
@@ -340,6 +514,16 @@ def test_preference_use_case_depends_only_on_narrow_application_ports():
     assert "archive_" not in adapter
     assert "task_" not in adapter
     assert "checklist_" not in adapter
+
+
+def test_preference_codec_is_composed_from_its_canonical_adapter():
+    from sonder_runtime.adapters.preference_adapters import LegacyPreferenceCodec
+    from sonder_runtime.adapters.preference_codec import PreferenceCodecAdapter
+    from sonder_runtime.bootstrap.app import build_application
+
+    assert LegacyPreferenceCodec is PreferenceCodecAdapter
+    application = build_application(preference_module_provider=lambda: None)
+    assert type(application.preferences._codec) is PreferenceCodecAdapter
 
 
 def test_domain_modules_are_pure():
@@ -383,11 +567,10 @@ def test_evaluation_history_application_service_has_no_persistence_dependency():
     assert "import server" not in source
 
 
-def test_production_callers_use_the_evaluation_history_adapter():
+def test_evaluation_history_root_alias_is_retired():
     module = _architecture_module()
-    assert module.compatibility_import_offenders(
-        "eval_history", Path("eval_history.py")
-    ) == ()
+    assert Path("eval_history.py") in module.RETIRED_ROOT_MODULES
+    assert "eval_history" not in module.COMPATIBILITY_ROOT_MODULES
 
 
 def test_production_inventory_ignores_generated_tree_but_catches_tracked_offender(

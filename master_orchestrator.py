@@ -17,7 +17,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
-import fleet_store
+import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import fleet_provenance
 
 
@@ -324,7 +324,7 @@ def fleet_model_bytes() -> int:
         return cached[1]
     size = 0
     try:
-        import runtime_policy  # local import: runtime_policy never imports this module
+        import sonder_runtime.adapters.runtime_policy as runtime_policy  # local import: runtime_policy never imports this module
 
         policy = runtime_policy.load(create=True)
         tier = runtime_policy.route_tier("fleet", policy=policy)

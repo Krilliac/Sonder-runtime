@@ -22,7 +22,7 @@ import collections
 import base64
 import contextlib
 import datetime
-import email.utils
+import functools
 import hashlib
 import hmac
 import importlib
@@ -52,15 +52,15 @@ import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
 import reflection
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import personas
 import summarizer
-import code_runner
+from sonder_runtime.adapters.execution_tools import code_runner
 import compiler_cache
 import request_cache
 import isolated_runner
-import live_reload
-import system_profile
+from sonder_runtime.adapters.web import live_reload
+from sonder_runtime.platform import system_profile
 import emotion_vectors
 import preference_learning
 from sonder_runtime.adapters import process_liveness
@@ -68,91 +68,240 @@ import web_tools
 import local_service_probe as local_probe
 import web_intents
 import self_heal
-import grounding
-import sonder_paths
+from sonder_runtime.adapters.execution_tools import grounding
+from sonder_runtime.platform import paths as sonder_paths
 import harness_tools
 import memory_quality
 import learning_health
 import domain_grounding
 import master_orchestrator
 from sonder_runtime.domain.execution import status as execution_status
-import ollama_lifecycle
+from sonder_runtime.domain.model_routing import (
+    is_cloud_model_name as _is_cloud_model_name,
+)
+from sonder_runtime.platform.deployment_auth import (
+    authenticates_callers as _deployment_authenticates_callers_policy,
+)
+from sonder_runtime.domain.model_usage import usage_count as _model_usage_count
+from sonder_runtime.domain.model_usage_formatting import (
+    usage_source as _model_usage_source,
+)
+from sonder_runtime.platform.environment_options import (
+    cpu_thread_default as _cpu_thread_default,
+    env_int_option as _env_int_option,
+    local_model_options as _platform_local_model_options,
+)
+from sonder_runtime.platform.location_consent import (
+    location_consent as _location_consent,
+)
+from sonder_runtime.platform.reasoning_policy import (
+    exposure_enabled as _reasoning_exposure_enabled_policy,
+)
+from sonder_runtime.platform.private_cot_policy import (
+    opt_in_enabled as _private_cot_opt_in_enabled_policy,
+)
+from sonder_runtime.platform.version import (
+    running_source_commit_at_import as _running_source_commit,
+)
+from sonder_runtime.adapters import ollama_lifecycle
 import admin_auth
 import codegen_loop
-import file_ops
-import data_query as data_query_module
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters.inspection import (
+    archive_tools,
+    content_digest,
+    data_query as data_query_module,
+    dependency_inventory as dependency_inventory_tool,
+    log_inspect as log_inspect_module,
+    project_detect as project_detector,
+    workspace_compare as workspace_compare_module,
+)
 import json_patch_tool
 import json_schema_verifier
-import text_patch as text_patch_ops
-import workspace_compare as workspace_compare_module
-import log_inspect as log_inspect_module
+import sonder_runtime.adapters.filesystem.text_patch as text_patch_ops
 import data_convert as data_convert_module
 import sqlite_mutate as sqlite_mutate_module
 import symbol_index
-import project_detect as project_detector
 import git_history
-import content_digest
-import archive_tools
-import archive_create as archive_create_tool
-import context_policy
+import sonder_runtime.adapters.archive_create as archive_create_tool
+from sonder_runtime.platform import context_policy
 import command_registry
 import adaptive_training
 import selfmod
 import permission_rules
-import debug_dump
-import activity_tracker
+from sonder_runtime.platform import debug_dump
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
+from sonder_runtime.adapters.model_inventory_formatting import (
+    inventory_model_name as _inventory_model_name,
+    inventory_model_names as _inventory_model_names,
+    residency_display as _residency_display,
+)
 import assetgen
-import artifact_grounding
+import sonder_runtime.adapters.artifact_grounding as artifact_grounding
 import game_forge
-import workbench
-import dependency_inventory as dependency_inventory_tool
+import sonder_runtime.adapters.filesystem.workbench as workbench
 import creative_router
 import intents
-import runtime_policy
-import npu_contract
-import npu_service
+import sonder_runtime.adapters.runtime_policy as runtime_policy
+import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
+import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
-import command_catalog
+from sonder_runtime.adapters.command_catalog import command_catalog
 import grounded_extraction
 import grounded_outcomes
-import permission_modes
+from sonder_runtime.adapters.security.permission_policy import (
+    permission_policy as permission_modes,
+)
 import reloadable_mcp
-import autopilot_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 import autopilot_controller
-import fanout_store
+from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
-from model_transport import ModelCallError
+from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
+from sonder_runtime.application.context_health import (
+    ContextHealthService,
+    ContextHealthSettings,
+    ContextMemorySnapshot,
+)
 from sonder_runtime.domain.common.errors import InvalidInput
-import ollama_endpoint
+from sonder_runtime.domain.runtime_identity import (
+    runtime_identity_block as _runtime_identity_block,
+)
+from sonder_runtime.domain.model_capabilities import (
+    fanout_capabilities as _fanout_capabilities,
+)
+from sonder_runtime.domain.master_timeout import (
+    master_timeout as _master_timeout_policy,
+)
+from sonder_runtime.domain.distillation_policy import (
+    distillation_timeout_seconds as _distillation_timeout_policy,
+)
+from sonder_runtime.domain.fanout_policy import (
+    declares_generative_capability as _fanout_declares_generative_capability,
+    nonchat_reason as _fanout_nonchat_reason,
+)
+from sonder_runtime.domain.campaign_formatting import (
+    campaign_headline as _campaign_headline,
+)
+from sonder_runtime.domain.campaign_expectations import (
+    campaign_expected as _campaign_expected,
+)
+from sonder_runtime.domain.cloud_access import (
+    cloud_allowed as _cloud_allowed_policy,
+    cloud_disabled_message as _cloud_disabled_message,
+)
+from sonder_runtime.domain.interaction_footer import (
+    trailing_interaction_id as _trailing_interaction_id,
+)
+from sonder_runtime.domain.campaign_environment import (
+    environment_failure as _campaign_environment_failure,
+)
+from sonder_runtime.domain.learning_tier import (
+    canonical_learn_tier as _canonical_learn_tier,
+    should_learn as _should_learn_policy,
+)
+from sonder_runtime.domain.retrieval_policy import no_retrieve as _no_retrieve_policy
+from sonder_runtime.domain.thinking_policy import (
+    strip_inline_thinking as _strip_inline_thinking,
+    thinking_exhausted_budget as _thinking_exhausted_budget,
+)
+from sonder_runtime.domain.agent_mutation_policy import (
+    WORK_MUTATION_TOOLS as _WORK_MUTATION_TOOLS,
+    invocation_mutates as _agent_tool_mutates,
+)
+from sonder_runtime.domain.schema_policy import (
+    format_schema_gaps as _format_schema_gaps,
+    leading_json_object as _leading_json_object_policy,
+)
+from sonder_runtime.platform.model_retry_policy import (
+    hosted_overflow_retry_enabled as _hosted_overflow_retry_enabled,
+    overflow_retry_allowed as _overflow_retry_allowed,
+)
+from sonder_runtime.platform.local_retry_policy import (
+    local_model_retries as _local_model_retries_policy,
+    retry_delay as _local_retry_delay_policy,
+)
+from sonder_runtime.platform.runtime_summary import (
+    local_runtime_summary as _platform_local_runtime_summary,
+)
+from sonder_runtime.platform.context_selection import (
+    native_context as _platform_native_context,
+    requested_context as _platform_requested_context,
+)
+from sonder_runtime.domain.prompt_composition import (
+    join_system_parts as _join_system_parts,
+)
+from sonder_runtime.domain.native_tool_policy import (
+    MAX_ARGUMENT_CHARS as _NATIVE_TOOL_ARGUMENTS_MAX_CHARS,
+    TOOL_NAME_RE as _NATIVE_TOOL_NAME_RE,
+    native_tool_call_decision as _native_tool_call_policy,
+)
+from sonder_runtime.domain.model_error_formatting import (
+    embedded_model_error as _embedded_model_error_policy,
+    redact_model_error_value as _redact_model_error_value,
+    safe_model_error_detail as _safe_model_error_detail,
+)
+from sonder_runtime.adapters.model_error_details import (
+    http_error_detail as _http_error_detail_policy,
+    transport_error_detail as _transport_error_detail_policy,
+)
+from sonder_runtime.adapters.model_error_formatting import (
+    TRANSIENT_MODEL_HTTP_CODES,
+    format_model_call_error,
+    format_runtime_model_call_error as _format_runtime_model_call_error_policy,
+)
+from sonder_runtime.interfaces.http.serve_policy import (
+    serve_temperature as _serve_temperature,
+)
+from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.domain.runtime_model_configuration import (
+    RuntimeModelConfiguration,
+)
+from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
+from sonder_runtime.domain.cloud_tier_policy import (
+    refresh_live_cloud_tiers as _refresh_live_cloud_tiers_policy,
+)
+from sonder_runtime.domain.tier_names import valid_tier_names as _valid_tier_names_policy
+from sonder_runtime.domain.permission_context import (
+    render_permission_mode_context as _render_permission_mode_context,
+)
+from sonder_runtime.domain.retry_after import retry_after_seconds as _retry_after_seconds
+from sonder_runtime.domain.cancellation_policy import (
+    cancellation_requested as _cancel_requested,
+)
+from sonder_runtime.domain.code_gate_policy import (
+    code_gate_target as _code_gate_target_policy,
+)
+from sonder_runtime.domain.cloud_thinking_budget import (
+    ensure_prediction_budget as _ensure_cloud_prediction_budget_policy,
+)
+from sonder_runtime.domain.request_timeout import (
+    bound_request_timeout as _bound_request_timeout,
+)
 import sonder_speculation
 import consult as consult_flow
 import code_improve
 import tier_router
 import project_scaffold
-import environment_probe
+from sonder_runtime.platform import environment_probe
 import toolchain_status as toolchain_status_module
 import sonder_hardware
-import sonder_logging
+from sonder_runtime.platform import logging as sonder_logging
 import tool_capabilities
 import git_tools
 import sonder_runtime.adapters.evaluation_history_store as eval_history
-import artifact_risk as artifact_risk_module
-import artifact_fetch as artifact_fetch_module
-import process_risk as process_risk_module
-import unsafe_lab
+import sonder_runtime.adapters.artifact_risk as artifact_risk_module
+import sonder_runtime.adapters.artifact_fetch as artifact_fetch_module
+import sonder_runtime.adapters.process_risk as process_risk_module
+from sonder_runtime.adapters.security import unsafe_lab
 
 
 def _running_source_commit_at_import():
     """Best-effort immutable marker for the code this process imported."""
-    try:
-        return git_tools.runtime_checkout_commit(Path(__file__).resolve().parent)
-    except Exception:
-        # Packaged installs and constrained test/import environments can lack
-        # Git metadata. Update status remains useful there; it simply cannot
-        # prove whether a process restart would load different source bytes.
-        return ""
+    return _running_source_commit(Path(__file__).resolve().parent)
 
 
 # Keep this separate from the mutable on-disk HEAD used by /updatecheck.
@@ -167,183 +316,84 @@ OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
 KEEP_ALIVE = os.environ.get("SONDER_KEEP_ALIVE", "2m")
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
-SONDER_STABLE_ALIAS = "sonder:latest"
-LOCAL_CODE_MODEL = os.environ.get("SONDER_CODE_LOCAL", SONDER_STABLE_ALIAS)
-DEFAULT_CLOUD_CODE_MODEL = "kimi-k2.7-code:cloud"
-DEFAULT_CLOUD_GENERAL_MODEL = "glm-5.2:cloud"
-CLOUD_EXTRA_USAGE_FALLBACK_MODEL = "kimi-k2.7-code:cloud"
-
-# Hosted cloud models Ollama has permanently retired (HTTP 410 at request time).
-# A machine-wide SONDER_CLOUD_* override set before a retirement must not keep
-# resurrecting the dead model forever -- route it to today's default instead of
-# failing every offload call until someone notices and edits their env by hand.
-RETIRED_CLOUD_MODELS = frozenset(
-    {
-        "qwen3-coder:480b-cloud",  # retired 2026-07-15
-    }
+_RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ)
+SONDER_STABLE_ALIAS = _RUNTIME_MODEL_CONFIGURATION.stable_alias
+LOCAL_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.local_code_model
+DEFAULT_CLOUD_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_code_model
+DEFAULT_CLOUD_GENERAL_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_general_model
+CLOUD_EXTRA_USAGE_FALLBACK_MODEL = (
+    _RUNTIME_MODEL_CONFIGURATION.cloud_extra_usage_fallback_model
 )
-
-
-def _live_cloud_model(configured, default):
-    lowered = str(configured or "").strip().lower()
-    if not lowered or lowered in RETIRED_CLOUD_MODELS:
-        return default
-    return configured
-
-
-def _env_int_option(name, default=None):
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    raw = raw.strip()
-    if raw.lower() in ("", "auto", "default", "none", "off"):
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _cpu_thread_default():
-    return max(1, os.cpu_count() or 4)
+RETIRED_CLOUD_MODELS = _RUNTIME_MODEL_CONFIGURATION.retired_cloud_models
 
 
 def _local_model_options(temperature, num_predict, num_ctx):
-    """Options sent with every local Ollama model request.
-
-    Read env at call time so a long-running process can pick up live env patches made
-    inside this Python process, and so tests can exercise the performance knobs.
-    """
-    options = {
-        "temperature": temperature,
-        "num_predict": num_predict,
-        "num_ctx": context_policy.native(num_ctx),
-    }
-    runtime = {
-        "num_thread": _env_int_option("SONDER_NUM_THREAD", _cpu_thread_default()),
-        # Omit num_gpu unless the operator explicitly pins it. Ollama can then
-        # select CPU, Metal, ROCm, CUDA, Vulkan, or another supported backend
-        # from live host capabilities instead of inheriting an NVIDIA-shaped
-        # default from the maintainer's workstation.
-        "num_gpu": _env_int_option("SONDER_NUM_GPU"),
-        "num_batch": _env_int_option("SONDER_NUM_BATCH", 512),
-    }
-    for key, value in runtime.items():
-        if value is not None:
-            options[key] = value
-    return options
-
-
-_SERVE_TEMPERATURE_DEFAULT = 0.2
-
-
-def _serve_temperature():
-    """Sampling temperature for the serve chat route (default 0.2, unchanged).
-
-    ``SONDER_SERVE_TEMPERATURE=0`` selects greedy decoding, which is what
-    makes a non-learning local turn eligible for the deterministic request
-    cache (see request_cache.eligible).  Values are clamped to Ollama's
-    accepted range and read at call time like the other live performance
-    knobs; an unparseable value keeps the default so a bad env var can never
-    silently change generation behavior.
-    """
-    raw = os.environ.get("SONDER_SERVE_TEMPERATURE", "").strip()
-    if not raw:
-        return _SERVE_TEMPERATURE_DEFAULT
-    try:
-        value = float(raw)
-    except ValueError:
-        return _SERVE_TEMPERATURE_DEFAULT
-    if not math.isfinite(value):
-        return _SERVE_TEMPERATURE_DEFAULT
-    return min(2.0, max(0.0, value))
+    """Compatibility delegate for the packaged local-model option policy."""
+    return _platform_local_model_options(
+        temperature,
+        num_predict,
+        num_ctx,
+        native_context=context_policy.native,
+        environ=os.environ,
+    )
 
 
 def _local_runtime_summary():
-    options = _local_model_options(0.2, 1, SESSION_NUM_CTX)
-    return {
-        "num_thread": options.get("num_thread", "ollama-default"),
-        "num_gpu": options.get("num_gpu", "ollama-default"),
-        "num_batch": options.get("num_batch", "ollama-default"),
-        "num_ctx_native": options.get("num_ctx", "ollama-default"),
-        "num_ctx_requested": context_policy.requested(SESSION_NUM_CTX),
-    }
+    """Compatibility delegate for the packaged local-runtime summary."""
+    options = _platform_local_model_options(
+        0.2,
+        1,
+        SESSION_NUM_CTX,
+        native_context=context_policy.native,
+        environ=os.environ,
+    )
+    return _platform_local_runtime_summary(
+        options,
+        context_policy.requested(SESSION_NUM_CTX),
+    )
 
 
 def _context_requested(value=None):
-    return context_policy.requested(SESSION_NUM_CTX if value in (None, "") else value)
+    """Compatibility delegate for packaged context-size selection."""
+    return _platform_requested_context(value, default_value=SESSION_NUM_CTX)
 
 
 def _context_native(value=None):
-    return context_policy.native(_context_requested(value))
+    """Compatibility delegate for packaged native-context selection."""
+    return _platform_native_context(value, default_value=SESSION_NUM_CTX)
 
 
-TIERS = {
-    "fast": os.environ.get("SONDER_FAST", SONDER_STABLE_ALIAS),
-    "code": os.environ.get("SONDER_CODE", SONDER_STABLE_ALIAS),
-    "general": os.environ.get("SONDER_GENERAL", SONDER_STABLE_ALIAS),
-    # Specialist local tiers the capability router prefers for reasoning and
-    # vision work. `_refresh_runtime_policy` drops either one when the shared
-    # policy leaves it unbound, so an unset tier is simply not offered and
-    # routing degrades to a base tier exactly as it did before they existed.
-    "reasoning": os.environ.get("SONDER_REASONING", ""),
-    "vision": os.environ.get("SONDER_VISION", ""),
-    "cloud-code": _live_cloud_model(
-        os.environ.get("SONDER_CLOUD_CODE"), DEFAULT_CLOUD_CODE_MODEL
-    ),
-    "cloud-general": _live_cloud_model(
-        os.environ.get("SONDER_CLOUD_GENERAL"), DEFAULT_CLOUD_GENERAL_MODEL
-    ),
-}
+TIERS = _RUNTIME_MODEL_CONFIGURATION.tier_map()
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
-CLOUD_TIERS = {"cloud-code", "cloud-general"}
+CLOUD_TIERS = set(_RUNTIME_MODEL_CONFIGURATION.cloud_tiers)
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
 
 
 def _refresh_live_cloud_tiers():
-    """Migrate import-time cloud defaults after an atomic source reload.
-
-    Live reload swaps function implementations but deliberately preserves the
-    module's process state.  Detect only the exact old default pair, so a fresh
-    process with an explicit gpt-oss override remains an intentional override.
-    """
-    preserve_legacy = os.environ.get(
-        "SONDER_PRESERVE_LEGACY_CLOUD_GENERAL", ""
-    ).strip().lower() in ("1", "true", "yes", "on")
-    if (
-        not preserve_legacy
-        and TIERS.get("cloud-general") == "gpt-oss:120b-cloud"
-    ):
-        TIERS["cloud-general"] = "glm-5.2:cloud"
+    """Compatibility wrapper for the packaged live cloud-tier policy."""
+    _refresh_live_cloud_tiers_policy(
+        TIERS,
+        os.environ,
+        default_cloud_general_model=(
+            _RUNTIME_MODEL_CONFIGURATION.default_cloud_general_model
+        ),
+    )
 
 
 def cloud_allowed():
-    return os.environ.get("SONDER_ALLOW_CLOUD", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    """Compatibility wrapper for the packaged cloud opt-in policy."""
+    return _cloud_allowed_policy(os.environ)
 
 
 def available_tiers(include_disabled=False):
     _refresh_live_cloud_tiers()
-    if include_disabled or cloud_allowed():
+    if include_disabled or _cloud_allowed_policy(os.environ):
         return dict(TIERS)
     return {k: v for k, v in TIERS.items() if k not in CLOUD_TIERS}
 
 
 def _valid_tier_names():
-    return ", ".join(available_tiers())
-
-
-def _cloud_disabled_message():
-    return (
-        "ERROR: hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 "
-        "to opt in; prompts sent to cloud tiers leave this machine."
-    )
-
-
-def _is_cloud_model_name(model):
-    name = (model or "").lower()
-    return "-cloud" in name or name.endswith(":cloud")
+    return _valid_tier_names_policy(available_tiers())
 
 
 def discovered_models():
@@ -420,158 +470,8 @@ def _cache_model_revision(model):
 
 
 def _inventory_rows(payload, endpoint):
-    """Return the dict rows of an Ollama inventory payload, or raise.
-
-    A wrong-shape payload (non-dict body, non-list ``models``) is a protocol
-    failure that must surface as an explicit error: rendering it as an empty
-    catalog would tell an operator nothing is installed or resident when the
-    endpoint actually misbehaved. Individual malformed rows inside a valid
-    list are skipped instead -- partial inventory is real data.
-    """
-    if isinstance(payload, dict):
-        rows = payload.get("models")
-        if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    raise ModelCallError("protocol", "invalid Ollama %s response" % endpoint)
-
-
-def _inventory_model_name(row) -> str:
-    return str(row.get("name") or row.get("model") or "").strip()
-
-
-def _inventory_model_names(rows) -> list:
-    """Canonical, casefold-deduplicated model names from inventory rows."""
-    names, seen = [], set()
-    for row in rows:
-        name = _inventory_model_name(row)
-        key = name.casefold()
-        if name and key not in seen:
-            seen.add(key)
-            names.append(name)
-    names.sort(key=str.casefold)
-    return names
-
-
-def _residency_display(row) -> str:
-    """Render one resident model with bounded, content-free VRAM indicators.
-
-    ``/api/ps`` reports ``size`` and ``size_vram`` per resident model; the
-    split is the only signal an operator has that a "loaded" model is
-    actually spilled to CPU. Malformed or absent size metadata degrades to
-    the bare model name -- never a guessed number.
-    """
-    name = _inventory_model_name(row)
-    if not name:
-        return ""
-
-    def _byte_count(value, minimum):
-        if isinstance(value, bool):
-            return False
-        if isinstance(value, int):
-            # Do not coerce arbitrary JSON integers to float: a malicious or
-            # malformed provider can send a value too large for IEEE-754.
-            return minimum <= value <= (2**63 - 1)
-        return (
-            isinstance(value, float)
-            and math.isfinite(value)
-            and value >= minimum
-        )
-
-    size = row.get("size")
-    vram = row.get("size_vram")
-    if not _byte_count(size, 1) or not _byte_count(vram, 0):
-        return name
-    # A provider claiming more VRAM than the model's own size is nonsense;
-    # clamp rather than advertising >100% GPU.
-    vram = min(float(vram), float(size))
-    gib = float(size) / float(2**30)
-    if vram == 0:
-        return "%s (%.1f GiB, CPU only)" % (name, gib)
-    return "%s (%.1f GiB, %d%% GPU)" % (
-        name, gib, int(round(100.0 * vram / float(size))),
-    )
-
-
-_KNOWN_VISION_ONLY_MODEL_FAMILIES = frozenset({
-    # Ollama's normal /api/tags response often omits capabilities altogether.
-    # These upstream model families are image-conditioned interfaces, not
-    # ordinary text-chat targets, so probing them in a broad fanout wastes a
-    # serial local slot and produces misleading generic prose.
-    "bakllava", "llama3.2-vision", "llava", "minicpm-v", "moondream",
-})
-
-
-def _fanout_capabilities(record):
-    """Normalize capability metadata with the catalog's documented fallback.
-
-    Ollama-compatible catalogs vary between scalar, list, and nested metadata.
-    An empty top-level declaration is not authoritative when the nested record
-    positively describes the model, so every fanout consumer uses the same
-    non-empty-first rule.
-    """
-    record = record if isinstance(record, dict) else {}
-    details = record.get("details") if isinstance(record.get("details"), dict) else {}
-
-    def normalized(raw):
-        if isinstance(raw, str):
-            values = (raw,)
-        elif isinstance(raw, (list, tuple, set)):
-            values = raw
-        else:
-            return set()
-        return {str(value).strip().casefold() for value in values if str(value).strip()}
-
-    capabilities = normalized(record.get("capabilities"))
-    return capabilities or normalized(details.get("capabilities"))
-
-
-def _fanout_nonchat_reason(record):
-    """Return a skip reason for explicit or known non-chat catalog targets."""
-    record = record if isinstance(record, dict) else {}
-    details = record.get("details") if isinstance(record.get("details"), dict) else {}
-    def normalized(raw):
-        if isinstance(raw, str):
-            values = (raw,)
-        elif isinstance(raw, (list, tuple, set)):
-            values = raw
-        else:
-            return set()
-        return {str(value).strip().lower() for value in values if str(value).strip()}
-
-    # Some Ollama-compatible catalogs expose a scalar capability, while others
-    # nest it under details.  Prefer a meaningful top-level declaration, but
-    # do not mistake null/empty metadata for an authoritative "unknown".
-    capabilities = _fanout_capabilities(record)
-    generative = {"completion", "chat", "generate", "text-generation"}
-    if capabilities & generative:
-        return ""
-    if "embedding" in capabilities:
-        return "embedding-only capability"
-    if "vision" in capabilities:
-        return "vision-only capability"
-    # The catalog's family is immutable model metadata; a tag is an
-    # operator-controlled alias.  Prefer any non-empty family declaration so
-    # a renamed LLaVA is still skipped and an unrelated text model named
-    # "llava" is not rejected merely for its display name.
-    families = normalized(details.get("family")) | normalized(details.get("families"))
-    if not families:
-        name = str(record.get("name") or record.get("model") or "").strip().casefold()
-        families = {name.rsplit("/", 1)[-1].split(":", 1)[0]}
-    if families & _KNOWN_VISION_ONLY_MODEL_FAMILIES:
-        return "known vision-only model family"
-    return ""
-
-
-def _fanout_declares_generative_capability(record):
-    """Whether a catalog record positively declares a text-generation surface.
-
-    Normal fanout can include an unknown catalog model because it is only a
-    bounded probe. Synthesis instead puts multiple durable answer previews in
-    one new prompt, so require a positive local chat/completion declaration.
-    """
-    return bool(_fanout_capabilities(record) & {
-        "completion", "chat", "generate", "text-generation",
-    })
+    """Compatibility delegate for the packaged inventory protocol adapter."""
+    return _inventory_rows_policy(payload, endpoint)
 
 
 def resolve_discovered_model_record(selector):
@@ -605,9 +505,7 @@ def reasoning_exposure_enabled() -> bool:
     model for its thinking at all. With it off nothing is captured, so there is
     nothing for either surface to show.
     """
-    return os.environ.get("SONDER_EXPOSE_REASONING", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return _reasoning_exposure_enabled_policy()
 
 
 def private_cot_opt_in_enabled() -> bool:
@@ -622,9 +520,7 @@ def private_cot_opt_in_enabled() -> bool:
 
     The flag alone is not sufficient: see ``_private_cot_rule_allows``.
     """
-    return os.environ.get("SONDER_ALLOW_PRIVATE_COT", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return _private_cot_opt_in_enabled_policy()
 
 
 def _private_cot_rule_allows() -> bool:
@@ -687,42 +583,6 @@ _THINK_OPTION_UNSUPPORTED_RE = re.compile(
 # rather than Ollama's separate ``message.thinking`` field.  That field is
 # governed by explicit reasoning exposure policy; a leading closed tag must
 # not become an accidental bypass of the same boundary.
-_INLINE_THINKING_OPEN_RE = re.compile(r"^\s*<(think|thinking)(?:\s+[^>]*)?>", re.IGNORECASE)
-_INLINE_THINKING_TAG_RE = re.compile(r"</?(think|thinking)(?:\s+[^>]*)?>", re.IGNORECASE)
-
-
-def _strip_inline_thinking(content):
-    """Drop closed leading model reasoning tags from public assistant text.
-
-    Only leading, syntactically closed blocks are recognized.  This keeps a
-    legitimate answer that discusses literal tags intact while ensuring that
-    untrusted model deliberation cannot be shown, saved to session history, or
-    fed into a later turn as assistant content.
-    """
-    if not isinstance(content, str):
-        return content
-    value = content
-    while True:
-        opening = _INLINE_THINKING_OPEN_RE.match(value)
-        if not opening:
-            return value
-        depth = 0
-        end = None
-        for tag in _INLINE_THINKING_TAG_RE.finditer(value, opening.start()):
-            if tag.group(0).startswith("</"):
-                depth -= 1
-                if depth == 0:
-                    end = tag.end()
-                    break
-            else:
-                depth += 1
-        # A leading unterminated reasoning block is private by default; never
-        # trade an incomplete delimiter for a reasoning exposure.
-        if end is None:
-            return ""
-        value = value[end:].lstrip()
-
-
 def _apply_cloud_thinking_policy(payload, model, *, compact=False):
     """Apply hosted-model thinking controls without changing custom models.
 
@@ -760,15 +620,8 @@ def _apply_cloud_thinking_policy(payload, model, *, compact=False):
 
 
 def _ensure_cloud_prediction_budget(payload, minimum=4096):
-    """Leave enough shared output budget for thinking plus final content."""
-    options = payload.get("options")
-    if not isinstance(options, dict):
-        return
-    requested = options.get("num_predict")
-    if isinstance(requested, int) and 0 < requested < minimum:
-        options = dict(options)
-        options["num_predict"] = minimum
-        payload["options"] = options
+    """Compatibility delegate for the packaged thinking-budget policy."""
+    return _ensure_cloud_prediction_budget_policy(payload, minimum)
 
 
 LOCAL_THINKING_MIN_NUM_PREDICT = 2048
@@ -807,21 +660,6 @@ def _remember_unsupported_think_option(model) -> None:
 def _think_option_unsupported(detail) -> bool:
     """Whether Ollama explicitly refused only the optional ``think`` control."""
     return bool(_THINK_OPTION_UNSUPPORTED_RE.search(str(detail or "")))
-
-
-def _thinking_exhausted_budget(out, message, *, inline_thinking=False) -> bool:
-    """Did the model spend its whole output budget thinking, leaving no answer?
-
-    The signature is exact: thinking present, content absent, and Ollama
-    reporting it stopped on length rather than finishing.
-    """
-    if not isinstance(message, dict):
-        return False
-    thinking = message.get("thinking")
-    if not inline_thinking and (not isinstance(thinking, str) or not thinking.strip()):
-        return False
-    done_reason = out.get("done_reason") if isinstance(out, dict) else None
-    return str(done_reason or "").strip().casefold() == "length"
 
 
 def _with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT):
@@ -1008,8 +846,55 @@ _STRUCTURED_UNIQUE_ITEMS_MAX_ITEMS = 256
 
 _DB_PATH = sonder_paths.memory_db_path()
 
-FOOTER_PREFIX = "\n\n[interaction_id: "
-_FOOTER_RE = re.compile(r"\[interaction_id: ([0-9a-f]+)\]\s*$")
+from sonder_runtime.adapters.observability.response_formatting import (
+    FOOTER_PREFIX,
+    _FOOTER_RE,
+    _append_activity,
+    _strip_activity_block,
+    parse_interaction_id,
+    with_footer,
+)
+from sonder_runtime.adapters.observability.trace_buffer import (
+    _TURN_TRACES,
+    _capture_turn,
+    _format_trace,
+)
+from sonder_runtime.adapters.command_parsing import (
+    _parse_game_campaign_command,
+)
+from sonder_runtime.adapters.memory_lesson_ids import _parse_lesson_ids
+from sonder_runtime.adapters.admin_formatting import _format_account
+from sonder_runtime.adapters.inspection_executor import _format_file_result
+from sonder_runtime.adapters.task_formatting import _format_checklist, _format_task
+from sonder_runtime.adapters.observability.health_formatting import (
+    format_context_health,
+)
+from sonder_runtime.domain.health_formatting import health_bar as _health_bar
+from sonder_runtime.domain.context_formatting import (
+    rough_token_count as _rough_token_count,
+    rough_token_count_from_chars as _rough_token_count_from_chars,
+)
+from sonder_runtime.domain.campaign_policy import output_matches as _campaign_output_matches
+from sonder_runtime.domain.control_timeout import parse_control_timeout as _parse_control_timeout
+from sonder_runtime.domain.query_limits import safe_limit as _safe_limit_policy
+from sonder_runtime.domain.control_history import (
+    control_history_messages as _control_history_messages,
+)
+from sonder_runtime.adapters.observability.activity_formatting import _format_activity_status
+from sonder_runtime.adapters.observability.distillation_formatting import (
+    _drain_backlog_text,
+    _drain_summary_text,
+)
+from sonder_runtime.adapters.observability.run_result_formatting import (
+    format_run_result as _format_run_result,
+)
+from sonder_runtime.adapters.runtime_readiness_formatting import (
+    format_model_readiness as _runtime_model_readiness_lines,
+)
+from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
+from sonder_runtime.adapters.learning_tier_formatting import (
+    format_learning_tiers,
+)
 _CAMPAIGN_LEARN_LOCK = threading.Lock()
 _AUTOPILOT_THREADS_LOCK = threading.RLock()
 _AUTOPILOT_THREADS = {}
@@ -1054,7 +939,7 @@ LIVE_RELOAD_MODULES = [
     "master_orchestrator",
     "ollama_lifecycle",
     "admin_auth",
-    "file_ops",
+    "sonder_runtime.adapters.filesystem.file_ops",
     "data_query",
     "json_patch_tool",
     "dependency_inventory",
@@ -1074,14 +959,14 @@ LIVE_RELOAD_MODULES = [
     "command_registry",
     "permission_rules",
     "debug_dump",
-    "activity_tracker",
+    "sonder_runtime.adapters.observability.activity_tracker",
     "media_assets",
     "model_assets",
     "ooxml_assets",
     "assetgen",
     "artifact_grounding",
     "game_forge",
-    "workbench",
+    "sonder_runtime.adapters.filesystem.workbench",
     "creative_router",
     "intents",
     "runtime_policy",
@@ -1092,18 +977,17 @@ LIVE_RELOAD_MODULES = [
     "tool_contract",
     # NPU accelerator host modules reload in dependency order; the broker and
     # service keep live worker/process state behind reload guards.
-    "npu_contract",
-    "npu_manifest",
-    "npu_providers",
-    "npu_broker",
-    "npu_service",
+    "sonder_runtime.adapters.accelerators.npu.contract",
+    "sonder_runtime.adapters.accelerators.npu.manifest",
+    "sonder_runtime.adapters.accelerators.npu.providers",
+    "sonder_runtime.adapters.accelerators.npu.npu_broker",
+    "sonder_runtime.adapters.accelerators.npu.service",
     # The controller is stateless and safe to refresh between callback calls.
     # autopilot_store intentionally stays loaded because it exclusively owns a
     # process-safe SQLite schema and may be serving background worker threads.
     "autopilot_controller",
-    "pdf_risk",
-    "artifact_risk",
-    "process_risk",
+    "sonder_runtime.adapters.artifact_risk",
+    "sonder_runtime.adapters.process_risk",
 ]
 
 def _prime_live_reload_modules():
@@ -1194,10 +1078,10 @@ def _maybe_live_reload():
             # The workflow adapter resolves this watched legacy module lazily.
             # Do not recreate a direct server dependency during live reload.
             continue
-        if name == "artifact_risk":
+        if name == "sonder_runtime.adapters.artifact_risk":
             globals()["artifact_risk_module"] = module
             continue
-        if name == "process_risk":
+        if name == "sonder_runtime.adapters.process_risk":
             globals()["process_risk_module"] = module
             continue
         if name == "sqlite_mutate":
@@ -1261,52 +1145,6 @@ def _open_db_readonly():
     return conn
 
 
-def with_footer(text, interaction_id):
-    current = activity_tracker.current()
-    activity = activity_tracker.format_response(current) if current else ""
-    if activity and not activity.startswith("activity:") and "=== ACTIVITY (observable work) ===" not in (text or ""):
-        text = "%s\n\n%s" % (text, activity)
-    return "%s%s%s]" % (text, FOOTER_PREFIX, interaction_id)
-
-
-def _strip_activity_block(text):
-    """Remove the final observable-activity block while preserving other text."""
-    value = str(text or "")
-    marker = "=== ACTIVITY (observable work) ==="
-    end_marker = "=== END ACTIVITY ==="
-    start = value.rfind(marker)
-    if start < 0:
-        return value
-    end = value.find(end_marker, start)
-    if end < 0:
-        return value
-    end += len(end_marker)
-    before = value[:start].rstrip()
-    after = value[end:].lstrip()
-    return "\n\n".join(part for part in (before, after) if part)
-
-
-def _append_activity(text, response=None, replace=False):
-    current = response if response is not None else activity_tracker.current()
-    if replace:
-        text = _strip_activity_block(text)
-    activity = activity_tracker.format_response(current) if current else ""
-    if activity and not activity.startswith("activity:") and "=== ACTIVITY (observable work) ===" not in (text or ""):
-        footer = _FOOTER_RE.search(text or "")
-        if footer:
-            before = (text or "")[:footer.start()].rstrip()
-            return "%s\n\n%s\n\n%s" % (
-                before, activity, (text or "")[footer.start():],
-            )
-        return "%s\n\n%s" % (text, activity)
-    return text
-
-
-def parse_interaction_id(text):
-    m = _FOOTER_RE.search(text or "")
-    return m.group(1) if m else None
-
-
 TRACE_SYSTEM = (
     "Before giving your answer, output a section titled '## Reasoning' where you "
     "think step by step: restate the task in your own words, note constraints and "
@@ -1316,22 +1154,8 @@ TRACE_SYSTEM = (
 
 
 def _deployment_authenticates_callers() -> bool:
-    """True when this runtime can serve more than one identity.
-
-    Mirrors sonder_serve's auth-mode resolution without importing it (that
-    would be circular). Any of these means callers are distinguishable, so a
-    tool returning one caller's data to another is a real disclosure:
-    SONDER_AUTH_MODE set at all, an API key configured, or accounts required.
-    Absent all three the deployment is `local-open` -- a single operator on
-    loopback, where there is no second party to protect.
-    """
-    if os.environ.get("SONDER_AUTH_MODE", "").strip():
-        return True
-    if os.environ.get("SONDER_API_KEY", "").strip():
-        return True
-    return str(os.environ.get("SONDER_REQUIRE_ACCOUNT", "")).strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    """Compatibility delegate for the packaged deployment-auth policy."""
+    return _deployment_authenticates_callers_policy()
 
 
 def _developer_gate(tool_name: str, token: str, started):
@@ -1394,84 +1218,31 @@ def _direct_fanout_identity(token: str):
 
 def _direct_fanout_access(run_id: str, token: str, started, tool_name: str):
     """Authorize a direct-MCP fanout lifecycle operation without cross-user reads."""
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     refusal = _developer_gate(tool_name, token, started)
     if refusal:
         return None, refusal
     run = fanout_store.get_run(run_id)
     if run is None:
-        return None, _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+        return None, render_model_error(ModelCallError("configuration", "fanout run was not found"))
     if not _deployment_authenticates_callers():
         return run, None
     owner, account = _direct_fanout_identity(token)
     if str((account or {}).get("role") or "") == "admin" or run.get("request_owner") == owner:
         return run, None
     # Do not disclose whether another developer's opaque receipt exists.
-    return None, _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
-
-
-_TURN_TRACES = collections.deque(maxlen=8)
-
-
-def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
-    """Keep the last few turns' pipeline state so a turn can be debugged after it.
-
-    ``/trace on`` already prints all of this -- the assembled prompt, the
-    lessons retrieved, the tier -- but only for turns run *after* you thought
-    to enable it. That is the wrong way round for debugging: you want the
-    trace for the turn that already surprised you, and reproducing it is
-    exactly what is hard when the behaviour is intermittent.
-
-    ``_answer`` returns ``trace_ctx`` on every turn regardless of the flag, so
-    this state is built and then thrown away. Keeping a bounded ring of it in
-    memory costs nothing and makes ``turn_inspect`` retrospective. Nothing is
-    written to disk; the buffer dies with the process.
-    """
-    if not isinstance(trace_ctx, dict):
-        return
-    try:
-        _TURN_TRACES.append({
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "model": str(model or ""),
-            "tier": str(tier or ""),
-            "interaction_id": str(iid or ""),
-            "prompt": str(prompt or "")[:4000],
-            "augmented_prompt": str(trace_ctx.get("augmented_prompt") or "")[:16000],
-            "lessons": [str(x)[:400] for x in (trace_ctx.get("lessons") or [])][:20],
-            "facts_omitted": int(trace_ctx.get("facts_omitted") or 0),
-            "response_head": str(response or "")[:2000],
-        })
-    except Exception:
-        # Debug bookkeeping must never break the answer path it observes.
-        pass
-
-
-def _format_trace(model, tier, params, trace):
-    lessons = trace.get("lessons", [])
-    lines = [
-        "",
-        "=== TRACE (how Sonder Runtime decided) ===",
-        "model: %s   tier: %s" % (model, tier),
-        "generation params: %r" % (params,),
-        "lessons retrieved: %d" % len(lessons),
-    ]
-    for lesson_text in lessons:
-        lines.append("   - %s" % lesson_text)
-    # A bounded facts block that drops entries must say so on the surface an
-    # operator actually reads, not only inside the prompt text.
-    facts_omitted = int(trace.get("facts_omitted") or 0)
-    if facts_omitted:
-        lines.append("stored facts omitted by the block bound: %d" % facts_omitted)
-    lines.append("--- exact prompt sent to the model ---")
-    lines.append(trace.get("augmented_prompt", ""))
-    lines.append("=== END TRACE ===")
-    return "\n".join(lines)
+    return None, render_model_error(ModelCallError("configuration", "fanout run was not found"))
 
 
 def _should_learn(tier, learn):
-    # A tier feeds the learning loop when it is in LEARN_TIERS (env-configurable) and
-    # the caller didn't opt out with learn=False. Defaults: local 'code' plus the
-    # cloud tiers (teacher distillation); 'fast'/'general' stay mechanical.
-    return bool(learn) and tier in LEARN_TIERS
+    """Compatibility wrapper using the live, environment-resolved tier set."""
+    return _should_learn_policy(tier, learn, LEARN_TIERS)
 
 
 def resolve_sonder_model(strict=False):
@@ -1528,7 +1299,13 @@ def _make_generate(
         if cloud:
             options = {"temperature": temperature, "num_predict": prediction_limit}
         else:
-            options = _local_model_options(temperature, prediction_limit, num_ctx)
+            options = _platform_local_model_options(
+                temperature,
+                prediction_limit,
+                num_ctx,
+                native_context=context_policy.native,
+                environ=os.environ,
+            )
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
         if schema is not None:
@@ -1626,10 +1403,8 @@ def _make_generate(
 
 
 def _no_retrieve(conn, task):
-    """Retrieve hook that injects nothing — used for 'teacher' (clean) generation so a
-    strong model answers at full strength without local-lesson augmentation, while its
-    output is still captured for grounding + distillation."""
-    return []
+    """Compatibility wrapper for the packaged clean-generation retrieval policy."""
+    return _no_retrieve_policy(conn, task)
 
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
@@ -1658,6 +1433,39 @@ def _application():
         return _APP_GRAPH
 
 
+def _capture_durable_session_turn(
+    session_id, prompt, history, model, system, tier, response, request_id=None,
+):
+    """Commit one completed live turn through the typed session boundary.
+
+    The legacy server still owns routing, memory, and response decoration.  A
+    completed model turn is nevertheless durable through the canonical
+    application graph.  Capture is deliberately post-success and pre-footer:
+    model failures, policy refusals, and synthetic transport text cannot be
+    mistaken for recoverable model-visible history, while the captured
+    response remains the exact model output used by the legacy path.
+    """
+    if session_id is None:
+        return None
+    from sonder_runtime.application.ports.model_gateway import ModelRequest
+    from sonder_runtime.domain.common.ids import new_id
+
+    request = ModelRequest(
+        prompt=prompt,
+        tier=tier or "sonder",
+        system=system,
+        history=tuple(history or ()),
+    )
+    return _application().session_capture_service().capture_turn(
+        str(session_id),
+        new_id("turn"),
+        request,
+        request_id=str(request_id or new_id("request")),
+        user_message=prompt,
+        model_response=response,
+    )
+
+
 def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
                            num_predict=256, num_ctx=None, timeout=None):
     """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
@@ -1676,7 +1484,7 @@ def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
     context = local_owner_context(
         correlation_id="offload-%s" % os.urandom(4).hex(),
         source="system",
-        cloud_allowed=cloud_allowed(),
+        cloud_allowed=_cloud_allowed_policy(os.environ),
         remote_ollama_allowed=not ollama_endpoint.is_loopback(BASE),
         timeout_seconds=float(timeout) if timeout else None,
     )
@@ -1861,79 +1669,6 @@ def _resolve_project(project):
     return p
 
 
-def _join_system_parts(*parts):
-    return "\n\n".join(p for p in parts if p)
-
-
-def _runtime_identity_block(model: str, cloud: bool = False) -> str:
-    """Authoritative facts about what is actually serving this request.
-
-    Asked what model it was, the runtime answered from the weights -- and a
-    local 7B reported itself as "based on OpenAI's GPT-4 architecture,
-    approximately 175 billion parameters, training data to September 2023,
-    about 10 tokens per second". Every figure is wrong (measured ~36 tok/s
-    here) and the architecture line is another model's identity recalled out of
-    training text.
-
-    Which half was wrong is the useful part. The same answer described Sonder's
-    own surface -- memory, guarded file and program tools, artifact generation,
-    orchestration -- correctly, because those facts were already in the system
-    prompt. The model facts were not, so answering became recall, and recall is
-    the axis this model class is measured worst on.
-
-    Putting the facts in the prompt stops the question being recall. No network
-    call: this runs on every request, and an /api/show round trip per request
-    would charge every caller for a question few of them ask.
-
-    `model` is passed in by the caller, which has already resolved it. It used
-    to arrive through a module global, `_ACTIVE_MODEL_HINT`, whose only writer
-    (`_resolve_model_and_system`) had zero callers anywhere in the tree -- so
-    the hint was always empty and every request fell through to `TIERS["code"]`.
-    A `fast`-tier router and a `code`-tier agent were both handed a block
-    asserting, as authoritative, that the code tier was serving them. The block
-    that exists to stop a model guessing its identity was itself the guess.
-    A global is also the wrong carrier here: two concurrent serve requests on
-    different tiers would race for it. The model is in scope at every call
-    site, so it is now a parameter.
-
-    With no model, this emits nothing. A wrong identity asserted as
-    authoritative is worse than no identity at all.
-    """
-    # Naming THIS request's model, not the tier table. The first version listed
-    # all seven tiers and the model answered "my architecture is based on the
-    # kimi-k2.7-code:cloud tier" while actually running on sonder:latest -- a
-    # menu of names it had no way to choose between, so it picked one. A block
-    # meant to remove a guess must not introduce a new thing to guess.
-    try:
-        current = str(model or "")
-    except Exception:
-        return ""
-    if not current:
-        return ""
-    # Cloud tiers reach this too. Saying a hosted model runs "on this machine"
-    # would replace one confident falsehood with another.
-    where = (
-        "served by Ollama's hosted service, not on this machine"
-        if cloud else
-        "an open-weights model served by Ollama on this machine"
-    )
-    return (
-        "Facts about what is serving this request (authoritative -- use these, "
-        "never your own recollection):\n"
-        "- The model answering right now is `%s`, %s. You are NOT ChatGPT, "
-        "GPT-4, Claude, or Gemini, and you share no architecture or training "
-        "run with them.\n"
-        "- Sonder is the runtime around you (memory, tools, policy, grounding). "
-        "Sonder is not a model and has no parameters of its own.\n"
-        "- If asked about your architecture, parameter count, training data, "
-        "training cutoff, or generation speed, and the answer is not in this "
-        "block or in the conversation, say you do not know and point the caller "
-        "at `ollama ps` or Sonder's diagnostics. Do NOT guess a number, and do "
-        "not infer one from the model's name: a confident wrong figure is worse "
-        "than an admission." % (current, where)
-    )
-
-
 # The mutable, disk-backed parts of the system prompt, pinned for one turn.
 #
 # One turn can build the system prompt more than once, and each build re-read
@@ -2071,7 +1806,7 @@ def _serve_target(tier, strict):
         return resolve_sonder_model(strict_eff), False, True, "sonder"
     if t in TIERS:
         model = TIERS[t]
-        if _is_cloud_tier(t, model) and not cloud_allowed():
+        if _is_cloud_tier(t, model) and not _cloud_allowed_policy(os.environ):
             return None, True, False, "cloud-disabled"
         return model, _is_cloud_tier(t, model), t == "code", t
     # A caller may name an installed/discovered model directly.  Exact catalog
@@ -2089,7 +1824,7 @@ def _serve_target(tier, strict):
         if _fanout_nonchat_reason(record):
             return None, False, False, None
         cloud = _is_cloud_model_name(model)
-        if cloud and not cloud_allowed():
+        if cloud and not _cloud_allowed_policy(os.environ):
             return None, True, False, "cloud-disabled"
         return model, cloud, False, "model:%s" % model
     return None, False, True, None
@@ -2113,20 +1848,6 @@ def _explicit_serve_selection(tier, model_override):
     return str(tier or "").strip().lower() not in ("", "sonder", "local")
 
 
-def _control_history_messages(history, prompt):
-    messages = []
-    for msg in history or []:
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role")
-        content = msg.get("content") or ""
-        if role in ("user", "assistant") and content:
-            messages.append({"role": role, "content": content})
-    if prompt:
-        messages.append({"role": "user", "content": prompt})
-    return messages
-
-
 def _latest_runnable_block(history):
     for msg in reversed(history or []):
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
@@ -2145,16 +1866,6 @@ def _latest_project_files(history):
         if files:
             return files
     return []
-
-
-def _parse_control_timeout(arg, command="/run"):
-    arg = (arg or "").strip()
-    if not arg:
-        return grounding.DEFAULT_TIMEOUT, None
-    try:
-        return grounding.clamp_timeout(int(arg)), None
-    except ValueError:
-        return None, "usage: %s [seconds]  (runs the previous fenced code block)" % command
 
 
 def _control_run(arg, history=None):
@@ -2250,18 +1961,6 @@ def _control_dump(arg, prompt, history=None, session="", project=""):
             % (block["language"], block["code"])
         )
     return out
-
-
-def _parse_game_campaign_command(arg: str) -> dict | None:
-    parts = [part.strip() for part in str(arg or "").split("|", 3)]
-    if len(parts) < 2 or not parts[0] or not parts[1]:
-        return None
-    kwargs = {"name": parts[0], "concept": parts[1]}
-    if len(parts) > 2 and parts[2]:
-        kwargs["language"] = parts[2]
-    if len(parts) > 3 and parts[3]:
-        kwargs["dimension"] = parts[3]
-    return kwargs
 
 
 def _autopilot_command(arg: str, project: str = "", request_owner: str | None = None) -> str:
@@ -2670,19 +2369,9 @@ def _goal_command(arg: str) -> str:
     action = action.lower()
     rest = rest.strip()
 
-    def _fmt(goal):
-        if not goal:
-            return "no active goal"
-        lines = ["%s [%s] %s" % (goal["id"], goal["status"], goal["objective"])]
-        for criterion in goal.get("criteria") or []:
-            lines.append("  criterion: %s" % criterion)
-        for note in (goal.get("notes") or [])[-5:]:
-            lines.append("  note: %s" % note.get("text", ""))
-        return "\n".join(lines)
-
     try:
         if action in ("show", "status"):
-            return _fmt(goal_store.get_active())
+            return _format_goal(goal_store.get_active())
         if action == "set":
             objective, _, criteria = rest.partition("--criteria")
             if not objective.strip():
@@ -2690,11 +2379,11 @@ def _goal_command(arg: str) -> str:
             goal = goal_store.set_goal(
                 objective.strip(), criteria.strip(), origin="user",
             )
-            return "goal set\n" + _fmt(goal)
+            return "goal set\n" + _format_goal(goal)
         if action == "note":
             if not rest:
                 return "usage: /goal note <progress note>"
-            return "noted\n" + _fmt(goal_store.add_note(rest))
+            return "noted\n" + _format_goal(goal_store.add_note(rest))
         if action in ("done", "complete"):
             goal = goal_store.complete(rest, actor="user")
             return "goal completed: %s" % goal["objective"]
@@ -3213,13 +2902,6 @@ def control_command(prompt: str, history=None, session="", project="",
     return None
 
 
-def _canonical_learn_tier(tier_label):
-    """Map a recorded tier label to the LEARN_TIERS key that governs it. The local
-    learning route is labeled 'sonder' on interactions but is gated by the same 'code'
-    switch as offload's local coder, so both flip together."""
-    return "code" if tier_label == "sonder" else tier_label
-
-
 _ALL_PROJECTS = object()
 
 
@@ -3421,7 +3103,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         recalls = None
         facts = None
         project_facts = None
-        retrieve_fn = _no_retrieve
+        retrieve_fn = _no_retrieve_policy
     if trace:
         resp, iid, tctx = orchestrator.run_with_learning_traced(
             conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
@@ -3464,10 +3146,6 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
 # explicit NOT VERIFIED banner and record a negative outcome so broken code
 # never distills into lessons. Python-only for now; opt out with
 # SONDER_CODE_GATE=0.
-_CODE_GATE_SIGNS = re.compile(
-    r"^\s*(?:def\s+\w+|class\s+\w+|import\s+\w+|from\s+[\w.]+\s+import\s)",
-    re.MULTILINE,
-)
 _CODE_GATE_TIMEOUT = 8
 
 
@@ -3478,23 +3156,8 @@ def _code_gate_enabled() -> bool:
 
 
 def _code_gate_target(reply):
-    """Return the reply's runnable Python block worth gating, or None.
-
-    Only fenced Python with real definitions/imports is gated (keeps latency
-    off trivial snippet turns on this RAM-tight box), and interactive samples
-    that read stdin are skipped: a smoke run would EOFError on correct code.
-    """
-    if "```" not in str(reply or ""):
-        return None
-    block = grounding.extract_runnable_code_block(reply)
-    if not block or block.get("language") != "python":
-        return None
-    code = block.get("code") or ""
-    if not _CODE_GATE_SIGNS.search(code):
-        return None
-    if re.search(r"\binput\s*\(", code):
-        return None
-    return code
+    """Compatibility delegate for the packaged chat code-gate policy."""
+    return _code_gate_target_policy(reply, grounding.extract_runnable_code_block)
 
 
 def _release_lesson_distillation_claim(
@@ -3544,16 +3207,13 @@ def _defer_lesson_distillation(
 
 
 def _distillation_timeout_seconds():
-    """Return the short, independently configurable learning-call budget."""
-    value = _env_int_option("SONDER_DISTILLATION_TIMEOUT", 20)
-    if value is None:
-        value = 20
-    return max(1, min(int(value), TIMEOUT))
+    """Compatibility wrapper using the live server request-timeout ceiling."""
+    return _distillation_timeout_policy(_env_int_option, TIMEOUT)
 
 
 def _prepare_lesson_candidate_bounded(interaction, signal):
     """Generate one lesson within a bounded total model/embedding budget."""
-    budget = _distillation_timeout_seconds()
+    budget = _distillation_timeout_policy(_env_int_option, TIMEOUT)
     deadline = time.monotonic() + budget
 
     def remaining_seconds():
@@ -3827,58 +3487,6 @@ _EMPTY_DRAIN = {
 }
 
 
-def _drain_backlog_text(drain):
-    """Render the drain's remaining backlog, or say it could not be read."""
-    backlog = drain.get("backlog")
-    return "unknown (count query failed)" if backlog is None else str(backlog)
-
-
-def _drain_summary_text(drain):
-    """The campaign's one line about the drain.
-
-    Rendered here rather than at the two call sites that used to format it
-    identically, so a bucket added to the drain cannot reach one report and
-    miss the other. The healthy line is byte-identical to what it has always
-    been; the failure clause is appended only when non-zero, because an
-    unattended nightly run keeps these lines and a drain whose items raised
-    must not read as a quiet success.
-    """
-    text = (
-        "deferred distillations drained: %d (lessons stored %d, still "
-        "deferred in batch %d, backlog remaining %s)"
-        % (
-            drain.get("drained", 0), drain.get("stored", 0),
-            drain.get("deferred", 0), _drain_backlog_text(drain),
-        )
-    )
-    if drain.get("failed"):
-        text += " -- failed %d (recorder raised; these are NOT deferred and " \
-                "will be retried)" % drain["failed"]
-    return text
-
-
-def _campaign_headline(
-    passed, total, recorded, failed_recorded, pitfall_errors, elapsed,
-):
-    """Build the campaign's first line - the only line an unattended run keeps.
-
-    scripts/nightly_self_improve.py records _first_line() of each tool result,
-    so anything a nightly review must be able to see has to appear here. A
-    pitfall-distillation crash reported only in a per-attempt record, or on a
-    later summary line, is invisible in exactly the run where nobody is
-    watching. The count is appended only when non-zero so a healthy run's
-    headline stays byte-identical to what it has always been.
-    """
-    headline = (
-        "campaign generate/compile/execute/record: "
-        "%d/%d passed, %d recorded, %d failed-recorded"
-        % (passed, total, recorded, failed_recorded)
-    )
-    if pitfall_errors:
-        headline += ", %d pitfall-errors" % pitfall_errors
-    return "%s in %.3fs" % (headline, elapsed)
-
-
 def _record_failure_pitfall(interaction_id, task, response, error):
     """Turn a terminal failure into a durable pitfall lesson.
 
@@ -3907,7 +3515,7 @@ def _record_failure_pitfall(interaction_id, task, response, error):
             # SPEC-3: routed through the ModelGateway port; num_ctx pins the
             # small context distillation has always used.
             offload_fn=lambda prompt, **options: _gateway_generate_text(
-                prompt, timeout=_distillation_timeout_seconds(),
+                prompt, timeout=_distillation_timeout_policy(_env_int_option, TIMEOUT),
                 num_ctx=options.pop("num_ctx", 2048), **options
             ),
         )
@@ -4101,203 +3709,47 @@ _PERSISTENT_MCP = mcp
 
 
 def _bounded_timeout(value) -> int:
-    try:
-        value = TIMEOUT if value is None else int(value)
-    except (TypeError, ValueError):
-        value = TIMEOUT
-    return max(1, min(value, TIMEOUT))
+    """Compatibility wrapper using the live server request-timeout ceiling."""
+    return _bound_request_timeout(value, TIMEOUT)
 
 
-_TRANSIENT_MODEL_HTTP_CODES = frozenset({408, 429, 502, 503, 504})
-_MAX_LOCAL_MODEL_RETRIES = 2
+# Compatibility name retained for callers that inspect the historical module.
+_TRANSIENT_MODEL_HTTP_CODES = TRANSIENT_MODEL_HTTP_CODES
 _MAX_MODEL_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 def _local_model_retries() -> int:
-    raw = os.environ.get("SONDER_LOCAL_RETRIES", "1").strip()
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = 1
-    return max(0, min(value, _MAX_LOCAL_MODEL_RETRIES))
-
-
-def _hosted_overflow_retry_enabled() -> bool:
-    """Operator opt-in for compaction retries on hosted/remote model routes.
-
-    Off by default. Even when on it is not sufficient: the calling site must also
-    declare the request idempotent, because a hosted retry is metered work that
-    may duplicate a side effect.
-    """
-    return os.environ.get("SONDER_HOSTED_OVERFLOW_RETRY", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-
-
-def _overflow_retry_allowed(*, cloud: bool, remote: bool, idempotent: bool) -> bool:
-    """Whether this route may spend one extra attempt on a compacted prompt.
-
-    Loopback Ollama is free and side-effect-free, so it may always take the one
-    retry. Anything that leaves the machine - a hosted tier or a remote Ollama -
-    keeps the existing "no retries" posture unless the request was explicitly
-    declared idempotent *and* the operator opted in.
-    """
-    if not (cloud or remote):
-        return True
-    return bool(idempotent) and _hosted_overflow_retry_enabled()
+    """Compatibility wrapper for the packaged local retry policy."""
+    return _local_model_retries_policy()
 
 
 def _embedded_model_error(result) -> str:
     """Error text from a 2xx body that reports failure in-band, else ""."""
-    if not isinstance(result, dict):
-        return ""
-    embedded = result.get("error")
-    if not embedded:
-        return ""
-    return _safe_model_error_detail(embedded)
+    return _embedded_model_error_policy(result)
 
 
 def _compacted_overflow_payload(payload, verdict):
-    """One bounded compaction of `payload` for a classified context overflow.
-
-    Returns a new payload, or None when there is nothing safe to drop. Only the
-    message list changes: `options` (and therefore `num_ctx`) is carried through
-    untouched, so recovery never silently widens the context window behind the
-    context policy's back.
-    """
-    if not verdict.overflow or not isinstance(payload, dict):
-        return None
-    compacted = context_compaction.compact_messages(payload.get("messages"))
-    if compacted is None:
-        return None
-    updated = dict(payload)
-    updated["messages"] = compacted
-    return updated
+    """Compatibility wrapper for the packaged context compaction policy."""
+    return context_compaction.compact_overflow_payload(payload, verdict)
 
 
 def _local_retry_delay(attempt: int) -> float:
-    raw = os.environ.get("SONDER_LOCAL_RETRY_DELAY_MS", "150").strip()
-    try:
-        base_ms = float(raw)
-    except (TypeError, ValueError):
-        base_ms = 150.0
-    base_ms = max(0.0, min(base_ms, 1000.0))
-    return min(1.0, (base_ms / 1000.0) * (2 ** max(0, attempt - 1)))
-
-
-def _redact_model_error_value(value, depth: int = 0):
-    if depth > 4:
-        return "<nested>"
-    if isinstance(value, dict):
-        redacted = {}
-        for key, item in list(value.items())[:64]:
-            name = str(key)
-            lowered = name.lower().replace("-", "_")
-            if any(part in lowered for part in (
-                "password", "passwd", "secret", "token", "api_key",
-                "authorization", "credential",
-            )):
-                redacted[name] = "<redacted>"
-            else:
-                redacted[name] = _redact_model_error_value(item, depth + 1)
-        return redacted
-    if isinstance(value, (list, tuple)):
-        return [_redact_model_error_value(item, depth + 1) for item in list(value)[:64]]
-    return value
-
-
-def _safe_model_error_detail(value, limit: int = 600) -> str:
-    structured = isinstance(value, (dict, list, tuple))
-    if structured:
-        value = json.dumps(
-            _redact_model_error_value(value), ensure_ascii=False, sort_keys=True,
-        )
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    # Error bodies should not become a second persistence surface for bearer
-    # tokens or API keys accidentally echoed by an upstream proxy.
-    if not structured:
-        text = re.sub(
-            r"(?i)\b(bearer|token|secret|api[-_]?key)\b\s*[:=]?\s*"
-            r"(?!(?:limit|count|budget|window|usage|quota|length|context|maximum|minimum)\b)"
-            r"\S+",
-            r"\1=<redacted>",
-            text,
-        )
-    return text[:limit] or "model request failed"
+    """Compatibility wrapper for the packaged local retry backoff policy."""
+    return _local_retry_delay_policy(attempt)
 
 
 def _http_error_detail(error: urllib.error.HTTPError) -> str:
-    detail = getattr(error, "reason", "") or "HTTP %s" % error.code
-    try:
-        raw = error.read(4097)
-        if raw:
-            decoded = raw[:4096].decode("utf-8", errors="replace")
-            try:
-                parsed = json.loads(decoded)
-                if isinstance(parsed, dict) and parsed.get("error"):
-                    decoded = parsed["error"]
-                elif isinstance(parsed, (dict, list)):
-                    decoded = parsed
-            except (TypeError, ValueError):
-                pass
-            detail = decoded
-    except Exception:
-        pass
-    return _safe_model_error_detail(detail)
-
-
-def _retry_after_seconds(headers, *, now=None):
-    """Return a bounded upstream Retry-After hint without ever sleeping on it.
-
-    Hosted calls are deliberately single-attempt because a retry can duplicate
-    metered work.  The header is therefore observability for the caller, not an
-    instruction to make the runtime wait or retry.  Both RFC delta-seconds and
-    HTTP-date forms are accepted; malformed or excessive values are ignored or
-    capped so an upstream cannot make status output misleading.
-    """
-    try:
-        value = headers.get("Retry-After", "") if headers else ""
-    except (AttributeError, TypeError):
-        value = ""
-    value = str(value or "").strip()
-    if not value:
-        return None
-    try:
-        seconds = float(value)
-    except ValueError:
-        try:
-            when = email.utils.parsedate_to_datetime(value)
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=datetime.timezone.utc)
-            current = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
-            seconds = (when - current).total_seconds()
-        except (TypeError, ValueError, IndexError, OverflowError):
-            return None
-    if not math.isfinite(seconds):
-        return None
-    if seconds < 0:
-        return 0.0
-    return min(float(seconds), 86400.0)
+    return _http_error_detail_policy(error)
 
 
 def _transport_error_detail(error) -> str:
-    reason = getattr(error, "reason", error)
-    return _safe_model_error_detail(reason)
+    return _transport_error_detail_policy(error)
 
 
-def _cancel_requested(cancel_check) -> bool:
-    if cancel_check is None:
-        return False
-    try:
-        return bool(cancel_check())
-    except Exception:
-        # Cancellation state is a safety gate. If the durable fleet ledger
-        # cannot be read, do not authorize another expensive request.
-        return True
-
-
-def _ollama_display() -> str:
-    return ollama_endpoint.safe_display(BASE)
+# Compatibility alias: endpoint display formatting is owned by the packaged
+# Ollama endpoint policy, while legacy server callers retain the zero-argument
+# private helper contract.
+_ollama_display = functools.partial(ollama_endpoint.safe_display, BASE)
 
 
 def _require_ollama_endpoint(*, cloud: bool = False) -> None:
@@ -4334,7 +3786,7 @@ def _post_model(
     a route will take even the overflow retry.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
-    if cloud and not cloud_allowed():
+    if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
@@ -4343,10 +3795,10 @@ def _post_model(
         )
     _require_ollama_endpoint(cloud=cloud)
     remote_endpoint = not ollama_endpoint.is_loopback(BASE)
-    request_timeout = _bounded_timeout(timeout)
+    request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
     max_attempts = (
-        1 if cloud or remote_endpoint else 1 + _local_model_retries()
+        1 if cloud or remote_endpoint else 1 + _local_model_retries_policy()
     )
 
     # Bumped by exactly one if a classified context overflow earns a compaction
@@ -4384,7 +3836,7 @@ def _post_model(
             # Ollama can report a refusal in-band on a 200. That is the same
             # failure surface as an HTTP error body, so it gets classified too
             # rather than being handed upward as an opaque success.
-            embedded_detail = "" if compaction_spent else _embedded_model_error(result)
+            embedded_detail = "" if compaction_spent else _embedded_model_error_policy(result)
             if not embedded_detail:
                 return result, attempt
         except ModelCallError as error:
@@ -4513,7 +3965,7 @@ def _post_model(
 
         if cloud or not failure.transient or attempt >= max_attempts:
             raise failure
-        delay = _local_retry_delay(attempt)
+        delay = _local_retry_delay_policy(attempt)
         remaining = deadline - time.monotonic()
         if remaining < delay + 1.0:
             raise failure
@@ -4534,10 +3986,6 @@ def _post_model(
     raise AssertionError("unreachable model retry state")
 
 
-_NATIVE_TOOL_ARGUMENTS_MAX_CHARS = 65536
-_NATIVE_TOOL_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z")
-
-
 def _native_tool_call_decision(message):
     """Translate one canonical native tool call into the agent JSON contract.
 
@@ -4545,59 +3993,7 @@ def _native_tool_call_decision(message):
     mutation policy after this translation.  Thinking text and provider-owned
     metadata are intentionally excluded.
     """
-    if not isinstance(message, dict):
-        return None
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, (list, tuple)) or len(tool_calls) != 1:
-        return None
-    tool_call = tool_calls[0]
-    function = tool_call.get("function") if isinstance(tool_call, dict) else None
-    if not isinstance(function, dict):
-        return None
-    name = function.get("name")
-    if not isinstance(name, str):
-        return None
-    name = name.strip()
-    if not _NATIVE_TOOL_NAME_RE.fullmatch(name):
-        return None
-    if "arguments" not in function:
-        return None
-    arguments = function.get("arguments")
-    if isinstance(arguments, str):
-        if len(arguments) > _NATIVE_TOOL_ARGUMENTS_MAX_CHARS:
-            return None
-        try:
-            arguments = json.loads(arguments)
-        except (TypeError, ValueError, RecursionError):
-            return None
-    if not isinstance(arguments, dict):
-        return None
-    try:
-        encoded_arguments = json.dumps(
-            arguments,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError, OverflowError, RecursionError):
-        return None
-    if len(encoded_arguments) > _NATIVE_TOOL_ARGUMENTS_MAX_CHARS:
-        return None
-    try:
-        return json.dumps(
-            {
-                "tool": name,
-                "args": arguments,
-                "reason": "model native tool call",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError, OverflowError, RecursionError):
-        return None
+    return _native_tool_call_policy(message)
 
 
 def _chat_request(
@@ -4689,30 +4085,6 @@ def _chat_request(
     return out, content
 
 
-def _model_usage_count(value):
-    if value is None:
-        return None
-    try:
-        value = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return value if value >= 0 else None
-
-
-def _model_usage_source(tokens_in, tokens_out):
-    """Describe whether both persisted token counts came from Ollama.
-
-    Some compatible gateways return only one of ``prompt_eval_count`` and
-    ``eval_count``.  Keep the available counter, but do not label the other
-    side's character estimate as an exact provider measurement.
-    """
-    if tokens_in is not None and tokens_out is not None:
-        return "ollama"
-    if tokens_in is None and tokens_out is None:
-        return "estimated"
-    return "mixed"
-
-
 def _empty_model_response_detail(out, message):
     """Describe an empty response without exposing model reasoning content."""
     metadata = {}
@@ -4776,40 +4148,10 @@ def _response_error_metadata(error) -> dict:
 
 
 def _format_model_call_error(error: ModelCallError) -> str:
-    target = (
-        "hosted Ollama" if error.cloud else
-        "remote Ollama" if not ollama_endpoint.is_loopback(BASE) else
-        "local Ollama"
-    )
-    suffix = " after %d attempt(s)" % error.attempts
-    if error.kind == "budget":
-        return "ERROR: hosted agent output budget exhausted: %s" % error.detail
-    if error.kind == "http":
-        retry_hint = ""
-        if error.cloud and error.status in _TRANSIENT_MODEL_HTTP_CODES:
-            retry_hint = (
-                " Cloud calls are not retried automatically to avoid duplicate "
-                "metered work."
-            )
-            if error.retry_after_seconds is not None:
-                retry_hint += " Provider suggests retrying after about %ss." % (
-                    int(round(error.retry_after_seconds)),
-                )
-        rendered = "ERROR: %s rejected the model request (HTTP %s)%s: %s%s" % (
-            target, error.status or "unknown", suffix, error.detail,
-            retry_hint,
-        )
-        return rendered
-    if error.kind == "configuration":
-        return "ERROR: %s" % error.detail
-    if error.kind in ("protocol", "empty_response", "request"):
-        return "ERROR: invalid response from %s%s: %s" % (
-            target, suffix, error.detail,
-        )
-    if error.kind == "cancelled":
-        return "ERROR: %s" % error.detail
-    return "ERROR contacting %s at %s%s: %s" % (
-        target, _ollama_display(), suffix, error.detail,
+    return _format_runtime_model_call_error_policy(
+        error,
+        endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+        display=_ollama_display(),
     )
 
 
@@ -4819,7 +4161,7 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     req = urllib.request.Request(
         f"{BASE}{path}", data=data, headers={"Content-Type": "application/json"}
     )
-    request_timeout = _bounded_timeout(timeout)
+    request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     with ollama_endpoint.open_url(req, timeout=request_timeout) as resp:
         raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
@@ -4953,9 +4295,6 @@ _VERIFIED_SCHEMA_KEYWORDS = frozenset({
 })
 
 # How many gaps a disclosure names before it summarizes the rest.
-_MAX_REPORTED_SCHEMA_GAPS = 8
-
-
 def _schema_coverage(value, schema, path, gaps):
     """Mirror `json_schema_verifier._validate`'s descent, recording what it skips.
 
@@ -5021,14 +4360,6 @@ def _schema_coverage_gaps(value, schema):
         return _schema_coverage(value, schema, "$", [])
     except Exception as exc:
         return [("$", "coverage could not be determined: %s" % exc)]
-
-
-def _format_schema_gaps(gaps):
-    shown = ["%s (%s)" % (path, reason) for path, reason in gaps[:_MAX_REPORTED_SCHEMA_GAPS]]
-    remaining = len(gaps) - len(shown)
-    if remaining > 0:
-        shown.append("and %d more" % remaining)
-    return "; ".join(shown)
 
 
 def _with_schema_coverage(text, gaps):
@@ -5145,7 +4476,7 @@ def _offload_impl(
     # remote Ollama hosts have different KV-cache and memory ceilings.
     num_ctx = num_ctx or context_policy.native()
     _refresh_live_cloud_tiers()
-    request_timeout = _bounded_timeout(timeout)
+    request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     model = TIERS.get(tier)
     if model is None:
         raise ModelCallError(
@@ -5153,7 +4484,7 @@ def _offload_impl(
             "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
         )
     cloud = _is_cloud_tier(tier, model)
-    if cloud and not cloud_allowed():
+    if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
@@ -5168,7 +4499,13 @@ def _offload_impl(
         if cloud:
             options = {"temperature": temperature, "num_predict": num_predict}
         else:
-            options = _local_model_options(temperature, num_predict, num_ctx)
+            options = _platform_local_model_options(
+                temperature,
+                num_predict,
+                num_ctx,
+                native_context=context_policy.native,
+                environ=os.environ,
+            )
         payload = {
             "model": model,
             "messages": messages,
@@ -5260,7 +4597,7 @@ def _offload_impl(
             cancel_check=cancel_check,
             schema=schema,
         )
-        retrieve_kwargs["retrieve_fn"] = _no_retrieve
+        retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
         learning_model = resolve_sonder_model(_STRICT_DEFAULT)
         if learning_model is None:
@@ -5371,47 +4708,18 @@ def offload(
             schema=schema,
         )
     except ModelCallError as error:
-        return _format_model_call_error(error)
-
-
-def _trailing_interaction_id(text):
-    """Read back the id `with_footer` appended, using the footer's own delimiters.
-
-    `parse_interaction_id` only matches the lowercase-hex ids the store happens
-    to mint today. Using it here would mean that the day an id gains a hyphen, a
-    rejection stops being filed -- silently, and in the direction that flatters
-    the numbers, since only negative outcomes are filed from this path.
-    """
-    body = (text or "").rstrip()
-    start = body.rfind(FOOTER_PREFIX)
-    if start < 0 or not body.endswith("]"):
-        return None
-    return body[start + len(FOOTER_PREFIX):-1].strip() or None
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
 
 
 def _leading_json_object(text):
-    """The JSON object a schema-constrained reply starts with.
-
-    A constrained response is JSON first and footers after -- the interaction-id
-    line, an activity block, a `[schema_unverified: ...]` disclosure. Decoding
-    the leading value instead of matching those trailers means this does not
-    have to know their formats, and cannot be broken by a new one.
-    """
-    body = (text or "").lstrip()
     try:
-        data, _end = json.JSONDecoder().raw_decode(body)
+        return _leading_json_object_policy(text)
     except ValueError as exc:
-        raise ModelCallError(
-            "protocol",
-            "response did not begin with the JSON object the schema required: %s" % exc,
-        ) from exc
-    if not isinstance(data, dict):
-        raise ModelCallError(
-            "protocol",
-            "response was a JSON %s, not the object the schema required"
-            % type(data).__name__,
-        )
-    return data
+        raise ModelCallError("protocol", str(exc)) from exc
 
 
 def _extract_grounded_impl(
@@ -5553,19 +4861,16 @@ def extract_grounded(
             timeout=timeout,
         )
     except ModelCallError as error:
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
 
 
 def _env_location_consent() -> bool:
-    """Opt-in approximate-IP-location consent for the local MCP/REPL surfaces.
-
-    Off by default to preserve the privacy contract. Set
-    SONDER_LOCATION_CONSENT=1 to allow server-side approximate location lookup
-    on this host's own chat surfaces.
-    """
-    return os.environ.get("SONDER_LOCATION_CONSENT", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    """Compatibility delegate for the approximate-location opt-in policy."""
+    return _location_consent()
 
 
 def _session_messages_light(
@@ -5716,7 +5021,7 @@ def _sonder_impl_serialized(
         if command is not None:
             return _append_activity(command)
     location_consent = (
-        _env_location_consent() if location_consent is None else bool(location_consent)
+        _location_consent() if location_consent is None else bool(location_consent)
     )
     if not explicit_target:
         web_reply = _route_chat_web(prompt, session, project, location_consent)
@@ -5755,7 +5060,10 @@ def _sonder_impl_serialized(
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
-    requested_ctx = _context_requested(context_size or (SESSION_NUM_CTX if session_id else num_ctx))
+    requested_ctx = _platform_requested_context(
+        context_size or (SESSION_NUM_CTX if session_id else num_ctx),
+        default_value=SESSION_NUM_CTX,
+    )
     # Sessioned threads get the selected virtual context window; honor a larger explicit num_ctx.
     num_ctx_eff = max(num_ctx, requested_ctx) if session_id else requested_ctx
 
@@ -5786,7 +5094,11 @@ def _sonder_impl_serialized(
                 internal_generate=internal_generate,
             )
     except ModelCallError as error:
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
@@ -5834,6 +5146,10 @@ def _sonder_impl_serialized(
     response, _code_verified, code_repaired = _apply_code_gate(
         response, interaction_id=iid, regenerate=_code_repair,
     )
+    _capture_durable_session_turn(
+        session_id, prompt, history, tgt_model, effective_system, tier_label,
+        response, request_id=iid,
+    )
     footer_iid = iid
     if code_repaired and not _persist_verified_code_repair(
         iid, interaction_snapshot, response, repair_usage,
@@ -5845,7 +5161,10 @@ def _sonder_impl_serialized(
             "temperature": temperature,
             "num_predict": num_predict,
             "num_ctx": num_ctx_eff,
-            "num_ctx_native": _context_native(num_ctx_eff),
+            "num_ctx_native": _platform_native_context(
+                num_ctx_eff,
+                default_value=SESSION_NUM_CTX,
+            ),
         }
         trace_block = _format_trace(tgt_model, tier_label, params, trace_ctx)
         # Footer must stay LAST so parse_interaction_id's $-anchored regex still finds it.
@@ -5923,6 +5242,13 @@ def sonder(
     token: str = "",
 ) -> str:
     """Ask through Sonder Runtime and show observable activity for the response."""
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     # An explicitly selected target is a caller-owned routing contract.  Do
     # not reinterpret its prompt as a local control command before it reaches
     # that model; ``_answer_with_history_impl`` applies the same rule for the
@@ -5934,7 +5260,7 @@ def sonder(
     natural = natural_model_request(prompt)
     if natural and natural["kind"] in ("fanout", "ensemble"):
         if natural["prompt"].lstrip().startswith("/"):
-            return _format_model_call_error(ModelCallError(
+            return render_model_error(ModelCallError(
                 "configuration",
                 "model selection cannot wrap a slash command; issue the command directly.",
             ))
@@ -5949,7 +5275,7 @@ def sonder(
         )
     if natural and natural["kind"] == "model":
         if natural["prompt"].lstrip().startswith("/"):
-            return _format_model_call_error(ModelCallError(
+            return render_model_error(ModelCallError(
                 "configuration",
                 "model selection cannot wrap a slash command; issue the command directly.",
             ))
@@ -6054,7 +5380,10 @@ def _answer_with_history_impl(
     # cloud from learning and have the app respect it. The local route is gated via 'code'.
     learn = _should_learn(_canonical_learn_tier(tier_label), True)
     temperature = _serve_temperature()
-    req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
+    req_ctx = _platform_requested_context(
+        context_size or SESSION_NUM_CTX,
+        default_value=SESSION_NUM_CTX,
+    )
     session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
     interaction_snapshot = None
@@ -6109,8 +5438,14 @@ def _answer_with_history_impl(
                     tier=tier_label,
                     system=effective_system, prompt=prompt,
                     history=history or [],
-                    options=_local_model_options(temperature, 1024, req_ctx),
-                    cloud_allowed=cloud_allowed(),
+                    options=_platform_local_model_options(
+                        temperature,
+                        1024,
+                        req_ctx,
+                        native_context=context_policy.native,
+                        environ=os.environ,
+                    ),
+                    cloud_allowed=_cloud_allowed_policy(os.environ),
                 )
                 response = request_cache.get(request_cache_key)
                 request_cache_status = "hit" if response is not None else "miss"
@@ -6136,7 +5471,11 @@ def _answer_with_history_impl(
     except ModelCallError as error:
         if raise_model_errors:
             raise
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
     except urllib.error.URLError as e:
         return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
@@ -6175,6 +5514,10 @@ def _answer_with_history_impl(
     response, _code_verified, code_repaired = _apply_code_gate(
         response, interaction_id=iid, regenerate=_code_repair,
     )
+    _capture_durable_session_turn(
+        session_id, prompt, history, model, effective_system, tier_label,
+        response, request_id=iid,
+    )
     footer_iid = iid
     if code_repaired and not _persist_verified_code_repair(
         iid, interaction_snapshot, response, repair_usage,
@@ -6185,7 +5528,10 @@ def _answer_with_history_impl(
             "temperature": temperature,
             "num_predict": 1024,
             "num_ctx": req_ctx,
-            "num_ctx_native": _context_native(req_ctx),
+            "num_ctx_native": _platform_native_context(
+                req_ctx,
+                default_value=SESSION_NUM_CTX,
+            ),
         }
         trace_block = _format_trace(model, tier_label, params, trace_ctx)
         traced_response = response + trace_block
@@ -6277,7 +5623,10 @@ def structured_answer_with_history(
             target_observer(model, tier_label, cloud)
         except Exception:
             pass
-    req_ctx = _context_requested(context_size or SESSION_NUM_CTX)
+    req_ctx = _platform_requested_context(
+        context_size or SESSION_NUM_CTX,
+        default_value=SESSION_NUM_CTX,
+    )
     system = _build_system("", False, "", model=model, cloud=cloud)
     response = _make_generate(
         model, system, 0.2, 1024, req_ctx, cloud=cloud, schema=schema,
@@ -6482,7 +5831,7 @@ def parallel_generate_run(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not cloud_allowed():
+    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
         return _cloud_disabled_message()
     cloud = _is_cloud_tier(tier, model)
     system = (
@@ -6593,7 +5942,7 @@ def parallel_generate_run_languages(
     model = TIERS.get(tier)
     if model is None:
         return "ERROR: unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names())
-    if _is_cloud_tier(tier, model) and not cloud_allowed():
+    if _is_cloud_tier(tier, model) and not _cloud_allowed_policy(os.environ):
         return _cloud_disabled_message()
     cloud = _is_cloud_tier(tier, model)
     started = time.time()
@@ -6721,57 +6070,6 @@ _CAMPAIGN_TASKS = [
     ("fib",
      "print the 20th Fibonacci number where fib(1)=1 and fib(2)=1"),
 ]
-
-
-def _campaign_expected(task_name):
-    return {
-        "hello": "sonder-ok",
-        "sum": "42",
-        "loop": "1\n2\n3",
-        "string": "rednos",
-        "branch": "prime",
-        "list": "20",
-        "toposort": "d a b c",
-        "lru": "10 -1 30",
-        "intervals": "1-6 8-12",
-        "balanced": "ok\nbad\nbad",
-        "wordfreq": "the:3",
-        "fib": "6765",
-    }.get(task_name, "")
-
-
-def _campaign_output_matches(output, expected):
-    """Whether executed output satisfies a task that says "print exactly".
-
-    Substring containment let a chatty answer false-pass: "The result of 12 +
-    30 is 42." contains "42" and was recorded as a success even though every
-    campaign task asks to print the value exactly. The comparison is now the
-    faithful one - each line stripped, blank leading/trailing lines dropped,
-    platform line-endings normalised, then equal - which tolerates trailing
-    whitespace and newlines while rejecting embedded prose and extra lines.
-    """
-    def _norm(text):
-        lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        stripped = [line.strip() for line in lines]
-        while stripped and not stripped[0]:
-            stripped.pop(0)
-        while stripped and not stripped[-1]:
-            stripped.pop()
-        return "\n".join(stripped)
-
-    return _norm(output) == _norm(expected)
-
-
-def _campaign_environment_failure(output):
-    """Whether a failed attempt broke on the host, not the model.
-
-    A missing interpreter/compiler fails every attempt in that language no
-    matter what the model wrote; recording it as 'failed' would penalize the
-    model for the host's toolchain - the same mis-attribution class as the
-    pytest timeouts campaign_repo_repair no longer records. A repair round
-    cannot install a toolchain either, so callers also stop retrying.
-    """
-    return str(output or "").startswith("missing runtime/compiler:")
 
 
 def _campaign_prompt(language, task_name, task_text, repair_note=""):
@@ -7423,24 +6721,6 @@ def learning_health_status() -> str:
     return learning_health.format_report(learning_health_data())
 
 
-def _rough_token_count(text) -> int:
-    """Cheap, dependency-free estimate for dashboard health meters."""
-    if not text:
-        return 0
-    return max(1, (len(str(text)) + 3) // 4)
-
-
-def _rough_token_count_from_chars(count) -> int:
-    count = max(0, int(count or 0))
-    return max(1, (count + 3) // 4) if count else 0
-
-
-def _health_bar(percent, width=18) -> str:
-    pct = max(0.0, min(1.0, float(percent or 0.0)))
-    filled = int(round(pct * width))
-    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
-
 def context_health_data(session: str = "", project: str = "") -> dict:
     """Read-only context/memory snapshot for app and console visualizers.
 
@@ -7449,191 +6729,75 @@ def context_health_data(session: str = "", project: str = "") -> dict:
     plus the recent turns that Sonder keeps in the prompt.
     """
     _maybe_live_reload()
-    session_id = _resolve_session(session)
-    project_id = _resolve_project(project)
-    conn = _open_db()
-    try:
-        scoped_turns = (
-            memory_store.session_turns_for_project(conn, session_id, project_id)
-            if session_id else []
-        )
-        turns = [
-            (row["task"], row["response"])
-            for row in scoped_turns[-MAX_TURNS:]
-        ]
-        session_row = memory_store.get_session(conn, session_id) if session_id else None
-        summary_row = (
-            memory_store.get_session_project_summary(conn, session_id, project_id)
-            if session_id else {}
-        )
-        summary = summary_row.get("summary") or ""
-        turn_count = len(scoped_turns)
-        session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        lesson_count = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
-        fact_count = (
-            memory_store.count_facts(conn, project_id) if project_id else
-            conn.execute("SELECT COUNT(*) FROM facts WHERE project IS NULL").fetchone()[0]
-        )
-        preference_count = conn.execute(
-            "SELECT COUNT(*) FROM preferences WHERE enabled=1"
-        ).fetchone()[0]
-        interaction_count = memory_store.count_interactions(conn)
-        outcome_count = conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
-        summarized_through = summary_row.get("summarized_through") or ""
-        updated_ts = (session_row or {}).get("updated_ts") or ""
-        title = (session_row or {}).get("title") or ""
-        live_chars = sum(len(task or "") + len(response or "") for task, response in turns)
-        summary_tokens = _rough_token_count(summary)
-        live_tokens = _rough_token_count_from_chars(live_chars)
-        estimated_tokens = summary_tokens + live_tokens
-    finally:
-        conn.close()
 
-    policy = context_policy.policy(SESSION_NUM_CTX)
-    context_limit = max(1, int(policy["requested"] or 1))
-    context_ratio = min(1.0, estimated_tokens / context_limit)
-    live_turn_count = len(turns)
-    turn_ratio = min(1.0, live_turn_count / max(1, int(MAX_TURNS or 1)))
-    if context_ratio >= 0.90:
-        status_label = "hot"
-    elif context_ratio >= 0.70:
-        status_label = "warm"
-    else:
-        status_label = "healthy"
-    memory_items = lesson_count + fact_count + preference_count + outcome_count
-    memory_ratio = min(1.0, memory_items / 1000.0)
-    return {
-        "session": session_id or "none",
-        "project": project_id or "none",
-        "title": title,
-        "status": status_label,
-        "context_limit": context_limit,
-        "native_context_limit": policy["native"],
-        "native_context_max": policy["native_max"],
-        "virtual_context_max": policy["virtual_max"],
-        "context_mode": policy["mode"],
-        "virtual_context": policy["virtual"],
-        "estimated_tokens": estimated_tokens,
-        "context_percent": round(context_ratio * 100.0, 1),
-        "context_bar": _health_bar(context_ratio),
-        "live_turns": live_turn_count,
-        "max_live_turns": MAX_TURNS,
-        "total_turns": turn_count,
-        "turn_percent": round(turn_ratio * 100.0, 1),
-        "turn_bar": _health_bar(turn_ratio),
-        "summary_tokens": summary_tokens,
-        "live_tokens": live_tokens,
-        "summary_chars": len(summary),
-        "summarized_through": summarized_through,
-        "updated_ts": updated_ts,
-        "sessions": session_count,
-        "lessons": lesson_count,
-        "facts": fact_count,
-        "preferences": preference_count,
-        "interactions": interaction_count,
-        "outcomes": outcome_count,
-        "memory_percent": round(memory_ratio * 100.0, 1),
-        "memory_bar": _health_bar(memory_ratio),
-        "db_path": _DB_PATH,
-        "state_home": str(sonder_paths.default_home()),
-    }
+    class _Identity:
+        session = staticmethod(_resolve_session)
+        project = staticmethod(_resolve_project)
 
+    class _Repository:
+        @staticmethod
+        def snapshot(session_id, project_id, limit):
+            conn = _open_db()
+            try:
+                scoped_turns = (
+                    memory_store.session_turns_for_project(conn, session_id, project_id)
+                    if session_id else []
+                )
+                selected = scoped_turns[-limit:] if limit else []
+                turns = tuple(
+                    (row["task"], row["response"])
+                    for row in selected
+                )
+                session_row = memory_store.get_session(conn, session_id) if session_id else None
+                summary_row = (
+                    memory_store.get_session_project_summary(conn, session_id, project_id)
+                    if session_id else {}
+                )
+                return ContextMemorySnapshot(
+                    turns=turns,
+                    total_turns=len(scoped_turns),
+                    title=(session_row or {}).get("title") or "",
+                    summary=summary_row.get("summary") or "",
+                    summarized_through=summary_row.get("summarized_through") or "",
+                    updated_ts=(session_row or {}).get("updated_ts") or "",
+                    sessions=conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
+                    lessons=conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0],
+                    facts=(
+                        memory_store.count_facts(conn, project_id) if project_id else
+                        conn.execute("SELECT COUNT(*) FROM facts WHERE project IS NULL").fetchone()[0]
+                    ),
+                    preferences=conn.execute(
+                        "SELECT COUNT(*) FROM preferences WHERE enabled=1"
+                    ).fetchone()[0],
+                    interactions=memory_store.count_interactions(conn),
+                    outcomes=conn.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0],
+                )
+            finally:
+                conn.close()
 
-def format_context_health(data: dict) -> str:
-    lines = [
-        "sonder context health",
-        "  status: %s" % data.get("status", "unknown"),
-        "  session: %s%s" % (
-            data.get("session", "none"),
-            " (%s)" % data.get("title") if data.get("title") else "",
+    class _Metrics:
+        tokens = staticmethod(_rough_token_count)
+        tokens_from_chars = staticmethod(_rough_token_count_from_chars)
+        bar = staticmethod(_health_bar)
+
+    return ContextHealthService(
+        identity=_Identity(),
+        repository=_Repository(),
+        policy=context_policy,
+        metrics=_Metrics(),
+        settings=ContextHealthSettings(
+            requested_context=SESSION_NUM_CTX,
+            max_turns=MAX_TURNS,
+            db_path=_DB_PATH,
+            state_home=str(sonder_paths.default_home()),
         ),
-        "  context %s %s%%  ~%s/%s tokens" % (
-            data.get("context_bar", ""),
-            data.get("context_percent", 0),
-            data.get("estimated_tokens", 0),
-            data.get("context_limit", 0),
-        ),
-        "  native  ~%s token Ollama num_ctx (%s mode)" % (
-            data.get("native_context_limit", 0),
-            data.get("context_mode", "native"),
-        ),
-        "  live    %s %s/%s turns in active prompt (%s total)" % (
-            data.get("turn_bar", ""),
-            data.get("live_turns", 0),
-            data.get("max_live_turns", 0),
-            data.get("total_turns", 0),
-        ),
-        "  memory  %s %s lessons, %s facts, %s prefs, %s interactions, %s outcomes" % (
-            data.get("memory_bar", ""),
-            data.get("lessons", 0),
-            data.get("facts", 0),
-            data.get("preferences", 0),
-            data.get("interactions", 0),
-            data.get("outcomes", 0),
-        ),
-        "  summary: %s chars, ~%s tokens%s" % (
-            data.get("summary_chars", 0),
-            data.get("summary_tokens", 0),
-            " through %s" % data.get("summarized_through")
-            if data.get("summarized_through") else "",
-        ),
-        "  db: %s" % data.get("db_path", ""),
-    ]
-    return "\n".join(lines)
+    ).snapshot(session=session, project=project)
 
 
 @mcp.tool()
 def context_health(session: str = "", project: str = "") -> str:
     """Show context budget, live turns, summaries, and memory as text meters."""
     return format_context_health(context_health_data(session=session, project=project))
-
-
-def _format_activity_status(source: dict, include_events: bool = True, *, scope="") -> str:
-    """Render an already-authorized activity source.
-
-    ``activity_status`` is intentionally an operator surface and may describe
-    the runtime globally.  A tool-using model, on the other hand, must never
-    receive another request's activity merely because it asked for its own
-    progress.  Keeping source selection outside this formatter makes that
-    authority boundary explicit and testable.
-    """
-    snap = activity_tracker.public_snapshot(source)
-    if snap is None:
-        return "sonder activity\n  state: unknown"
-    lines = [
-        "sonder activity%s" % (" (%s)" % scope if scope else ""),
-        "  active responses: %s" % snap.get("active_count", 0),
-        "  total tool calls since start: %s" % snap.get("total_tool_calls", 0),
-    ]
-    active = snap.get("active") or []
-    if active:
-        lines.append("  active:")
-        for row in active[-8:]:
-            last = row.get("last_event") or {}
-            lines.append(
-                "    %s %s tools=%s models=%s tokens=%s/%s last=%s" % (
-                    row.get("id"),
-                    row.get("label"),
-                    row.get("tool_calls", 0),
-                    row.get("model_calls", 0),
-                    row.get("tokens_in", 0),
-                    row.get("tokens_out", 0),
-                    last.get("kind", "starting"),
-                )
-            )
-    latest = snap.get("latest")
-    if latest:
-        lines.extend(["", activity_tracker.format_response(latest)])
-    elif include_events:
-        lines.append("  latest: (none yet)")
-    if include_events:
-        lines.extend([
-            "",
-            activity_tracker.format_execution_feed(
-                activity_tracker.execution_feed(source)
-            ),
-        ])
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -7705,26 +6869,6 @@ def command_registry_list(filter_text: str = "") -> str:
     """List slash commands/tools by name, category, risk, or summary text."""
     _maybe_live_reload()
     return command_registry.format_commands(filter_text)
-
-
-def _format_task(row: dict) -> str:
-    if not row:
-        return "(no task)"
-    detail = (" - " + row.get("detail", "")) if row.get("detail") else ""
-    scope = []
-    if row.get("project"):
-        scope.append("project=%s" % row["project"])
-    if row.get("owner"):
-        scope.append("owner=%s" % row["owner"])
-    suffix = (" [" + ", ".join(scope) + "]") if scope else ""
-    return "%s  p%s  %-11s %s%s%s" % (
-        row.get("id", "")[:8],
-        row.get("priority", 2),
-        row.get("status", "pending"),
-        row.get("title", ""),
-        detail,
-        suffix,
-    )
 
 
 def _task_service(conn):
@@ -7930,6 +7074,30 @@ def task_progress(project: str = "") -> str:
 
 
 @mcp.tool()
+def task_ledger(
+    goal_id: str,
+    replan_count: int = 0,
+    last_replan_reason: str = "",
+) -> str:
+    """Show a deterministic, digest-bound task ledger for one work plan."""
+    _maybe_live_reload()
+    conn = _open_db()
+    try:
+        ledger = _task_service(conn).task_ledger(
+            goal_id, replan_count=replan_count,
+            last_replan_reason=last_replan_reason or None,
+        )
+        return json.dumps(
+            {"ledger": ledger.to_dict(), "digest": ledger.digest()},
+            indent=2, sort_keys=True,
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)}, sort_keys=True)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
 def task_depend(
     task_id: str,
     depends_on: str,
@@ -8019,6 +7187,17 @@ def scoped_task_tool_dispatch(tool_name: str, kwargs: dict, *, account_scope: st
                 % (stats["total"], stats["pending"], stats["in_progress"], stats["blocked"],
                    stats["done"], stats["canceled"]),
             ])
+        if tool_name == "task_ledger":
+            goal_id = values.pop("goal_id")
+            ledger = service.task_ledger(
+                goal_id, account_scope=account_scope,
+                replan_count=values.pop("replan_count", 0),
+                last_replan_reason=values.pop("last_replan_reason", "") or None,
+            )
+            return json.dumps(
+                {"ledger": ledger.to_dict(), "digest": ledger.digest()},
+                indent=2, sort_keys=True,
+            )
         if tool_name == "task_depend":
             task_id = values.pop("task_id")
             depends_on = values.pop("depends_on")
@@ -8146,19 +7325,13 @@ def context_compaction_plan(session: str = "", project: str = "") -> str:
 
 def _permission_mode_context(mode: str) -> str:
     """The state a rule table cannot show: which mode is in force, and privilege."""
-    return "\n".join([
-        "permission mode: %s -- %s" % (
-            permission_modes.MODE_LABELS.get(mode, mode),
-            permission_modes.MODE_BLURBS.get(mode, ""),
-        ),
-        # Load-bearing, and printed unconditionally on every render: it is
-        # what makes an `ask` row incomplete rather than false for a caller
-        # this surface does not speak for. Defined in permission_modes so the
-        # same sentence reaches /mode and /help too, rather than being a
-        # second copy free to drift.
-        "  %s" % permission_modes.ASK_CAVEAT,
+    return _render_permission_mode_context(
+        mode,
+        permission_modes.MODE_LABELS,
+        permission_modes.MODE_BLURBS,
+        permission_modes.ASK_CAVEAT,
         _elevation_status_text(),
-    ])
+    )
 
 
 def _permission_policy_text(tool_name: str = "") -> str:
@@ -8292,7 +7465,7 @@ def permission_rule_set(
 def memory_quality_report(sample_limit: int = 5) -> str:
     """Audit lesson quality: duplicates, long/vague rows, embeddings, and FTS health."""
     _maybe_live_reload()
-    sample_limit = _safe_limit(sample_limit, 5, 20)
+    sample_limit = _safe_limit_policy(sample_limit, 5, 20)
     conn = _open_db()
     try:
         report = memory_quality.audit(conn)
@@ -8327,36 +7500,11 @@ def memory_quality_repair(apply: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _parse_lesson_ids(value):
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            values = []
-        elif text.startswith("["):
-            values = json.loads(text)
-        else:
-            values = [part for part in re.split(r"[\s,]+", text) if part]
-    else:
-        values = value
-    if not isinstance(values, list):
-        raise ValueError("lesson IDs must be a JSON list or comma-separated text")
-    if len(values) > 50:
-        raise ValueError("at most 50 lesson IDs can be reviewed at once")
-    out = []
-    for raw in values:
-        lesson_id = str(raw or "").strip()
-        if not lesson_id or len(lesson_id) > 128 or any(ord(ch) < 32 for ch in lesson_id):
-            raise ValueError("invalid lesson ID")
-        if lesson_id not in out:
-            out.append(lesson_id)
-    return out
-
-
 @mcp.tool()
 def memory_privacy_review(sample_limit: int = 20) -> str:
     """List redacted path/credential-like lessons without revealing raw values."""
     _maybe_live_reload()
-    sample_limit = _safe_limit(sample_limit, 20, 100)
+    sample_limit = _safe_limit_policy(sample_limit, 20, 100)
     conn = _open_db()
     try:
         findings = memory_quality.privacy_findings(conn, limit=sample_limit)
@@ -8439,7 +7587,7 @@ def memory_embedding_backfill(limit: int = 25, apply: bool = False) -> str:
             "ERROR: embedding refresh is local-only; configured Ollama endpoint "
             "is not loopback."
         )
-    limit = _safe_limit(limit, 25, 100)
+    limit = _safe_limit_policy(limit, 25, 100)
     conn = _open_db()
     updated = 0
     failed = []
@@ -8571,7 +7719,7 @@ def memory_interaction_embedding_backfill(
             "ERROR: interaction embedding refresh is local-only; configured "
             "Ollama endpoint is not loopback."
         )
-    limit = _safe_limit(limit, 25, 100)
+    limit = _safe_limit_policy(limit, 25, 100)
     conn = _open_db()
     updated = 0
     failed = []
@@ -8699,24 +7847,12 @@ def memory_interaction_embedding_backfill(
 @mcp.tool()
 def learn_tiers() -> str:
     """Show which tiers currently feed the learning loop."""
-    lines = ["learning tiers"]
-    for tier, model in available_tiers(include_disabled=True).items():
-        state = "on" if tier in LEARN_TIERS else "off"
-        locality = "cloud" if _is_cloud_tier(tier, model) else "local"
-        if locality == "cloud" and not cloud_allowed():
-            state = "disabled"
-        lines.append("  %s: %s (%s, %s)" % (tier, state, locality, model))
-    if cloud_allowed():
-        lines.append(
-            "cloud tiers are available; opt into cloud learning explicitly with "
-            "SONDER_LEARN_TIERS"
-        )
-    else:
-        lines.append(
-            "cloud tiers require SONDER_ALLOW_CLOUD=1; override learning with "
-            "SONDER_LEARN_TIERS"
-        )
-    return "\n".join(lines)
+    return format_learning_tiers(
+        available_tiers(include_disabled=True),
+        LEARN_TIERS,
+        cloud_enabled=_cloud_allowed_policy(os.environ),
+        cloud_tiers=CLOUD_TIERS,
+    )
 
 
 def improvement_report_data(session: str = "", project: str = "") -> dict:
@@ -8893,7 +8029,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "The MCP client did not accept the latest tool-list notification.",
             "Use /mcp status and reconnect only if the client does not relist tools automatically.",
         )
-    if not cloud_allowed():
+    if not _cloud_allowed_policy(os.environ):
         add(
             "deployment",
             "info",
@@ -8990,7 +8126,7 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
         ),
         "lessons": lesson_count,
         "facts": fact_count,
-        "cloud_allowed": cloud_allowed(),
+        "cloud_allowed": _cloud_allowed_policy(os.environ),
         "context_status": context.get("status", "unknown"),
         "memory_quality": {
             "duplicates": quality.get("exact_duplicate_prunable", 0),
@@ -9081,11 +8217,13 @@ def system_improvement_report(session: str = "", project: str = "") -> str:
 
 
 def _master_timeout(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        value = default
-    return max(15, min(value, TIMEOUT))
+    """Compatibility delegate for the packaged master-timeout policy."""
+    return _master_timeout_policy(
+        os.environ.get(name, str(default)),
+        default,
+        15,
+        TIMEOUT,
+    )
 
 
 def _orchestrator_worker(tier: str, learn: bool = False, timeout: int = 150):
@@ -9358,7 +8496,12 @@ def master_orchestrate(
             # interactions. This guarantees a drifted result cannot later be
             # promoted through record_outcome, even after a restart.
             learn=learn and not protected_objectives,
-            timeout=_master_timeout("SONDER_MASTER_AGENT_TIMEOUT", 150),
+            timeout=_master_timeout_policy(
+                os.environ.get("SONDER_MASTER_AGENT_TIMEOUT", "150"),
+                150,
+                15,
+                TIMEOUT,
+            ),
         )
     )
     if mode in ("inline", "master"):
@@ -9389,7 +8532,12 @@ def master_orchestrate(
             audit_fn=_orchestrator_worker(
                 audit_tier,
                 learn=False,
-                timeout=_master_timeout("SONDER_MASTER_AUDIT_TIMEOUT", 120),
+                timeout=_master_timeout_policy(
+                    os.environ.get("SONDER_MASTER_AUDIT_TIMEOUT", "120"),
+                    120,
+                    15,
+                    TIMEOUT,
+                ),
             ),
             agents=agents,
             metadata={
@@ -9609,13 +8757,6 @@ def _admin_require(token: str, role: str = "admin"):
     return ok, msg, account
 
 
-def _format_account(account: dict) -> str:
-    return (
-        "%(username)s role=%(role)s tier=%(tier)s banned=%(banned)s "
-        "dev_flags=%(dev_flags)s"
-    ) % account
-
-
 @mcp.tool()
 def admin_register(username: str, password: str) -> str:
     """Register a local hosted account. The first account becomes admin."""
@@ -9721,7 +8862,9 @@ def admin_status(token: str = "") -> str:
         "  accounts: %d" % count,
         "  auth mode: %s" % ("api-key" if os.environ.get("SONDER_API_KEY") else "local-open"),
         "  require account: %s" % os.environ.get("SONDER_REQUIRE_ACCOUNT", "0"),
-        "  hosted/cloud allowed: %s" % ("yes" if cloud_allowed() else "no"),
+        "  hosted/cloud allowed: %s" % (
+            "yes" if _cloud_allowed_policy(os.environ) else "no"
+        ),
         "  logged in: %s" % (_format_account(account) if account else "no"),
         "  safeguards: role gates, bans, session tokens, per-tier rate limits, bounded execution",
     ]
@@ -9885,38 +9028,8 @@ def _include_ignored_error(tool_name: str, include_ignored, token: str = "") -> 
     )
 
 
-def _format_file_result(title: str, data: dict) -> str:
-    lines = [title]
-    for key, value in data.items():
-        if key == "text":
-            continue
-        lines.append("  %s: %s" % (key, value))
-    if "text" in data:
-        lines.extend(["", data["text"]])
-    return "\n".join(lines)
-
-
 def _checklist_data(conn, checklist_id: str) -> dict:
     return _task_service(conn).checklist(checklist_id).to_dict()
-
-
-def _format_checklist(data: dict) -> str:
-    symbols = {"done": "[x]", "in_progress": "[~]", "blocked": "[!]", "canceled": "[-]"}
-    lines = [
-        "sonder checklist %s" % data.get("id", "")[:8],
-        "  %s [%s] %s" % (
-            data.get("title", ""), data.get("status", "pending"),
-            data.get("summary", "0/0 complete"),
-        ),
-    ]
-    for index, item in enumerate(data.get("items") or [], 1):
-        lines.append("  %s %d. %s  (%s)" % (
-            symbols.get(item.get("status"), "[ ]"), index,
-            item.get("title", ""), item.get("id", "")[:8],
-        ))
-    if not data.get("items"):
-        lines.append("  (no checklist items)")
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -11578,35 +10691,6 @@ def file_delete(
     return _format_file_result("file delete", data)
 
 
-def _format_run_result(title: str, data: dict) -> str:
-    lines = [
-        title,
-        "  command: %s" % json.dumps(data.get("command") or [], ensure_ascii=False),
-        "  cwd: %s" % data.get("cwd", ""),
-        "  ok: %s" % data.get("ok", False),
-        "  returncode: %s" % data.get("returncode"),
-        "  timed_out: %s" % data.get("timed_out", False),
-        "  elapsed_ms: %s" % data.get("elapsed_ms", 0),
-    ]
-    # Why nothing ran, when nothing ran. `harness_tools` returns `{"ok": False,
-    # "error": ...}` without spawning anything for an unknown framework, an
-    # unknown linter, or a root with no build system, and this dropped the
-    # field: a model was told `ok: False` with no reason at all, and the
-    # rendered text -- the only evidence the agent path ever has -- could not
-    # be told apart from a real failing build. Header block, before the
-    # child's own output, because `grounded_outcomes.rendered_infrastructure_
-    # error` reads exactly this much and stops at `stdout:`.
-    if data.get("error"):
-        lines.append("  error: %s" % data["error"])
-    if data.get("stdout"):
-        lines.extend(["stdout:", data["stdout"].rstrip()])
-    if data.get("stderr"):
-        lines.extend(["stderr:", data["stderr"].rstrip()])
-    if data.get("stdout_truncated") or data.get("stderr_truncated"):
-        lines.append("  output truncated: true")
-    return "\n".join(lines)
-
-
 @mcp.tool()
 def repo_status(
     root: str = ".",
@@ -13236,7 +12320,13 @@ def _vision_analyze_impl(
             {"role": "user", "content": question, "images": [encoded]},
         ],
         "stream": False,
-        "options": _local_model_options(0.1, 1024, num_ctx),
+        "options": _platform_local_model_options(
+            0.1,
+            1024,
+            num_ctx,
+            native_context=context_policy.native,
+            environ=os.environ,
+        ),
         "keep_alive": KEEP_ALIVE,
     }
     _out, content = _chat_request(
@@ -13267,7 +12357,11 @@ def vision_analyze(
             extra_roots=extra_roots, timeout=timeout,
         )
     except ModelCallError as exc:
-        rendered = _format_model_call_error(exc)
+        rendered = _format_runtime_model_call_error_policy(
+            exc,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
         _record_direct_tool("vision_analyze", args, ok=False, started=started, summary=exc.kind)
         return rendered
     except Exception as exc:
@@ -15551,11 +14645,8 @@ def preference_command(arg: str = "") -> str:
 
 
 def _safe_limit(limit, default=10, max_value=100):
-    try:
-        value = int(limit)
-    except (TypeError, ValueError):
-        value = default
-    return max(1, min(value, max_value))
+    """Compatibility delegate for the packaged bounded-limit policy."""
+    return _safe_limit_policy(limit, default, max_value)
 
 
 @mcp.tool()
@@ -15565,7 +14656,7 @@ def memory_search(query: str, limit: int = 10) -> str:
     query = (query or "").strip()
     if not query:
         return "ERROR: empty query."
-    limit = _safe_limit(limit, 10, 50)
+    limit = _safe_limit_policy(limit, 10, 50)
     like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
     conn = _open_db()
     try:
@@ -15683,7 +14774,7 @@ def apply_learned(task: str, limit: int = 5) -> str:
     task = (task or "").strip()
     if not task:
         return "ERROR: empty task."
-    limit = _safe_limit(limit, 5, 20)
+    limit = _safe_limit_policy(limit, 5, 20)
     conn = _open_db()
     try:
         rows = retriever.retrieve_with_ids(conn, task, k=limit)
@@ -15706,7 +14797,7 @@ def apply_learned(task: str, limit: int = 5) -> str:
 def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
     """Export a compact JSON snapshot of local memory."""
     _maybe_live_reload()
-    limit = _safe_limit(limit, 50, 200)
+    limit = _safe_limit_policy(limit, 50, 200)
     conn = _open_db()
     try:
         data = {
@@ -15737,7 +14828,7 @@ def session_export(session: str = "", limit: int = 50) -> str:
     session_id = _resolve_session(session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."
-    limit = _safe_limit(limit, 50, 200)
+    limit = _safe_limit_policy(limit, 50, 200)
     conn = _open_db()
     try:
         sess = memory_store.get_session(conn, session_id)
@@ -15977,7 +15068,7 @@ def tool_manifest() -> str:
         "data_inspect/data_query/sqlite_mutate": "Preview structured data, run bounded read-only queries, or explicitly preview/apply one guarded parameterized SQLite DML statement.",
         "data_convert": "Preview or atomically create a non-overwriting JSON/JSONL/CSV/TSV conversion with explicit ordered fields.",
         "program_search/script_search/workspace_run/script_run/image_inspect": "Discover installed programs and workspace scripts, run bounded argv-only processes, and inspect image metadata; script_run applies the operator execution-risk policy before launch.",
-        "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo and ordered checklist state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary. task_depend manages blocking relationships.",
+        "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_ledger/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo, ordered checklist, and digest-bound manager ledger state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary; task_ledger exposes bounded dependencies and replan metadata.",
         "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
         "tool_manifest/tool_capability_manifest/access_request_preview": "Inspect the human-readable MCP tool catalog, fingerprint the live registered capability schemas, or preview a non-authorizing scoped filesystem access request.",
@@ -16190,6 +15281,7 @@ AGENT_TOOL_HELP = """Available tools:
 - task_delete: {"task_id": "..."}
 - task_plan: {"title": "...", "steps": ["Step 1", "Step 2", {"title": "Step 3", "detail": "..."}], "project": "...", "sequential": true}
 - task_progress: {"project": ""}
+- task_ledger: {"goal_id": "...", "replan_count": 0, "last_replan_reason": ""}
 - task_depend: {"task_id": "...", "depends_on": "...", "remove": false}
 - checklist_create: {"title": "...", "items_json": ["Inspect", "Implement", "Validate", "Report"], "project": "..."}
 - checklist_update: {"checklist_id": "...", "item": "1|id-prefix", "status": "in_progress|done|blocked", "note": "..."}
@@ -17317,7 +16409,11 @@ def _agent_negative_claim_review(
                 raise
             return {
                 "decision": "error",
-                "reason": _format_model_call_error(error),
+                "reason": _format_runtime_model_call_error_policy(
+                    error,
+                    endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+                    display=_ollama_display(),
+                ),
                 "tool": "",
                 "args": {},
             }
@@ -18232,6 +17328,12 @@ def _agent_dispatch(
         )
     if tool_name == "task_progress":
         return task_progress(project=args.get("project", ""))
+    if tool_name == "task_ledger":
+        return task_ledger(
+            goal_id=args.get("goal_id", args.get("id", "")),
+            replan_count=args.get("replan_count", 0),
+            last_replan_reason=args.get("last_replan_reason", ""),
+        )
     if tool_name == "task_depend":
         return task_depend(
             task_id=args.get("task_id", args.get("id", "")),
@@ -18699,7 +17801,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
-        "task_delete", "task_plan", "task_progress", "task_depend",
+        "task_delete", "task_plan", "task_progress", "task_ledger", "task_depend",
         "checklist_create", "checklist_update", "checklist_show",
         "command_registry_list", "tool_manifest", "activity_status",
         "permission_policy", "context_compaction_plan", "diagnostics",
@@ -19137,66 +18239,6 @@ def _agent_dispatch_observed(
                 run_id=activity_tracker.current_response_id() or "",
             )
 
-
-_WORK_MUTATION_TOOLS = frozenset({
-    "directory_create", "file_write", "file_batch_write", "json_patch", "file_edit", "file_copy", "file_move", "file_delete", "text_patch", "data_convert",
-    "sqlite_mutate", "scaffold_project", "archive_extract", "archive_create",
-    "fetch_artifact",
-    "artifact_generate", "game_generate_and_test", "game_generation_campaign",
-    "ensemble_codegen_build_loop",
-    "memory_quality_repair", "memory_privacy_repair", "memory_embedding_backfill",
-    "memory_interaction_embedding_backfill",
-    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
-    "git_merge", "git_cherry_pick",
-    "dependency_add", "dependency_remove", "dependency_update",
-    "build_clean", "rename_symbol", "apply_patch",
-    # lint_run(fix=True) runs the linter's fix command and format_code writes
-    # in place unless check_only -- both rewrite source files, so both must be
-    # able to count as mutations. _agent_tool_mutates decides per invocation.
-    "lint_run", "format_code",
-    "task_delete",
-})
-
-
-def _agent_tool_mutates(tool_name, args):
-    """True only when this invocation can change persistent workspace state."""
-    args = args if isinstance(args, dict) else {}
-    if tool_name not in _WORK_MUTATION_TOOLS:
-        return False
-    if tool_name == "file_delete":
-        return args.get("dry_run") is False
-    if tool_name == "json_patch":
-        return str(args.get("mode", "preview")).strip().lower() == "apply"
-    if tool_name == "text_patch":
-        return args.get("apply") is True
-    if tool_name == "rename_symbol":
-        return args.get("dry_run") is False
-    if tool_name == "apply_patch":
-        # Unlike rename_symbol's dry_run (default True, opt-in to mutate),
-        # apply_patch's check_only defaults False -- it applies by default,
-        # so only an explicit check_only=True is a non-mutating dry run.
-        return args.get("check_only") is not True
-    if tool_name == "lint_run":
-        # `ruff check --fix`, `npx eslint --fix` and `cargo clippy --fix`
-        # rewrite source files. Linters with no fix command (flake8, pylint)
-        # fall back to checking, but which linter runs is auto-detected inside
-        # the tool -- long after this gate has to answer -- so fix=True is
-        # treated as a mutation rather than guessing that it is harmless.
-        return args.get("fix") is True
-    if tool_name == "format_code":
-        # Every formatter in the table writes in place by default, so like
-        # apply_patch this applies unless explicitly told only to check.
-        return args.get("check_only") is not True
-    if tool_name == "data_convert":
-        return args.get("apply") is True
-    if tool_name == "sqlite_mutate":
-        return str(args.get("mode", "preview")).strip().lower() == "apply"
-    if tool_name in {
-        "memory_quality_repair", "memory_privacy_repair",
-        "memory_embedding_backfill", "memory_interaction_embedding_backfill",
-    }:
-        return args.get("apply") is True
-    return True
 
 # Read-only tools whose default (empty-args) invocation is meaningful, so a
 # name-only branch prediction yields a deterministic call signature that can
@@ -20047,7 +19089,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_audit", "find_references", "diff_files", "secret_scan",
     "build_run",
-    "task_progress",
+    "task_progress", "task_ledger",
 })
 
 # Tools that only observe the running runtime: no filesystem root, no host
@@ -20311,6 +19353,13 @@ def _agent_turn(
     Tools include code execution, memory search, workflows, diagnostics, and
     public web search/fetch/weather when allow_web=True and web tools are on.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     _maybe_live_reload()
     unsafe = unsafe_lab.active()
     if unsafe:
@@ -20327,7 +19376,7 @@ def _agent_turn(
         tool_allowlist = None
         tool_policy = None
         auto_checklist = False
-    max_steps = _safe_limit(max_steps, 6, 20)
+    max_steps = _safe_limit_policy(max_steps, 6, 20)
     model, cloud, augment, tier_label = _serve_target(tier, None)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
@@ -20854,7 +19903,7 @@ def _agent_turn(
                         checklist_id, checklist_states,
                         "model request failed before a valid tool decision", 1,
                     )
-                return _early_exit(_format_model_call_error(decision_error))
+                return _early_exit(render_model_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
                     checklist_id, checklist_states,
@@ -21413,7 +20462,7 @@ def _agent_turn(
                         "model request failed during final synthesis",
                         active_item,
                     )
-                return _early_exit(_format_model_call_error(final_error))
+                return _early_exit(render_model_error(final_error))
             if auto_checklist:
                 active_item = 3 if validation_attempted else 2 if mutated else 1
                 _agent_checklist_fail(
@@ -21618,7 +20667,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     # a reachable, host-observed way to satisfy its verification standing.
     "test_run", "build_run", "lint_run", "typecheck_run",
     "ensemble_codegen_build_loop",
-    "process_list", "process_memory_risk_inspect", "task_progress",
+    "process_list", "process_memory_risk_inspect", "task_progress", "task_ledger",
     "task_delete", "task_plan", "task_depend",
     # Other developer-workflow tools remain absent until their agent dispatch
     # and project-root guards are admitted to this autonomous lane.
@@ -22591,7 +21640,7 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
     else:
         active = []
         with contextlib.suppress(Exception):
-            snapshot = _application().automation.snapshot(include_finished=False, limit=20)
+            snapshot = autopilot_store.snapshot(include_finished=False, limit=20)
             active = [
                 row for row in snapshot.get("runs", [])
                 if row.get("status") in autopilot_store.ACTIVE_STATUSES
@@ -22751,74 +21800,6 @@ def runtime_policy_data() -> dict:
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
     return data
-
-
-def _runtime_model_readiness_lines(data: dict) -> list[str]:
-    """Render a bounded operator-facing readiness summary for `/runtime`.
-
-    Runtime policy is allowed to map several base tiers to one local model, so
-    merely listing mappings does not tell an operator whether the minimum chat
-    path is usable.  Keep this projection local to the server: it is derived
-    from the live inventory that ``runtime_policy_data`` already collected. A
-    sparse embedding tag may require one narrow ``/api/show`` lookup so the
-    status never calls a chat-only model memory-ready.
-    """
-    if data.get("inventory_error"):
-        return [
-            "  readiness: unknown (local model inventory unavailable)",
-        ]
-
-    local_models = data.get("local_models") or {}
-    missing = {
-        str(model or "").strip().casefold()
-        for model in data.get("missing_models") or ()
-        if str(model or "").strip()
-    }
-
-    def unavailable(model) -> bool:
-        return str(model or "").strip().casefold() in missing
-
-    capability_errors = data.get("capability_errors") or {}
-
-    base_missing = [
-        "%s=%s%s" % (
-            tier,
-            local_models.get(tier) or "(unset)",
-            " (%s)" % capability_errors[tier] if tier in capability_errors else "",
-        )
-        for tier in runtime_policy.BASE_LOCAL_TIERS
-        if not str(local_models.get(tier) or "").strip()
-        or unavailable(local_models.get(tier))
-        or tier in capability_errors
-    ]
-    lines = ["  readiness:"]
-    if base_missing:
-        lines.append("    local chat/code: requires %s" % ", ".join(base_missing))
-    else:
-        lines.append("    local chat/code: ready")
-
-    embedding = str(data.get("embedding_model") or "").strip()
-    if not embedding or unavailable(embedding) or "embedding" in capability_errors:
-        lines.append(
-            "    semantic memory: requires embedding model%s%s"
-            % (
-                " %s" % embedding if embedding else "",
-                " (%s)" % capability_errors["embedding"]
-                if "embedding" in capability_errors else "",
-            )
-        )
-    else:
-        lines.append("    semantic memory: ready (%s)" % embedding)
-
-    for tier in runtime_policy.OPTIONAL_LOCAL_TIERS:
-        model = str(local_models.get(tier) or "").strip()
-        if not model:
-            lines.append("    %s: not configured (optional)" % tier)
-        elif unavailable(model):
-            lines.append("    %s: requires %s" % (tier, model))
-        else:
-            lines.append("    %s: configured (%s)" % (tier, model))
-    return lines
 
 
 @mcp.tool()
@@ -23076,15 +22057,24 @@ def diagnostics() -> str:
             policy.get("path", runtime_policy.policy_path()),
         )
     )
-    runtime = _local_runtime_summary()
+    runtime = _platform_local_runtime_summary(
+        _platform_local_model_options(
+            0.2,
+            1,
+            SESSION_NUM_CTX,
+            native_context=context_policy.native,
+            environ=os.environ,
+        ),
+        _platform_requested_context(SESSION_NUM_CTX, default_value=SESSION_NUM_CTX),
+    )
     lines.append("  local runtime: threads=%s, gpu_layers=%s, batch=%s" % (
         runtime["num_thread"], runtime["num_gpu"], runtime["num_batch"]))
     lines.append(
         "  loopback model retry: %d transient retry(s), %dms base delay; "
         "remote/cloud retries off"
         % (
-            _local_model_retries(),
-            int(_local_retry_delay(1) * 1000),
+            _local_model_retries_policy(),
+            int(_local_retry_delay_policy(1) * 1000),
         )
     )
     try:
@@ -23175,7 +22165,9 @@ def diagnostics() -> str:
     except Exception:
         lines.append("  npu accelerator: unknown (status unavailable)")
     try:
-        names = _inventory_model_names(_inventory_rows(_get("/api/tags"), "/api/tags"))
+        names = _inventory_model_names(
+            _inventory_rows_policy(_get("/api/tags"), "/api/tags")
+        )
         # Show the count AND an enumeration consistent with it: truncating the
         # list to 8 while printing "11 models" silently hid three models
         # (including sonder:latest, the active tier). Cap the enumeration but
@@ -23198,10 +22190,14 @@ def status() -> str:
     """
     _maybe_live_reload()
     try:
-        tags = _inventory_rows(_get("/api/tags"), "/api/tags")
-        ps = _inventory_rows(_get("/api/ps"), "/api/ps")
+        tags = _inventory_rows_policy(_get("/api/tags"), "/api/tags")
+        ps = _inventory_rows_policy(_get("/api/ps"), "/api/ps")
     except ModelCallError as error:
-        return _format_model_call_error(error)
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
     except urllib.error.URLError as e:
         return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
 
@@ -23209,7 +22205,9 @@ def status() -> str:
     loaded = [line for line in map(_residency_display, ps) if line]
     tier_lines = [
         f"  {k}={v}" + ("  [CLOUD - leaves machine]" if _is_cloud_tier(k, v) else "  [local Ollama]")
-        for k, v in available_tiers(include_disabled=cloud_allowed()).items()
+        for k, v in available_tiers(
+            include_disabled=_cloud_allowed_policy(os.environ)
+        ).items()
     ]
     if not ollama_endpoint.is_loopback(BASE):
         tier_lines = [
@@ -23226,10 +22224,22 @@ def status() -> str:
         f"Resident in Ollama now: {', '.join(loaded) if loaded else '(none loaded)'}",
         f"local keep_alive: {KEEP_ALIVE}",
         "loopback retry: %d transient retry(s), %dms base delay; remote/cloud retries off" % (
-            _local_model_retries(), int(_local_retry_delay(1) * 1000),
+            _local_model_retries_policy(), int(_local_retry_delay_policy(1) * 1000),
         ),
         "local runtime: threads={num_thread}, gpu_layers={num_gpu}, batch={num_batch}".format(
-            **_local_runtime_summary()
+            **_platform_local_runtime_summary(
+                _platform_local_model_options(
+                    0.2,
+                    1,
+                    SESSION_NUM_CTX,
+                    native_context=context_policy.native,
+                    environ=os.environ,
+                ),
+                _platform_requested_context(
+                    SESSION_NUM_CTX,
+                    default_value=SESSION_NUM_CTX,
+                ),
+            )
         ),
     ]
     mcp_state = mcp_runtime_data()
@@ -23770,7 +22780,7 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
     # Cloud-only fanout must fail before catalog discovery, prompt sealing, or
     # receipt creation when the operator has not opted in. This avoids making
     # a privacy policy depend on the currently visible model catalog.
-    if scope == "cloud" and not cloud_allowed():
+    if scope == "cloud" and not _cloud_allowed_policy(os.environ):
         return {"scope": scope, "selected": [], "skipped": []}, ModelCallError(
             "configuration",
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
@@ -23821,7 +22831,7 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
             })
             continue
         selected.append(name)
-    if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not cloud_allowed():
+    if scope in ("cloud", "all") and any(_is_cloud_model_name(name) for name in selected) and not _cloud_allowed_policy(os.environ):
         return {"selected": [], "skipped": skipped}, ModelCallError(
             "configuration",
             "hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in; prompts sent to cloud tiers leave this machine.",
@@ -24099,7 +23109,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
     try:
         run = fanout_store.create_run(
             marker, targets, request_owner=request_owner, request_role=request_role,
-            scope=plan["scope"], cloud_opt_in=cloud_allowed(),
+            scope=plan["scope"], cloud_opt_in=_cloud_allowed_policy(os.environ),
             limits=limits, execution_prompt_ciphertext=sealed,
         )
     except (OSError, ValueError) as exc:
@@ -24500,7 +23510,13 @@ def _fanout_synthesis_generate(model, source_bundle):
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": _local_model_options(0.2, FANOUT_SYNTHESIS_NUM_PREDICT, num_ctx),
+        "options": _platform_local_model_options(
+            0.2,
+            FANOUT_SYNTHESIS_NUM_PREDICT,
+            num_ctx,
+            native_context=context_policy.native,
+            environ=os.environ,
+        ),
         "keep_alive": KEEP_ALIVE,
     }
     out, _attempts = _post_model(
@@ -24625,7 +23641,7 @@ def _execute_fanout_run(run_id):
         residency_reason = _fanout_dispatch_residency_reason(limits, model)
         if residency_reason:
             return row, "skipped", "", residency_reason, 0, None, {}
-        if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not cloud_allowed()):
+        if _is_cloud_model_name(model) and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ)):
             return row, "skipped", "", "cloud access disabled before execution", 0, None, {}
         exc = None
         generate = None
@@ -24644,7 +23660,7 @@ def _execute_fanout_run(run_id):
                     return True
                 return bool(
                     _is_cloud_model_name(model)
-                    and (not run.get("cloud_opt_in") or not cloud_allowed())
+                    and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ))
                 )
 
             generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
@@ -24691,7 +23707,7 @@ def _execute_fanout_run(run_id):
                 isinstance(caught, ModelCallError)
                 and caught.kind == "cancelled"
                 and _is_cloud_model_name(model)
-                and (not run.get("cloud_opt_in") or not cloud_allowed())
+                and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ))
             ):
                 return (
                     row,
@@ -24811,13 +23827,20 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
     principal and must go through ``model_fanout`` below.  A public boolean
     bypass would let an untrusted caller self-authorize the costly operation.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     question = str(prompt or "").strip()
     if not question:
-        return _format_model_call_error(
+        return render_model_error(
             ModelCallError("configuration", "model_fanout needs a prompt.")
         )
     if len(question) > fanout_store.MAX_PROMPT_CHARS:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "model fanout prompt exceeds %d characters." % fanout_store.MAX_PROMPT_CHARS
         ))
     # These values define resource and provider-spend bounds.  Do not use
@@ -24828,7 +23851,7 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
     if any(isinstance(value, bool) or not isinstance(value, int) for value in (
         num_predict, timeout, max_cloud_workers,
     )):
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "num_predict, timeout, and max_cloud_workers must be integers."
         ))
     cap = max(32, min(num_predict, 4096))
@@ -24842,9 +23865,9 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
         )
         receipt = _execute_fanout_run(run["id"])
     except ModelCallError as exc:
-        return _format_model_call_error(exc)
+        return render_model_error(exc)
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+        return render_model_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
@@ -24883,6 +23906,13 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
     receipts may contain another caller's model answers.  Local-open use keeps
     the full local toolset.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     _run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_status",
@@ -24891,7 +23921,7 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
         return refusal
     receipt = _fanout_receipt(run_id)
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout run was not found"))
+        return render_model_error(ModelCallError("configuration", "fanout run was not found"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
@@ -24904,13 +23934,20 @@ def model_fanout_recent(limit: StrictInt = 20, include_finished: StrictBool = Tr
     omits prompts, answers, model names, error text, hashes, limits and owner
     data; use ``model_fanout_status(run_id)`` for an authorized full receipt.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "limit must be an integer between 1 and 100",
         ))
     if not isinstance(include_finished, bool):
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "include_finished must be a boolean",
         ))
     refusal = _developer_gate("model_fanout_recent", token, started)
@@ -24928,6 +23965,13 @@ def model_fanout_recent(limit: StrictInt = 20, include_finished: StrictBool = Tr
 @mcp.tool()
 def model_fanout_cancel(run_id: str, token: str = "") -> str:
     """Cancel a durable model fanout; late provider results are discarded."""
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     _run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_cancel",
@@ -24937,7 +23981,7 @@ def model_fanout_cancel(run_id: str, token: str = "") -> str:
     fanout_store.request_cancel(run_id)
     receipt = _fanout_receipt(run_id)
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+        return render_model_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
@@ -24949,6 +23993,13 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
     Unknown results are never retried unless ``retry_unknown`` is true, which
     prevents accidental replays of metered cloud calls after an interruption.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     # Keep direct Python calls strict too.  MCP transport enforces this at the
     # schema boundary through StrictBool, before Pydantic can coerce 1 or
@@ -24958,7 +24009,7 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
         ("retry_unknown", retry_unknown),
     ):
         if not isinstance(value, bool):
-            return _format_model_call_error(ModelCallError(
+            return render_model_error(ModelCallError(
                 "configuration", "%s must be a boolean" % name,
             ))
     _run, refusal = _direct_fanout_access(
@@ -24970,12 +24021,12 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
         run_id, include_failed=include_failed, retry_unknown=retry_unknown,
     )
     if run is None:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration", "fanout run is not resumable with the selected retry options"
         ))
     receipt = _execute_fanout_run(run["id"])
     if receipt is None:
-        return _format_model_call_error(ModelCallError("configuration", "fanout receipt was unavailable"))
+        return render_model_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)
 
 
@@ -24989,6 +24040,13 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
     must be a currently discovered local model that declares chat/completion
     capability. The synthesis and provider reasoning are never persisted.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     started = time.time()
     run, refusal = _direct_fanout_access(
         run_id, token, started, "model_fanout_synthesize",
@@ -24998,7 +24056,7 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
     try:
         return json.dumps(_fanout_synthesize_run(run, synth_model), ensure_ascii=False, sort_keys=True)
     except ModelCallError as exc:
-        return _format_model_call_error(exc)
+        return render_model_error(exc)
 
 
 def _fanout_synthesize_run(run, synth_model=""):
@@ -25049,7 +24107,7 @@ def _ensemble_targets(tiers: str = ""):
             # not swallowed: the caller should see why the tier is absent.
             if not explicit:
                 continue
-            if not cloud_allowed():
+            if not _cloud_allowed_policy(os.environ):
                 unknown.append("%s (cloud disabled; set SONDER_ALLOW_CLOUD=1)" % tier)
                 continue
         model, _cloud, _augment, label = _serve_target(tier, False)
@@ -25210,6 +24268,13 @@ def ensemble_answer(
             an explicitly named multi-tier ensemble cannot supply two distinct
             available models. Natural code-and-reasoning routing enables this.
     """
+    def render_model_error(error):
+        return _format_runtime_model_call_error_policy(
+            error,
+            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            display=_ollama_display(),
+        )
+
     _maybe_live_reload()
     question = (prompt or "").strip()
     if not question:
@@ -25225,7 +24290,7 @@ def ensemble_answer(
             " (unknown: %s)" % ", ".join(unknown) if unknown else ""
         )
     if require_all_tiers and len(targets) < 2:
-        return _format_model_call_error(ModelCallError(
+        return render_model_error(ModelCallError(
             "configuration",
             "requested ensemble needs two distinct available models%s." % (
                 " (unavailable: %s)" % ", ".join(unknown) if unknown else ""
@@ -25241,7 +24306,7 @@ def ensemble_answer(
         except ModelCallError as error:
             if error.kind == "cancelled":
                 raise
-            failures.append((tier, model, _format_model_call_error(error)))
+            failures.append((tier, model, render_model_error(error)))
             continue
         except Exception as exc:  # a bad tier must not sink the whole ensemble
             failures.append((tier, model, str(exc)))

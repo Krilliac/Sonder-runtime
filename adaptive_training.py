@@ -26,11 +26,11 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-import runtime_policy
+import sonder_runtime.adapters.runtime_policy as runtime_policy
 import promotion_eval
-import ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
-import system_profile
+from sonder_runtime.platform import system_profile
 import sonder_paths
 import training_data
 
@@ -369,6 +369,40 @@ def format_plan(plan):
         lines.append("Rejected alternatives:")
         lines.extend(f"  - {item}" for item in rejected)
     return "\n".join(lines)
+
+
+# Compatibility names for callers that still import the legacy entrypoint.
+# The canonical planning implementation lives in the application boundary;
+# lifecycle/deployment code below remains intentionally in this module until
+# its external process and policy seams can be extracted safely.
+from sonder_runtime.application.training.hardware_planning import (
+    HardwarePlan,
+    PlanOptions,
+    Recommendation,
+    build_plan as _application_build_plan,
+    format_hardware as _application_format_hardware,
+    format_plan as _application_format_plan,
+    memory_budgets as _application_memory_budgets,
+)
+
+
+def memory_budgets(profile, options):
+    return _application_memory_budgets(profile, options)
+
+
+def build_plan(profile=None, options=None):
+    profile = profile or system_profile.detect_hardware(
+        gpu_index=(options or PlanOptions()).gpu_index
+    )
+    return _application_build_plan(profile, options)
+
+
+def format_hardware(profile=None):
+    return _application_format_hardware(profile or system_profile.detect_hardware())
+
+
+def format_plan(plan):
+    return _application_format_plan(plan)
 
 
 def state_path():

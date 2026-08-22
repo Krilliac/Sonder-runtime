@@ -1,6 +1,6 @@
 import json
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import memory_store
 import pytest
 import self_heal
@@ -65,7 +65,7 @@ def test_self_heal_clears_bad_embedding_and_provenance(tmp_path, bad_embedding):
 
 def test_self_heal_repairs_invalid_json_configs(monkeypatch, tmp_path):
     import emotion_vectors
-    import workflow_store
+    from sonder_runtime.adapters.filesystem import workflow_store
 
     monkeypatch.setattr(emotion_vectors, "workspace_root", lambda: str(tmp_path))
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))

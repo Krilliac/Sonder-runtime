@@ -7,6 +7,36 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/models.dart';
 
 void main() {
+  test('extension registry fetch parses the admin projection', () async {
+    late http.Request seen;
+    final client = MockClient((request) async {
+      seen = request;
+      return http.Response(jsonEncode({
+        'persistence': 'durable',
+        'records': [
+          {
+            'extension_id': 'sonder.worker',
+            'scope': 'global',
+            'version': '1.0.0',
+            'enabled': true,
+            'health_state': 'healthy',
+            'resources': {'memory_limit_bytes': 123},
+          },
+        ],
+      }), 200);
+    });
+    final result = await http.runWithClient(
+      () => const SonderApi(
+        baseUrl: 'https://host.test',
+        apiKey: 'key',
+      ).fetchExtensionRegistry(),
+      () => client,
+    );
+    expect(seen.url.path, '/v1/extensions');
+    expect(result?.records.single.extensionId, 'sonder.worker');
+    expect(result?.records.single.memoryLimitBytes, 123);
+  });
+
   test('model catalog refresh preserves a case-insensitive saved selection', () {
     expect(
       resolveCatalogModel(['sonder', 'gemma3:12b'], 'Gemma3:12B'),

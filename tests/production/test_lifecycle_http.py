@@ -3,18 +3,18 @@ from __future__ import annotations
 
 import json
 import threading
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
 import pytest
 
-import sonder_lifecycle
-import sonder_serve
+import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
+import sonder_runtime.interfaces.http.serve as sonder_serve
 from sonder_service_state import DependencyState
 
 pytestmark = pytest.mark.integration
-
 
 @pytest.fixture()
 def http_server(tmp_path, monkeypatch):
@@ -22,6 +22,11 @@ def http_server(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_HOME", str(home))
     monkeypatch.setenv("SONDER_OPERATIONS_DB", str(home / "operations.db"))
     sonder_lifecycle.reset_for_tests()
+    # Isolate this fixture from preceding auth-focused tests that temporarily
+    # reconfigure the HTTP module's deployment globals.
+    monkeypatch.setattr(sonder_serve, "API_KEY", "")
+    monkeypatch.setattr(sonder_serve, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(sonder_serve, "REQUIRE_ACCOUNT", False)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), sonder_serve.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -61,12 +66,238 @@ def test_live_is_unauthenticated_and_minimal(http_server):
     assert json.loads(body) == {"status": "alive"}
 
 
+def test_startup_reconciles_before_publishing_ready(monkeypatch):
+    events = []
+    lifecycle = sonder_lifecycle.RuntimeLifecycle(
+        startup_reconciler=lambda: events.append(
+            lifecycle.tracker.snapshot().process.value
+        ) or 3,
+    )
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.persistence.migrations.migrate_all",
+        lambda: events.append("migrated") or {},
+    )
+
+    lifecycle.startup()
+
+    assert events == ["migrated", "migrating"]
+    assert lifecycle._startup_reconciled == 3
+    assert lifecycle.tracker.snapshot().process.value == "ready"
+
+
+def test_startup_reconciliation_failure_does_not_publish_ready(monkeypatch):
+    lifecycle = sonder_lifecycle.RuntimeLifecycle(
+        startup_reconciler=lambda: (_ for _ in ()).throw(RuntimeError("reconcile failed")),
+    )
+    monkeypatch.setattr(
+        "sonder_runtime.adapters.persistence.migrations.migrate_all",
+        lambda: {},
+    )
+
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        lifecycle.startup()
+    assert lifecycle.tracker.snapshot().process.value == "recovery_required"
+
+
 def test_version_reports_build(http_server):
     status, body, _ = _get(http_server, "/version")
     assert status == 200
     payload = json.loads(body)
     assert payload["version"]
     assert "commit_sha" in payload
+
+
+def test_admin_job_list_and_poll_surface_is_bounded(http_server, tmp_path, monkeypatch):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "jobs.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-http", "shell", "op-http", "idem-http"))
+
+    status, body, _ = _get(http_server, "/v1/jobs?limit=1")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "list"
+    assert payload["data"][0]["job_id"] == "job-http"
+
+    status, body, _ = _get(http_server, "/v1/jobs/job-http")
+    assert status == 200
+    assert json.loads(body)["status"] == "pending"
+
+    status, body, _ = _get(http_server, "/v1/jobs?limit=101")
+    assert status == 400
+    assert "limit must be an integer" in json.loads(body)["error"]["message"]
+
+    status, _, _ = _get(http_server, "/v1/jobs/does-not-exist")
+    assert status == 404
+
+    status, body = _post(
+        http_server,
+        "/v1/jobs/job-http/cancel",
+        {"reason": "operator requested cancellation"},
+    )
+    assert status == 200
+    assert json.loads(body)["cancelled_count"] == 1
+
+    status, body, _ = _get(http_server, "/v1/jobs/job-http")
+    assert status == 200
+    assert json.loads(body)["status"] == "cancelled"
+
+    status, body = _post(http_server, "/v1/jobs/job-http/cancel", {})
+    assert status == 400
+    assert "reason must be a non-empty string" in json.loads(body)["error"]["message"]
+
+
+def test_http_job_surface_reads_canonical_application_service_after_restart(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "canonical-http-jobs.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    application = bootstrap_app.build_application()
+    application.job_service().create(
+        JobIdentity("canonical-http-job", "shell", "op-canonical", "idem-canonical")
+    )
+
+    status, body, _ = _get(http_server, "/v1/jobs/canonical-http-job")
+    assert status == 200
+    assert json.loads(body)["status"] == "pending"
+
+    bootstrap_app.reset_for_tests()
+    reopened = bootstrap_app.build_application()
+    assert reopened.job_service().get("canonical-http-job").status.value == "pending"
+    status, body, _ = _get(http_server, "/v1/jobs/canonical-http-job")
+    assert status == 200
+    assert json.loads(body)["job_id"] == "canonical-http-job"
+
+
+def test_admin_job_cancel_surface_validates_reason_and_bounds_response(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.capabilities.jobs import JobRegistryService
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "jobs.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-cancel", "shell", "op-cancel", "idem-cancel"))
+    monkeypatch.setattr(
+        bootstrap_app, "default_app",
+        lambda: SimpleNamespace(job_service=lambda: JobRegistryService(registry)),
+    )
+
+    status, body = _post(
+        http_server, "/v1/jobs/job-cancel/cancel",
+        {"reason": "operator requested cancellation"},
+    )
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "job_cancel"
+    assert payload["job"]["status"] == "cancelled"
+    assert payload["cancelled_count"] == 1
+
+    status, body = _post(http_server, "/v1/jobs/job-cancel/cancel", {"reason": ""})
+    assert status == 400
+    assert "reason must be" in json.loads(body)["error"]["message"]
+
+    status, body = _post(http_server, "/v1/jobs/missing/cancel", {"reason": "cleanup"})
+    assert status == 404
+
+    ordinary = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "ordinary", "role": "user"},
+    }
+    monkeypatch.setattr(
+        sonder_serve.Handler, "_request_auth_context",
+        lambda _self: ordinary,
+    )
+    status, body = _post(http_server, "/v1/jobs/job-cancel/cancel", {"reason": "again"})
+    assert status == 403
+    assert "administrator authorization is required" in json.loads(body)["error"]["message"]
+    bootstrap_app.reset_for_tests()
+
+
+def test_admin_job_stream_surface_serializes_events_and_bounds_cursor(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.execution.world_control import OutputStream
+    from sonder_runtime.application.ports.jobs import JobIdentity
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "jobs-stream.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-stream", "shell", "op-stream", "idem-stream"))
+    registry.append_output("job-stream", OutputStream.STDOUT, "hello")
+    registry.append_output("job-stream", OutputStream.STDERR, "warning")
+
+    status, body, _ = _get(
+        http_server, "/v1/jobs/job-stream/stream?after=0&max_events=1&max_bytes=5"
+    )
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "job_output"
+    assert payload["job_id"] == "job-stream"
+    assert payload["events"] == [{
+        "sequence": 1,
+        "stream": "stdout",
+        "data": "hello",
+        "spill": None,
+    }]
+    assert payload["next_watermark"] == 1
+    assert payload["has_more"] is True
+
+    status, body, _ = _get(http_server, "/v1/jobs/job-stream/stream?after=1")
+    assert status == 200
+    assert json.loads(body)["events"][0]["stream"] == "stderr"
+
+    status, body, _ = _get(
+        http_server, "/v1/jobs/job-stream/stream?max_events=257"
+    )
+    assert status == 400
+    assert "max_events must be an integer" in json.loads(body)["error"]["message"]
+    bootstrap_app.reset_for_tests()
+
+
+def test_admin_job_result_surface_distinguishes_missing_nonterminal_and_terminal(
+    http_server, tmp_path, monkeypatch,
+):
+    from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+    from sonder_runtime.application.ports.jobs import JobIdentity, JobStatus
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    database = tmp_path / "jobs-result.db"
+    monkeypatch.setenv("SONDER_JOBS_DB", str(database))
+    bootstrap_app.reset_for_tests()
+    registry = SQLiteDurableJobRegistry(database)
+    registry.create(JobIdentity("job-result", "shell", "op-result", "idem-result"))
+
+    status, _, _ = _get(http_server, "/v1/jobs/missing/result")
+    assert status == 404
+    status, body, _ = _get(http_server, "/v1/jobs/job-result/result")
+    assert status == 409
+    assert json.loads(body)["error"]["type"] == "conflict"
+
+    registry.transition("job-result", JobStatus.SUCCEEDED, result={"answer": 42})
+    status, body, _ = _get(http_server, "/v1/jobs/job-result/result")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["object"] == "job_result"
+    assert payload["result"] == {"answer": 42}
+    assert payload["job"]["status"] == "succeeded"
+    bootstrap_app.reset_for_tests()
 
 
 def test_ready_reflects_ollama_outage_without_false_success(http_server):
@@ -100,6 +331,28 @@ def test_health_reports_state_dependencies_schemas(http_server):
     assert "ollama" in payload["dependencies"]
     assert "operations" in payload["schemas"]
     assert "build" in payload
+    assert payload["typed_health"]["states"]
+    assert payload["admission"]["accepting"] is True
+    assert payload["telemetry"]["export"] == "disabled"
+
+
+def test_live_lifecycle_creates_typed_context_and_bounded_trace():
+    lifecycle = sonder_lifecycle.RuntimeLifecycle()
+    context = lifecycle.operation_context(
+        "req-typed", {"account": {"username": "alice", "role": "developer"}},
+    )
+
+    assert context.source == "http"
+    assert context.principal_id == "alice"
+    record = lifecycle.trace_operation(
+        context,
+        operation="test.operation",
+        status="ok",
+        duration_ms=1.5,
+        labels={"result": "ok"},
+    )
+    assert record.redaction_applied is True
+    assert lifecycle.telemetry_snapshot()["retained"] == 1
 
 
 def test_metrics_endpoint_renders(http_server):
@@ -217,7 +470,7 @@ def test_auth_failure_limiter_and_events(http_server, monkeypatch):
         assert status == 401
     assert saw_429
 
-    from sonder_operations_store import OperationsStore
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     events = OperationsStore().recent_events(limit=50)
     assert any(e.event_code == "AUTH_FAILED" for e in events)

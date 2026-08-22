@@ -1,7 +1,7 @@
 import sqlite3
 import threading
 
-import embeddings as _e
+import sonder_runtime.adapters.embeddings as _e
 import memory_store as ms
 import pytest
 

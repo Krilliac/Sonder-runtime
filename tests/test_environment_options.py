@@ -1,0 +1,98 @@
+from sonder_runtime.platform.environment_options import (
+    cpu_thread_default,
+    env_int_option,
+    local_model_options,
+)
+import server
+
+
+def test_server_production_paths_do_not_call_local_options_compatibility_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_local_model_options"
+    ]
+    assert calls == []
+
+
+def test_missing_option_returns_default():
+    assert env_int_option("MISSING", 17, environ={}) == 17
+
+
+def test_disable_tokens_return_none():
+    for value in ("", "auto", " default ", "none", "off"):
+        assert env_int_option("OPTION", 17, environ={"OPTION": value}) is None
+
+
+def test_integer_is_trimmed_and_parsed():
+    assert env_int_option("OPTION", 17, environ={"OPTION": "  -12 "}) == -12
+
+
+def test_invalid_integer_returns_default():
+    assert env_int_option("OPTION", 17, environ={"OPTION": "wat"}) == 17
+
+
+def test_cpu_thread_default_uses_a_single_thread_minimum():
+    assert cpu_thread_default(cpu_count=None) >= 1
+    assert cpu_thread_default(cpu_count=0) == 4
+    assert cpu_thread_default(cpu_count=-2) == 1
+
+
+def test_server_cpu_thread_alias_preserves_identity():
+    assert server._cpu_thread_default is cpu_thread_default
+
+
+def test_server_alias_preserves_identity():
+    assert server._env_int_option is env_int_option
+
+
+def test_server_options_read_live_environment(monkeypatch):
+    monkeypatch.setenv("SONDER_NUM_THREAD", " 9 ")
+    assert server._local_model_options(0.2, 64, 2048)["num_thread"] == 9
+
+
+def test_server_alias_reads_process_environment(monkeypatch):
+    monkeypatch.setenv("SONDER_NUM_BATCH", "256")
+    assert server._env_int_option("SONDER_NUM_BATCH", 512) == 256
+
+
+def test_local_model_options_is_owned_by_platform_policy():
+    assert server._platform_local_model_options is local_model_options
+
+
+def test_local_model_options_injects_context_and_reads_environment():
+    options = local_model_options(
+        0.2,
+        64,
+        2048,
+        native_context=lambda value: value // 2,
+        environ={
+            "SONDER_NUM_THREAD": "9",
+            "SONDER_NUM_GPU": "0",
+            "SONDER_NUM_BATCH": "256",
+        },
+    )
+    assert options == {
+        "temperature": 0.2,
+        "num_predict": 64,
+        "num_ctx": 1024,
+        "num_thread": 9,
+        "num_gpu": 0,
+        "num_batch": 256,
+    }
+
+
+def test_local_model_options_omits_unpinned_gpu():
+    options = local_model_options(
+        0.2,
+        10,
+        4096,
+        environ={},
+    )
+    assert "num_gpu" not in options

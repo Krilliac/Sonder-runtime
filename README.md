@@ -178,7 +178,7 @@ name in later terminals.
 # Linux/macOS, from the installed bundle
 ./bootstrap-engine.sh
 . ./sonder-runtime.sh
-"$SONDER_PYTHON" ./sonder_repl.py
+"$SONDER_PYTHON" -m sonder_runtime repl
 ```
 
 ### From source
@@ -342,3 +342,106 @@ still relies on the external runtime and host kernel and is not escape-proof.
 
 Contributions are welcome under the [Apache License 2.0](LICENSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development and review workflow.
+- WP1 Forty-Fifth Slice: the HTTP chat usage presentation helper now lives in `sonder_runtime.adapters.observability.chat_formatting`.
+- WP1 Forty-Sixth Slice: the pure REPL duration presentation helper now lives in `sonder_runtime.adapters.observability.repl_formatting`.
+- WP1 Forty-Seventh Slice: the active architecture legacy-root policy now covers only roots with live package callers; `autopilot_store` is migration-only.
+- WP1 Forty-Eighth Slice: pure HTTP command-completion limit normalization now lives in `sonder_runtime.adapters.command_completion`.
+- WP1 Fifty-First Slice: pure runtime model-readiness presentation now lives in `sonder_runtime.adapters.runtime_readiness_formatting`.
+- WP1 Fifty-Second Slice: pure run-result presentation now lives in `sonder_runtime.adapters.observability.run_result_formatting`.
+- WP1 Fifty-Fifth Slice: the Ollama gateway now reads its endpoint through the packaged `sonder_runtime.adapters.ollama.endpoint` boundary; the remaining server model-routing dependency is explicit.
+- WP1 Fifty-Fourth Slice: pure goal presentation now lives in `sonder_runtime.adapters.goal_formatting`.
+- WP1 Fifty-Sixth Slice: pure learning-tier model/provider presentation now lives in `sonder_runtime.adapters.learning_tier_formatting`.
+- WP1 Sixty-Seventh Slice: the embedding-cache adapter now consumes database paths through `sonder_runtime.platform.paths`.
+- WP1 Fifty-Seventh Slice: the import-time model/tier seed now has a typed immutable projection in `sonder_runtime.domain.runtime_model_configuration`; server compatibility aliases and live policy refresh remain intact.
+- WP1 Fifty-Eighth Slice: Ollama process-lifecycle policy now lives in the packaged `sonder_runtime.adapters.ollama_lifecycle` boundary; the root module remains a compatibility import.
+- WP1 Fifty-Ninth Slice: the live cloud-default compatibility repair now consumes its replacement from the frozen typed runtime-model configuration projection.
+- WP1 Sixtieth Slice: the root Ollama lifecycle compatibility import now exposes only the packaged adapter's two public helpers; private process and trust hooks remain package-internal.
+- WP1 Seventy-Fifth Slice: the filesystem workbench now consumes the canonical `sonder_runtime.platform.logging` seam, preserving handler setup and redaction semantics.
+- WP1 Eighty-First Slice: filesystem operations now consume the canonical `sonder_runtime.platform.paths` seam, preserving default-home resolution and containment semantics.
+- WP1 Seventy-Seventh Slice: local observability now consumes the canonical `sonder_runtime.platform.logging` seam, preserving logger identity and redaction semantics.
+  - WP1 Seventy-First Slice: the packaged preference adapter now resolves its default memory database path through `sonder_runtime.platform.paths`.
+- WP1 Sixty-First Slice: the preflight adapter now consumes `SonderConfig` through `sonder_runtime.platform.config`, preserving the root implementation's environment/default semantics while reducing a package caller's root dependency.
+- WP1 Sixty-Fourth Slice: the HTTP interface now reads the API-key policy through `sonder_runtime.platform.config`, preserving the canonical configuration defaults and environment-backed implementation.
+- WP1 Sixty-Third Slice: the packaged entrypoint now consumes typed configuration through `sonder_runtime.platform.config`, preserving the historical `sonder_paths` compatibility attribute.
+- WP1 Sixty-Sixth Slice: the evaluation-history adapter now consumes state locations through `sonder_runtime.platform.paths`, preserving existing path resolution and migration behavior.
+- WP1 Sixty-Eighth Slice: local-system packaging now proves that retired `eval_history.py` is excluded while the canonical evaluation-history store and application package are included.
+- WP1 Sixty-Ninth Slice: the runtime-policy adapter now consumes its state-file path through `sonder_runtime.platform.paths`, preserving explicit policy-path overrides and legacy home resolution.
+- WP1 Seventieth Slice: the packaged HTTP lifecycle now consumes the shutdown coordinator through `sonder_runtime.platform.shutdown`, preserving the root implementation and all drain semantics.
+- WP1 Seventy-Second Slice: the packaged HTTP lifecycle now consumes `MetricsRegistry` through `sonder_runtime.platform.metrics`, preserving metric names, labels, and semantics.
+- WP1 Seventy-Fourth Slice: the packaged backup adapter now consumes build identity through `sonder_runtime.platform.version`, preserving stamped version and commit metadata.
+- WP1 Sixty-Fifth Slice: the read-only doctor checks now load typed configuration through `sonder_runtime.platform.config`, preserving diagnostic output and error handling.
+- WP1 Fiftieth Slice: the active architecture legacy-root policy now excludes `fleet_store`; its root alias remains only for immutable migration replay.
+WP1 Seventy-Eighth Slice: the packaged NPU manifest adapter now resolves its manifest directory through the canonical platform path seam.
+WP1 Seventy-Ninth Slice: the NPU service now resolves its shadow-ledger state file through the canonical platform path seam.
+
+WP1 Eighty-Eighth Slice: the operations store now consumes redaction through the canonical `sonder_runtime.platform.logging` seam, preserving durable event persistence semantics.
+WP1 Ninetieth Slice: the strangler unit-of-work now resolves its default memory database through `sonder_runtime.platform.paths`, preserving the live memory-store port and explicit path overrides.
+WP1 Ninety-First Slice: the filesystem workbench now resolves its Bash executable through `sonder_runtime.platform.paths`, preserving workspace resolution and containment semantics.
+WP1 Eighty-Ninth Slice: the migrations adapter now resolves the operations database through the canonical `sonder_runtime.platform.paths` seam; immutable migration replay and database locations are unchanged.
+WP1 Eightieth Slice: the packaged secret-rotation adapter now resolves its default rotation state through the canonical platform path seam.
+WP1 Eighty-Second Slice: the update engine now reads build identity through the canonical platform version seam; signed-update verification and release metadata behavior are unchanged.
+WP1 Eighty-Third Slice: workflow persistence now resolves its mutable state home through the canonical platform path seam; workspace overrides, containment, legacy migration, and atomic writes are unchanged.
+WP1 Eighty-Fourth Slice: the update service now reads build identity through the canonical platform version seam; bundle metadata and signed-update verification behavior are unchanged.
+WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principal-credential paths through the canonical `sonder_runtime.platform.paths` seam; SQLite and migration semantics are unchanged.
+- WP1 Eighty-Seventh Slice: queued-action persistence now resolves its database path through the canonical `sonder_runtime.platform.paths` seam; queue and immutable migration semantics are unchanged.
+- WP1 Ninety-Second Slice: the update engine now resolves default release and active-pointer paths through the canonical `sonder_runtime.platform.paths` seam; signed-update verification and bootstrap behavior are unchanged.
+- WP1 Ninety-Fourth Slice: the migrations adapter now resolves all store paths and the migration lock through the identity-preserving `sonder_runtime.platform.paths` seam; immutable migration replay and database locations are unchanged.
+- WP1 Ninety-Fifth Slice: the packaged entrypoint now resolves its default backup target through `sonder_runtime.platform.paths`, preserving default-home resolution and explicit/configured target precedence.
+- WP1 Eighty-Fifth Slice: moved the autopilot persistence database-path caller to `sonder_runtime.platform.paths` while preserving database and migration semantics.
+- WP1 Ninety-Third Slice: packaged entrypoint build metadata now crosses the canonical platform version boundary; root release metadata remains available for tooling compatibility.
+- WP1 Ninety-Sixth Slice: packaged web lifecycle build identity now crosses the canonical platform version boundary; lifecycle metrics and version payloads remain unchanged.
+- WP1 Ninety-Seventh Slice: filesystem path implementation ownership now lives in `sonder_runtime.platform.paths`; the root `sonder_paths` module remains a thin identity-preserving compatibility alias with environment and legacy-migration behavior unchanged.
+- WP1 Ninety-Eighth Slice: structured logging, redaction, and child-environment filtering now belong to `sonder_runtime.platform.logging`; `sonder_logging` remains a thin module-identity compatibility shim preserving logger and monkeypatch behavior.
+- WP1 One-Hundred-Eleventh Slice: metrics ownership is now single-path under `sonder_runtime.platform.metrics`; the duplicate `sonder_metrics.py` root delegate is retired after all production callers and focused tests moved to the canonical module.
+- WP1 One-Hundred-Twelfth Slice: unsafe-lab state now belongs to the security adapter, with pure explicit-input policy separated into the platform seam and zero architecture violations.
+- WP1 One-Hundred-Twenty-Third Slice: durable operations-event sink ownership now belongs to `sonder_runtime.adapters.operations_event_sink`; the generic strangler name remains an identity-preserving compatibility alias.
+- WP1 One-Hundred-Twenty-Fourth Slice: pure schema-gap formatting now belongs to `sonder_runtime.domain.schema_policy`, preserving the server compatibility alias.
+- WP1 One-Hundred-Thirteenth Slice: autopilot repository ownership now belongs to `sonder_runtime.adapters.persistence.autopilot_repository`, removing the generic strangler repository implementation.
+- WP1 One-Hundred-Fourteenth Slice: HTTP serve-temperature policy now belongs to `sonder_runtime.interfaces.http.serve_policy`, preserving the server compatibility alias.
+- WP1 One-Hundred-Sixteenth Slice: process-probe ownership now belongs to `sonder_runtime.adapters.process_probe.ProcessProbeAdapter`; the generic strangler no longer owns that port adapter.
+- WP1 Two-Hundred-Twenty-Fifth Slice: live-process fingerprint selection now belongs to `sonder_runtime.adapters.process_liveness.process_identity`; `ProcessProbeAdapter.identity` remains the compatibility port surface.
+- WP1 One-Hundred-Fifteenth Slice: pure model-catalog capability normalization now belongs to `sonder_runtime.domain.model_capabilities`, preserving the server compatibility alias.
+- WP1 One-Hundred-Eighteenth Slice: pure inline-thinking output policy now belongs to `sonder_runtime.domain.thinking_policy`, preserving the server compatibility alias.
+- WP1 One-Hundredth Slice: full shutdown coordination now belongs to `sonder_runtime.platform.shutdown`; `sonder_shutdown` remains an identity-preserving compatibility shim with cancellation, signal, drain, deadline, and concurrent idempotence semantics unchanged.
+- WP1 One-Hundred-Fifth Slice: process and dependency state now belong to `sonder_runtime.platform.service_state`; `sonder_service_state` remains an identity-preserving compatibility shim while lifecycle and shutdown consume the canonical implementation.
+- WP1 One-Hundred-First Slice: build identity implementation now belongs to `sonder_runtime.platform.version`; `sonder_version.py` retains its literal release-tooling `VERSION` and identity-preserving compatibility surface.
+- WP1 One-Hundred-Third Slice: the persistence migration registry now consumes build identity from `sonder_runtime.platform.version`; immutable migration bytes, checksums, replay, and release metadata remain unchanged.
+- WP1 One-Hundred-Sixth Slice: full system-profile implementation ownership now lives in `sonder_runtime.platform.system_profile`; the root module remains an identity-preserving shim while hardware detection, mutable probe state, profile editing, and monkeypatch behavior remain unchanged.
+- WP1 One-Hundred-Seventh Slice: the `sonder_version` root-platform allowance is removed after all packaged runtime callers moved to `sonder_runtime.platform.version`; the literal root `VERSION` contract remains intact for release tooling.
+- WP1 One-Hundred-Eighth Slice: pure Ollama-origin normalization and fail-closed security policy now live in `sonder_runtime.domain.ollama_policy`; `unsafe_lab` no longer imports the transport adapter, preserving the security gate while removing the blocked platform-to-adapter dependency.
+- WP1 Two-Hundred-Twenty-Sixth Slice: system-profile boolean environment overrides now use the canonical `sonder_runtime.platform.config_environment` policy, preserving the `_env_bool` compatibility alias and hardware override behavior.
+- WP1 Two-Hundred-Twenty-Eighth Slice: launcher-health nonce, identity, and HMAC proof status policy now live in the packaged `sonder_runtime.domain.launcher_health` boundary, preserving the root `sonder_health` compatibility aliases.
+- WP1 Two-Hundred-Forty-Sixth Slice: the remaining root doctor configuration-check policy now lives in the packaged `sonder_runtime.bootstrap.config_loading` boundary, preserving the root `_check_config` compatibility delegate.
+- WP1 Two-Hundred-Thirtieth Slice: the bounded local-observability percentile helper now lives in `sonder_runtime.adapters.observability.latency_formatting`, preserving the `local_observability._percentile` compatibility alias and the root logging identity.
+- WP1 Two-Hundred-Thirty-First Slice: headless argument parsing and command sequencing now live in `sonder_runtime.interfaces.cli.headless`, while `sonder_headless.py` preserves the supervisor implementation and compatibility surface.
+- WP1 Two-Hundred-Thirty-Third Slice: unstamped build identity now reuses the packaged version commit probe, preserving the root `sonder_version` module identity and `_commit_from_git` compatibility helper.
+- WP1 Two-Hundred-Thirty-Fourth Slice: cooperative cancellation now belongs to `sonder_runtime.platform.process`; packaged shutdown and root `sonder_shutdown` keep identity-preserving aliases.
+- WP1 Two-Hundred-Thirty-Fifth Slice: speculative-tool safety policy now lives in the packaged `sonder_runtime.domain.speculation_policy` boundary, preserving the root `sonder_speculation.SPECULATABLE_TOOLS` alias and predictor seam.
+- WP1 Two-Hundred-Forty-Third Slice: speculative-execution configuration helpers now live in the packaged `sonder_runtime.platform.speculation` boundary, preserving root helper aliases and the packaged domain safety policy.
+- WP1 Two-Hundred-Thirty-Sixth Slice: the debug-dump export boundary now imports `Redactor` from canonical packaged logging, preserving the `debug_dump.Redactor` and root `sonder_logging` identities.
+- WP1 Two-Hundred-Thirty-Seventh Slice: the lifecycle metric projection now belongs to `sonder_runtime.application.lifecycle`, preserving the web `_state_number` alias and root `sonder_service_state` identity.
+- WP1 Two-Hundred-Forty-Second Slice: the remaining pure hardware sizing
+  helpers now belong to the packaged domain boundary; accelerator and host
+  platform probe ownership is documented without changing inventory or
+  filesystem-text behavior.
+- WP1 Two-Hundred-Forty-Fifth Slice: root hardware probe classification now
+  uses identity-preserving aliases to the packaged platform boundary; the
+  accelerator and host-platform probe seams remain explicitly packaged.
+- WP1 Two-Hundred-Forty-Eighth Slice: standalone-client endpoint comparison and connection-error fallback now live in packaged client adapters; root names remain compatibility aliases.
+- WP1 Two-Hundred-Forty-Ninth Slice: pure launcher output-tail, timeout, and operation-retention policy now live in `sonder_runtime.adapters.launcher_output`; root private helper names remain identity-preserving compatibility aliases.
+- WP1 Two-Hundred-Fiftieth Slice: read-only memory-quality doctor policy now lives in `sonder_runtime.bootstrap.doctor_checks`, preserving the root `_check_memory_quality` compatibility delegate and injected legacy collaborators.
+- WP1 Two-Hundred-Thirty-Eighth Slice: context-health text formatting now belongs to the packaged observability health-formatting boundary, preserving the generic packaged formatter alias while leaving the root launcher-health contract unchanged.
+- WP1 Two-Hundred-Thirty-Ninth Slice: standalone-client HTTP execution now lives in `sonder_runtime.adapters.client_transport`, preserving the root `send_prompt` and `build_request` compatibility seams.
+- WP1 Two-Hundred-Fortieth Slice: pure doctor terminal formatting and status rollup now live in `sonder_runtime.bootstrap.doctor_formatting`, preserving root rendering, status, and rollup aliases.
+- WP1 Two-Hundred-Forty-First Slice: pure thinking-budget exhaustion detection now lives in `sonder_runtime.domain.thinking_policy`, preserving the root `server._thinking_exhausted_budget` alias.
+- WP1 Two-Hundred-Forty-Seventh Slice: pure agent tool-invocation mutation policy now lives in `sonder_runtime.domain.agent_mutation_policy`, preserving the root mutation tool-set and predicate aliases.
+- WP1 Two-Hundred-Forty-Fourth Slice: launcher idempotency-key normalization and durable replay validation now live in `sonder_runtime.adapters.launcher_idempotency`, preserving root helper and regex aliases.
+- WP1 Two-Hundred-Twenty-Seventh Slice: environment-file parsing now belongs to the packaged `sonder_runtime.platform.config_environment` policy boundary, preserving the root `sonder_config.parse_env_file` and `ConfigError` contract.
+- WP1 Two-Hundred-Twenty-Ninth Slice: packaged HTTP default-home and server-log resolution now use the canonical `sonder_runtime.platform.paths` boundary; the root `sonder_paths` identity alias remains compatible.
+- WP1 Two-Hundred-Thirty-Second Slice: pure launcher lifecycle `context_size` normalization now belongs to `sonder_runtime.application.lifecycle`, preserving the root `sonder_launcher` helper and compatibility constants.
+- WP1 One-Hundred-Second Slice: complete typed configuration ownership now belongs to `sonder_runtime.platform.config`; `sonder_config` remains a thin external-tooling compatibility surface with exact class, loader, exception, precedence, default, and validation semantics preserved.
+# WP1 One-Hundred-Tenth Slice
+
+- Extracted the state-independent runtime identity prompt renderer into
+  `sonder_runtime.domain.runtime_identity`, reducing composition-root policy
+  while preserving the `server._runtime_identity_block` compatibility surface.

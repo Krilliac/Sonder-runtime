@@ -100,6 +100,21 @@ class OutputSnapshot:
     preview_truncated: bool
     failure_code: str | None
 
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable JSON-safe stream status envelope."""
+        return {
+            "stream_id": self.stream_id.value,
+            "state": self.state.value,
+            "revision": self.revision,
+            "next_sequence": self.next_sequence,
+            "chunk_count": self.chunk_count,
+            "total_bytes": self.total_bytes,
+            "sha256": self.sha256,
+            "preview": self.preview,
+            "preview_truncated": self.preview_truncated,
+            "failure_code": self.failure_code,
+        }
+
 
 @dataclass(frozen=True)
 class AppendResult:

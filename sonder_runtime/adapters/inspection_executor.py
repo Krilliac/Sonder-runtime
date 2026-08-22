@@ -9,9 +9,12 @@ from ..application.context import OperationContext
 from ..application.ports.tool_executor import ToolCall, ToolResult
 
 
-def _legacy_module(name: str):
-    """Resolve a watched root module lazily without creating package cycles."""
-    return importlib.import_module(name)
+def _packaged_module(name: str):
+    """Resolve an inspection implementation owned by the packaged adapter."""
+    return importlib.import_module(
+        name if name.startswith("sonder_runtime.adapters.")
+        else "sonder_runtime.adapters.inspection.%s" % name
+    )
 
 
 def _authorized(context: OperationContext) -> bool:
@@ -61,8 +64,8 @@ def _failure(exc: Exception, audit_args: dict) -> ToolResult:
     )
 
 
-class LegacyInspectionExecutor:
-    """Strict allowlisted executor for legacy read-only inspection modules."""
+class InspectionExecutorAdapter:
+    """Strict allowlisted adapter for read-only inspection modules."""
 
     def execute(self, call: ToolCall, context: OperationContext) -> ToolResult:
         args = dict(call.arguments or {})
@@ -98,7 +101,7 @@ class LegacyInspectionExecutor:
             return _failure(exc, args)
 
     def _log_inspect(self, args: dict, context: OperationContext) -> ToolResult:
-        log_inspect = _legacy_module("log_inspect")
+        log_inspect = _packaged_module("log_inspect")
 
         audit_args = {key: args[key] for key in (
             "path", "tail_lines", "context_lines", "max_file_bytes",
@@ -131,10 +134,11 @@ class LegacyInspectionExecutor:
         except Exception as exc:
             return _failure(exc, audit_args)
 
+
     def _workspace_compare(
         self, args: dict, context: OperationContext
     ) -> ToolResult:
-        workspace_compare = _legacy_module("workspace_compare")
+        workspace_compare = _packaged_module("workspace_compare")
 
         audit_args = {key: args[key] for key in (
             "left", "right", "max_entries", "max_file_bytes",
@@ -175,8 +179,9 @@ class LegacyInspectionExecutor:
         except Exception as exc:
             return _failure(exc, audit_args)
 
+
     def _project_detect(self, args: dict, context: OperationContext) -> ToolResult:
-        project_detect = _legacy_module("project_detect")
+        project_detect = _packaged_module("project_detect")
 
         audit_args = {key: args[key] for key in (
             "path", "max_depth", "max_files", "max_total_bytes",
@@ -202,7 +207,7 @@ class LegacyInspectionExecutor:
             return _failure(exc, audit_args)
 
     def _file_digest(self, args: dict, context: OperationContext) -> ToolResult:
-        content_digest = _legacy_module("content_digest")
+        content_digest = _packaged_module("content_digest")
 
         audit_args = {"path": args["path"], "max_bytes": args["max_bytes"]}
         try:
@@ -225,7 +230,7 @@ class LegacyInspectionExecutor:
     def _directory_digest(
         self, args: dict, context: OperationContext
     ) -> ToolResult:
-        content_digest = _legacy_module("content_digest")
+        content_digest = _packaged_module("content_digest")
 
         audit_args = {key: args[key] for key in (
             "path", "max_depth", "max_files", "max_total_bytes",
@@ -251,7 +256,7 @@ class LegacyInspectionExecutor:
             return _failure(exc, audit_args)
 
     def _archive_list(self, args: dict, context: OperationContext) -> ToolResult:
-        archive_tools = _legacy_module("archive_tools")
+        archive_tools = _packaged_module("archive_tools")
 
         audit_args = {
             "path": args["path"], "max_entries": args["max_entries"],
@@ -281,7 +286,9 @@ class LegacyInspectionExecutor:
             return _failure(exc, audit_args)
 
     def _data_inspect(self, args: dict, context: OperationContext) -> ToolResult:
-        file_ops = _legacy_module("file_ops")
+        file_ops = _packaged_module(
+            "sonder_runtime.adapters.filesystem.file_ops"
+        )
 
         audit_args = {"path": args["path"]}
         try:
@@ -312,7 +319,7 @@ class LegacyInspectionExecutor:
             return _failure(exc, audit_args)
 
     def _data_query(self, args: dict, context: OperationContext) -> ToolResult:
-        data_query = _legacy_module("data_query")
+        data_query = _packaged_module("data_query")
 
         audit_args = {key: args[key] for key in (
             "path", "sql", "projection_json", "filters_json", "max_rows",
@@ -349,7 +356,7 @@ class LegacyInspectionExecutor:
     def _dependency_inventory(
         self, args: dict, context: OperationContext
     ) -> ToolResult:
-        dependency_inventory = _legacy_module("dependency_inventory")
+        dependency_inventory = _packaged_module("dependency_inventory")
 
         audit_args = {key: args[key] for key in (
             "path", "max_depth", "max_files", "max_total_bytes", "max_results",
@@ -374,3 +381,7 @@ class LegacyInspectionExecutor:
             )
         except Exception as exc:
             return _failure(exc, audit_args)
+
+
+# Compatibility name for callers that still import the pre-migration adapter.
+LegacyInspectionExecutor = InspectionExecutorAdapter

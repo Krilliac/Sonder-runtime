@@ -2,16 +2,16 @@ import json
 import os
 import sys
 
-import activity_tracker
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import assetgen
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import pytest
-import workbench
+import sonder_runtime.adapters.filesystem.workbench as workbench
 
 
 def _guard_root(monkeypatch, tmp_path):
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
-    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(file_ops.runtime_paths, "default_home", lambda: tmp_path / "home")
 
 
 def test_directory_tree_is_bounded_and_skips_noise(monkeypatch, tmp_path):
@@ -313,7 +313,7 @@ def test_activity_transcript_and_end_report_are_replay_friendly():
 def test_find_files_signals_truncation(tmp_path, monkeypatch):
     # Regression (2026-07-13 audit): file_find silently truncated at max_results
     # with no indicator, inducing undercounts for any counting use case.
-    import file_ops
+    import sonder_runtime.adapters.filesystem.file_ops as file_ops
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
     for i in range(6):
         (tmp_path / ("m%d.log" % i)).write_text("x", encoding="utf-8")
@@ -328,7 +328,7 @@ def test_find_files_signals_truncation(tmp_path, monkeypatch):
 def test_read_line_range_rejects_inverted_range(tmp_path, monkeypatch):
     # Regression (2026-07-13 audit): an inverted range (start > end) was silently
     # clamped to a single line instead of erroring.
-    import workbench
+    import sonder_runtime.adapters.filesystem.workbench as workbench
     monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
     f = tmp_path / "lines.txt"
     f.write_text("\n".join("line%d" % i for i in range(1, 21)), encoding="utf-8")
@@ -344,7 +344,7 @@ def test_text_search_honors_an_explicit_glob_for_unlisted_extension(tmp_path, mo
     # Regression (audit): text_search skipped a .tmp file (not in TEXT_SUFFIXES)
     # even when the caller explicitly globbed it, returning a misleading "no
     # matches". An explicit glob must be honored (binary check still guards).
-    import workbench
+    import sonder_runtime.adapters.filesystem.workbench as workbench
     monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
     (tmp_path / "probe.tmp").write_text("UNIQUEMARKER_XYZZY here", encoding="utf-8")
     hit = workbench.text_search("UNIQUEMARKER_XYZZY", root=str(tmp_path), glob="*.tmp")

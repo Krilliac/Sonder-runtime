@@ -22,7 +22,10 @@ import threading
 import time
 from collections.abc import Callable
 
-from sonder_logging import REDACTION_FAILED, Redactor
+from sonder_runtime.adapters.observability.latency_formatting import (
+    percentile,
+)
+from sonder_runtime.platform.logging import REDACTION_FAILED, Redactor
 
 
 SEVERITIES = frozenset(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))
@@ -195,12 +198,7 @@ def _sanitize_value(
     return text
 
 
-def _percentile(samples: list[int], percentile: float) -> int:
-    if not samples:
-        return 0
-    ordered = sorted(samples)
-    index = max(0, min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1))
-    return int(ordered[index])
+_percentile = percentile
 
 
 class LocalObservabilitySink:
@@ -432,3 +430,16 @@ class LocalObservabilitySink:
                     "delegate_delivery_attestation": "unavailable",
                 },
             }
+
+    def trace_projection(self, limit: int = 256):
+        """Return a bounded export-neutral projection of retained events.
+
+        The application projection receives only this sink's already-redacted
+        event view. It never receives the delegate's raw event arguments and
+        does not enable export or delivery.
+        """
+        from sonder_runtime.application.observability.trace_projection import (
+            project_trace,
+        )
+
+        return project_trace(self.recent_events(limit=limit))

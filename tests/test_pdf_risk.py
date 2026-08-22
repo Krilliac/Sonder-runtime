@@ -8,8 +8,8 @@ import zlib
 
 import pytest
 
-import file_ops
-import pdf_risk
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
+import sonder_runtime.adapters.pdf_risk as pdf_risk
 
 
 @pytest.fixture

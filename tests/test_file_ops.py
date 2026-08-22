@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 def test_write_read_edit_delete_inside_workspace(monkeypatch, tmp_path):
@@ -122,7 +122,7 @@ def test_find_files_matches_names(monkeypatch, tmp_path):
     (tmp_path / "a.py").write_text("print(1)", encoding="utf-8")
     (tmp_path / "b.txt").write_text("x", encoding="utf-8")
 
-    result = file_ops.find_files("*.py")
+    result = file_ops.find_files("*.py", include_ignored=True)
 
     assert [r["relative"] for r in result["results"]] == ["a.py"]
 
@@ -135,7 +135,7 @@ def test_recursive_delete_allows_plain_subdirectory(monkeypatch, tmp_path):
     state.mkdir()
     (target / "ordinary.txt").write_text("delete me", encoding="utf-8")
     monkeypatch.setattr(file_ops, "workspace_root", lambda: workspace)
-    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: state)
+    monkeypatch.setattr(file_ops.runtime_paths, "default_home", lambda: state)
 
     preview = file_ops.delete_path(str(target), recursive=True)
     result = file_ops.delete_path(
@@ -266,7 +266,7 @@ def test_repository_read_rejects_posix_absolute_root_form_off_native_host(
 def test_file_ops_errors_carry_a_reason(monkeypatch, tmp_path):
     # Regression (audit): read/write returned a bare "ERROR: <path>" with no
     # cause. The raised exceptions must state the reason.
-    import file_ops
+    import sonder_runtime.adapters.filesystem.file_ops as file_ops
     import pytest
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
     with pytest.raises(FileNotFoundError, match="file not found"):

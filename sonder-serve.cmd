@@ -15,6 +15,8 @@ if errorlevel 1 (
   echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
   endlocal & exit /b 2
 )
-"%SONDER_PYTHON%" "%REPO%sonder_serve.py" %*
+pushd "%REPO%" >nul
+"%SONDER_PYTHON%" -m sonder_runtime serve %*
 set "EXIT_CODE=%ERRORLEVEL%"
+popd >nul
 endlocal & exit /b %EXIT_CODE%

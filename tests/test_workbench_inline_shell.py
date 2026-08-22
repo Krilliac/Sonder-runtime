@@ -11,10 +11,9 @@ PowerShell/cmd refusals intact.
 import shutil
 import subprocess
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import pytest
-import sonder_paths
-import workbench
+import sonder_runtime.adapters.filesystem.workbench as workbench
 
 
 def _runnable(program):
@@ -49,7 +48,7 @@ def _python_interpreter():
 
 def _guard_root(monkeypatch, tmp_path):
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
-    monkeypatch.setattr(file_ops.sonder_paths, "default_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(file_ops.runtime_paths, "default_home", lambda: tmp_path / "home")
 
 
 # (program-name-on-PATH, inline-code flag) — each must be refused by run_program.
@@ -86,7 +85,7 @@ SCRIPT_CASES = [
 @pytest.mark.parametrize("program,flag", INLINE_CASES)
 def test_run_program_refuses_inline_code_flags(monkeypatch, tmp_path, program, flag):
     _guard_root(monkeypatch, tmp_path)
-    if program in {"bash", "sh"} and sonder_paths.bash_executable() is None:
+    if program in {"bash", "sh"} and file_ops.runtime_paths.bash_executable() is None:
         pytest.skip("compatible bash not installed")
     if program not in {"bash", "sh"} and shutil.which(program) is None:
         pytest.skip("%s not installed" % program)
@@ -103,7 +102,7 @@ def test_run_program_allows_plain_script_invocation(
     monkeypatch, tmp_path, program, filename, body, expected
 ):
     _guard_root(monkeypatch, tmp_path)
-    if program in {"bash", "sh"} and sonder_paths.bash_executable() is None:
+    if program in {"bash", "sh"} and file_ops.runtime_paths.bash_executable() is None:
         pytest.skip("compatible bash not installed")
     if program not in {"bash", "sh"} and not _runnable(program):
         pytest.skip("%s not installed or not runnable" % program)

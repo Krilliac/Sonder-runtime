@@ -1,4 +1,4 @@
-"""Typed preflight service and root-compatibility coverage."""
+"""Typed preflight service and adapter coverage."""
 from __future__ import annotations
 
 import inspect
@@ -7,31 +7,33 @@ import subprocess
 import sys
 from pathlib import Path
 
-import sonder_preflight
 from sonder_runtime.adapters import preflight as preflight_adapter
 from sonder_runtime.adapters.preflight_executor import PreflightExecutor
 from sonder_runtime.application.ports.preflight import CheckResult, PreflightReport
 from sonder_runtime.application.preflight import PreflightService
+from sonder_runtime.platform.config import SonderConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_root_module_alias_preserves_types_helpers_and_signature():
-    assert sonder_preflight is preflight_adapter
-    assert sonder_preflight.CheckResult is CheckResult
-    assert sonder_preflight.PreflightReport is PreflightReport
-    assert sonder_preflight._check_disk_space is preflight_adapter._check_disk_space
-    assert str(inspect.signature(sonder_preflight.run_preflight)) == (
+def test_adapter_exposes_types_helpers_and_signature():
+    assert preflight_adapter.SonderConfig is SonderConfig
+    assert preflight_adapter.CheckResult is CheckResult
+    assert preflight_adapter.PreflightReport is PreflightReport
+    assert callable(preflight_adapter._check_disk_space)
+    assert str(inspect.signature(preflight_adapter.run_preflight)) == (
         "(config: 'SonderConfig', *, check_ollama: 'bool' = True, "
         "ollama_timeout: 'float' = 5.0) -> 'PreflightReport'"
     )
-    namespace = {}
-    exec("from sonder_preflight import *", namespace)
-    assert {
-        "CheckResult", "PreflightReport", "SonderConfig", "dataclass",
-        "json", "os", "shutil", "urlsplit", "run_preflight",
-    } <= set(namespace)
+
+
+def test_adapter_uses_packaged_configuration_boundary():
+    source = (ROOT / "sonder_runtime" / "adapters" / "preflight.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from sonder_config import" not in source
+    assert "from sonder_runtime.platform.config import SonderConfig" in source
 
 
 def test_report_text_shape_properties_and_pickle_path_remain_stable():
@@ -52,8 +54,8 @@ def test_report_text_shape_properties_and_pickle_path_remain_stable():
     restored = pickle.loads(pickle.dumps(report))
     assert restored == report
     assert repr(report).startswith("PreflightReport(checks=(CheckResult(")
-    assert CheckResult.__module__ == "sonder_preflight"
-    assert PreflightReport.__module__ == "sonder_preflight"
+    assert CheckResult.__module__ == "sonder_runtime.adapters.preflight"
+    assert PreflightReport.__module__ == "sonder_runtime.adapters.preflight"
 
 
 def test_service_delegates_exact_options_and_result_identity():

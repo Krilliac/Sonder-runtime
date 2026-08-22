@@ -1,9 +1,10 @@
 import importlib
 import os
+from pathlib import Path
 import sys
 import time
 
-import live_reload
+from sonder_runtime.adapters.web import live_reload
 import pytest
 
 
@@ -11,6 +12,19 @@ import pytest
 def _enable_live_reload(monkeypatch):
     """Opt this unit-test module into the feature disabled by the global test sandbox."""
     monkeypatch.setenv("SONDER_LIVE_RELOAD", "1")
+
+
+def test_packaged_live_reload_owns_behavior_after_root_retirement():
+    packaged = importlib.import_module("sonder_runtime.adapters.web.live_reload")
+
+    assert Path("live_reload.py").exists() is False
+    assert live_reload is packaged
+    assert {
+        "enabled",
+        "prime_modules",
+        "reload_changed_modules",
+        "snapshot",
+    }.issubset(vars(packaged))
 
 
 def test_reload_changed_modules_reloads_source_edit(monkeypatch, tmp_path):
@@ -193,10 +207,8 @@ def test_server_rebinds_reloaded_modules(monkeypatch):
 
 def test_workflow_live_reload_stays_behind_package_adapter(monkeypatch, tmp_path):
     import server
-    import workflow_store
     from sonder_runtime.adapters.filesystem import workflow_store as packaged
 
-    assert workflow_store is packaged
     monkeypatch.setattr(packaged, "workspace_root", lambda: str(tmp_path))
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     monkeypatch.setattr(
@@ -208,17 +220,6 @@ def test_workflow_live_reload_stays_behind_package_adapter(monkeypatch, tmp_path
     server._maybe_live_reload()
     assert "status_sweep" in server.workflow_list()
     assert "workflow_store" not in server.__dict__
-
-
-def test_workflow_compatibility_alias_keeps_identity_through_real_reload():
-    import workflow_store
-    from sonder_runtime.adapters.filesystem import workflow_store as packaged
-
-    assert workflow_store is packaged
-    refreshed = importlib.reload(workflow_store)
-    assert refreshed is packaged
-    assert sys.modules["workflow_store"] is packaged
-    assert sys.modules[packaged.__spec__.name] is packaged
 
 
 def test_server_rebinds_log_inspect_alias_without_replacing_tool(monkeypatch):
@@ -303,9 +304,9 @@ def test_server_prime_live_reload_upgrades_legacy_helper(monkeypatch):
 
 
 def test_serve_rebinds_reloaded_server(monkeypatch):
-    import sonder_serve as ts
+    import sonder_runtime.interfaces.http.serve as ts
 
-    original = ts.server
+    original = ts._LEGACY_RUNTIME
     replacement = object()
     monkeypatch.setattr(
         ts.live_reload,
@@ -314,13 +315,14 @@ def test_serve_rebinds_reloaded_server(monkeypatch):
     )
     try:
         ts._maybe_live_reload()
-        assert ts.server is replacement
+        assert ts._LEGACY_RUNTIME is replacement
+        assert ts.server is not replacement
     finally:
-        ts.server = original
+        ts._LEGACY_RUNTIME = original
 
 
 def test_repl_rebinds_reloaded_personas(monkeypatch):
-    import sonder_repl as repl
+    import sonder_runtime.interfaces.repl.repl as repl
 
     original = repl.personas
     replacement = object()

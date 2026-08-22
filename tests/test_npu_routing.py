@@ -379,7 +379,10 @@ def test_diagnostics_includes_npu_line(monkeypatch):
 
 def test_live_reload_covers_npu_modules():
     for name in (
-        "npu_contract", "npu_manifest", "npu_providers", "npu_broker",
-        "npu_service",
+        "sonder_runtime.adapters.accelerators.npu.contract",
+        "sonder_runtime.adapters.accelerators.npu.manifest",
+        "sonder_runtime.adapters.accelerators.npu.providers",
+        "sonder_runtime.adapters.accelerators.npu.npu_broker",
+        "sonder_runtime.adapters.accelerators.npu.service",
     ):
         assert name in server.LIVE_RELOAD_MODULES

@@ -1,11 +1,11 @@
-"""SPEC-3: LegacyProcessProbe over the root process_liveness module."""
+"""ProcessProbeAdapter over the process_liveness adapter."""
 from __future__ import annotations
 
 import os
 
 import pytest
 
-from sonder_runtime.adapters.strangler_services import LegacyProcessProbe
+from sonder_runtime.adapters.process_probe import ProcessProbeAdapter
 from sonder_runtime.application.ports.process_probe import (
     ProbeResult,
     ProcessIdentity,
@@ -15,7 +15,7 @@ from sonder_runtime.bootstrap import app as bootstrap_app
 
 @pytest.fixture()
 def probe():
-    return LegacyProcessProbe()
+    return ProcessProbeAdapter()
 
 
 def test_identity_of_self_is_present(probe):
@@ -55,5 +55,5 @@ def test_application_exposes_process_probe(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
     bootstrap_app.reset_for_tests()
     app = bootstrap_app.build_application()
-    assert isinstance(app.process_probe, LegacyProcessProbe)
+    assert isinstance(app.process_probe, ProcessProbeAdapter)
     bootstrap_app.reset_for_tests()

@@ -1,7 +1,7 @@
 """Headless Ollama + Sonder server supervisor.
 
 This starts/stops/checks the local Ollama daemon and the OpenAI-compatible
-sonder_serve.py API without requiring the Flutter app or a visible console.
+Sonder Runtime API without requiring the Flutter app or a visible console.
 """
 from __future__ import annotations
 
@@ -19,11 +19,12 @@ import urllib.request
 from pathlib import Path
 
 import engine_bundle
-import ollama_endpoint
-import unsafe_lab
+from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters.security import unsafe_lab
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
-import sonder_health
-import sonder_paths
+from sonder_runtime.domain import launcher_health as sonder_health
+from sonder_runtime.platform import paths as sonder_paths
+from sonder_runtime.interfaces.cli.headless import HeadlessCliOperations, run as _run_headless_cli
 
 
 DEFAULT_HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
@@ -195,8 +196,7 @@ def _pid_command_line(pid: int) -> str:
 
 def _is_sonder_server_pid(pid: int) -> bool:
     command = _pid_command_line(pid).lower().replace("/", os.sep).replace("\\", os.sep)
-    script = str((repo_root() / "sonder_serve.py").resolve()).lower()
-    return bool(command and script in command)
+    return bool(command and re.search(r"(?:^|\s)-m\s+sonder_runtime\s+serve(?:\s|$)", command))
 
 
 def _is_sonder_server_for_port(pid: int, port: int) -> bool:
@@ -211,10 +211,15 @@ def _is_sonder_server_for_port(pid: int, port: int) -> bool:
     """
     command = _pid_command_line(pid)
     normalized = command.lower().replace("/", os.sep).replace("\\", os.sep)
-    script = str((repo_root() / "sonder_serve.py").resolve()).lower()
-    if not command or script not in normalized:
+    if not command or not re.search(
+        r"(?:^|\s)-m\s+sonder_runtime\s+serve(?:\s|$)", normalized
+    ):
         return False
-    match = re.search(r"sonder_serve\.py[\"']?\s+(\d+)(?:\s|$)", command, re.IGNORECASE)
+    match = re.search(
+        r"(?:-m\s+sonder_runtime\s+serve)\s+(\d+)(?:\s|$)",
+        command,
+        re.IGNORECASE,
+    )
     if match:
         return int(match.group(1)) == int(port)
     return int(port) == DEFAULT_PORT
@@ -427,7 +432,7 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
         pid = _managed_pid("sonder_serve", host, port)
         suffix = " pid=%s" % pid if pid else " (unmanaged listener)"
         return "sonder: already listening on http://%s:%s%s" % (host, port, suffix)
-    cmd = [python_exe(), str(repo_root() / "sonder_serve.py"), str(port)]
+    cmd = [python_exe(), "-m", "sonder_runtime", "serve", str(port)]
     merged_env = runtime_environment()
     child_overrides = dict(env or {})
     health_token = child_overrides.pop(
@@ -573,81 +578,34 @@ def _launcher_control_gate() -> bool:
 def main(argv=None) -> int:
     if not _launcher_control_gate():
         return 2
-    parser = argparse.ArgumentParser(description="Run Sonder Runtime and Ollama headlessly.")
-    parser.add_argument(
-        "command", nargs="?", default="start",
-        choices=["start", "engine", "status", "stop", "restart"],
+    def validate_start(host, env):
+        try:
+            # Validate before touching Ollama or the bootstrap subprocess.  The
+            # API child validates again at bind time, protecting the launcher
+            # sequence itself and including --allow-hosted in the effective env.
+            _require_safe_unsafe_lab_start(host, env)
+        except unsafe_lab.UnsafeLabError as exc:
+            return str(exc)
+        return None
+
+    operations = HeadlessCliOperations(
+        status=status,
+        stop_pid=stop_pid,
+        stop_succeeded=_stop_succeeded,
+        start_succeeded=_start_succeeded,
+        start_ollama=start_ollama,
+        ensure_sonder_alias=ensure_sonder_alias,
+        validate_start=validate_start,
+        start_sonder=lambda host, port, env: start_sonder(host, port, env=env),
+        managed_listener_pid=_managed_listener_pid,
+        wait_until=wait_until,
     )
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--stop-ollama", action="store_true", help="Also stop Ollama when stopping.")
-    parser.add_argument("--context-size", default=os.environ.get("SONDER_CONTEXT_SIZE", ""))
-    parser.add_argument("--allow-hosted", action="store_true")
-    args = parser.parse_args(argv)
-
-    env = {}
-    if args.context_size:
-        env["SONDER_CONTEXT_SIZE"] = args.context_size
-    if args.allow_hosted:
-        env["SONDER_ALLOW_CLOUD"] = "1"
-
-    if args.command == "status":
-        print(status(args.host, args.port))
-        return 0
-    if args.command == "stop":
-        messages = [stop_pid("sonder_serve", args.host, args.port)]
-        print(messages[0])
-        if args.stop_ollama:
-            messages.append(stop_pid("ollama"))
-            print(messages[-1])
-        return 0 if all(_stop_succeeded(message) for message in messages) else 1
-    if args.command == "restart":
-        stopped = stop_pid("sonder_serve", args.host, args.port)
-        print(stopped)
-        if not _stop_succeeded(stopped):
-            return 1
-    try:
-        # Validate before touching Ollama or the bootstrap subprocess.  The
-        # API child validates again at bind time; this protects the launcher
-        # sequence itself and includes --allow-hosted in the effective env.
-        _require_safe_unsafe_lab_start(args.host, env)
-    except unsafe_lab.UnsafeLabError as exc:
-        print("ERROR: %s" % exc, file=sys.stderr)
-        return 2
-    print(start_ollama())
-    alias_ok, alias_message = ensure_sonder_alias()
-    print(alias_message)
-    if not alias_ok:
-        return 2
-    if args.command == "engine":
-        return 0
-    started = start_sonder(args.host, args.port, env=env)
-    print(started)
-    print(status(args.host, args.port))
-    # A cold Python process can bind just after ``start_sonder`` exhausts its
-    # bounded readiness window.  ``status`` above probes the same endpoint
-    # immediately afterward, so preserve a successful exit when that probe
-    # can verify the listener belongs to our managed Sonder process.  Do not
-    # treat an arbitrary unmanaged listener as success.
-    managed = _managed_listener_pid(args.host, args.port)
-    if not managed:
-        # A Windows process can accept the readiness probe just before its
-        # listener ownership becomes observable through ``netstat``.  Give
-        # that identity check one small, bounded chance to converge; a bare
-        # open port still never becomes launch success.
-        observed = None
-
-        def listener_identity_visible():
-            nonlocal observed
-            observed = _managed_listener_pid(args.host, args.port)
-            return observed is not None
-
-        wait_until(listener_identity_visible, 2)
-        managed = observed
-    # ``_managed_listener_pid`` proves both ownership and the listener, so a
-    # hung/pre-bind child still returns a failure to launchers and the desktop
-    # shell.
-    return 0 if _start_succeeded(started) or managed else 1
+    return _run_headless_cli(
+        argv,
+        operations,
+        default_host=DEFAULT_HOST,
+        default_port=DEFAULT_PORT,
+    )
 
 
 if __name__ == "__main__":

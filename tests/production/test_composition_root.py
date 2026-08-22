@@ -15,6 +15,7 @@ from sonder_runtime.domain.common.errors import (
     InvalidInput,
 )
 from sonder_runtime.domain.runtime_policy import rules
+from sonder_runtime.platform.config import SonderConfig
 
 pytestmark = pytest.mark.integration
 
@@ -36,6 +37,178 @@ def _context(**kwargs):
 def test_build_application_requires_known_profile():
     with pytest.raises(ValueError, match="unknown profile"):
         bootstrap_app.build_application("public-saas")
+
+
+def test_build_application_retains_exact_typed_config_and_uses_its_profile():
+    config = SonderConfig(profile="server-private")
+
+    application = bootstrap_app.build_application(config=config)
+
+    assert application.config is config
+    assert application.profile == "server-private"
+
+
+def test_default_app_passes_typed_config_to_the_lazy_lifecycle():
+    config = SonderConfig(profile="server-private")
+    bootstrap_app.reset_for_tests()
+
+    application = bootstrap_app.default_app(config=config)
+
+    assert application.config is config
+    assert bootstrap_app.default_app() is application
+
+
+def test_typed_config_reaches_lazy_runtime_lifecycle():
+    from sonder_runtime.adapters.web import lifecycle
+    from sonder_runtime.platform.config import (
+        CapacityConfig,
+        ObservabilityConfig,
+    )
+
+    config = SonderConfig(
+        capacity=CapacityConfig(http_requests=7, queue_depth=9),
+        observability=ObservabilityConfig(metrics_enabled=False),
+    )
+    lifecycle.reset_for_tests()
+    bootstrap_app.build_application(config=config)
+
+    assert lifecycle._instance is None
+    instance = lifecycle.get()
+    assert instance._max_concurrent == 7
+    assert instance._queue_depth == 9
+    assert instance.metrics.enabled is False
+    lifecycle.reset_for_tests()
+
+
+def test_profile_only_application_keeps_compatibility_shape():
+    application = bootstrap_app.build_application("workstation-local")
+
+    assert application.profile == "workstation-local"
+    assert application.config is None
+
+
+def test_composition_root_uses_canonical_system_clock_adapter():
+    from sonder_runtime.adapters.system_clock import SystemClock
+    application = bootstrap_app.build_application()
+
+    assert type(application.clock) is SystemClock
+
+
+def test_composition_root_uses_canonical_evaluation_history_adapter():
+    from sonder_runtime.adapters.evaluation_history_reader import (
+        EvaluationHistoryReaderAdapter,
+    )
+
+    application = bootstrap_app.build_application()
+
+    assert type(application.evaluation_history._reader) is EvaluationHistoryReaderAdapter
+
+
+def test_composition_root_exposes_typed_web_provider():
+    from sonder_runtime.adapters.web_provider import LegacyWebProvider
+    from sonder_runtime.application.ports.web import WebProvider
+
+    application = bootstrap_app.build_application()
+
+    assert isinstance(application.web_provider, LegacyWebProvider)
+    assert callable(WebProvider.request)
+    assert callable(WebProvider.health)
+    assert callable(application.web_provider.request)
+    assert callable(application.web_provider.health)
+
+
+def test_composition_root_exposes_redacted_provider_health_projection():
+    application = bootstrap_app.build_application()
+
+    rows = application.provider_health_data()
+
+    assert rows
+    assert {row["provider_id"] for row in rows} >= {"embedding"}
+    assert all(set(row) == {"provider_id", "status", "detail", "checked_at"} for row in rows)
+    assert all(row["status"] in {"healthy", "degraded", "unhealthy", "unknown"} for row in rows)
+
+
+def test_composition_root_exposes_cooperative_provider_cancellation():
+    application = bootstrap_app.build_application()
+
+    assert application.cancel_provider("embedding", reason="test stop") is False
+
+
+def test_composition_root_publishes_attended_training_and_update_lanes():
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.specialized_lifecycle import (
+        ActivationRequest, ActivationResult, DeploymentResult, TrainingRequest,
+    )
+
+    class Training:
+        def train(self, request, context):
+            assert request.run_id == "run-1"
+            assert not context.cancellation.cancelled
+            return DeploymentResult(
+                "training", request.run_id, "deployment-1", "model-1", "a" * 64,
+            )
+
+    class Update:
+        def activate(self, request, context):
+            assert request.activation_id == "activation-1"
+            assert not context.cancellation.cancelled
+            return ActivationResult(
+                "update", request.activation_id, request.release_id,
+                request.version, request.artifact_digest,
+            )
+
+    application = bootstrap_app.build_application(
+        training_backend=Training(), update_activator=Update(),
+    )
+    try:
+        assert {row.provider_id for row in application.provider_health()} == {
+            "embedding", "training", "update",
+        }
+        context = local_owner_context(correlation_id="composition-specialized")
+        deployment = application.train_provider(
+            TrainingRequest("run-1", "base-model", "rev-1", "d" * 64), context,
+        )
+        assert deployment.provider_id == "training"
+        activation = application.activate_provider(
+            ActivationRequest("activation-1", "release-1", "1.0.0", "a" * 64), context,
+        )
+        assert activation.provider_id == "update"
+        assert application.cancel_provider("training", reason="operator stop") is False
+    finally:
+        application.close_providers(timeout=1)
+
+
+def test_composition_root_specialized_operations_fail_closed_when_lane_is_absent():
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.specialized_lifecycle import TrainingRequest
+    from sonder_runtime.application.providers import ProviderLifecycleError
+
+    application = bootstrap_app.build_application()
+    with pytest.raises(ProviderLifecycleError, match="unknown provider"):
+        application.train_provider(
+            TrainingRequest("run-1", "base-model", "rev-1", "d" * 64),
+            local_owner_context(correlation_id="composition-absent"),
+        )
+
+
+def test_composition_root_exposes_lazy_cached_durable_session_repository(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "sessions.db"
+    monkeypatch.setenv("SONDER_SESSIONS_DB", str(database))
+    application = bootstrap_app.build_application()
+
+    assert not database.exists()
+    first = application.session_repository()
+    second = application.session_repository()
+
+    from sonder_runtime.adapters.persistence.session_repository import (
+        SQLiteSessionRepository,
+    )
+
+    assert isinstance(first, SQLiteSessionRepository)
+    assert first is second
+    assert database.exists()
 
 
 def test_importing_bootstrap_has_no_side_effects(tmp_path, monkeypatch):

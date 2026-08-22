@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import memory_store
 
 import lesson_pruner

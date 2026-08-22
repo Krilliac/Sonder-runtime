@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-import sonder_migrations
-from sonder_migrations import (
+import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+from sonder_runtime.adapters.persistence.migrations import (
     FutureSchemaError,
     MigrationError,
     migrate_store,
@@ -133,7 +133,7 @@ def test_all_registered_stores_report_status():
     statuses = sonder_migrations.status_all()
     assert set(statuses) == {
         "memory", "autopilot", "fleet", "operations", "queued_actions",
-        "updates",
+        "updates", "jobs",
     }
     for store_status in statuses.values():
         assert not store_status.unknown

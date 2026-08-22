@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-import autopilot_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
 from sonder_runtime.domain.runtime_policy import rules as _policy_rules
 
 

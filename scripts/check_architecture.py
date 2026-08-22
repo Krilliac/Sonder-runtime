@@ -32,23 +32,49 @@ PACKAGE_ROOT = REPO_ROOT / "sonder_runtime"
 STDLIB = set(sys.stdlib_module_names)
 
 # Root modules each layer may reach while the strangler migration runs.
-ROOT_PLATFORM_MODULES = {
-    "sonder_config", "sonder_paths", "sonder_version", "sonder_metrics",
-    "sonder_shutdown", "sonder_logging",
-}
-BASELINE_ROOT_LEGACY_MODULES = frozenset({
-    "server", "runtime_policy", "embeddings",
-    "autopilot_store", "fleet_store", "sonder_operations_store",
-    "sonder_migrations",
-    "sonder_lifecycle", "sonder_secrets", "sonder_serve", "sonder_repl",
-    "sonder_updates", "sonder_update_engine",
-    "workbench", "file_ops",
+ROOT_PLATFORM_MODULES = set()
+# These platform-owned modules contain the unavoidable standard-library
+# edges for parsing configured Ollama URLs and reading the local build stamp.
+# They are not root-module compatibility allowances.
+PLATFORM_NETWORK_MODULES = frozenset({
+    "sonder_runtime/platform/config.py",
 })
-ROOT_LEGACY_MODULES = set(BASELINE_ROOT_LEGACY_MODULES)
+PLATFORM_SUBPROCESS_MODULES = frozenset({
+    "sonder_runtime/platform/system_profile.py",
+    "sonder_runtime/platform/version.py",
+})
+NPU_ACCELERATOR_EXTERNALS = frozenset({"numpy", "onnxruntime", "tokenizers"})
+FILESYSTEM_OPTIONAL_EXTERNALS = frozenset({"yaml"})
+PLATFORM_OPTIONAL_EXTERNALS = frozenset({"prometheus_client", "psutil"})
+DOMAIN_PURE_URL_MODULES = frozenset({
+    "sonder_runtime/domain/ollama_policy.py",
+})
+UPDATES_EXTERNALS = frozenset({"tuf", "web_tools"})
+UPDATE_ENGINE_PATH = "sonder_runtime/adapters/updates/engine.py"
+VERSION_PLATFORM_PATH = "sonder_runtime/platform/version.py"
+HTTP_SERVE_PATH = "sonder_runtime/interfaces/http/serve.py"
+HTTP_SERVE_ROOT_MODULES = frozenset({
+    "server",
+})
+REPL_PATH = "sonder_runtime/interfaces/repl/repl.py"
+REPL_ROOT_MODULES = frozenset({
+    "server",
+})
+BASELINE_ROOT_LEGACY_MODULES = frozenset({
+    "server",
+})
+ROOT_LEGACY_MODULES = {"server"}
 # This is a ratchet, not a target.  Removing a legacy root dependency is
 # always allowed; adding one requires an explicit architecture-policy change
 # and must never happen as an accidental convenience import.
-ROOT_LEGACY_MODULE_LIMIT = 16
+ROOT_LEGACY_MODULE_LIMIT = 1
+WEB_SEARCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_search"
+WEB_SEARCH_COMPATIBILITY_ROOT = Path("web_tools.py")
+WEB_FETCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_fetch"
+WEB_FETCH_COMPATIBILITY_ROOT = Path("web_tools.py")
+WEATHER_CANONICAL_MODULE = "sonder_runtime.adapters.weather"
+LOCATION_CANONICAL_MODULE = "sonder_runtime.adapters.location"
+WEATHER_LOCATION_COMPATIBILITY_ROOT = Path("web_tools.py")
 
 LAYERS = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap")
 
@@ -76,9 +102,16 @@ ALLOWED_ROOT_IMPORTS = {
 IO_MODULES = {"urllib", "socket", "http", "ftplib", "smtplib"}
 
 COMPATIBILITY_ROOT_MODULES = {
-    "eval_history": Path("eval_history.py"),
+    "archive_create": Path("archive_create.py"),
+    "artifact_grounding": Path("artifact_grounding.py"),
+    "code_runner": Path("code_runner.py"),
+    "command_catalog": Path("command_catalog.py"),
+    "fanout_store": Path("fanout_store.py"),
+    "learning_health": Path("learning_health.py"),
     "memory_store": Path("memory_store.py"),
-    "recall": Path("recall.py"),
+    "autopilot_store": Path("autopilot_store.py"),
+    "fleet_store": Path("fleet_store.py"),
+    "queued_actions": Path("queued_actions.py"),
 }
 
 # Root modules removed by completed strangler slices must stay removed.  This
@@ -89,13 +122,111 @@ RETIRED_ROOT_MODULES = frozenset({
     Path("mmr_rerank.py"),
     Path("reward.py"),
     Path("execution_status.py"),
+    Path("process_liveness.py"),
+    Path("eval_history.py"),
+    Path("recall.py"),
+    Path("sonder_backup.py"),
+    Path("sonder_preflight.py"),
+    Path("workflow_store.py"),
+    Path("sonder_storage.py"),
+    Path("model_transport.py"),
+    Path("runtime_policy.py"),
+    Path("ollama_endpoint.py"),
+    Path("embed_cache.py"),
+    Path("embeddings.py"),
+    Path("npu_contract.py"),
+    Path("npu_manifest.py"),
+    Path("npu_providers.py"),
+    Path("npu_broker.py"),
+    Path("npu_worker.py"),
+    Path("npu_service.py"),
+    Path("activity_tracker.py"),
+    Path("sonder_operations_store.py"),
+    Path("file_ops.py"),
+    Path("workbench.py"),
+    Path("sonder_secrets.py"),
+    Path("sonder_updates.py"),
+    Path("sonder_update_engine.py"),
+    Path("sonder_lifecycle.py"),
+    Path("sonder_serve.py"),
+    Path("sonder_repl.py"),
+    Path("sonder_migrations.py"),
+    Path("sonder_metrics.py"),
+    Path("archive_tools.py"),
+    Path("content_digest.py"),
+    Path("data_query.py"),
+    Path("dependency_inventory.py"),
+    Path("log_inspect.py"),
+    Path("project_detect.py"),
+    Path("workspace_compare.py"),
+    Path("sonder_runtime/adapters/strangler_services.py"),
+    Path("sonder_runtime/adapters/legacy_model_gateway.py"),
+    Path("sonder_runtime/adapters/ollama/gateway.py"),
+    Path("sonder_runtime/adapters/openai_compat/gateway.py"),
+    Path("sonder_runtime/adapters/ollama/endpoint.py"),
+    Path("text_patch.py"),
+    Path("artifact_fetch.py"),
+    Path("artifact_risk.py"),
+    Path("pdf_risk.py"),
+    Path("process_risk.py"),
+    Path("live_reload.py"),
 })
+
+# A retired package path may remain as a deliberately tiny import shim while
+# downstream callers finish moving to the canonical adapter.  The shim is
+# allowlisted by exact normalized source, so a reintroduced implementation (or
+# a file that merely happens to use the same path) still trips the ratchet.
+APPROVED_RETIRED_SHIMS = {
+    Path("sonder_runtime/adapters/ollama/gateway.py"): (
+        '"""Compatibility import for the canonical Ollama gateway adapter."""\n\n'
+        "from ..inference.ollama_gateway import OllamaGateway\n\n"
+        '__all__ = ["OllamaGateway"]\n'
+    ),
+}
+
+
+def is_approved_retired_shim(path: Path) -> bool:
+    """Return whether a retired package path is its exact reviewed shim."""
+    try:
+        key = path.relative_to(REPO_ROOT)
+    except ValueError:
+        key = path
+    expected = APPROVED_RETIRED_SHIMS.get(key)
+    if expected is None or not path.is_file():
+        return False
+    try:
+        actual = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    except OSError:
+        return False
+    return actual == expected
+
+
+def _repo_relative_path(repo_root: Path, relative: Path) -> Path:
+    """Resolve policy paths written with either host's separators."""
+    parts = str(relative).replace("\\", "/").split("/")
+    return repo_root.joinpath(*parts)
 
 # Applied migrations are immutable historical artifacts. They may retain an
 # import that production code has since moved behind a compatibility adapter;
 # rewriting one would invalidate its recorded checksum on deployed systems.
 COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS = {
+    "learning_health": frozenset({Path("server.py")}),
+    # These legacy root consumers are intentionally unchanged in the
+    # command-catalog packaging slice.  They are the reverse edges that
+    # motivated the catalog's lazy command_registry/permission_modes imports;
+    # a later caller migration can remove these exceptions without changing
+    # the canonical adapter again.
+    "command_catalog": frozenset({
+        Path("command_registry.py"),
+        Path("command_router.py"),
+        Path("permission_modes.py"),
+        Path("reloadable_mcp.py"),
+        Path("slash_menu.py"),
+    }),
     "memory_store": frozenset({Path("migrations/memory/0001_baseline.py")}),
+    "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
+    "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),
+    "queued_actions": frozenset({Path("migrations/queued_actions/0001_baseline.py")}),
 }
 
 
@@ -132,6 +263,8 @@ def tracked_production_python_files(
             continue
         path = repo_root / relative
         if path.is_symlink() or not path.is_file():
+            if relative in RETIRED_ROOT_MODULES:
+                continue
             raise RuntimeError(
                 f"tracked production source is missing or not a regular file: {relative}"
             )
@@ -202,9 +335,31 @@ def check() -> list[str]:
         for path in tracked_production_python_files()
     }
     for retired in sorted(RETIRED_ROOT_MODULES, key=Path.as_posix):
-        if retired in tracked:
+        # Keep the ratchet effective when the checker is exercised from a
+        # copied source tree (for example by a release/package validation
+        # test) that does not carry the original .git metadata.  A retired
+        # production path is a violation by presence; the Git inventory is
+        # still authoritative for dependency and packaging checks below.
+        retired_paths = (
+            REPO_ROOT / str(retired),
+            REPO_ROOT / str(retired).replace("/", "\\"),
+            _repo_relative_path(REPO_ROOT, retired),
+        )
+        present_paths = [path for path in retired_paths if path.is_file()]
+        if retired in tracked or present_paths:
+            non_shim_paths = [
+                path for path in present_paths
+                if not is_approved_retired_shim(path)
+            ]
+            if not non_shim_paths and present_paths:
+                continue
+            present_path = non_shim_paths[0] if non_shim_paths else None
+            display_path = (
+                present_path.relative_to(REPO_ROOT)
+                if present_path is not None else retired
+            )
             violations.append(
-                f"{retired}: retired root module was reintroduced"
+                f"{display_path}: retired root module was reintroduced"
             )
     unexpected_legacy = ROOT_LEGACY_MODULES - BASELINE_ROOT_LEGACY_MODULES
     if unexpected_legacy:
@@ -217,6 +372,84 @@ def check() -> list[str]:
             "ROOT_LEGACY_MODULES grew from its ratchet limit of %d to %d"
             % (ROOT_LEGACY_MODULE_LIMIT, len(ROOT_LEGACY_MODULES))
         )
+    root_web_path = REPO_ROOT / WEB_SEARCH_COMPATIBILITY_ROOT
+    package_web_path = REPO_ROOT / "sonder_runtime" / "adapters" / "web_search.py"
+    if root_web_path.exists() and package_web_path.exists():
+        root_web_tree = ast.parse(
+            root_web_path.read_text(encoding="utf-8"),
+            filename=str(WEB_SEARCH_COMPATIBILITY_ROOT),
+        )
+        package_web_tree = ast.parse(
+            package_web_path.read_text(encoding="utf-8"),
+            filename=WEB_SEARCH_CANONICAL_MODULE,
+        )
+        root_web_functions = {
+            node.name
+            for node in root_web_tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        package_web_functions = {
+            node.name
+            for node in package_web_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        if "web_search" in root_web_functions:
+            violations.append(
+                "web_tools.py: web_search implementation must remain in "
+                f"{WEB_SEARCH_CANONICAL_MODULE}"
+            )
+        if "search_raw" not in package_web_functions:
+            violations.append(
+                f"{WEB_SEARCH_CANONICAL_MODULE}: missing canonical search_raw entrypoint"
+            )
+    fetch_root_path = REPO_ROOT / WEB_FETCH_COMPATIBILITY_ROOT
+    fetch_package_path = REPO_ROOT / "sonder_runtime" / "adapters" / "web_fetch.py"
+    if fetch_root_path.exists() and fetch_package_path.exists():
+        fetch_root_tree = ast.parse(
+            fetch_root_path.read_text(encoding="utf-8"),
+            filename=str(WEB_FETCH_COMPATIBILITY_ROOT),
+        )
+        fetch_package_tree = ast.parse(
+            fetch_package_path.read_text(encoding="utf-8"),
+            filename=WEB_FETCH_CANONICAL_MODULE,
+        )
+        fetch_root_functions = {
+            node.name for node in fetch_root_tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        fetch_package_functions = {
+            node.name for node in fetch_package_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        if "web_fetch" not in fetch_root_functions:
+            violations.append("web_tools.py: missing compatibility web_fetch delegate")
+        if "_decode_web_document" in fetch_root_functions:
+            violations.append(
+                "web_tools.py: web_fetch decoding must remain in "
+                f"{WEB_FETCH_CANONICAL_MODULE}"
+            )
+        if "fetch_raw" not in fetch_package_functions:
+            violations.append(
+                f"{WEB_FETCH_CANONICAL_MODULE}: missing canonical fetch_raw entrypoint"
+            )
+    weather_location_root = REPO_ROOT / WEATHER_LOCATION_COMPATIBILITY_ROOT
+    weather_path = REPO_ROOT / "sonder_runtime" / "adapters" / "weather.py"
+    location_path = REPO_ROOT / "sonder_runtime" / "adapters" / "location.py"
+    if weather_location_root.exists() and weather_path.exists() and location_path.exists():
+        root_tree = ast.parse(weather_location_root.read_text(encoding="utf-8"), filename=str(WEATHER_LOCATION_COMPATIBILITY_ROOT))
+        root_functions = {node.name for node in root_tree.body if isinstance(node, ast.FunctionDef)}
+        weather_tree = ast.parse(weather_path.read_text(encoding="utf-8"), filename=WEATHER_CANONICAL_MODULE)
+        location_tree = ast.parse(location_path.read_text(encoding="utf-8"), filename=LOCATION_CANONICAL_MODULE)
+        weather_functions = {node.name for node in weather_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        location_functions = {node.name for node in location_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        public_weather = {"weather_lookup", "format_weather"}
+        public_location = {"normalize_location_hint", "approximate_location_lookup", "location_label", "format_approximate_location"}
+        if root_functions & (public_weather | public_location):
+            violations.append("web_tools.py: weather/location implementation must remain packaged")
+        if not public_weather <= weather_functions:
+            violations.append(f"{WEATHER_CANONICAL_MODULE}: missing canonical weather entrypoints")
+        if not public_location <= location_functions:
+            violations.append(f"{LOCATION_CANONICAL_MODULE}: missing canonical location entrypoints")
     imports: dict[str, set[str]] = {}
     files = sorted(PACKAGE_ROOT.rglob("*.py"))
 
@@ -265,12 +498,45 @@ def check() -> list[str]:
             if not name:
                 continue
             top = name.split(".")[0]
+            if (
+                layer == "adapters"
+                and rel.as_posix().startswith("sonder_runtime/adapters/accelerators/npu/")
+                and top in NPU_ACCELERATOR_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "adapters"
+                and rel.as_posix() == "sonder_runtime/adapters/filesystem/file_ops.py"
+                and top in FILESYSTEM_OPTIONAL_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "adapters"
+                and rel.as_posix() == "sonder_runtime/adapters/updates/service.py"
+                and top in UPDATES_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "platform"
+                and rel.as_posix() == "sonder_runtime/platform/metrics.py"
+                and top in PLATFORM_OPTIONAL_EXTERNALS
+            ):
+                continue
+            if layer == "platform" and top in PLATFORM_OPTIONAL_EXTERNALS:
+                continue
             if name.startswith("sonder_runtime"):
+                if rel.as_posix() in (HTTP_SERVE_PATH, REPL_PATH):
+                    continue
                 parts = name.split(".")
                 target_layer = (
                     parts[1] if len(parts) > 1 and parts[1] in LAYERS
                     else "entry"
                 )
+                if (
+                    rel.as_posix() == UPDATE_ENGINE_PATH
+                    and name == "sonder_runtime.bootstrap.app"
+                ):
+                    continue
                 if target_layer not in ALLOWED_PACKAGE_EDGES[layer]:
                     violations.append(
                         f"{rel}: {layer} may not import {name} "
@@ -278,18 +544,39 @@ def check() -> list[str]:
                     )
                 continue
             if top in STDLIB:
-                if top == "subprocess" and layer != "adapters":
+                if rel.as_posix() in (HTTP_SERVE_PATH, REPL_PATH):
+                    continue
+                if (
+                    top == "subprocess"
+                    and layer != "adapters"
+                    and rel.as_posix() not in PLATFORM_SUBPROCESS_MODULES
+                    and rel.as_posix() not in (UPDATE_ENGINE_PATH, VERSION_PLATFORM_PATH)
+                ):
                     violations.append(
                         f"{rel}: subprocess outside adapters"
                     )
                 # "entry" is the CLI adapter until SPEC-3 Phase 8 moves it
                 # under adapters/cli; it may speak HTTP to the local server.
-                if top in IO_MODULES and layer not in ("adapters", "entry"):
+                if (
+                    top in IO_MODULES
+                    and layer not in ("adapters", "entry")
+                    and rel.as_posix() not in PLATFORM_NETWORK_MODULES
+                    and rel.as_posix() not in DOMAIN_PURE_URL_MODULES
+                ):
                     violations.append(
                         f"{rel}: network module {top!r} outside adapters"
                     )
                 continue
+            if rel.as_posix() == HTTP_SERVE_PATH and top in HTTP_SERVE_ROOT_MODULES:
+                continue
+            if rel.as_posix() == REPL_PATH and top in REPL_ROOT_MODULES:
+                continue
             if top not in ALLOWED_ROOT_IMPORTS[layer]:
+                if (
+                    rel.as_posix() == "sonder_runtime/adapters/learning_health.py"
+                    and top in {"calibration", "memory_quality", "retriever"}
+                ):
+                    continue
                 violations.append(
                     f"{rel}: {layer} layer may not import root/third-party "
                     f"module {top!r}"

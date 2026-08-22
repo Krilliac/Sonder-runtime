@@ -285,3 +285,15 @@ def test_concurrent_emit_keeps_exact_counters_and_bounded_recent_events():
     assert snap["series"][0]["count"] == 800
     assert len(sink.recent_events(limit=10_000)) == 64
     assert len(sink.recent_events(correlation_id="req-3")) <= 64
+
+
+def test_trace_projection_reads_only_sanitized_retained_events():
+    sink = LocalObservabilitySink(clock=lambda: 3.0)
+    sink.emit(
+        "TOOL_CALL", summary="private prompt", correlation_id="req-trace",
+        detail={"prompt": "do not project", "safe": "value"},
+    )
+    body = sink.trace_projection().to_dict()
+    assert body["schema"] == "sonder.trace-span.v1"
+    assert body["spans"][0]["attributes"]["gen_ai.operation.name"] == "execute_tool"
+    assert "do not project" not in str(body)

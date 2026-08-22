@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-import sonder_serve as ts
+import sonder_runtime.interfaces.http.serve as ts
 
 
 CHAT_BODY = (

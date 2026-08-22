@@ -61,7 +61,7 @@ def write_manifest(directory, payload):
 
 
 def routing_manifest(directory, **overrides):
-    import npu_manifest
+    import sonder_runtime.adapters.accelerators.npu.manifest as npu_manifest
 
     return npu_manifest.normalize_manifest(
         routing_payload(directory, **overrides), directory,
@@ -69,7 +69,7 @@ def routing_manifest(directory, **overrides):
 
 
 def embedding_manifest(directory, **overrides):
-    import npu_manifest
+    import sonder_runtime.adapters.accelerators.npu.manifest as npu_manifest
 
     return npu_manifest.normalize_manifest(
         embedding_payload(directory, **overrides), directory,

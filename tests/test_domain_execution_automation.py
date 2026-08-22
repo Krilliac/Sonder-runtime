@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-import autopilot_store
-import fleet_store
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
+import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import permission_rules
 from sonder_runtime.domain.automation import state_machine as sm
 from sonder_runtime.domain.execution import policy

@@ -393,8 +393,8 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    import npu_manifest
-    import npu_service
+    import sonder_runtime.adapters.accelerators.npu.manifest as npu_manifest
+    import sonder_runtime.adapters.accelerators.npu.service as npu_service
 
     manifest_dir = Path(args.manifest_dir or npu_manifest.manifest_dir())
     models_dir = manifest_dir / "models"

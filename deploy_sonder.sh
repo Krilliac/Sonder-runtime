@@ -103,12 +103,12 @@ if [ "$SERVE" -eq 1 ]; then
 echo ""
 echo "== hosting: Sonder Runtime as a loopback-only development service =="
 
-# This script must live inside the cloned repo (it references sibling files
-# like sonder_serve.py). Resolve that directory so the service works
+# This script must live inside the cloned repo (it runs the packaged runtime
+# module). Resolve that directory so the service works
 # regardless of cwd.
 CLONE_DIR="$SCRIPT_DIR"
-if [ ! -f "$CLONE_DIR/sonder_serve.py" ]; then
-  echo "ERROR: $CLONE_DIR/sonder_serve.py not found." >&2
+if [ ! -f "$CLONE_DIR/sonder_runtime/interfaces/http/serve.py" ]; then
+  echo "ERROR: packaged HTTP adapter not found under $CLONE_DIR/sonder_runtime." >&2
   echo "  --serve expects this script to be run from inside a checkout of" >&2
   echo "  https://github.com/Krilliac/Sonder-runtime — clone it first:" >&2
   echo "    git clone https://github.com/Krilliac/Sonder-runtime.git && cd Sonder-runtime && bash deploy_sonder.sh --serve" >&2
@@ -167,7 +167,7 @@ Type=simple
 WorkingDirectory=$CLONE_DIR
 Environment=SONDER_HOST=127.0.0.1
 EnvironmentFile=/etc/sonder/sonder-local.env
-ExecStart=$VENV_PY $CLONE_DIR/sonder_serve.py $PORT
+ExecStart=$VENV_PY -m sonder_runtime serve $PORT
 Restart=on-failure
 RestartSec=3
 UMask=0077

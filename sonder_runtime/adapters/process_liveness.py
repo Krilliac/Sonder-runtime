@@ -79,6 +79,20 @@ def probe_process(
     return state, identity
 
 
+def process_identity(pid: object) -> str | None:
+    """Return the observed live-process fingerprint for *pid*, if available.
+
+    Identity extraction is kept beside the platform-specific liveness probes so
+    port adapters do not need to repeat the dead/unknown/fingerprint policy.
+    A live process without a fingerprint is deliberately treated as having no
+    usable identity.
+    """
+    state, identity = probe_process(pid)
+    if state != PROCESS_ALIVE or not identity:
+        return None
+    return str(identity)
+
+
 def pid_alive(pid: object) -> bool:
     """Return conservatively whether *pid* may still be running.
 

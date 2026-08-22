@@ -7,9 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import sonder_updates
-from sonder_update_engine import UpdateManager, confirm_nonce_for
-from sonder_updates import UpdateRepository, build_bundle
+import sonder_runtime.adapters.updates.service as sonder_updates
+from sonder_runtime.adapters.updates.engine import UpdateManager, confirm_nonce_for
+from sonder_runtime.adapters.updates.service import UpdateRepository, build_bundle
+from sonder_runtime.platform import paths as runtime_paths
 
 pytestmark = pytest.mark.integration
 
@@ -27,6 +28,7 @@ def _pointer_text(link) -> str:
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     """Isolated state, releases dir, and the unsigned-bundle dev gate."""
+    runtime_paths.reset_home()
     home = tmp_path / "home"
     monkeypatch.setenv("SONDER_HOME", str(home))
     monkeypatch.setenv("SONDER_DB", str(home / "memory.db"))
@@ -190,7 +192,7 @@ def test_install_happy_path_commits_and_activates(env):
     assert steps["activate"] == "ok"
 
     # The backup gate produced a verified backup on disk.
-    import sonder_backup
+    from sonder_runtime.adapters import backup as sonder_backup
 
     assert sonder_backup.list_backups(env / "backups")
 
@@ -404,7 +406,7 @@ def test_update_events_are_audited(env):
         plan["update_id"], confirm=confirm_nonce_for(plan),
         allow_unverified=True,
     )
-    from sonder_operations_store import OperationsStore
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     codes = {e.event_code for e in OperationsStore().recent_events(limit=50)}
     assert "UPDATE_AVAILABLE" in codes

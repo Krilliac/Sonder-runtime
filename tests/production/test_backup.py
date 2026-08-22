@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-import sonder_backup
+from sonder_runtime.adapters import backup as sonder_backup
 
 pytestmark = pytest.mark.unit
 
@@ -64,7 +64,7 @@ def test_backup_taken_while_db_open_is_consistent(isolated_state, monkeypatch):
 
 
 def test_backup_includes_migrated_queued_action_ledger(isolated_state):
-    import queued_actions
+    import sonder_runtime.adapters.persistence.queued_actions as queued_actions
 
     conn = queued_actions.connect()
     try:
@@ -94,7 +94,7 @@ def test_tampered_backup_fails_verification(isolated_state):
 
 
 def test_backup_run_recorded_in_operations(isolated_state):
-    from sonder_operations_store import OperationsStore
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     target = isolated_state / "backups"
     result = sonder_backup.create_backup(target)

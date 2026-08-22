@@ -13,7 +13,7 @@ import pytest
 import admin_auth
 import memory_store
 import sonder_config
-import sonder_secrets
+import sonder_runtime.adapters.secrets as sonder_secrets
 
 
 @pytest.fixture

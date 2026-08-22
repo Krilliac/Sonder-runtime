@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-import npu_broker
+import sonder_runtime.adapters.accelerators.npu.npu_broker as npu_broker
 from tests.npu_helpers import (
     embedding_manifest,
     isolate_broker_env,
@@ -302,7 +302,7 @@ def test_worker_environment_drops_conflicting_case_variant_values():
 def test_worker_tries_next_allowlisted_provider_after_session_failure(
     monkeypatch, tmp_path,
 ):
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     class FakeOrt:
         @staticmethod
@@ -336,7 +336,7 @@ def test_worker_tries_next_allowlisted_provider_after_session_failure(
 
 
 def test_worker_rejects_failed_provider_introspection(monkeypatch, tmp_path):
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     class BrokenSession:
         @staticmethod
@@ -356,7 +356,7 @@ def test_worker_rejects_failed_provider_introspection(monkeypatch, tmp_path):
 
 
 def test_worker_rejects_unallowlisted_cpu_ep_chain(monkeypatch, tmp_path):
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     class AmbiguousSession:
         @staticmethod
@@ -379,7 +379,7 @@ def test_worker_rejects_unallowlisted_cpu_ep_chain(monkeypatch, tmp_path):
 def test_real_session_receives_pinned_bytes_and_disables_cpu_fallback(
     monkeypatch, tmp_path,
 ):
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     captured = {}
 
@@ -414,7 +414,7 @@ def test_real_session_receives_pinned_bytes_and_disables_cpu_fallback(
 
 
 def test_real_session_resolves_only_hash_pinned_provider_files(monkeypatch, tmp_path):
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     captured = {}
 
@@ -725,8 +725,8 @@ def test_intentional_stop_during_warmup_does_not_open_circuit(
 
 
 def test_cpu_sim_is_not_registered_outside_explicit_test_hooks(monkeypatch):
-    import npu_providers
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.providers as npu_providers
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     monkeypatch.delenv("SONDER_NPU_TEST_HOOKS", raising=False)
     rows = npu_providers.detect_providers(None, "missing", test_hooks=False)
@@ -741,7 +741,7 @@ def test_cpu_sim_is_not_registered_outside_explicit_test_hooks(monkeypatch):
 
 
 def test_registered_execution_provider_is_not_reported_ready_or_detected():
-    import npu_providers
+    import sonder_runtime.adapters.accelerators.npu.providers as npu_providers
 
     class RegisteredOnly:
         @staticmethod
@@ -810,7 +810,7 @@ def test_nonfinite_worker_rss_is_malformed_and_destroys_worker(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows RSS API regression")
 def test_windows_worker_reports_nonzero_rss():
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     assert npu_worker._rss_mb() > 0
 
@@ -867,7 +867,7 @@ def test_malformed_load_provenance_never_marks_model_or_npu_ready(
 
 
 def test_pinned_read_stats_size_before_allocating(monkeypatch, tmp_path):
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     manifest = routing_manifest(tmp_path)
     manifest["model"] = {**manifest["model"], "bytes": 1}
@@ -882,7 +882,7 @@ def test_pinned_read_stats_size_before_allocating(monkeypatch, tmp_path):
 
 def test_pinned_read_fstats_open_handle_before_read(monkeypatch, tmp_path):
     import builtins
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     manifest = routing_manifest(tmp_path)
     original_open = npu_worker.Path.open
@@ -916,8 +916,8 @@ def test_pinned_read_fstats_open_handle_before_read(monkeypatch, tmp_path):
 
 def test_vendor_path_uses_private_read_only_pinned_snapshot(
         monkeypatch, tmp_path):
-    import npu_contract
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     manifest = routing_manifest(tmp_path)
     stage_dir = tmp_path / "stage"
@@ -1179,7 +1179,7 @@ def test_run_provenance_must_match_validated_loaded_session(
 def test_tokenizer_rejects_vector_changing_automatic_settings(
         monkeypatch, tmp_path, setting):
     from types import SimpleNamespace
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     tokenizer_file = write_model(tmp_path, "tokenizer.json", b"{}")
     manifest = embedding_manifest(
@@ -1204,7 +1204,7 @@ def test_tokenizer_rejects_vector_changing_automatic_settings(
 
 def test_real_embedding_rejects_unknown_onnx_input_name():
     from types import SimpleNamespace
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     class Tokenizer:
         @staticmethod
@@ -1228,7 +1228,7 @@ def test_real_embedding_rejects_unknown_onnx_input_name():
 
 def test_real_embedding_requires_mask_for_variable_length_batch():
     from types import SimpleNamespace
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     class Tokenizer:
         @staticmethod
@@ -1265,7 +1265,7 @@ def test_real_embedding_requires_mask_for_variable_length_batch():
 def test_real_routing_rejects_out_of_contract_outputs(
         monkeypatch, postprocess, outputs):
     from types import SimpleNamespace
-    import npu_worker
+    import sonder_runtime.adapters.accelerators.npu.npu_worker as npu_worker
 
     class Array:
         def __init__(self, values):

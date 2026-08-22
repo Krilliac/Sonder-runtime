@@ -44,8 +44,7 @@ SENSITIVE_PREFIXES = (
     "model_transport.py", "sonder_runtime/adapters/model_transport.py",
     "sonder_runtime/domain/context/overflow.py",
     "sonder_runtime/domain/context/compaction.py",
-    "ollama_endpoint.py",
-    "process_liveness.py",
+    "process_liveness.py", "ollama_endpoint.py",
     "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
     "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",
     "tests/test_control_plane", "tests/test_read_only_agent_policy",
@@ -524,6 +523,12 @@ def create_backup(run_id):
             if existed:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
+                # The bundle is sealed below, but keep the individual backup
+                # writable until sealing completes so integrity checks and
+                # controlled corruption tests can operate on the artifact.
+                if os.name != "nt":
+                    with contextlib.suppress(OSError):
+                        os.chmod(destination, 0o600)
                 record["sha256_backup"] = _sha(destination)
                 if record["sha256_backup"] != record["sha256_before"]:
                     raise RuntimeError("backup hash mismatch for %s" % rel)
@@ -1322,9 +1327,26 @@ def verify_rollback_ready(run_id):
         emergency_root.mkdir()
         bundle = scratch / "bundle"
         bundle.mkdir()
+        # The emergency entry point deliberately confines backups to the
+        # manifest bundle. Build a complete temporary bundle for this probe;
+        # reusing the production backup paths would make the probe fail its
+        # own containment contract before exercising restoration.
+        probe_records = []
+        for record in records:
+            probe_record = dict(record)
+            if record["existed_before"]:
+                backup = bundle / "files" / record["path"]
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(record["backup_path"], backup)
+                probe_record["backup_path"] = str(backup)
+            probe_records.append(probe_record)
         manifest_path = bundle / "manifest.json"
         manifest_path.write_text(
-            json.dumps(dict(manifest, repository_root=str(emergency_root)), indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                dict(manifest, repository_root=str(emergency_root), files=probe_records),
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
             encoding="utf-8",
         )
         (bundle / "manifest.sha256").write_text(_sha(manifest_path) + "\n", encoding="ascii")

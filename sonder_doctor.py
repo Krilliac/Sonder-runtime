@@ -33,23 +33,36 @@ and the report rolls those up::
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
-# Status vocabulary. ``skipped`` is intentionally neutral: a collaborator that
-# is simply absent should not make an otherwise-healthy runtime look sick.
-STATUS_OK = "ok"
-STATUS_WARN = "warn"
-STATUS_FAIL = "fail"
-STATUS_SKIPPED = "skipped"
-
-_VALID_STATUSES = frozenset(
-    {STATUS_OK, STATUS_WARN, STATUS_FAIL, STATUS_SKIPPED}
+from sonder_runtime.adapters.config_validation import (
+    validated_config_check as _validated_config_check,
 )
-
-# Rollup precedence: any fail dominates, then any warn, otherwise ok. Skipped
-# never counts toward warn/fail, so an all-skipped report is still ``ok``.
-_SEVERITY = {STATUS_OK: 0, STATUS_SKIPPED: 0, STATUS_WARN: 1, STATUS_FAIL: 2}
-_SEVERITY_TO_STATUS = {0: STATUS_OK, 1: STATUS_WARN, 2: STATUS_FAIL}
+from sonder_runtime.domain.doctor_result import normalize_result as _normalize_result
+from sonder_runtime.domain.doctor_result import skipped as _skipped_result
+from sonder_runtime.domain.doctor_status import coerce_status as _coerce_status
+from sonder_runtime.bootstrap.doctor_formatting import (
+    STATUS_FAIL,
+    STATUS_OK,
+    STATUS_SKIPPED,
+    STATUS_WARN,
+    _SEVERITY,
+    _SEVERITY_TO_STATUS,
+    render_report,
+    rollup_status,
+)
+from sonder_runtime.domain.doctor_specs import (
+    CheckCallable,
+    iter_specs as _iter_specs,
+)
+from sonder_runtime.bootstrap.config_loading import (
+    check_config as _check_config_impl,
+    load_config_or_none as _load_config_or_none_impl,
+)
+from sonder_runtime.bootstrap.doctor_checks import (
+    summarize_memory_quality as _summarize_memory_quality,
+    summarize_self_heal as _summarize_self_heal,
+)
 
 # A check spec is anything ``_iter_specs`` can turn into a ``(name, callable)``
 # pair. A check callable takes no required arguments and returns one of:
@@ -57,92 +70,6 @@ _SEVERITY_TO_STATUS = {0: STATUS_OK, 1: STATUS_WARN, 2: STATUS_FAIL}
 #   * a (status, detail) tuple
 #   * a mapping with at least "status" and optionally "name"/"detail"
 # or it may raise -- a raised exception is captured as a ``fail`` entry.
-CheckCallable = Callable[[], Any]
-
-
-def _coerce_status(value: Any) -> str:
-    """Map an arbitrary check verdict onto the fixed status vocabulary."""
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in _VALID_STATUSES:
-            return lowered
-        # Accept a few friendly synonyms so callers are not forced to memorise
-        # the exact spelling; anything else is treated as a failure to be safe.
-        synonyms = {
-            "pass": STATUS_OK,
-            "passed": STATUS_OK,
-            "healthy": STATUS_OK,
-            "good": STATUS_OK,
-            "warning": STATUS_WARN,
-            "degraded": STATUS_WARN,
-            "attention": STATUS_WARN,
-            "watch": STATUS_WARN,
-            "error": STATUS_FAIL,
-            "failed": STATUS_FAIL,
-            "critical": STATUS_FAIL,
-            "skip": STATUS_SKIPPED,
-        }
-        return synonyms.get(lowered, STATUS_FAIL)
-    if isinstance(value, bool):
-        return STATUS_OK if value else STATUS_FAIL
-    # Anything unexpected (None, numbers, objects) is a defensive failure rather
-    # than a silent pass -- the doctor should surface, not swallow, weirdness.
-    return STATUS_FAIL
-
-
-def _normalize_result(name: str, raw: Any) -> dict:
-    """Normalize a check's return value into a ``{name, status, detail}`` entry.
-
-    ``name`` is the registry name; a mapping result may override it with its own
-    ``name`` key (useful when a single callable knows its canonical label).
-    """
-    result_name = name
-    detail = ""
-    if isinstance(raw, Mapping):
-        result_name = str(raw.get("name") or name)
-        status = _coerce_status(raw.get("status"))
-        detail = "" if raw.get("detail") is None else str(raw.get("detail"))
-    elif isinstance(raw, tuple) and len(raw) == 2:
-        status = _coerce_status(raw[0])
-        detail = "" if raw[1] is None else str(raw[1])
-    else:
-        status = _coerce_status(raw)
-    return {"name": str(result_name), "status": status, "detail": detail}
-
-
-def _iter_specs(
-    checks: Mapping[str, CheckCallable] | Iterable[Any],
-) -> list[tuple[str, CheckCallable]]:
-    """Normalize a heterogeneous check registry into ordered (name, fn) pairs.
-
-    Accepts, in rough order of convenience:
-
-    * a mapping ``{name: callable}`` (insertion order preserved),
-    * an iterable of ``(name, callable)`` pairs,
-    * an iterable of bare callables (name taken from ``.name`` or ``__name__``).
-    """
-    specs: list[tuple[str, CheckCallable]] = []
-    if isinstance(checks, Mapping):
-        for name, fn in checks.items():
-            specs.append((str(name), fn))
-        return specs
-    for index, item in enumerate(checks):
-        if isinstance(item, tuple) and len(item) == 2:
-            name, fn = item
-            specs.append((str(name), fn))
-        elif callable(item):
-            name = getattr(item, "name", None) or getattr(
-                item, "__name__", None
-            )
-            specs.append((str(name or "check_%d" % index), item))
-        else:
-            raise TypeError(
-                "check spec must be a (name, callable) pair or a callable, "
-                "got %r" % (item,)
-            )
-    return specs
-
-
 def run_doctor(
     checks: Mapping[str, CheckCallable] | Iterable[Any] | None = None,
 ) -> dict:
@@ -168,7 +95,6 @@ def run_doctor(
     specs = _iter_specs(registry)
 
     entries: list[dict] = []
-    worst = 0
     for name, fn in specs:
         try:
             raw = fn()
@@ -180,44 +106,8 @@ def run_doctor(
                 "detail": "%s: %s" % (exc.__class__.__name__, exc),
             }
         entries.append(entry)
-        worst = max(worst, _SEVERITY[entry["status"]])
 
-    return {"overall": _SEVERITY_TO_STATUS[worst], "checks": entries}
-
-
-def render_report(report: Mapping[str, Any]) -> str:
-    """Render :func:`run_doctor`'s report as a clean terminal summary.
-
-    The layout is a single header line stating the overall verdict followed by
-    one aligned line per check. It is intentionally plain text (no colour codes)
-    so it renders identically in logs, pipes, and terminals.
-    """
-    overall = str(report.get("overall", "unknown")).lower()
-    checks = list(report.get("checks") or [])
-
-    lines = ["sonder doctor: %s" % overall.upper()]
-    if not checks:
-        lines.append("  (no checks run)")
-        return "\n".join(lines)
-
-    # Pad the status column so details line up regardless of status length.
-    marks = {
-        STATUS_OK: "ok",
-        STATUS_WARN: "warn",
-        STATUS_FAIL: "FAIL",
-        STATUS_SKIPPED: "skip",
-    }
-    name_width = max(len(str(c.get("name", ""))) for c in checks)
-    for check in checks:
-        name = str(check.get("name", ""))
-        status = str(check.get("status", "")).lower()
-        mark = marks.get(status, status or "?")
-        detail = str(check.get("detail", "") or "")
-        line = "  [%-4s] %-*s" % (mark, name_width, name)
-        if detail:
-            line = "%s  %s" % (line, detail)
-        lines.append(line.rstrip())
-    return "\n".join(lines)
+    return {"overall": rollup_status(entries), "checks": entries}
 
 
 # ---------------------------------------------------------------------------
@@ -232,45 +122,22 @@ def render_report(report: Mapping[str, Any]) -> str:
 
 
 def _skip(reason: str) -> dict:
-    return {"status": STATUS_SKIPPED, "detail": "skipped: %s" % reason}
+    return _skipped_result(reason)
 
 
 def _load_config_or_none():
-    """Best-effort read-only config load; ``None`` if unavailable."""
-    try:
-        import sonder_config
-    except Exception:
-        return None
-    try:
-        return sonder_config.load_config()
-    except Exception:
-        return None
+    """Compatibility delegate for the packaged bootstrap config boundary."""
+    return _load_config_or_none_impl()
 
 
 def _check_config() -> dict:
-    """Report whether configuration loads and validates (read-only)."""
-    try:
-        import sonder_config
-    except Exception as exc:
-        return _skip("sonder_config unavailable (%s)" % exc)
-    try:
-        config = sonder_config.load_config()
-    except sonder_config.ConfigError as exc:
-        return {"status": STATUS_FAIL, "detail": "config invalid: %s" % exc}
-    except Exception as exc:
-        return _skip("config load failed (%s)" % exc)
-    return validated_config_check(config)()
+    """Compatibility wrapper for the packaged read-only config check."""
+    return _check_config_impl()()
 
 
 def validated_config_check(config):
-    """Return a check bound to the exact config already validated by the CLI."""
-    def check():
-        detail = "ollama=%s" % getattr(
-            getattr(config, "ollama", None), "url", "?"
-        )
-        return {"status": STATUS_OK, "detail": detail}
-
-    return check
+    """Compatibility alias for the packaged config-check adapter."""
+    return _validated_config_check(config)
 
 
 def _check_self_heal() -> dict:
@@ -284,22 +151,11 @@ def _check_self_heal() -> dict:
     db_path = os.environ.get("SONDER_DB")
     if not db_path:
         return _skip("SONDER_DB not set")
-    try:
-        issues = self_heal.check(db_path)
-    except Exception as exc:
-        return _skip("self-heal check failed (%s)" % exc)
-    if not issues:
-        return {"status": STATUS_OK, "detail": "no issues"}
-    repairable = sum(1 for i in issues if getattr(i, "repairable", False))
-    status = STATUS_WARN if repairable == len(issues) else STATUS_FAIL
-    return {
-        "status": status,
-        "detail": "%d issue(s), %d repairable" % (len(issues), repairable),
-    }
+    return _summarize_self_heal(self_heal.check, db_path)
 
 
 def _check_memory_quality() -> dict:
-    """Summarize memory-quality audit counters (read-only)."""
+    """Compatibility delegate for the packaged memory-quality policy."""
     import os
 
     db_path = os.environ.get("SONDER_DB")
@@ -310,43 +166,15 @@ def _check_memory_quality() -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
     except Exception as exc:
         return _skip("memory quality surfaces unavailable (%s)" % exc)
-    try:
-        conn = memory_store.connect(db_path)
-    except Exception as exc:
-        return _skip("cannot open memory db (%s)" % exc)
-    try:
-        audit = memory_quality.audit(conn)
-    except Exception as exc:
-        return _skip("audit failed (%s)" % exc)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    severe = int(audit.get("path_or_secret_like", 0)) + int(
-        audit.get("missing_fts", 0)
-    ) + int(audit.get("orphan_fts", 0))
-    hygiene = int(audit.get("exact_duplicate_prunable", 0)) + int(
-        audit.get("no_embedding", 0)
-    ) + int(audit.get("vague_without_anchor", 0))
-    total = int(audit.get("total_lessons", 0))
-    if severe:
-        return {
-            "status": STATUS_FAIL,
-            "detail": "%d lessons, %d severe issue(s)" % (total, severe),
-        }
-    if hygiene:
-        return {
-            "status": STATUS_WARN,
-            "detail": "%d lessons, %d hygiene issue(s)" % (total, hygiene),
-        }
-    return {"status": STATUS_OK, "detail": "%d lessons clean" % total}
+    return _summarize_memory_quality(
+        memory_store.connect, memory_quality.audit, db_path
+    )
 
 
 def _check_runtime_policy() -> dict:
     """Report runtime-policy load status without creating the file."""
     try:
-        import runtime_policy
+        import sonder_runtime.adapters.runtime_policy as runtime_policy
     except Exception as exc:
         return _skip("runtime_policy unavailable (%s)" % exc)
     try:
@@ -370,7 +198,7 @@ def schema_check(config=None):
     """Bind a non-mutating, non-disclosing migration-health check."""
     def check():
         try:
-            import sonder_migrations
+            import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
             cfg = config if config is not None else _load_config_or_none()
             if cfg is None:
@@ -473,7 +301,7 @@ def storage_checks(config=None, *, throughput: bool = False):
         return loaded
 
     def state_check():
-        import sonder_storage
+        from sonder_runtime.adapters import storage as sonder_storage
 
         cfg = loaded_config()
         record = sonder_storage.inspect_root(
@@ -491,7 +319,7 @@ def storage_checks(config=None, *, throughput: bool = False):
         return {"status": status, "detail": detail}
 
     def models_check():
-        import sonder_storage
+        from sonder_runtime.adapters import storage as sonder_storage
 
         cfg = loaded_config()
         records = [

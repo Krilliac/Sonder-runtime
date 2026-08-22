@@ -1,4 +1,4 @@
-import embeddings as e
+import sonder_runtime.adapters.embeddings as e
 
 
 class FakeResponse:

@@ -24,8 +24,11 @@ import json
 import os
 import sys
 
-import sonder_config
-import sonder_version
+from sonder_runtime.platform import config as sonder_config
+from sonder_runtime.platform import paths as runtime_paths
+from sonder_runtime.platform import version as sonder_version
+from sonder_runtime.application.command_surface import McpCommand
+from sonder_runtime.bootstrap.legacy_mcp import build_legacy_server_mcp_runtime
 
 
 def _load_config(args) -> "sonder_config.SonderConfig":
@@ -37,6 +40,10 @@ def _load_config(args) -> "sonder_config.SonderConfig":
             )
         key, _, value = item.partition("=")
         overrides[key.strip()] = value.strip()
+    # Preserve the legacy ``python sonder_serve.py [port]`` launcher contract
+    # for the packaged ``python -m sonder_runtime serve [port]`` entrypoint.
+    if getattr(args, "port", None) is not None:
+        overrides["server.port"] = str(args.port)
     return sonder_config.load_config(
         _configured_path(getattr(args, "config", None), "SONDER_CONFIG", "sonder.toml"),
         secrets_path=_configured_path(
@@ -113,6 +120,10 @@ def cmd_preflight(args) -> int:
 def cmd_doctor(args) -> int:
     """Run the consolidated read-only health report."""
     import sonder_doctor
+    from sonder_runtime.bootstrap.doctor_formatting import (
+        STATUS_FAIL,
+        render_report,
+    )
 
     try:
         config = _load_config(args)
@@ -139,12 +150,12 @@ def cmd_doctor(args) -> int:
     if args.json:
         _emit(report, as_json=True)
     else:
-        print(sonder_doctor.render_report(report))
-    return 1 if report.get("overall") == sonder_doctor.STATUS_FAIL else 0
+        print(render_report(report))
+    return 1 if report.get("overall") == STATUS_FAIL else 0
 
 
 def cmd_status(args) -> int:
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     build = sonder_version.build_info()
     payload: dict = {"build": build.as_dict()}
@@ -179,7 +190,7 @@ def cmd_status(args) -> int:
 
 
 def cmd_diagnostics(args) -> int:
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     payload: dict = {"build": sonder_version.build_info().as_dict()}
     try:
@@ -217,13 +228,46 @@ def cmd_config(args) -> int:
 
 
 def cmd_migrate(args) -> int:
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     try:
         config = _load_config(args)
+        _configure_typed_home(config)
         # Migration paths are environment-backed compatibility adapters; without
-        # this export --config/--set selected one home but migrated another.
+        # this process-local override --config/--set selected one home but
+        # migrated another. Keep the compatibility export for the remaining
+        # legacy settings, but path resolution is owned by the typed config.
         _export_runtime_environment(config)
+        if getattr(args, "adopt_epoch2", False):
+            from sonder_runtime.adapters.persistence.epoch_adoption import (
+                check_epoch2_cleanup,
+            )
+            from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+                run_bridge_migration,
+            )
+
+            home = runtime_paths.default_home()
+            receipt = run_bridge_migration(home, version="spec5-bridge-cli")
+            cleanup = check_epoch2_cleanup(home)
+            if not cleanup.allowed:
+                print(
+                    "epoch-2 adoption completed but verification failed: "
+                    + "; ".join(cleanup.reasons),
+                    file=sys.stderr,
+                )
+                return 1
+            _emit(
+                {
+                    "adopted": True,
+                    "epoch": receipt.epoch,
+                    "source_version": receipt.source_version,
+                    "backup_path": receipt.backup_path,
+                    "tasks_migrated": receipt.tasks_migrated,
+                    "verified": cleanup.allowed,
+                },
+                as_json=args.json,
+            )
+            return 0
         if args.store:
             results = {
                 args.store: sonder_migrations.migrate_store(args.store)
@@ -258,9 +302,7 @@ def _backup_target(args, config=None) -> str:
     config = config or _load_config(args)
     if config and config.backup.target:
         return config.backup.target
-    import sonder_paths
-
-    return str(sonder_paths.default_home() / "backups")
+    return str(runtime_paths.default_home() / "backups")
 
 
 def _report_problems(
@@ -290,13 +332,15 @@ def _report_problems(
 def cmd_backup(args) -> int:
     from .bootstrap.app import default_app
 
-    backups = default_app().backup
-
+    config = None
     if args.backup_command != "verify":
         config = _load_config(args)
         # Backup source discovery reads SONDER_HOME; exporting only the validated
         # target backed up unrelated state while reporting success.
         _export_runtime_environment(config)
+        backups = default_app(config=config).backup
+    else:
+        backups = default_app().backup
     if args.backup_command == "create":
         result = backups.create(_backup_target(args, config))
         _emit(
@@ -372,8 +416,8 @@ def cmd_restore(args) -> int:
 
 def cmd_smoke(args) -> int:
     """Minimal end-to-end: config, migrations, operations write/read."""
-    import sonder_migrations
-    from sonder_operations_store import OperationsStore
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     try:
         config = _load_config(args)
@@ -415,7 +459,7 @@ def cmd_smoke(args) -> int:
     return 0
 
 
-def _export_runtime_environment(config) -> None:
+def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -> None:
     """Publish the validated configuration through the compatibility vars.
 
     The stdlib HTTP adapter and the shared helper modules still read their
@@ -437,46 +481,52 @@ def _export_runtime_environment(config) -> None:
         os.environ["SONDER_FILE_ROOTS"] = os.pathsep.join(
             config.state.workspace_roots
         )
-    os.environ["SONDER_HOST"] = config.server.host
-    os.environ["SONDER_PORT"] = str(config.server.port)
+    if include_typed_runtime:
+        os.environ["SONDER_HOST"] = config.server.host
+        os.environ["SONDER_PORT"] = str(config.server.port)
     # ``require_account`` predates the explicit mode field.  Preserve its
     # documented meaning when a configuration relies on the default api-key
     # mode rather than quietly letting the explicit default take precedence.
     auth_mode = config.server.auth_mode
     if config.server.require_account and auth_mode == "api-key":
         auth_mode = "account"
-    os.environ["SONDER_AUTH_MODE"] = auth_mode
-    os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] = (
-        "1" if config.server.tls_terminated_by_proxy else "0"
-    )
-    os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
-    os.environ["SONDER_MAX_CONCURRENT_REQUESTS"] = str(
-        config.server.max_concurrent_requests
-    )
-    os.environ["SONDER_REQUEST_TIMEOUT_SECONDS"] = str(
-        config.server.request_timeout_seconds
-    )
-    os.environ["SONDER_STREAM_IDLE_TIMEOUT_SECONDS"] = str(
-        config.server.stream_idle_timeout_seconds
-    )
-    os.environ["SONDER_CORS_ORIGINS"] = ",".join(config.server.cors_origins)
-    os.environ["SONDER_REQUIRE_ACCOUNT"] = "1" if config.server.require_account else "0"
-    os.environ["SONDER_ALLOW_REGISTRATION"] = (
-        "1" if config.server.allow_registration else "0"
-    )
-    os.environ["SONDER_REASONING_AUDIENCE"] = config.server.reasoning_audience
-    os.environ["SONDER_HTTP_SESSION_STATE_LIMIT"] = str(config.server.session_state_limit)
-    os.environ["SONDER_HTTP_SESSION_STATE_OWNER_LIMIT"] = str(
-        config.server.session_state_owner_limit
-    )
-    os.environ["SONDER_TRAIN_MAX_N"] = str(config.server.train_max_n)
+    if include_typed_runtime:
+        os.environ["SONDER_AUTH_MODE"] = auth_mode
+        os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
+        os.environ["SONDER_MAX_CONCURRENT_REQUESTS"] = str(
+            config.server.max_concurrent_requests
+        )
+        os.environ["SONDER_REQUEST_TIMEOUT_SECONDS"] = str(
+            config.server.request_timeout_seconds
+        )
+        os.environ["SONDER_STREAM_IDLE_TIMEOUT_SECONDS"] = str(
+            config.server.stream_idle_timeout_seconds
+        )
+        os.environ["SONDER_CORS_ORIGINS"] = ",".join(config.server.cors_origins)
+        os.environ["SONDER_REQUIRE_ACCOUNT"] = "1" if config.server.require_account else "0"
+        os.environ["SONDER_ALLOW_REGISTRATION"] = (
+            "1" if config.server.allow_registration else "0"
+        )
+        os.environ["SONDER_REASONING_AUDIENCE"] = config.server.reasoning_audience
+        os.environ["SONDER_HTTP_SESSION_STATE_LIMIT"] = str(config.server.session_state_limit)
+        os.environ["SONDER_HTTP_SESSION_STATE_OWNER_LIMIT"] = str(
+            config.server.session_state_owner_limit
+        )
+        os.environ["SONDER_TRAIN_MAX_N"] = str(config.server.train_max_n)
     # The stdlib HTTP adapter has a final bind-time gate as well as config
     # validation.  Export the validated proxy declaration so a direct adapter
     # import cannot weaken a non-loopback deployment between those boundaries.
+    # The preflight and legacy deployment probes still consume this explicit
+    # proxy declaration before the HTTP adapter is fully active.
     os.environ["SONDER_TLS_TERMINATED_BY_PROXY"] = (
         "1" if config.server.tls_terminated_by_proxy else "0"
     )
-    os.environ["OLLAMA_HOST"] = config.ollama.url
+    # Canonical ``serve`` binds the validated URL into the typed endpoint
+    # adapter before lazy legacy providers are composed.  Keep exporting the
+    # variable for compatibility subcommands, but do not recreate the mutable
+    # environment bridge on the canonical path.
+    if include_typed_runtime:
+        os.environ["OLLAMA_HOST"] = config.ollama.url
     os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
         "1" if config.ollama.allow_remote else "0"
     )
@@ -491,12 +541,19 @@ def _export_runtime_environment(config) -> None:
     os.environ["SONDER_LOCATION_CONSENT"] = (
         "1" if config.features.location_consent else "0"
     )
-    os.environ["SONDER_QUEUE_DEPTH"] = str(config.capacity.queue_depth)
-    os.environ["SONDER_METRICS"] = "1" if config.observability.metrics_enabled else "0"
+    if include_typed_runtime:
+        os.environ["SONDER_QUEUE_DEPTH"] = str(config.capacity.queue_depth)
+        os.environ["SONDER_METRICS"] = "1" if config.observability.metrics_enabled else "0"
     if config.secrets.api_key:
         os.environ["SONDER_API_KEY"] = config.secrets.api_key
     if config.secrets.auth_secret:
         os.environ["SONDER_AUTH_SECRET"] = config.secrets.auth_secret
+
+
+def _configure_typed_home(config) -> None:
+    """Bind a non-empty typed state home without mutating ``os.environ``."""
+    if config.state.home:
+        runtime_paths.configure_home(config.state.home)
 
 
 def cmd_serve(args) -> int:
@@ -518,15 +575,33 @@ def cmd_serve(args) -> int:
                   "(use --skip-preflight only for recovery work)",
                   file=sys.stderr)
             return 1
-    # The stdlib HTTP adapter still reads its environment at import; feed
-    # the validated configuration through the compatibility variables until
-    # SPEC-3 gives it a constructor.  This runs before the migration phase:
-    # migrations resolve their database paths through SONDER_HOME, so an
-    # export after them would migrate the wrong state directory.
-    _export_runtime_environment(config)
+    # Bind typed state and HTTP settings before migration/binding. The
+    # compatibility export below is restricted to settings still consumed by
+    # legacy adapters; typed HTTP authority no longer depends on environment
+    # round-tripping.
+    _configure_typed_home(config)
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+    from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+        require_epoch_2,
+    )
+    from sonder_runtime.domain.common.errors import MigrationRequired
+
+    try:
+        require_epoch_2(runtime_paths.default_home())
+    except MigrationRequired as exc:
+        print(
+            f"migration required before serve: {exc}; "
+            "run `migrate --adopt-epoch2`",
+            file=sys.stderr,
+        )
+        return 1
+    import sonder_runtime.interfaces.http.serve as sonder_serve
+    sonder_serve.configure_typed_config(config)
+    _export_runtime_environment(config, include_typed_runtime=False)
 
     # MIGRATING phase: no listener opens until migrations complete.
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     try:
         sonder_migrations.migrate_all(
@@ -536,10 +611,11 @@ def cmd_serve(args) -> int:
         print(f"migration failed, refusing to bind: {exc}", file=sys.stderr)
         return 1
 
-    import sonder_serve
+    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
-    sys.argv = ["sonder_serve.py", str(config.server.port)]
-    sonder_serve.main()
+    configure_legacy_interfaces()
+    sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
+    sonder_serve.main(config=config)
     return 0
 
 
@@ -549,25 +625,41 @@ def cmd_repl(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    import sonder_repl
+    import sonder_runtime.interfaces.repl.repl as sonder_repl
+    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
+    configure_legacy_interfaces()
     sonder_repl.main()
     return 0
 
 
 def cmd_mcp(args) -> int:
-    # Preserve the unsafe-lab startup fence ahead of every configuration read.
-    # A hostile/invalid model endpoint must not mask the dedicated safety
-    # refusal or let the adapter import far enough to begin initialization.
-    import server
+    if getattr(args, "native", False):
+        from sonder_runtime.adapters.security import unsafe_lab
 
-    server.require_mcp_startup_safety()
+        try:
+            unsafe_lab.require_startup()
+        except unsafe_lab.UnsafeLabError as exc:
+            print(f"native MCP startup refused: {exc}", file=sys.stderr)
+            return 2
+        try:
+            config = _load_config(args)
+        except sonder_config.ConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        from sonder_runtime.bootstrap.app import build_application
+        from sonder_runtime.bootstrap.native_mcp import run_native_mcp
+
+        _configure_typed_home(config)
+        _export_runtime_environment(config, include_typed_runtime=False)
+        return run_native_mcp(build_application(config=config))
     try:
-        _export_runtime_environment(_load_config(args))
+        McpCommand(build_legacy_server_mcp_runtime()).execute(
+            lambda: _export_runtime_environment(_load_config(args))
+        )
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    server.run_mcp(safety_checked=True)
     return 0
 
 
@@ -602,8 +694,8 @@ def cmd_drain(args) -> int:
 
 
 def cmd_update(args) -> int:
-    import sonder_update_engine
-    import sonder_updates
+    import sonder_runtime.adapters.updates.engine as sonder_update_engine
+    import sonder_runtime.adapters.updates.service as sonder_updates
 
     manager = sonder_update_engine.UpdateManager()
     try:
@@ -660,7 +752,7 @@ def cmd_update(args) -> int:
 
 
 def cmd_rotate_key(args) -> int:
-    import sonder_secrets
+    import sonder_runtime.adapters.secrets as sonder_secrets
 
     if not args.secrets:
         print("rotate-key requires --secrets <path>", file=sys.stderr)
@@ -672,7 +764,7 @@ def cmd_rotate_key(args) -> int:
     except sonder_secrets.RotationError as exc:
         print(f"rotation failed: {exc}", file=sys.stderr)
         return 1
-    from sonder_operations_store import OperationsStore
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
     try:
         OperationsStore().record_event(
@@ -783,6 +875,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("migrate", help="apply pending schema migrations")
     common(p)
     p.add_argument("--store", choices=("memory", "autopilot", "fleet", "operations"))
+    p.add_argument(
+        "--adopt-epoch2", action="store_true",
+        help="run the explicit crash-safe SPEC-5 epoch-2 bridge adoption",
+    )
     p.set_defaults(func=cmd_migrate)
 
     p = sub.add_parser("backup", help="backup management")
@@ -822,6 +918,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="run the HTTP adapter")
     common(p, ollama_flag=True)
+    p.add_argument("port", nargs="?", type=int)
     p.add_argument("--skip-preflight", action="store_true")
     p.set_defaults(func=cmd_serve)
 
@@ -831,6 +928,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("mcp", help="run the MCP adapter")
     common(p)
+    p.add_argument(
+        "--native", action="store_true",
+        help="use the application-owned bounded MCP transport",
+    )
     p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("drain", help="request graceful drain")

@@ -3,8 +3,22 @@ import sqlite3
 
 import pytest
 
-import queued_actions as queue
+import sonder_runtime.adapters.persistence.queued_actions as queue
 from scripts import package_local_system as package
+
+
+def test_database_path_uses_packaged_platform_paths(monkeypatch, tmp_path):
+    expected = tmp_path / "queued_actions.db"
+    calls = []
+
+    def fake_state_path(name, env_var=""):
+        calls.append((name, env_var))
+        return str(expected)
+
+    monkeypatch.setattr(queue._platform_paths, "state_path", fake_state_path)
+
+    assert queue.database_path() == str(expected)
+    assert calls == [("queued_actions.db", "SONDER_QUEUED_ACTION_DB")]
 
 
 def _proposed(conn, request_id="action-1"):

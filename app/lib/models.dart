@@ -267,3 +267,60 @@ class UpdateStatus {
 
   bool get canRollback => previousRelease != null;
 }
+
+/// Bounded administrator projection of the extension registry.
+class ExtensionRecord {
+  final String extensionId;
+  final String scope;
+  final String version;
+  final bool enabled;
+  final String healthState;
+  final int? memoryLimitBytes;
+  final String? artifactDigest;
+
+  const ExtensionRecord({
+    required this.extensionId,
+    required this.scope,
+    required this.version,
+    required this.enabled,
+    required this.healthState,
+    this.memoryLimitBytes,
+    this.artifactDigest,
+  });
+
+  factory ExtensionRecord.fromJson(Map<String, dynamic> json) {
+    final resources = json['resources'];
+    final artifact = json['artifact'];
+    final memory = resources is Map ? resources['memory_limit_bytes'] : null;
+    return ExtensionRecord(
+      extensionId: json['extension_id']?.toString() ?? '',
+      scope: json['scope']?.toString() ?? '',
+      version: json['version']?.toString() ?? '',
+      enabled: json['enabled'] == true,
+      healthState: json['health_state']?.toString() ?? 'unknown',
+      memoryLimitBytes: memory is int ? memory : null,
+      artifactDigest: artifact is Map
+          ? artifact['artifact_digest']?.toString()
+          : null,
+    );
+  }
+}
+
+class ExtensionRegistryStatus {
+  final String persistence;
+  final List<ExtensionRecord> records;
+
+  const ExtensionRegistryStatus({
+    required this.persistence,
+    required this.records,
+  });
+
+  factory ExtensionRegistryStatus.fromJson(Map<String, dynamic> json) =>
+      ExtensionRegistryStatus(
+        persistence: json['persistence']?.toString() ?? 'unknown',
+        records: ((json['records'] as List<dynamic>?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(ExtensionRecord.fromJson)
+            .toList(growable: false),
+      );
+}

@@ -30,7 +30,7 @@ mutation paths for lessons/lessons_fts, and this module doesn't call them.
 import argparse
 import collections
 
-import embeddings as _embeddings
+import sonder_runtime.adapters.embeddings as _embeddings
 import sonder_runtime.adapters.memory_store as memory_store
 
 Issue = collections.namedtuple("Issue", ["code", "lesson_id", "detail"])

@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 
-import artifact_risk
-import file_ops
+import sonder_runtime.adapters.artifact_risk as artifact_risk
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import server
 
 
@@ -106,7 +106,7 @@ def test_script_run_report_includes_risk_before_execution(tmp_path, monkeypatch)
 
 
 def test_manifest_help_autopilot_and_reload_contract():
-    assert "artifact_risk" in server.LIVE_RELOAD_MODULES
+    assert "sonder_runtime.adapters.artifact_risk" in server.LIVE_RELOAD_MODULES
     assert "artifact_risk_inspect" in server.tool_manifest()
     assert "artifact_risk_inspect" in server.AGENT_TOOL_HELP
     assert "artifact_risk_inspect" in server.REPOSITORY_AGENT_TOOL_HELP

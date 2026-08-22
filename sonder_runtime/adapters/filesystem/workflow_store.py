@@ -8,7 +8,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-import sonder_paths
+from sonder_runtime.platform import paths as runtime_paths
 
 
 DEFAULT_WORKFLOWS = {
@@ -58,7 +58,7 @@ def default_path():
     configured = os.environ.get("SONDER_WORKFLOWS", "").strip()
     if configured:
         return configured
-    return str(sonder_paths.ensure_home() / "workflows.json")
+    return str(runtime_paths.ensure_home() / "workflows.json")
 
 
 def _configured_path():
@@ -77,8 +77,10 @@ def _state_path(path):
     if not candidate.is_absolute():
         # The per-user default is always absolute, but do not let a malformed
         # caller reinterpret a relative value outside the state boundary.
-        candidate = sonder_paths.ensure_home() / candidate
-    return _resolve_inside(candidate, sonder_paths.ensure_home(), "Sonder state home")
+        candidate = runtime_paths.ensure_home() / candidate
+    return _resolve_inside(
+        candidate, runtime_paths.ensure_home(), "Sonder state home"
+    )
 
 
 def _resolve_inside(candidate, root, label):

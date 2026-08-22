@@ -2,7 +2,7 @@
 import re
 
 import contribute
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import sonder_runtime.adapters.memory_store as memory_store
 
 DUP_THRESHOLD = 0.92

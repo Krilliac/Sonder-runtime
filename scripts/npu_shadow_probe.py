@@ -45,7 +45,7 @@ def main() -> int:
     os.environ.setdefault("SONDER_AVAILABLE_RAM_GB", "4")
 
     import npu_distill_router
-    import npu_service
+    import sonder_runtime.adapters.accelerators.npu.service as npu_service
     import server
 
     if npu_service._mode("routing") not in ("shadow", "prefer"):

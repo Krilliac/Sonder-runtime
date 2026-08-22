@@ -46,7 +46,7 @@ def _dispatch_slash_names() -> set:
     """
     names = set()
     for filename in _DISPATCH_CHAINS:
-        path = os.path.join(catalog_module._HERE, filename)
+        path = catalog_module._source_path(filename)
         for group in catalog_module._slash_groups(path):
             names.update(group)
     return names

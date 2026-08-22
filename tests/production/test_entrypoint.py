@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import sonder_migrations
+import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 import unsafe_lab
 
 from sonder_runtime.__main__ import main
@@ -37,6 +37,19 @@ def test_status_json(isolated_home, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["build"]["version"]
     assert "schemas" in payload
+
+
+def test_entrypoint_uses_packaged_configuration_boundary():
+    source = (_REPO_ROOT / "sonder_runtime" / "__main__.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from sonder_runtime.platform import config as sonder_config" in source
+    assert "import sonder_config\n" not in source
+
+    import sonder_runtime.platform.config as packaged_config
+
+    assert packaged_config.SonderConfig is not None
+    assert packaged_config.sonder_paths.default_home is not None
 
 
 def test_status_storage_failure_is_resilient_and_redacted(
@@ -169,6 +182,37 @@ def test_user_global_config_is_discovered_when_present(monkeypatch, tmp_path):
     assert _configured_path(str(tmp_path / "chosen.toml"), "SONDER_CONFIG", "sonder.toml") == str(tmp_path / "chosen.toml")
 
 
+def test_backup_entrypoint_passes_loaded_config_to_default_application(monkeypatch, tmp_path):
+    import sonder_runtime.__main__ as entrypoint
+    import sonder_runtime.bootstrap.app as bootstrap_app
+    from sonder_runtime.platform.config import SonderConfig
+
+    config = SonderConfig()
+    seen = []
+
+    class Backups:
+        def list(self, target):
+            return []
+
+    class Application:
+        backup = Backups()
+
+    monkeypatch.setattr(entrypoint, "_load_config", lambda _args: config)
+    monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda _config: None)
+    monkeypatch.setattr(
+        bootstrap_app,
+        "default_app",
+        lambda *, config=None: seen.append(config) or Application(),
+    )
+
+    args = SimpleNamespace(
+        backup_command="list", target=str(tmp_path / "backups"),
+        keep=None, json=True,
+    )
+    assert entrypoint.cmd_backup(args) == 0
+    assert seen == [config]
+
+
 def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(monkeypatch):
     import server
     from sonder_runtime.__main__ import cmd_mcp
@@ -247,7 +291,7 @@ def test_doctor_json_fails_on_modified_migration_without_disclosure(
     monkeypatch, capsys
 ):
     import sonder_doctor
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
     from types import SimpleNamespace
 
     secret_path = "C:/Users/private/secret-memory.db"
@@ -352,7 +396,7 @@ def test_doctor_schema_check_uses_exact_cli_home(
     isolated_home, tmp_path, monkeypatch, capsys, selection
 ):
     import sonder_doctor
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     configured_home = tmp_path / f"selected-{selection}"
     configured_home.mkdir()
@@ -394,8 +438,8 @@ def test_doctor_schema_check_uses_exact_cli_home(
     # unhealthy rather than pending.
     known = sum(
         len(sonder_migrations.discover_migrations(store))
-        for store in ("memory", "autopilot", "fleet", "operations",
-                      "queued_actions", "updates")
+            for store in ("memory", "autopilot", "fleet", "operations",
+                          "queued_actions", "updates", "jobs")
     )
     assert payload == {
         "overall": "fail",
@@ -403,7 +447,7 @@ def test_doctor_schema_check_uses_exact_cli_home(
             "name": "schemas",
             "status": "fail",
             "detail": (
-                "6 store(s); unhealthy history: modified=1 future=0; "
+                    "7 store(s); unhealthy history: modified=1 future=0; "
                 "pending=%d" % (known - 1)
             ),
         }],
@@ -442,7 +486,7 @@ def test_serve_exports_validated_config_before_migrations(
     validated and then dropped, so the runtime used unrelated defaults; the
     home in particular must be exported before migrations open a database.
     """
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     configured_home = tmp_path / "configured-home"
     workspace = tmp_path / "workspaces"
@@ -481,7 +525,11 @@ def test_serve_exports_validated_config_before_migrations(
     assert rc == 1  # the stubbed migration aborts before any listener opens
     assert seen["home"] == str(configured_home)
     assert str(workspace) in seen["roots"]
-    assert seen["ollama"] == "http://127.0.0.1:11500"
+    # Canonical serve no longer mutates OLLAMA_HOST; the typed endpoint is the
+    # authority that the lazy provider sees.
+    assert seen["ollama"] != "http://127.0.0.1:11500"
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    assert ollama_endpoint.normalize() == "http://127.0.0.1:11500"
     assert seen["web"] == "1"
     assert seen["tls_proxy"] == "1"
 
@@ -490,7 +538,7 @@ def test_serve_exports_feature_gates_closed_by_default(
     isolated_home, tmp_path, monkeypatch, capsys
 ):
     """[features].web=false must actually close the web-egress gate."""
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     for name in ("SONDER_WEB_TOOLS", "SONDER_LIVE_RELOAD", "SONDER_HOST",
                  "SONDER_PORT", "OLLAMA_HOST", "SONDER_ALLOW_REMOTE_OLLAMA"):
@@ -513,7 +561,7 @@ def test_serve_exports_feature_gates_closed_by_default(
 
 
 def test_migrate_exports_configured_home(isolated_home, tmp_path, monkeypatch):
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     configured_home = tmp_path / "migration-home"
     seen = {}
@@ -528,7 +576,7 @@ def test_migrate_exports_configured_home(isolated_home, tmp_path, monkeypatch):
 
 
 def test_backup_fails_closed_on_invalid_config(isolated_home, monkeypatch, capsys):
-    import sonder_backup
+    from sonder_runtime.adapters import backup as sonder_backup
 
     called = []
     monkeypatch.setattr(sonder_backup, "list_backups", lambda target: called.append(target) or [])
@@ -540,7 +588,7 @@ def test_backup_fails_closed_on_invalid_config(isolated_home, monkeypatch, capsy
 def test_backup_exports_configured_source_home(
     isolated_home, tmp_path, monkeypatch, capsys
 ):
-    import sonder_backup
+    from sonder_runtime.adapters import backup as sonder_backup
 
     configured_home = tmp_path / "backup-home"
     target = tmp_path / "target"
@@ -565,7 +613,7 @@ def test_backup_exports_configured_source_home(
 def test_smoke_exports_the_home_it_preflighted(
     isolated_home, tmp_path, monkeypatch, capsys
 ):
-    import sonder_migrations
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
     configured_home = tmp_path / "smoke-home"
     seen = {}

@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 
 MAX_LOG_COUNT = 100

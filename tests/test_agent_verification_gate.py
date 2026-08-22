@@ -34,7 +34,7 @@ import os
 
 import pytest
 
-import activity_tracker
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import autopilot_controller
 import calibration
 import server

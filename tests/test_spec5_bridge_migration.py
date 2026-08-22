@@ -101,6 +101,13 @@ class TestRequireEpoch2:
         run_bridge_migration(sonder_home)
         require_epoch_2(sonder_home)  # Should not raise
 
+    def test_partial_epoch_2_adoption_fails_closed(self, sonder_home):
+        _create_legacy_memory_db(sonder_home)
+        run_bridge_migration(sonder_home)
+        (sonder_home / "training.db").unlink()
+        with pytest.raises(MigrationRequired, match="training.db"):
+            require_epoch_2(sonder_home)
+
 
 class TestBridgeMigration:
     def test_new_install_creates_epoch_2(self, sonder_home):

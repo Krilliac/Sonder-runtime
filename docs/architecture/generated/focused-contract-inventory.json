@@ -1,0 +1,59 @@
+{
+  "authority_index": "docs/architecture/DOCUMENT-AUTHORITY-INDEX.md",
+  "documents": [
+    {
+      "classification": "current",
+      "exists": true,
+      "path": "ARCHITECTURE.md",
+      "summary": "Product boundary and current runtime architecture."
+    },
+    {
+      "classification": "current",
+      "exists": true,
+      "path": "SECURITY.md",
+      "summary": "Current trust, authorization, and isolation contract."
+    },
+    {
+      "classification": "current",
+      "exists": true,
+      "path": "SELFMOD.md",
+      "summary": "Guarded self-modification lifecycle and recovery contract."
+    },
+    {
+      "classification": "current",
+      "exists": true,
+      "path": "TRAINING.md",
+      "summary": "Attended training, evaluation, deployment, and rollback contract."
+    },
+    {
+      "classification": "current",
+      "exists": true,
+      "path": "CLIENT.md",
+      "summary": "Thin-client and remote API client contract."
+    },
+    {
+      "classification": "current",
+      "exists": true,
+      "path": "MOBILE_HOST_CONTROL.md",
+      "summary": "Mobile-to-host launcher and control contract."
+    }
+  ],
+  "historical": [
+    {
+      "classification": "superseded",
+      "exists": true,
+      "path": "docs/architecture/SPEC-5-End-State-Architecture.md"
+    },
+    {
+      "classification": "superseded",
+      "exists": true,
+      "path": "docs/architecture/SPEC-5-MIGRATION-RUNBOOK.md"
+    },
+    {
+      "classification": "superseded",
+      "exists": true,
+      "path": "docs/architecture/PROGRAM-STATUS.md"
+    }
+  ],
+  "schema": "sonder-focused-document-inventory-v1"
+}

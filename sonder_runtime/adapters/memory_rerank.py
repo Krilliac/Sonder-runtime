@@ -1,7 +1,7 @@
 """Embedding-backed adapters for pure memory ranking policy."""
 from __future__ import annotations
 
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 from sonder_runtime.domain.memory import rules
 
 

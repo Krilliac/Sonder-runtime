@@ -78,8 +78,8 @@ def test_user_facing_terminology_never_presents_runtime_as_model_weights():
         "cloud_train.sh",
         "command_registry.py",
         "endless_train.py",
-        "sonder_repl.py",
-        "sonder_serve.py",
+        "sonder_runtime/interfaces/repl/repl.py",
+        "sonder_runtime/interfaces/http/serve.py",
         "curriculum_run.py",
         "docs/superpowers/plans/2026-07-02-sonder-memory-loop.md",
     )
@@ -178,8 +178,8 @@ def test_canonical_entrypoints_are_tracked_and_present():
         "sonder_headless.py",
         "sonder_health.py",
         "sonder_launcher.py",
-        "sonder_repl.py",
-        "sonder_serve.py",
+        "sonder_runtime/interfaces/repl/repl.py",
+        "sonder_runtime/interfaces/http/serve.py",
     }
 
     assert entrypoints <= tracked

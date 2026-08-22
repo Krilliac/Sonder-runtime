@@ -61,7 +61,9 @@ MUTATING = {
 
 def discover_commands() -> list[str]:
     """Every command literal in sonder_serve._handle_slash."""
-    src = (ROOT / "sonder_serve.py").read_text(encoding="utf-8", errors="ignore")
+    src = (ROOT / "sonder_runtime/interfaces/http/serve.py").read_text(
+        encoding="utf-8", errors="ignore"
+    )
     start = src.index("def _handle_slash")
     end = src.index("def _handle_feedback")
     return sorted({m for m in re.findall(r'"(/[a-z0-9]+)"', src[start:end])})

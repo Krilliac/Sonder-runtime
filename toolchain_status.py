@@ -14,8 +14,9 @@ import subprocess
 import threading
 import time
 
-import environment_probe
 import sonder_logging
+from sonder_runtime.adapters import process_termination
+from sonder_runtime.platform import toolchain_policy
 
 
 TIMEOUT_SECONDS = 3
@@ -24,85 +25,23 @@ MAX_OUTPUT_CHARS = 2_000
 # Keep this intentionally small.  A tool must have a non-interactive,
 # read-only version switch before it can be probed.  Unknown tools remain
 # discoverable through environment_status but are not executable here.
-_VERSION_ARGUMENTS = {
-    "python": ("--version",),
-    "python3": ("--version",),
-    "node": ("--version",),
-    "npm": ("--version",),
-    "npx": ("--version",),
-    "cargo": ("--version",),
-    "rustc": ("--version",),
-    "go": ("version",),
-    "dotnet": ("--version",),
-    "cmake": ("--version",),
-    "ninja": ("--version",),
-    "gcc": ("--version",),
-    "g++": ("--version",),
-    "clang": ("--version",),
-    "clang++": ("--version",),
-    "git": ("--version",),
-    "gh": ("--version",),
-    "rg": ("--version",),
-    "curl": ("--version",),
-    "pip": ("--version",),
-    "uv": ("--version",),
-    "ruff": ("--version",),
-    "pytest": ("--version",),
-    "sccache": ("--version",),
-    "clcache": ("--version",),
-    "doxygen": ("--version",),
-}
-
-
 def _available_path(name: str, refresh: bool) -> str:
-    env = environment_probe.probe(refresh=refresh)
-    return (env.get("toolchains", {}).get(name)
-            or env.get("specialist_tools", {}).get(name)
-            or "")
+    return toolchain_policy.discovered_path(name, refresh=refresh)
 
 
 def _safe_output(text: str) -> str:
-    # Version commands should be tiny, but retain a hard presentation bound and
-    # redact any accidental credentials emitted by a local wrapper.
-    text = (text or "").strip()
-    text = sonder_logging.Redactor().redact(text)
-    if len(text) > MAX_OUTPUT_CHARS:
-        return text[:MAX_OUTPUT_CHARS] + "\n[output truncated]"
-    return text
+    """Compatibility delegate for packaged toolchain-output policy."""
+    return toolchain_policy.safe_output(text, max_chars=MAX_OUTPUT_CHARS)
 
 
 def _terminate_process_tree(proc) -> None:
-    """Best-effort teardown of the fixed probe and ordinary descendants."""
-    if proc.poll() is not None:
-        return
-    pid = getattr(proc, "pid", None)
-    if os.name == "nt" and pid:
-        # The PID originates from our own fixed-argv Popen call.  `/T` covers
-        # a wrapper's ordinary helper children, avoiding a timeout that only
-        # kills the parent while its spawned work continues.
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-                check=False,
-                shell=False,
-            )
-            return
-        except (OSError, subprocess.SubprocessError):
-            pass
-    elif pid:
-        try:
-            os.killpg(pid, signal.SIGKILL)
-            return
-        except (OSError, ProcessLookupError):
-            pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
+    """Compatibility delegate for the packaged process-teardown adapter."""
+    return process_termination.terminate_process_tree(
+        proc,
+        os_module=os,
+        signal_module=signal,
+        subprocess_module=subprocess,
+    )
 
 
 def _run_bounded(argv: list[str]) -> tuple[str, str]:
@@ -182,7 +121,8 @@ def _run_bounded(argv: list[str]) -> tuple[str, str]:
 def status(name: str, refresh: bool = False) -> dict[str, object]:
     """Run a fixed non-interactive version probe for one discovered tool."""
     tool = (name or "").strip().lower()
-    if tool not in _VERSION_ARGUMENTS:
+    arguments = toolchain_policy.allowed_arguments(tool)
+    if arguments is None:
         return {
             "ok": False,
             "tool": tool,
@@ -192,7 +132,7 @@ def status(name: str, refresh: bool = False) -> dict[str, object]:
     if not path:
         return {"ok": False, "tool": tool, "error": "tool is not available on this host"}
     try:
-        outcome, output = _run_bounded([path, *_VERSION_ARGUMENTS[tool]])
+        outcome, output = _run_bounded([path, *arguments])
     except subprocess.TimeoutExpired:
         return {"ok": False, "tool": tool, "error": "status probe timed out"}
     except OSError:

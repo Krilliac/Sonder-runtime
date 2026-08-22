@@ -38,3 +38,10 @@ examples/codegen-arena-shooter/FpsGame_Skeleton/
 # made repo-wide source scans report the copy's files as offenders.
 .claude/
 .pytest_cache/
+# Codex/pytest bounded-run output directories; keep repository status usable
+# when many isolated suites run concurrently.
+/.pytest-*/
+/.pytest-*.txt
+/pytest-cache-*/
+/probe-*/
+/tmp/pytest-cache-*/

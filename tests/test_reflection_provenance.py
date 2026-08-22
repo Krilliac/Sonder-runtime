@@ -26,7 +26,7 @@ pruner covers (>= 0.93) was swept, and the survivors sit exactly in the
 0.92-0.93 band that ONLY the inline gate protects. All 13 are
 interaction-distilled; 0 are seeds.
 """
-import embeddings as e
+import sonder_runtime.adapters.embeddings as e
 import memory_store as ms
 import reflection
 import pytest
@@ -216,7 +216,7 @@ def test_trusted_provenance_has_one_home(monkeypatch):
     Hermetic on purpose: provenance() is stubbed so this tests the trust
     routing, not whether an embedding server happens to be reachable.
     """
-    import embeddings as emb
+    import sonder_runtime.adapters.embeddings as emb
     import inspect
 
     bound = {"model": "m", "revision": "r", "dimension": 3, "provider": "ollama"}
@@ -242,7 +242,7 @@ def test_no_module_reintroduces_the_identity_check():
     """Five copies survived the first fix. This fails if a sixth appears."""
     import inspect
 
-    for module in ("recall", "retriever", "seed_merge", "tune_min_sim",
+    for module in ("sonder_runtime.adapters.recall", "retriever", "seed_merge", "tune_min_sim",
                    "pull_community", "reflection"):
         src = inspect.getsource(__import__(module))
         offending = [

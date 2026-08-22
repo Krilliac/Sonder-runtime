@@ -34,6 +34,7 @@ class _SystemScreenState extends State<SystemScreen>
   bool _autopilotAdaptive = true;
   SystemInfo? _info;
   UpdateStatus? _updateStatus;
+  ExtensionRegistryStatus? _extensionRegistry;
   LocalInstallInfo? _localInfo;
   LauncherStatus? _launcherInfo;
   LauncherOperation? _launcherOperation;
@@ -260,10 +261,17 @@ class _SystemScreenState extends State<SystemScreen>
         // Update status is best-effort: a non-admin key or older build
         // simply hides the section.
       }
+      ExtensionRegistryStatus? extensionRegistry;
+      try {
+        extensionRegistry = await _api.fetchExtensionRegistry();
+      } catch (_) {
+        // Optional admin projection: older/non-admin servers hide it.
+      }
       if (!mounted || !_appActive) return;
       setState(() {
         if (info != null) _info = info;
         if (updateStatus != null) _updateStatus = updateStatus;
+        if (extensionRegistry != null) _extensionRegistry = extensionRegistry;
         _localInfo = localInfo;
         _launcherError = launcherError;
         if (!preserveMessage && serverError.isNotEmpty) {
@@ -675,6 +683,10 @@ class _SystemScreenState extends State<SystemScreen>
           const SizedBox(height: 12),
           if (_updateStatus != null) ...[
             _UpdateSection(status: _updateStatus!),
+            const SizedBox(height: 12),
+          ],
+          if (_extensionRegistry != null) ...[
+            _ExtensionRegistrySection(status: _extensionRegistry!),
             const SizedBox(height: 12),
           ],
           if (localInfo != null) ...[
@@ -2981,6 +2993,40 @@ class _OutputText extends StatelessWidget {
             fontFamily: 'monospace',
             height: 1.3,
           ),
+    );
+  }
+}
+
+class _ExtensionRegistrySection extends StatelessWidget {
+  final ExtensionRegistryStatus status;
+
+  const _ExtensionRegistrySection({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    return _Section(
+      title: 'Extensions',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _StatusRow(
+            label: 'Persistence',
+            value: status.persistence,
+            ok: status.persistence == 'durable',
+          ),
+          if (status.records.isEmpty)
+            const Text('No extension installations are registered.')
+          else
+            for (final record in status.records)
+              _StatusRow(
+                label: record.extensionId,
+                value: '${record.scope} v${record.version} — '
+                    '${record.healthState}${record.enabled ? ' — enabled' : ' — disabled'}'
+                    '${record.memoryLimitBytes == null ? '' : ' — memory ${record.memoryLimitBytes} B'}',
+                ok: record.enabled && record.healthState == 'healthy',
+              ),
+        ],
+      ),
     );
   }
 }

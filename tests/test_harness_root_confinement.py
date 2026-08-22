@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import pytest
 
-import file_ops
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import harness_tools
 import server
 

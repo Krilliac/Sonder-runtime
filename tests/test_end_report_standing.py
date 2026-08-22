@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import pytest
 
-import activity_tracker
+import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
 import calibration
 import server
 

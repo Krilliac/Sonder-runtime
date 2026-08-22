@@ -1,6 +1,6 @@
-"""SPEC-3: LegacyAutomationRepository faithfully wraps autopilot_store.
+"""SPEC-3: AutopilotRepository faithfully wraps autopilot_store.
 
-The strangler adapter must delegate to the root store without changing its
+The persistence adapter must delegate to the packaged store without changing
 observable behavior, must hold no state (so it is safe to build eagerly in the
 composition root), and must be the run ledger the assembled Application exposes.
 """
@@ -10,8 +10,8 @@ import os
 
 import pytest
 
-import autopilot_store
-from sonder_runtime.adapters.strangler_services import LegacyAutomationRepository
+import sonder_runtime.adapters.persistence.autopilot_store as autopilot_store
+from sonder_runtime.adapters.persistence.autopilot_repository import AutopilotRepository
 from sonder_runtime.bootstrap import app as bootstrap_app
 
 
@@ -33,7 +33,7 @@ def _durable_validation_plan():
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(tmp_path / "autopilot.db"))
     autopilot_store.reset_schema_cache_for_tests()
-    yield LegacyAutomationRepository()
+    yield AutopilotRepository()
     autopilot_store.reset_schema_cache_for_tests()
 
 
@@ -43,7 +43,7 @@ def test_constructing_the_adapter_opens_no_database(tmp_path, monkeypatch):
     db = tmp_path / "autopilot.db"
     monkeypatch.setenv("SONDER_AUTOPILOT_DB", str(db))
     autopilot_store.reset_schema_cache_for_tests()
-    LegacyAutomationRepository()
+    AutopilotRepository()
     assert not db.exists()
 
 
@@ -121,7 +121,7 @@ def test_application_exposes_the_automation_repository(tmp_path, monkeypatch):
     autopilot_store.reset_schema_cache_for_tests()
     bootstrap_app.reset_for_tests()
     app = bootstrap_app.build_application()
-    assert isinstance(app.automation, LegacyAutomationRepository)
+    assert isinstance(app.automation, AutopilotRepository)
     run = app.automation.create_run("through the graph")
     assert app.automation.get_run(run["id"])["objective"] == "through the graph"
     bootstrap_app.reset_for_tests()

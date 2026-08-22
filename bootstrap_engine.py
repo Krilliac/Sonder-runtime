@@ -17,8 +17,8 @@ from pathlib import Path
 
 import engine_bundle
 import adaptive_training
-import ollama_endpoint
-import system_profile
+from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.platform import system_profile
 
 
 MODEL_SMALL = "qwen2.5-coder:1.5b"

@@ -1,6 +1,6 @@
-import embeddings
+import sonder_runtime.adapters.embeddings as embeddings
 import memory_store as ms
-import recall
+from sonder_runtime.adapters import recall
 import sqlite3
 import time
 import pytest

@@ -5,6 +5,28 @@ import master_orchestrator
 import server
 
 
+def test_agent_decision_paths_do_not_call_root_model_error_wrapper():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    names = {"_agent_generate_decision", "_agent_turn"}
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in names
+    }
+    assert set(functions) == names
+    for function in functions.values():
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_format_model_call_error"
+            for node in ast.walk(function)
+        )
+
+
 def test_repository_agent_tool_help_is_task_anchored_not_language_biased():
     """Small local models copy concrete schema examples as if they were tasks.
 

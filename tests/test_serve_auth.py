@@ -8,8 +8,8 @@ import threading
 
 import pytest
 
-import sonder_serve as ts
-import sonder_config
+import sonder_runtime.interfaces.http.serve as ts
+import sonder_runtime.platform.config as runtime_config
 import sonder_health
 
 
@@ -2248,7 +2248,7 @@ def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):
     # This test exercises a provider-side 429.  Enable the separate operator
     # cloud consent gate so early selector preflight reaches the mocked model
     # transport rather than correctly denying cloud use first.
-    monkeypatch.setattr(ts.server, "cloud_allowed", lambda: True)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
 
     class FakeConnection:
         def close(self):
@@ -2886,7 +2886,7 @@ def test_bind_gate_tracks_the_named_minimum_key_length(monkeypatch):
     sonder_config.validate and left this gate -- the one that actually decides
     whether a non-loopback listener opens -- at the old minimum.
     """
-    monkeypatch.setattr(sonder_config, "MIN_API_KEY_LENGTH", 40)
+    monkeypatch.setattr(runtime_config, "MIN_API_KEY_LENGTH", 40)
 
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(
