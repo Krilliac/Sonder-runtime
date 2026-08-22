@@ -336,6 +336,42 @@ def test_nvidia_inventory_keeps_identical_physical_gpus():
     assert len(sonder_hardware._dedupe_accelerators(rows)) == 2
 
 
+def test_profile_ties_live_free_vram_to_primary_gpu():
+    accelerators = [
+        {
+            "device_id": "GPU-big",
+            "name": "24 GB GPU",
+            "vendor": "nvidia",
+            "memory_gb": 24.0,
+            "free_memory_gb": 1.0,
+            "integrated": False,
+            "presence_verified": True,
+        },
+        {
+            "device_id": "GPU-small",
+            "name": "8 GB GPU",
+            "vendor": "nvidia",
+            "memory_gb": 8.0,
+            "free_memory_gb": 8.0,
+            "integrated": False,
+            "presence_verified": True,
+        },
+    ]
+
+    profile = sonder_hardware.detect_profile(
+        probes={
+            "cpu_count": lambda: 8,
+            "total_ram_gb": lambda: 64.0,
+            "accelerators": lambda: accelerators,
+            "platform": lambda: "Linux",
+        }
+    )
+
+    assert profile["gpu_name"] == "24 GB GPU"
+    assert profile["vram_gb"] == 24.0
+    assert profile["vram_free_gb"] == 1.0
+
+
 def test_profile_cache_refreshes_only_when_requested(monkeypatch):
     calls = []
     fixture = {
@@ -354,6 +390,28 @@ def test_profile_cache_refreshes_only_when_requested(monkeypatch):
     sonder_hardware.get_profile(workload="coding")
     sonder_hardware.get_profile(refresh=True)
     assert len(calls) == 2
+
+
+def test_unknown_model_alias_does_not_inherit_default_30b_profile(monkeypatch):
+    fixture = {
+        "cpu_count": 8,
+        "total_ram_gb": 16.0,
+        "gpu_present": False,
+        "vram_gb": None,
+        "platform": "Linux",
+        "accelerators": [],
+        "accelerator_count": 0,
+        "runtime_readiness": "not-probed",
+    }
+    monkeypatch.setattr(sonder_hardware, "_PROFILE_CACHE", None)
+    monkeypatch.setattr(sonder_hardware, "detect_profile", lambda: dict(fixture))
+
+    report = sonder_hardware.get_profile(model="sonder:latest")
+    recommendation = report["recommendation"]
+
+    assert recommendation["model_profile"] is None
+    assert recommendation["model_execution"] is None
+    assert "model profile:" not in sonder_hardware.render(report["hardware"], recommendation)
 
 
 # --- recommend: across the hardware spectrum ----------------------------------

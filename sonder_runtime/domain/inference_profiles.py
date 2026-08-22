@@ -262,7 +262,13 @@ def plan_model_execution(
             profile.context_size, profile.required_gb, available, True,
             fallback_model,
         )
-    if available is not None and available > 0 and capabilities.system_ram_total_gb:
+    reported_ram = capabilities.system_ram_total_gb or 0.0
+    if (
+        available is not None
+        and available > 0
+        and reported_ram > 0
+        and available + reported_ram >= profile.required_gb
+    ):
         return ModelExecutionPlan(
             profile.model, profile.backend, "gpu+ram-hybrid", "auto",
             profile.context_size, profile.required_gb, available, False,
@@ -271,11 +277,20 @@ def plan_model_execution(
              "GPU offload is advisory until the selected backend reports readiness" if not backend_ready else
              "GPU offload remains advisory because the model is not fully resident"),
         )
+    warnings = ["no measured safe GPU execution plan is available"]
+    if available is not None and reported_ram > 0 and (
+        available + reported_ram < profile.required_gb
+    ):
+        warnings.insert(
+            0,
+            "measured free VRAM plus reported system RAM is below the model envelope",
+        )
     return ModelExecutionPlan(
         profile.model, "cpu", "cpu-fallback", 0, profile.context_size,
         profile.required_gb, available, False, fallback_model,
-        ("no measured safe GPU execution plan is available",
-         "use the configured smaller local fallback or explicitly benchmark CPU execution"),
+        tuple(warnings) + (
+            "use the configured smaller local fallback or explicitly benchmark CPU execution",
+        ),
     )
 
 

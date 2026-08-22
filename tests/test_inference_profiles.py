@@ -84,6 +84,25 @@ def test_gpu_resident_requires_both_fit_and_measured_backend_readiness():
     assert plan_model_execution(capabilities, profile).mode == "gpu-resident"
 
 
+def test_hybrid_requires_combined_reported_memory_to_cover_model_envelope():
+    capabilities = build_hardware_capabilities(
+        {
+            "gpu_vendor": "nvidia",
+            "vram_gb": 16.0,
+            "vram_free_gb": 10.0,
+            "vram_availability_live": True,
+            "cuda_available": True,
+            "total_ram_gb": 1.0,
+        },
+        backend_readiness={"ollama": True},
+    )
+
+    plan = plan_model_execution(capabilities, default_30b_profile())
+
+    assert plan.mode == "cpu-fallback"
+    assert any("below the model envelope" in warning for warning in plan.warnings)
+
+
 def test_unknown_quantization_and_invalid_parameter_counts_fail_closed():
     with pytest.raises(ValueError):
         quantized_model_profile(quantization="made-up")
