@@ -7,6 +7,7 @@ runtime is an explicit composition dependency; this interface never discovers
 it at import time.
 """
 import json
+import getpass
 import inspect
 import os
 import re
@@ -129,15 +130,27 @@ _HISTORY_SECRET_ASSIGNMENT = re.compile(
 
 
 class _Ansi:
-    """Small dependency-free palette; automatically disappears when piped."""
+    """Small dependency-free palette; automatically disappears when piped.
+
+    Truecolor is opt-in from the terminal's ``COLORTERM`` declaration. The
+    fallback uses a 256-color surface so a terminal that only advertises ANSI
+    colors does not receive unsupported 24-bit escape sequences.
+    """
 
     enabled = bool(getattr(sys.stdout, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
+    truecolor = enabled and os.environ.get("COLORTERM", "").lower() in {
+        "truecolor", "24bit",
+    }
     reset = "\x1b[0m"
     teal = "\x1b[38;5;80m"
     cyan = "\x1b[38;5;117m"
     # Keep the existing bright-cyan text, but give the composer itself a
     # quieter, darker-blue surface that separates input from the transcript.
-    composer_surface = "\x1b[48;2;17;38;54m\x1b[38;5;117m"
+    composer_surface = (
+        "\x1b[48;2;17;38;54m\x1b[38;5;117m"
+        if truecolor
+        else "\x1b[48;5;23m\x1b[38;5;117m"
+    )
     muted = "\x1b[38;5;245m"
     green = "\x1b[38;5;114m"
     amber = "\x1b[38;5;221m"
@@ -2211,15 +2224,24 @@ def main():
                     print(server.admin_register(parts[0], parts[1]))
             elif cmd == "/login":
                 parts = arg.split(None, 1)
-                if len(parts) != 2:
-                    print("usage: /login <username> <password>")
+                if not parts:
+                    # Do not put a password in the line editor's process-local
+                    # history. The explicit-argument form remains available
+                    # for scripts and backwards compatibility, but an
+                    # interactive login is masked by default.
+                    username = _read_input("username: ").strip()
+                    password = getpass.getpass("password: ")
+                elif len(parts) == 2:
+                    username, password = parts
                 else:
-                    out = server.admin_login(parts[0], parts[1])
-                    marker = "token: "
-                    from ...domain.cloud_access import has_legacy_error_prefix
-                    if marker in out and not has_legacy_error_prefix(out):
-                        CURRENT_TOKEN = out.split(marker, 1)[1].strip().splitlines()[0]
-                    print(out)
+                    print("usage: /login [<username> <password>]")
+                    continue
+                out = server.admin_login(username, password)
+                marker = "token: "
+                from ...domain.cloud_access import has_legacy_error_prefix
+                if marker in out and not has_legacy_error_prefix(out):
+                    CURRENT_TOKEN = out.split(marker, 1)[1].strip().splitlines()[0]
+                print(out)
             elif cmd == "/whoami":
                 print(server.admin_whoami(CURRENT_TOKEN))
             elif cmd == "/admin":

@@ -1016,6 +1016,34 @@ def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
     assert offered_history == [[], [], ["hello"]]
 
 
+def test_interactive_login_reads_password_outside_the_composer(monkeypatch):
+    lines = iter(("/login", "nate", "hello", "/exit"))
+    login = []
+
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(
+        sonder_repl.getpass,
+        "getpass",
+        lambda _prompt: "correct-horse-battery-staple",
+    )
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sonder_repl.server,
+        "admin_login",
+        lambda username, password: login.append((username, password)) or "logged in",
+    )
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: "answer")
+
+    sonder_repl.main()
+
+    assert login == [("nate", "correct-horse-battery-staple")]
+
+
 def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(monkeypatch):
     lines = iter(("/model CODE", "/model Gemma3:12B", "hello", "/exit"))
     seen = []
