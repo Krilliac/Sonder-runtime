@@ -1226,7 +1226,7 @@ def _auth_account(auth_header):
     token = _bearer_token(auth_header)
     if not token:
         return None
-    return server._admin_account_from_token(token)
+    return _legacy_runtime()._admin_account_from_token(token)
 
 
 def _effective_auth_mode():
@@ -4307,6 +4307,7 @@ class Handler(BaseHTTPRequestHandler):
                 or not parts[0] or len(parts[0]) > 80):
             return False
         run_id, action = parts
+        runtime = _legacy_runtime()
         if not context["authorized"]:
             self._send_auth_error()
             return True
@@ -4341,7 +4342,7 @@ class Handler(BaseHTTPRequestHandler):
             # deployments it must consume the same per-account admission
             # budget as chat completions, otherwise callers can bypass the
             # inference rate limit by repeatedly synthesizing one receipt.
-            conn = server._open_db()
+            conn = runtime._open_db()
             try:
                 ok, message = admin_auth.rate_limit(conn, context.get("account"))
             finally:
@@ -4355,10 +4356,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = replay(
                     "synthesize\0%s" % synth_model,
-                    lambda: server._fanout_synthesize_run(_run, synth_model),
+                    lambda: runtime._fanout_synthesize_run(_run, synth_model),
                 )
                 self._send_json_payload(payload)
-            except server.ModelCallError as exc:
+            except runtime.ModelCallError as exc:
                 status = exc.status or (
                     400 if exc.kind == "configuration" else
                     504 if exc.kind == "timeout" else 502
@@ -4379,7 +4380,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return True
         if action == "cancel":
-            replay("cancel", lambda: server.fanout_store.request_cancel(run_id))
+            replay("cancel", lambda: runtime.fanout_store.request_cancel(run_id))
         else:
             for name in ("include_failed", "retry_unknown"):
                 if name in req and not isinstance(req[name], bool):
@@ -4389,7 +4390,7 @@ class Handler(BaseHTTPRequestHandler):
             retry_unknown = req.get("retry_unknown") is True
 
             def resume():
-                resumed = server.fanout_store.resume_run(
+                resumed = runtime.fanout_store.resume_run(
                     run_id,
                     include_failed=include_failed,
                     retry_unknown=retry_unknown,
@@ -4399,7 +4400,7 @@ class Handler(BaseHTTPRequestHandler):
                 # A resume is an explicit replay instruction. _execute
                 # preserves the stored snapshot and never retries unknown rows
                 # unless this request included retry_unknown=true.
-                server._execute_fanout_run(run_id)
+                runtime._execute_fanout_run(run_id)
                 return True
 
             resumed = replay(
@@ -4414,7 +4415,7 @@ class Handler(BaseHTTPRequestHandler):
             if not resumed:
                 self._send_json_payload({"error": {"message": "fanout run is not resumable with the selected retry options", "type": "invalid_request"}}, status=400)
                 return True
-        receipt = server._fanout_receipt(run_id)
+        receipt = runtime._fanout_receipt(run_id)
         self._send_json_payload(receipt or {"error": {"message": "fanout receipt was unavailable", "type": "not_found"}}, status=200 if receipt else 404)
         return True
 

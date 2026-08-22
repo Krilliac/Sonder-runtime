@@ -342,6 +342,7 @@ def check() -> list[str]:
         # still authoritative for dependency and packaging checks below.
         retired_paths = (
             REPO_ROOT / str(retired),
+            REPO_ROOT / str(retired).replace("/", "\\"),
             _repo_relative_path(REPO_ROOT, retired),
         )
         present_path = next((path for path in retired_paths if path.is_file()), None)
