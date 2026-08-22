@@ -94,13 +94,22 @@ def _value(param: dict[str, Any], root: str, fixture_root: str | None = None,
             return "256"
         if name in {"timeout", "delay_seconds"}:
             return "1"
+        if name in {"max_steps", "max_cycles", "max_tasks", "max_replans",
+                    "max_failures", "max_iterations", "variants",
+                    "variants_per_language", "max_workers", "attempts",
+                    "repair_rounds", "num_predict"}:
+            return "1" if name != "num_predict" else "16"
         return "1"
     if name == "paths_json":
         return json.dumps([str(Path(fixture_root) / "probe.txt"),])
     if name in {"projection_json", "filters_json"}:
         return "[]" if name == "projection_json" else "{}"
     if name in _JSON_NAMES or name.endswith("_json"):
-        return "{}" if name == "payload" else "[]"
+        if name in {"files_json", "fields_json", "requirements_json"}:
+            if name == "requirements_json":
+                return "{}"
+            return "{}" if name == "files_json" else "[\"id\"]"
+        return "{}" if name in {"payload", "schema"} else "[]"
     if name in _PATH_NAMES or name.endswith("_path") or name in {
         "dest", "destination", "input_path", "output_path",
     }:
@@ -117,13 +126,35 @@ def _value(param: dict[str, Any], root: str, fixture_root: str | None = None,
             return "SELECT 1"
         return "slash-audit"
     if name == "sql":
-        return "SELECT 1"
+        return "" if command_name == "/data_query" else "SELECT 1"
+    if name == "framework":
+        return "pytest"
+    if name == "language":
+        return "python"
+    if name == "theme":
+        return "arcane"
+    if name == "dimension":
+        return "2d"
+    if name == "kind":
+        return "data" if command_name == "/artifact_generate" else "cpp-cmake"
+    if name == "policy":
+        return "workspace"
+    if name == "tool":
+        return "auto"
+    if name == "system":
+        return ""
+    if name in {"model_override", "synth_model"}:
+        return "sonder"
+    if name == "schema":
+        return "{}"
+    if name == "mode":
+        return "preview" if command_name in {"/sqlite_mutate", "/json_patch"} else "ask"
     if name == "pattern":
         return "*"
     if name == "tool_name":
         return "file_read"
     if name in {"model", "tier"}:
-        return "sonder" if name == "model" else "code"
+        return "sonder" if name == "model" else "fast"
     if name == "mode":
         return "ask"
     if name == "languages":
@@ -223,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("port", nargs="?", type=int, default=11435)
     parser.add_argument("--json", dest="output")
     parser.add_argument("--include-stateful", action="store_true")
+    parser.add_argument("--validation-only", action="store_true",
+                        help="probe non-safe dispatch without invoking handlers")
     parser.add_argument("--root", default="")
     args = parser.parse_args(argv)
     base = "http://127.0.0.1:%d" % args.port
@@ -265,9 +298,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for index, row in enumerate(catalog, 1):
             risk = str(row.get("risk") or "unknown")
-            if not args.include_stateful and risk != "safe":
+            if not args.include_stateful and not args.validation_only and risk != "safe":
                 continue
-            line = invocation(row, root, args.include_stateful, fixture_root)
+            if args.validation_only and risk != "safe":
+                line = ("/help " + str(row["name"])) if row.get("native") else (
+                    str(row["name"]) + " invalid_parameter=slash-audit"
+                )
+            else:
+                line = invocation(row, root, args.include_stateful, fixture_root)
             status, response = _request(
                 base, "POST", "/v1/chat/completions",
                 {"model": "sonder", "stream": False,
