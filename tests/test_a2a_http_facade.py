@@ -22,3 +22,22 @@ def test_a2a_card_route_does_not_match_other_paths():
     facade = A2AAgentCardFacade()
     assert facade.route("/.well-known/agent-card") is None
     assert facade.route("/v1/admin/control-plane") is None
+
+
+def test_loopback_a2a_discovery_uses_configured_listener_by_default(monkeypatch):
+    from sonder_runtime.interfaces.http import serve
+
+    monkeypatch.setattr(serve, "HOST", "127.0.0.1")
+    monkeypatch.setattr(serve, "CONFIGURED_PORT", 11435)
+    monkeypatch.delenv("SONDER_A2A_BASE_URL", raising=False)
+
+    assert serve._a2a_discovery_base_url() == "http://127.0.0.1:11435"
+
+
+def test_non_loopback_a2a_discovery_stays_explicit(monkeypatch):
+    from sonder_runtime.interfaces.http import serve
+
+    monkeypatch.setattr(serve, "HOST", "0.0.0.0")
+    monkeypatch.delenv("SONDER_A2A_BASE_URL", raising=False)
+
+    assert serve._a2a_discovery_base_url() == ""

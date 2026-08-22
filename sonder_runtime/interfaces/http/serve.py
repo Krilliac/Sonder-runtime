@@ -1402,6 +1402,21 @@ def _is_loopback_host(host):
         return False
 
 
+def _a2a_discovery_base_url():
+    """Resolve the safe local A2A URL used by agent-card discovery.
+
+    A workstation listener already has an unambiguous loopback address. Keep
+    proxy/non-loopback deployments explicit so discovery never invents an
+    externally reachable scheme or authority.
+    """
+    configured = os.environ.get("SONDER_A2A_BASE_URL", "").strip()
+    if configured:
+        return configured
+    if _is_loopback_host(HOST):
+        return "http://%s:%d" % (HOST, CONFIGURED_PORT)
+    return ""
+
+
 def _http_server_location_lookup_allowed(context):
     """Allow server-IP location lookup only for genuinely local-open use."""
     return (
@@ -4026,7 +4041,7 @@ class Handler(BaseHTTPRequestHandler):
                     status=403,
                 )
                 return
-            base_url = os.environ.get("SONDER_A2A_BASE_URL", "").strip()
+            base_url = _a2a_discovery_base_url()
             if not base_url:
                 self._send_json_payload(
                     {"error": "a2a_discovery_unavailable"}, status=503
