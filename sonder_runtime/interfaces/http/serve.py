@@ -241,7 +241,9 @@ def _local_server_log_tail():
             raw = stream.read(_LOCAL_LOG_TAIL_BYTES)
     except OSError:
         return "(server log is not available yet)"
-    text = raw.decode("utf-8", errors="replace")
+    # Keep the diagnostic projection stable across Git/OS newline modes;
+    # carriage returns are transport framing, not control characters to mask.
+    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
     if size > len(raw):
         text = "(showing the latest %d KiB)\n%s" % (_LOCAL_LOG_TAIL_BYTES // 1024, text)
     # This page is intentionally read-only and loopback-only, but its content
