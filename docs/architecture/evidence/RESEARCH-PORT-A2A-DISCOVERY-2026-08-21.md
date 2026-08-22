@@ -61,8 +61,9 @@ job/agent services. The default handler exposes bounded `GetTask`,
 application ports. When the composed application also exposes `ChatService`,
 `SendMessage` admits only bounded text-only user messages through a
 deterministic idempotent durable job, an explicit local-owner HTTP context,
-and the existing typed chat service; multimodal, remote, and background
-delegation are not claimed. Route contract evidence is in
+and the existing typed chat service; completed text responses now carry a
+bounded MIME type and SHA-256 artifact receipt in the A2A task projection.
+Multimodal, remote, and background delegation are not claimed. Route contract evidence is in
 `tests/test_a2a_http_jsonrpc.py`; cross-implementation remote interoperability
 remains outside this slice.
 
