@@ -746,9 +746,9 @@
     },
     {
       "checked": false,
-      "claim": "Bounded child-process extension isolation is composed for live experiments and retains startup/call deadlines, output limits, restart budgets, crash budgets, and no-replay behavior.",
+      "claim": "The live bootstrap host factory preserves a typed extension memory budget and environment through the application experiment boundary before native host startup.",
       "requirement_id": "EXT-003",
-      "revision": 3,
+      "revision": 4,
       "status": "implemented_unverified"
     },
     {
@@ -1566,7 +1566,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "b38eb36380990d7d8e51d4808e51ff87ad0a870e4020cd2a336f3acd1a3d8c97",
+    "ledger_sha256": "c594e0346119d56cf3607762236b9fa33827a40c6aa70e13d81008f56a5fd129",
     "spec_sha256": "7bf3ddbb6698370481dac9658f7e20c4f56587a794afe04e5c636973ef991a6d"
   }
 }
