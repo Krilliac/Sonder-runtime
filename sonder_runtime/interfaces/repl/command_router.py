@@ -87,6 +87,20 @@ def _with_arg(slash):
     return build
 
 
+def _web_search_action(match):
+    """Keep a follow-on instruction in the normal agent path."""
+    arg = (match.group("arg") or "").strip()
+    if re.search(
+        r"\b(?:and|then)\s+(?:summarize|describe|explain|open|fetch|run|"
+        r"show|list|check|verify|validate|download|put|import|save|write|"
+        r"copy|move|tell)\b",
+        arg,
+        re.I,
+    ):
+        return None
+    return ("/web_search %s" % arg).strip() if arg else None
+
+
 def _rule(pattern, action):
     return (re.compile(pattern, re.I), action)
 
@@ -97,6 +111,8 @@ _RULES = [
     # --- lifecycle / session ---
     _rule(r"^(?:new session|start over|reset(?: the)? session|fresh session|"
           r"clear(?: the)? session|new thread)\b", _fixed("/new")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?(?:past|recent|sonder)\s+"
+          r"(?:sonder\s+)?sessions\s*[?!.]*$", _fixed("/sonder_sessions")),
     _rule(r"^(?:list|show|my)\s+sessions\b", _fixed("/sessions")),
     _rule(r"^resume(?:\s+session)?\s+(?P<arg>.+)$", _with_arg("/resume")),
     _rule(r"^(?:switch(?:\s+to)?|set|use|change(?:\s+to)?)\s+(?:the\s+)?project"
@@ -127,6 +143,16 @@ _RULES = [
     # --- status / info ---
     _rule(r"^(?:show\s+(?:me\s+)?(?:your\s+)?|what\s+are\s+(?:your\s+)?|runtime\s+|"
           r"usage\s+)?stats\b", _fixed("/stats")),
+    _rule(r"^(?:suggest|recommend)\s+(?:the\s+)?(?:best\s+)?tier"
+          r"(?:\s+for\s+.+)?\s*[?!.]*$", _fixed("/route")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?repo(?:sitory)?\s+log\s*[?!.]*$",
+          _fixed("/repo_log")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?(?:task|todo)\s+list\s*[?!.]*$",
+          _fixed("/task_list")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?context\s+size\s*[?!.]*$",
+          _fixed("/contextsize")),
+    _rule(r"^(?:show|list)\s+(?:the\s+)?tool\s+status\s*[?!.]*$",
+          _fixed("/toolstatus")),
     _rule(r"^(?:show\s+)?context\s+health\b|^how'?s\s+the\s+context\b|"
           r"^context\s+usage\b", _fixed("/context")),
     _rule(r"^(?:show\s+)?(?:context\s+)?compaction(?:\s+plan)?\b|"
@@ -241,6 +267,9 @@ _RULES = [
     _rule(r"^file\s+policy\b", _fixed("/filepolicy")),
 
     # --- file operations (require the word "file" or a path with an extension) ---
+    _rule(r"^(?:ground|validate)\s+(?:the\s+)?artifact\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/artifact_ground")),
+    _rule(r"^search\s+(?:the\s+)?files?\s*[?!.]*$", _fixed("/search")),
     _rule(r"^(?:find|list|search)\s+files?\b(?:\s+(?:matching|named|like)?\s*(?P<arg>.+))?",
           lambda m: ("/files %s" % (m.group("arg") or "")).strip()),
     _rule(r"^(?:read|open|show\s+me)\s+(?:the\s+)?file\s+(?P<arg>\S+)", _with_arg("/read")),
@@ -337,6 +366,40 @@ _RULES = [
           _fixed("/tool_manifest")),
     _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?tools\s*[?!.]*$",
           _fixed("/tool_manifest")),
+
+    # Read-only tools with a required path/query argument.  These are exact
+    # whole-turn forms so a larger request still belongs to the normal agent
+    # path.  Keep the captured value to one contiguous token: it preserves
+    # guarded path prefixes while avoiding a free-form prompt becoming a tool
+    # argument by accident.
+    _rule(r"^(?:inspect|check|show)\s+(?:the\s+)?image\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/image_inspect")),
+    _rule(r"^(?:inspect|preview|show)\s+(?:the\s+)?data\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/data_inspect")),
+    _rule(r"^(?:inspect|list|show)\s+(?:the\s+)?archive\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/archive_list")),
+    _rule(r"^(?:inspect|check|show)\s+(?:the\s+)?log\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/log_inspect")),
+    _rule(r"^(?:show|get|check)\s+(?:the\s+)?file\s+(?:digest|hash)\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/file_digest")),
+    _rule(r"^(?:show|get|check)\s+(?:the\s+)?directory\s+(?:digest|hash)\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/directory_digest")),
+    _rule(r"^(?:discover|find|list)\s+(?:the\s+)?tests\s+(?:in|under|at)\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/test_discover")),
+    _rule(r"^(?:search|find)\s+(?:the\s+)?web\s+(?:for\s+)?(?P<arg>.+?)\s*[?!.]*$",
+          _web_search_action),
+    _rule(r"^(?:fetch|open|read)\s+(?:the\s+)?url\s+(?P<arg>\S+)\s*[?!.]*$",
+          _with_arg("/web_fetch")),
+    _rule(r"^(?:show|inspect|explain)\s+(?:the\s+)?policy\s+(?:for\s+)?(?P<arg>[A-Za-z][A-Za-z0-9_.:-]{0,127})\s*[?!.]*$",
+          _with_arg("/policy_explain")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?task\s+ledger\s+(?P<arg>[A-Za-z0-9_-]+)\s*[?!.]*$",
+          _with_arg("/task_ledger")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?task\s+(?P<arg>(?!progress\b|list\b|ledger\b|plan\b|status\b)[A-Za-z0-9_-]+)\s*[?!.]*$",
+          _with_arg("/task_show")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?checklist\s+(?P<arg>[A-Za-z0-9_-]+)\s*[?!.]*$",
+          _with_arg("/checklist_show")),
+    _rule(r"^(?:show|inspect)\s+(?:the\s+)?evaluation\s+history\s*[?!.]*$",
+          _fixed("/evaluation_history_status")),
 
     # The local-model report, not the model *switch*: "/model <tier>" keeps
     # its own rules above and stays the way to change anything.
@@ -454,13 +517,24 @@ _MAX_DISTINCTIVE_DF = 3
 
 _RISKY = frozenset({"mutation", "dangerous"})
 
+# A one-word command name is weaker evidence than a compound name.  Permit it
+# generically only when the catalog summary says that the command reports or
+# inspects state.  This reaches useful native forms such as "show the agents"
+# without turning "show the exit" or "show the strict" into lifecycle actions.
+_SINGLE_WORD_READ_MARKERS = frozenset("""
+audit check describe display find ground health inspect list measure preview
+read report review scan search show status summarize forecast
+""".split())
+
+_ARG_FILLERS = frozenset("for in at on named called path file".split())
+
 # Verbs that ask to be shown something. Naming a command is normally enough to
 # reach it even when it mutates, but a read verb contradicts that: "list the
 # git branches" names /git_branch, which CREATES one. When the opening verb
 # asks to look and the command would change something, the turn is asking for
 # a different thing than it named, so route nothing.
 _READ_VERBS = frozenset("""
-show display print tell list ls view read open
+show display print tell list ls view read open get fetch pull
 inspect review audit check count measure status
 compare diff describe
 """.split())
@@ -612,6 +686,57 @@ def _score(entry, present, content_set):
     return None
 
 
+def _single_word_readable(command):
+    """Whether a one-word command can safely be inferred from a read request."""
+    if command.risk not in ("safe", "ask"):
+        return False
+    if command.name.lstrip("/") in {"clear", "exit", "new", "resume", "strict", "trace"}:
+        return False
+    summary = set(_tokenize(command.summary))
+    return bool(summary & _SINGLE_WORD_READ_MARKERS)
+
+
+def _canonical_single_name_present(value, command):
+    """Prefer a canonical plural over a singular alias when they tie."""
+    name = command.name.lstrip("/")
+    if len(_tokenize(name)) != 1:
+        return False
+    return name.lower() in re.findall(r"[a-z0-9]+", str(value).lower())
+
+
+def _single_word_argument(value, matched):
+    """Return one contiguous argument following a one-word command name.
+
+    The generic resolver deliberately accepts only one raw token.  This keeps
+    free-form prompts and extra work in the normal agent path, while retaining
+    useful forms such as ``get weather in Chicago`` and
+    ``inspect artifactcheck report.json``.  Dots, slashes, and hyphens remain
+    part of a path-like token even though the coverage tokenizer splits them.
+    """
+    wanted = _norm_token(str(matched[0]))
+    token_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/\\-]*")
+    for token in token_re.finditer(str(value)):
+        if _norm_token(token.group(0).lower()) != wanted:
+            continue
+        suffix = str(value)[token.end():].strip()
+        while suffix:
+            parts = suffix.split(None, 1)
+            if _norm_token(parts[0].lower()) not in _ARG_FILLERS:
+                break
+            suffix = parts[1].strip() if len(parts) == 2 else ""
+        if not suffix:
+            return None
+        argument = re.fullmatch(
+            r"(?:~[\\/]|\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/])?"
+            r"[A-Za-z0-9_.:/\\-]+",
+            suffix,
+        )
+        if not argument or argument.group(0).lower() in {"and", "then"}:
+            return None
+        return argument.group(0)
+    return None
+
+
 def _catalog_match(value):
     """Resolve `value` against the whole command catalog, or return None.
 
@@ -643,14 +768,57 @@ def _catalog_match(value):
     if not ranked:
         return None
 
-    top = max(rank[:2] for rank in ranked)
-    finalists = [rank for rank in ranked if rank[:2] == top]
+    # If the first content word is itself a required one-word command, treat
+    # later command-looking words as arguments.  Without this, "inspect
+    # artifactcheck report.json" can elect /report because "report" also
+    # appears in the path, even though artifactcheck is the explicit target.
+    target_content = [t for t in content if t != lead]
+    first_named = [
+        rank for rank in ranked
+        if rank[0] == 2 and len(rank[3]) == 1
+        and rank[3][0] == (target_content[0] if target_content else None)
+    ]
+    first_required = [
+        rank for rank in first_named
+        if any(param.required for param in rank[2]["command"].params)
+    ]
+    if len(first_named) == 1 and first_required:
+        finalists = first_required
+    else:
+        top = max(rank[:2] for rank in ranked)
+        finalists = [rank for rank in ranked if rank[:2] == top]
     if len(finalists) != 1:
-        # A tie means the turn does not pick a command out; guessing here is
-        # exactly the failure this fallback must not have.
-        return None
+        # Plural folding intentionally makes "agents" match the /agent alias
+        # as well as /agents. When only one finalist owns the exact canonical
+        # spelling, retain that useful distinction; genuine ties still refuse.
+        canonical = [
+            rank for rank in finalists
+            if _canonical_single_name_present(value, rank[2]["command"])
+        ]
+        if len(canonical) != 1:
+            # A tie means the turn does not pick a command out; guessing here
+            # is exactly the failure this fallback must not have.
+            return None
+        finalists = canonical
     stage, _strength, entry, matched = finalists[0]
     command = entry["command"]
+
+    # Single-word names need an extra semantic guard: unlike ``task progress``
+    # or ``repo status``, a bare word is common prose.  Read-style catalog
+    # summaries are strong enough for exact requests, and a required one-token
+    # parameter is accepted only when it follows the named command directly.
+    if stage == 2 and len(matched) == 1:
+        if (lead not in _READ_VERBS or lead == "check"
+                or not _single_word_readable(command)):
+            return None
+        required = [p for p in command.params if p.required]
+        if required:
+            if len(required) != 1:
+                return None
+            argument = _single_word_argument(value, matched)
+            if argument is None:
+                return None
+            return "%s %s" % (command.name, argument)
 
     if command.risk in _RISKY and (stage != 2 or not _adjacent(tokens, matched)):
         # Destructive and file-changing commands are never inferred from a
@@ -663,7 +831,7 @@ def _catalog_match(value):
     explained = set(entry["summary"])
     for variant in entry["variants"]:
         explained.update(variant)
-    if lead and len(matched) >= 2:
+    if lead and (len(matched) >= 2 or (stage == 2 and len(matched) == 1)):
         # The request verb frames the ask rather than adding content -- but
         # only once the turn has named a multi-word command. A one-word name
         # is weak evidence and has to account for the whole turn, verb
