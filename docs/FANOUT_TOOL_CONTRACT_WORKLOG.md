@@ -238,13 +238,6 @@ to a machine-load flake backlog, not to this change.
   `workflow_*`, `memory_privacy_*`, `memory_quality_*`, plus the exact
   names in `_AUTHORITY_GRAMMAR_NAMES`) and left out of every declared set
   still needs a human to classify it.
-- `workspace_run`/`script_run` render `"%s %s" % (program, json.dumps(args))`
-  into the (detail-gated) command field; a secret VALUE inside that JSON
-  array form can survive `_safe_command`'s argv rule. Needs a rendering
-  change, not a vocabulary change; not taken here.
-- `_loop_dispatch` records a refused action into the in-memory activity
-  ledger before the gate refuses it (shows `ok=True` "queued"). Cosmetic;
-  follow-up candidate.
 - The three `test_sonder_storage.py` timing budgets fail on this loaded
   16 GB box on pre-change code too; if they persist on a quiet machine,
   they deserve their own issue.
