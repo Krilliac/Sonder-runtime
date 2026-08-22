@@ -790,6 +790,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           settings: widget.settings,
           onChanged: widget.onSettingsChanged,
         ),
+        transitionsBuilder: (_, __, ___, child) => child,
       ),
     );
     setState(() {
