@@ -34,6 +34,16 @@ def test_stateful_invocations_are_bounded_and_json_safe():
     assert "wait=false" in line
 
 
+def test_native_invocations_use_positional_branch_syntax():
+    row = {"name": "/artifactcheck", "native": True, "params": [
+        {"name": "path", "type": "str", "required": True},
+    ]}
+    line = _MODULE.invocation(row, r"C:\temp\audit", False,
+                              r"C:\temp\audit\fixture")
+    assert line.startswith("/artifactcheck ")
+    assert "path=" not in line
+
+
 def test_classification_distinguishes_auth_and_model_fallthrough():
     assert _MODULE.classify(401, "") == "auth_failure"
     assert _MODULE.classify(200, '{"choices":[{"message":{"content":"model calls: 1"}}]}') == "model_fallthrough"
