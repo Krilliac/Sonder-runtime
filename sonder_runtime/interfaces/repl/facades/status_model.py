@@ -135,6 +135,59 @@ class ExecutionStatusFacade:
         return "[lanes %s | agents %s]" % (lanes, agents)
 
 
+class PermissionModeFacade:
+    """Normalize permission mode/elevation for terminal presentation.
+
+    The REPL only renders a supplied snapshot; the composition owner decides
+    how the snapshot is obtained.  Missing or malformed state is represented
+    as ``None`` so a cosmetic header cannot invent a safety posture.
+    """
+
+    _SHORT_LABELS = {
+        "plan": "plan",
+        "manual": "manual",
+        "acceptEdits": "edits",
+        "auto": "auto",
+    }
+
+    def __init__(self, snapshot_provider: Callable[[], Any] | None = None) -> None:
+        self._snapshot_provider = snapshot_provider
+
+    def snapshot(self, value: Any = None) -> Mapping[str, Any] | None:
+        if value is None and self._snapshot_provider is not None:
+            try:
+                value = self._snapshot_provider()
+            except Exception:
+                return None
+        if not isinstance(value, Mapping):
+            return None
+        mode = str(value.get("mode") or "").strip()
+        if not mode:
+            return None
+        return value
+
+    def label(self, value: Any = None) -> str:
+        state = self.snapshot(value)
+        if state is None:
+            return ""
+        return str(state.get("label") or state.get("mode") or "unknown")
+
+    def short_label(self, value: Any = None) -> str:
+        state = self.snapshot(value)
+        if state is None:
+            return "?"
+        mode = str(state.get("mode") or "")
+        return self._SHORT_LABELS.get(mode, mode[:8] or "?")
+
+    def elevated(self, value: Any = None) -> bool:
+        state = self.snapshot(value)
+        return bool(state.get("elevated")) if state is not None else False
+
+    def elevation_reason(self, value: Any = None) -> str:
+        state = self.snapshot(value)
+        return str(state.get("elevationReason") or "").strip() if state else ""
+
+
 class ContextHealthFacade:
     """Read and normalize a bounded context-health snapshot."""
 
@@ -158,4 +211,5 @@ __all__ = [
     "ExecutionStatusFacade",
     "InstalledModel",
     "ModelSelectionFacade",
+    "PermissionModeFacade",
 ]

@@ -908,7 +908,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     _LiveStatusBar(
                       info: _systemInfo,
                       model: _model,
-                      project: _project,
                     ),
                   ],
                 ),
@@ -1223,57 +1222,32 @@ class _Suggestion extends StatelessWidget {
 class _LiveStatusBar extends StatelessWidget {
   final SystemInfo? info;
   final String model;
-  final String project;
 
   const _LiveStatusBar({
     required this.info,
     required this.model,
-    required this.project,
   });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final contextInfo = info?.context;
-    final agentInfo = info?.agents;
     final activityInfo = info?.activity;
     final responseInfo = activityInfo?.displayResponse;
-    final activeProject = project.trim().isEmpty
-        ? (contextInfo?.project ?? 'unknown')
-        : project.trim();
-    final projectText = activeProject == 'none'
-        ? 'project: none'
-        : 'project: $activeProject';
-    final path = info?.stateHome ?? '';
-    var latest = 'idle';
-    if (agentInfo != null) {
-      if (agentInfo.agents.isNotEmpty) {
-        final first = agentInfo.agents.first;
-        latest = '${first.id}: ${first.activity}';
-      } else if (agentInfo.events.isNotEmpty) {
-        latest = agentInfo.events.last;
-      }
-    }
-    final parts = [
-      'ctx ${(contextInfo?.contextPercent ?? 0).toStringAsFixed(1)}%',
-      // These two used to render as "native 0 | native" -- the same word
-      // twice, meaning a token limit and then a mode. Label each for what
-      // it is.
-      'native ${contextInfo?.nativeContextLimit ?? 0} tok',
-      'mode ${contextInfo?.contextMode ?? "native"}',
-      info?.executionSummary ?? 'lanes unknown | agents unknown',
-      'responses ${activityInfo?.activeCount ?? 0}',
-      'tools ${responseInfo?.toolCalls ?? 0}/${activityInfo?.totalToolCalls ?? 0}',
-      'models ${responseInfo?.modelCalls ?? 0}',
-      'files +${responseInfo?.fileCreates ?? 0} ~${responseInfo?.fileEdits ?? 0} -${responseInfo?.fileDeletes ?? 0}',
-      'lines +${responseInfo?.linesAdded ?? 0} ~${responseInfo?.linesEdited ?? 0} -${responseInfo?.linesDeleted ?? 0}',
-      projectText,
-      'tokens ${agentInfo?.tokensIn ?? 0}/${agentInfo?.tokensOut ?? 0}',
-      'model $model',
-      if (path.isNotEmpty) path,
-      latest,
-      if (responseInfo != null) responseInfo.summary,
-      if (responseInfo?.events.isNotEmpty == true) responseInfo!.events.last,
+    final contextText = contextInfo == null
+        ? '—'
+        : '${contextInfo.contextPercent.toStringAsFixed(1)}% · '
+            '${contextInfo.nativeContextLimit} native';
+    final routeText = model.trim().isEmpty ? '—' : model;
+    final turnText = responseInfo == null
+        ? null
+        : '+${responseInfo.linesAdded} −${responseInfo.linesDeleted} · '
+            '${responseInfo.tokensIn}/${responseInfo.tokensOut} tok';
+    final segments = <_StatusMetric>[
+      _StatusMetric('Context', contextText),
+      _StatusMetric('Activity', info?.executionSummary ?? '—'),
+      _StatusMetric('Route', routeText),
+      if (turnText != null) _StatusMetric('Turn', turnText),
     ];
     return Container(
       width: double.infinity,
@@ -1284,14 +1258,63 @@ class _LiveStatusBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
-        child: Text(
-          parts.join('   |   '),
-          maxLines: 1,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: cs.onSurfaceVariant,
-            fontFeatures: const [FontFeature.tabularFigures()],
-          ),
+        child: Row(
+          children: [
+            for (var i = 0; i < segments.length; i++) ...[
+              if (i > 0)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Text('·', style: TextStyle(color: cs.outline)),
+                ),
+              _StatusMetricView(metric: segments[i]),
+            ],
+          ],
         ),
+      ),
+    );
+  }
+}
+
+class _StatusMetric {
+  final String label;
+  final String value;
+
+  const _StatusMetric(this.label, this.value);
+}
+
+class _StatusMetricView extends StatelessWidget {
+  final _StatusMetric metric;
+
+  const _StatusMetricView({required this.metric});
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final cs = Theme.of(context).colorScheme;
+    return Semantics(
+      label: '${metric.label}: ${metric.value}',
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            metric.label.toLowerCase(),
+            style: textTheme.labelSmall?.copyWith(
+              color: cs.onSurfaceVariant,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            metric.value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: textTheme.bodySmall?.copyWith(
+              color: cs.onSurface,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
       ),
     );
   }

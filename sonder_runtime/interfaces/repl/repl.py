@@ -43,6 +43,7 @@ from sonder_runtime.interfaces.repl.facades import (
     ExecutionStatusFacade,
     InstalledModel,
     ModelSelectionFacade,
+    PermissionModeFacade,
 )
 
 # Optional: the live filtering "/" menu. Absent or unusable (piped stdin,
@@ -727,6 +728,25 @@ def _home_relative(path):
         return str(path)
 
 
+def _permission_mode_snapshot():
+    """Read current permission/elevation state for presentation only."""
+    return PermissionModeFacade(
+        lambda: server.permission_mode_data(),
+    ).snapshot()
+
+
+def _permission_mode_colour(snapshot):
+    mode = PermissionModeFacade().snapshot(snapshot)
+    if mode is None:
+        return _Ansi.muted
+    return {
+        "plan": _Ansi.green,
+        "manual": _Ansi.cyan,
+        "acceptEdits": _Ansi.amber,
+        "auto": _Ansi.red,
+    }.get(str(mode.get("mode") or ""), _Ansi.muted)
+
+
 def _startup_banner(strict, persona, project, tier=None):
     """The header shown on launch.
 
@@ -783,6 +803,7 @@ def _startup_banner(strict, persona, project, tier=None):
         running = "unavailable"
         update = "check unavailable"
 
+    permission = _permission_mode_snapshot()
     rows = [
         ("model", "%s  %s" % (model, _paint("(%s tier)" % tier, _Ansi.muted)),
          (_Ansi.cyan,)),
@@ -797,6 +818,20 @@ def _startup_banner(strict, persona, project, tier=None):
         (newest_label, newest, ()),
         ("update", "%s  /updatecheck | /update" % update, (_Ansi.amber,)),
     ]
+    if permission is not None:
+        mode_view = PermissionModeFacade()
+        mode_text = mode_view.label(permission)
+        blurb = str(permission.get("blurb") or "").strip()
+        rows.append((
+            "mode", "%s%s" % (mode_text, "  -- " + blurb if blurb else ""),
+            (_permission_mode_colour(permission),),
+        ))
+        if mode_view.elevated(permission):
+            reason = mode_view.elevation_reason(permission)
+            rows.append((
+                "elevation", "on%s" % ("  -- " + reason if reason else ""),
+                (_Ansi.red,),
+            ))
     if strict:
         rows.append(("strict", "on  pinned to the sonder alias", (_Ansi.amber,)))
     hint = "%s  %s" % (
@@ -873,7 +908,7 @@ def _latest_repl_turn_metrics(session_id="", *, surfaces=("terminal/mcp",)):
 
 
 def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
-                    width=None, model_override=None):
+                    width=None, model_override=None, permission=None):
     """Live model, runtime, context and last-turn status for the composer."""
     # Resolve the live execution state once. A title that is subsequently
     # compacted must keep this lanes/agents snapshot rather than falling back
@@ -900,11 +935,26 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
         # was unavailable -- an especially misleading place to hide a live
         # fanout or failed status read.
         lanes, agents = status_facade.counts(status)
-        parts = ["S %s" % resolved_tier, "L%s A%s" % (lanes, agents)]
+        parts = ["S %s" % resolved_tier]
+        if permission is not None:
+            mode_view = PermissionModeFacade()
+            parts.append("M:%s" % mode_view.short_label(permission))
+            if mode_view.elevated(permission):
+                parts.append("E!")
+        parts.append("L%s A%s" % (lanes, agents))
     else:
         parts = ["Sonder %s (%s)  %s" % (
             resolved_tier, model, _execution_prompt(status),
         )]
+        if permission is not None:
+            mode_view = PermissionModeFacade()
+            mode_text = "mode %s" % mode_view.label(permission)
+            if mode_view.elevated(permission):
+                reason = mode_view.elevation_reason(permission)
+                mode_text += "  ELEVATED%s" % (
+                    " (%s)" % reason if reason else "",
+                )
+            parts.append(_paint(mode_text, _permission_mode_colour(permission)))
     if isinstance(context, dict):
         parts.append(("C%s/%s L%s" if compact else "ctx~%s/%s (%s left)") % (
             _compact_count(context.get("used")),
@@ -939,7 +989,7 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
         if title_budget and _visible_len(title) > title_budget:
             return _composer_title(
                 tier, status, context=context, last_turn=last_turn,
-                width=88, model_override=model_override,
+                width=88, model_override=model_override, permission=permission,
             )
     return title
 
@@ -1856,6 +1906,7 @@ def main():
                 last_turn=last_turn_metrics,
                 width=_composer_frame_width(),
                 model_override=active_model,
+                permission=_permission_mode_snapshot(),
             ),
                                history=input_history, composer=True,
                                argument_completer=model_argument_completer)
