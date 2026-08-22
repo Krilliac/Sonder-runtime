@@ -795,6 +795,8 @@ void main() {
       'lists=${find.byType(ListView, skipOffstage: false).evaluate().length} '
       'settings=${find.byType(SettingsScreen, skipOffstage: false).evaluate().length}',
     );
+    final settingsElement =
+        find.byType(SettingsScreen, skipOffstage: false).evaluate().single;
     debugPrint(
       find
           .text('Runtime architecture', skipOffstage: false)
@@ -802,6 +804,7 @@ void main() {
           .single
           .toStringDeep(),
     );
+    debugPrint('SETTINGS_ROUTE_CURRENT=${ModalRoute.of(settingsElement)?.isCurrent}');
     expect(find.text('Runtime architecture'), findsOneWidget);
     expect(
       find.textContaining('not a standalone foundation model'),
