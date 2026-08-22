@@ -329,8 +329,14 @@ def check() -> list[str]:
         for path in tracked_production_python_files()
     }
     for retired in sorted(RETIRED_ROOT_MODULES, key=Path.as_posix):
-        if retired in tracked:
-            if is_approved_retired_shim(REPO_ROOT / retired):
+        # Keep the ratchet effective when the checker is exercised from a
+        # copied source tree (for example by a release/package validation
+        # test) that does not carry the original .git metadata.  A retired
+        # production path is a violation by presence; the Git inventory is
+        # still authoritative for dependency and packaging checks below.
+        retired_path = REPO_ROOT / retired
+        if retired in tracked or retired_path.is_file():
+            if is_approved_retired_shim(retired_path):
                 continue
             violations.append(
                 f"{retired}: retired root module was reintroduced"
