@@ -326,7 +326,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       onPopInvokedWithResult: (didPop, _) {
         if (didPop || !_dirty) return;
         unawaited(_confirmDiscard().then((discard) {
-          if (discard && mounted) Navigator.of(context).pop();
+          if (!discard || !mounted) return;
+          Navigator.of(context).pop();
         }));
       },
       child: Scaffold(
