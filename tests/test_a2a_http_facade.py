@@ -41,3 +41,21 @@ def test_non_loopback_a2a_discovery_stays_explicit(monkeypatch):
     monkeypatch.delenv("SONDER_A2A_BASE_URL", raising=False)
 
     assert serve._a2a_discovery_base_url() == ""
+
+
+def test_direct_port_override_updates_discovery_port(monkeypatch):
+    from sonder_runtime.interfaces.http import serve
+
+    monkeypatch.setattr(serve, "CONFIGURED_PORT", 11435)
+    monkeypatch.delenv("SONDER_PORT", raising=False)
+
+    assert serve._selected_listener_port(None, ["sonder", "12345"]) == 12345
+
+
+def test_environment_port_updates_discovery_port(monkeypatch):
+    from sonder_runtime.interfaces.http import serve
+
+    monkeypatch.setattr(serve, "CONFIGURED_PORT", 11435)
+    monkeypatch.setenv("SONDER_PORT", "12346")
+
+    assert serve._selected_listener_port(None, ["sonder"]) == 12346
