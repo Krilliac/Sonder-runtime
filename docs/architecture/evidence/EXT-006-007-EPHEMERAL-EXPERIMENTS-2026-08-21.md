@@ -10,7 +10,7 @@ allows the production CLI/HTTP/application path to request a native memory cap;
 the bootstrap translates it into the Windows Job Object host limiter. There is
 still no persistence or promotion API.
 
-Verification: `python -m pytest -q tests/test_extension_host.py tests/test_extension_experiments.py tests/production/test_extension_composition.py --basetemp C:\\Users\\Nathan\\Documents\\Codex\\pytest-extension-limits-1` — **19 passed** including the production native-limit boundary; compileall, architecture, and diff checks pass.
+Verification: `python -m pytest -q tests/test_extension_host.py tests/test_extension_experiments.py tests/production/test_extension_composition.py --basetemp <fresh-temp>` — **19 passed** including the production native-limit boundary; compileall, architecture, and diff checks pass.
 
 Limitations: the lifecycle is exposed through typed CLI/API routes, and a
 trusted persisted installation can enter the same ephemeral host boundary, but

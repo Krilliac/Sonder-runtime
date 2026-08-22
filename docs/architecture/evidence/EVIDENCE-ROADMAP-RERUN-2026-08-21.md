@@ -6,7 +6,7 @@ to completion from the branch `agent/port-research-findings`.
 Exact command:
 
 ```text
-python -m pytest -q --basetemp C:\Users\Nathan\Documents\Codex\pytest-evidence-roadmap-current tests/test_wp4_compact001_005.py tests/test_crosscutting_extensions.py tests/test_remaining_selfmod_governance.py tests/test_remaining_session_durable_replay.py tests/test_session_repository.py tests/test_composition_job_registry.py tests/test_crosscutting_provider_lifecycle.py tests/test_provider_lifecycle.py tests/test_api003_subprocess_provider.py tests/test_api003_legacy_declaration.py tests/test_mcp_stdio_transport.py tests/test_process_termination_adapter.py tests/production/test_composition_root.py tests/production/test_architecture.py
+python -m pytest -q --basetemp <fresh-temp> tests/test_wp4_compact001_005.py tests/test_crosscutting_extensions.py tests/test_remaining_selfmod_governance.py tests/test_remaining_session_durable_replay.py tests/test_session_repository.py tests/test_composition_job_registry.py tests/test_crosscutting_provider_lifecycle.py tests/test_provider_lifecycle.py tests/test_api003_subprocess_provider.py tests/test_api003_legacy_declaration.py tests/test_mcp_stdio_transport.py tests/test_process_termination_adapter.py tests/production/test_composition_root.py tests/production/test_architecture.py
 ```
 
 Result:
