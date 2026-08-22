@@ -37,6 +37,23 @@ void main() {
     expect(find.byKey(const Key('status-metric-route')), findsOneWidget);
   });
 
+  testWidgets('Desktop command shortcut opens the command browser', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(TextField));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('command-browser')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Desktop chat layout keeps the conversation rail visible', (
     tester,
   ) async {
@@ -281,6 +298,14 @@ void main() {
     );
     expect(find.byTooltip('Back to chat'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
+    expect(find.byKey(const Key('system-section-nav')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('system-section-nav')),
+        matching: find.text('Learning'),
+      ),
+      findsOneWidget,
+    );
 
     await tester.tap(find.byTooltip('Back to chat'));
     await tester.pump();

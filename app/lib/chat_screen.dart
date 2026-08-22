@@ -12,6 +12,30 @@ import 'settings.dart';
 import 'settings_screen.dart';
 import 'system_screen.dart';
 
+class _OpenCommandBrowserIntent extends Intent {
+  const _OpenCommandBrowserIntent();
+}
+
+class _NewChatIntent extends Intent {
+  const _NewChatIntent();
+}
+
+class _OpenThreadSwitcherIntent extends Intent {
+  const _OpenThreadSwitcherIntent();
+}
+
+class _OpenSettingsIntent extends Intent {
+  const _OpenSettingsIntent();
+}
+
+class _OpenSystemIntent extends Intent {
+  const _OpenSystemIntent();
+}
+
+class _CyclePermissionModeIntent extends Intent {
+  const _CyclePermissionModeIntent();
+}
+
 class ChatScreen extends StatefulWidget {
   final Settings settings;
   final ValueChanged<Settings> onSettingsChanged;
@@ -236,6 +260,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
     if (picked == null || !mounted || picked == current.mode) return;
 
+    await _setPermissionMode(picked);
+  }
+
+  Future<void> _setPermissionMode(String picked) async {
+    if (_switchingMode || _permissionMode == null) return;
     setState(() => _switchingMode = true);
     try {
       final next = await _api.setPermissionMode(picked);
@@ -254,6 +283,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _switchingMode = false);
     }
+  }
+
+  void _cyclePermissionMode() {
+    final current = _permissionMode;
+    if (current == null || _switchingMode || current.options.isEmpty) return;
+    final index = current.options.indexWhere(
+      (option) => option.name == current.mode,
+    );
+    final next = current.options[(index + 1) % current.options.length];
+    unawaited(_setPermissionMode(next.name));
   }
 
   /// Pull the server's command catalog once, and keep the hardcoded fallback
@@ -347,14 +386,35 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _inputFocus.requestFocus();
   }
 
-  /// Arrow keys, Tab/Enter and Escape drive the palette while it is open.
-  /// Every other key, and every key at all when it is closed, falls through
-  /// to the TextField untouched.
+  /// Enter sends, Shift+Enter inserts a newline, and palette navigation uses
+  /// arrows/Tab/Escape while it is open. Every other key falls through to the
+  /// TextField untouched.
   KeyEventResult _onComposerKey(KeyEvent event) {
-    if (_paletteMatches.isEmpty || event is! KeyDownEvent) {
+    if (event is! KeyDownEvent) {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+    if (_paletteMatches.isEmpty && key == LogicalKeyboardKey.enter) {
+      if (event.isShiftPressed) {
+        final value = _input.value;
+        final start = value.selection.start < 0
+            ? value.text.length
+            : value.selection.start;
+        final end = value.selection.end < 0 ? start : value.selection.end;
+        final text = value.text.replaceRange(start, end, '\n');
+        _input.value = value.copyWith(
+          text: text,
+          selection: TextSelection.collapsed(offset: start + 1),
+          composing: TextRange.empty,
+        );
+      } else {
+        _send();
+      }
+      return KeyEventResult.handled;
+    }
+    if (_paletteMatches.isEmpty) {
+      return KeyEventResult.ignored;
+    }
     if (key == LogicalKeyboardKey.arrowDown) {
       setState(
         () =>
@@ -747,6 +807,41 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _openThreadSwitcher(bool desktop) async {
+    if (!desktop) {
+      await showModalBottomSheet<void>(
+        context: context,
+        builder: (_) => SizedBox(
+          height: 560,
+          child: _ChatDrawer(
+            threads: _threads,
+            currentThreadId: _currentThreadId,
+            onNew: _newChat,
+            onSelect: _switchThread,
+            onDelete: _deleteThread,
+          ),
+        ),
+      );
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (_) => Dialog(
+        child: SizedBox(
+          width: 360,
+          height: 600,
+          child: _ChatDrawer(
+            threads: _threads,
+            currentThreadId: _currentThreadId,
+            onNew: _newChat,
+            onSelect: _switchThread,
+            onDelete: _deleteThread,
+          ),
+        ),
+      ),
+    );
+  }
+
   String _modelLabel(String m) => m == 'sonder' ? 'sonder (local route)' : m;
 
   @override
@@ -769,7 +864,66 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           onDelete: _deleteThread,
           embedded: desktop,
         );
-        return Scaffold(
+        return Shortcuts(
+          shortcuts: <ShortcutActivator, Intent>{
+            const SingleActivator(LogicalKeyboardKey.keyK, control: true):
+                const _OpenCommandBrowserIntent(),
+            const SingleActivator(LogicalKeyboardKey.keyN, control: true):
+                const _NewChatIntent(),
+            const SingleActivator(LogicalKeyboardKey.keyP, control: true):
+                const _OpenThreadSwitcherIntent(),
+            const SingleActivator(LogicalKeyboardKey.comma, control: true):
+                const _OpenSettingsIntent(),
+            const SingleActivator(LogicalKeyboardKey.keyD, control: true):
+                const _OpenSystemIntent(),
+            const SingleActivator(
+              LogicalKeyboardKey.tab,
+              shift: true,
+            ): const _CyclePermissionModeIntent(),
+          },
+          child: Actions(
+            actions: <Type, Action<Intent>>{
+              _OpenCommandBrowserIntent:
+                  CallbackAction<_OpenCommandBrowserIntent>(
+                    onInvoke: (_) {
+                      unawaited(_openCommandBrowser());
+                      return null;
+                    },
+                  ),
+              _NewChatIntent: CallbackAction<_NewChatIntent>(
+                onInvoke: (_) {
+                  _newChat();
+                  return null;
+                },
+              ),
+              _OpenThreadSwitcherIntent:
+                  CallbackAction<_OpenThreadSwitcherIntent>(
+                    onInvoke: (_) {
+                      unawaited(_openThreadSwitcher(desktop));
+                      return null;
+                    },
+                  ),
+              _OpenSettingsIntent: CallbackAction<_OpenSettingsIntent>(
+                onInvoke: (_) {
+                  unawaited(_openSettings());
+                  return null;
+                },
+              ),
+              _OpenSystemIntent: CallbackAction<_OpenSystemIntent>(
+                onInvoke: (_) {
+                  unawaited(_openSystem());
+                  return null;
+                },
+              ),
+              _CyclePermissionModeIntent:
+                  CallbackAction<_CyclePermissionModeIntent>(
+                    onInvoke: (_) {
+                      _cyclePermissionMode();
+                      return null;
+                    },
+                  ),
+            },
+            child: Scaffold(
           drawer: desktop ? null : drawer,
           appBar: AppBar(
             title: Row(
@@ -914,6 +1068,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 ),
               ),
             ],
+          ),
+            ),
           ),
         );
       },
