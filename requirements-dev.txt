@@ -1,2 +1,3 @@
 -r requirements-runtime.txt
 pytest
+pytest-xdist
