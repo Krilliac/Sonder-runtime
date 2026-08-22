@@ -1,6 +1,7 @@
 """Focused natural-language expansions for catalog commands with aliases."""
 
 import command_router as cr
+from sonder_runtime.adapters import command_catalog
 
 
 def test_read_only_catalog_phrases_choose_the_intended_tool():
@@ -56,6 +57,17 @@ def test_read_only_argument_phrases_reach_the_matching_catalog_tool():
     assert cr.resolve("check weather for Chicago") == "/weather Chicago"
     assert cr.resolve("show the workspace inventory") == "/inventory"
     assert cr.resolve("list the workspace tree") == "/tree"
+    assert cr.resolve("inspect artifact risk at report.bin") == \
+        "/artifact_risk_inspect report.bin"
+    assert cr.resolve("inspect artifact risk report.bin?") == \
+        "/artifact_risk_inspect report.bin"
+    assert cr.resolve("check artifact file integrity report.json") == \
+        "/verify_artifact report.json"
+    assert cr.resolve("show NPU status") == "/npu_status"
+    assert cr.resolve("probe local service http://127.0.0.1:11435/health") == \
+        "/local_service_probe http://127.0.0.1:11435/health"
+    assert cr.resolve("inspect process 1234 memory risk") == \
+        "/process_memory_risk_inspect 1234"
 
 
 def test_argument_expansions_leave_follow_on_work_for_the_agent():
@@ -86,3 +98,34 @@ def test_local_prompt_wrappers_require_a_prompt_and_explicit_lane():
     assert cr.resolve("ask several models to compare parser strategies") is None
     assert cr.resolve("verify generated file report.json") is None
     assert cr.resolve("check weather for Chicago and tell me what to wear") is None
+    assert cr.resolve("inspect artifact risk report.bin and explain it") is None
+    assert cr.resolve("probe local service https://example.com") is None
+    assert cr.resolve("probe local service http://localhost.evil:11435/health") is None
+    assert cr.resolve("probe local service http://127.0.0.1@evil.example:11435/health") is None
+    assert cr.resolve("probe local service http://127.0.0.1/health") is None
+    assert cr.resolve("inspect process abc memory risk") is None
+
+
+def test_explicit_structured_catalog_calls_cover_canonical_commands():
+    for command in command_catalog.catalog():
+        required = [param for param in command.params if param.required]
+        if not required:
+            phrase = "use the %s command" % command.name.lstrip("/")
+            expected = command.name
+        elif len(required) == 1 and required[0].type == "str":
+            phrase = "use the %s tool with probe" % command.name.lstrip("/")
+            expected = "%s probe" % command.name
+        else:
+            args = " ".join("%s=probe" % param.name for param in required)
+            phrase = "use the %s tool with %s" % (
+                command.name.lstrip("/"), args,
+            )
+            expected = "%s %s" % (command.name, args)
+        assert cr.resolve(phrase) == expected, phrase
+
+
+def test_structured_catalog_calls_require_a_known_command_and_arguments():
+    assert cr.resolve("use the not_a_real_tool tool") is None
+    assert cr.resolve("use the artifact_risk_inspect tool") is None
+    assert cr.resolve("use the file_read tool with path=README.md") == \
+        "/file_read path=README.md"
