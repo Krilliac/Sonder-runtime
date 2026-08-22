@@ -238,7 +238,30 @@ _RULES = [
     _rule(r"^autopilot\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/autopilot %s" % (m.group("arg") or "")).strip()),
 
+    # --- local prompt delegation ---
+    # These wrappers intentionally name the local execution lane.  They keep
+    # the full remainder as one prompt argument, so punctuation and natural
+    # language inside the request are not mistaken for a second command.  A
+    # bare "ask several models" is left to the normal agent path because it
+    # does not establish which runtime or privacy boundary the caller wants.
+    _rule(r"^ask\s+(?:several|multiple)\s+local\s+models"
+          r"(?:\s+(?:(?:to|about)\s+)?|[:,]\s*)"
+          r"(?P<arg>\S.*)$",
+          _with_arg("/ensemble")),
+    _rule(r"^offload\s+to\s+(?:a\s+)?local\s+model\s*[:,]?\s*"
+          r"(?P<arg>.+)$", _with_arg("/offload")),
+    _rule(r"^offload\s+(?:(?:this|the)\s+)?(?:local\s+)?"
+          r"(?:task|request)\s*(?:to\s+(?:a\s+)?local\s+model\s*)?"
+          r"[:,]?\s*(?P<arg>.+)$", _with_arg("/offload")),
+    _rule(r"^(?:run|use)\s+(?:a\s+)?local\s+workbench\s+agent\s+"
+          r"(?:(?:to\s+)?(?:work|act)\s+)?(?:on|for)\s+(?P<arg>.+)$",
+          _with_arg("/work")),
+    _rule(r"^work\s+on\s+(?:this\s+)?task\s*[:,]?\s*(?P<arg>.+)$",
+          _with_arg("/work")),
+
     # --- weather ---
+    _rule(r"^(?:check|show|get)\s+(?:the\s+)?weather\s+(?:for|in)\s+"
+          r"(?P<arg>.+?)\s*[?!.]*$", _with_arg("/weather")),
     _rule(r"^(?:weather|forecast)\b(?:\s+(?:for|in)\s+(?P<arg>.+))?",
           lambda m: ("/weather %s" % (m.group("arg") or "")).strip()),
 
@@ -267,6 +290,8 @@ _RULES = [
     _rule(r"^file\s+policy\b", _fixed("/filepolicy")),
 
     # --- file operations (require the word "file" or a path with an extension) ---
+    _rule(r"^(?:verify|check)\s+(?:the\s+)?generated\s+(?:artifact|files?)\s+"
+          r"(?P<arg>\S+)\s*[?!.]*$", _with_arg("/artifact_verify")),
     _rule(r"^(?:ground|validate)\s+(?:the\s+)?artifact\s+(?P<arg>\S+)\s*[?!.]*$",
           _with_arg("/artifact_ground")),
     _rule(r"^search\s+(?:the\s+)?files?\s*[?!.]*$", _fixed("/search")),
@@ -366,6 +391,10 @@ _RULES = [
           _fixed("/tool_manifest")),
     _rule(r"^(?:show|list)\s+(?:me\s+)?(?:your\s+|the\s+)?tools\s*[?!.]*$",
           _fixed("/tool_manifest")),
+    _rule(r"^(?:show|list|inspect)\s+(?:the\s+)?workspace\s+inventory\s*[?!.]*$",
+          _fixed("/inventory")),
+    _rule(r"^(?:show|list|inspect)\s+(?:the\s+)?workspace\s+tree\s*[?!.]*$",
+          _fixed("/tree")),
 
     # Read-only tools with a required path/query argument.  These are exact
     # whole-turn forms so a larger request still belongs to the normal agent
