@@ -43,6 +43,20 @@ def test_url_credentials_redacted():
     assert "s3cr3tpw" not in out
 
 
+def test_cookie_headers_and_query_credentials_redacted():
+    text = (
+        "Cookie: sessionid=private-session; csrftoken=private-csrf\n"
+        "Set-Cookie: auth=private-auth; HttpOnly\n"
+        "https://worker.example/api?access_token=private-token&model=code"
+    )
+    redacted = Redactor(env={}).redact(text)
+    for secret in (
+        "private-session", "private-csrf", "private-auth", "private-token",
+    ):
+        assert secret not in redacted
+    assert redacted.count(REDACTED) >= 3
+
+
 def test_private_key_blocks_redacted():
     text = (
         "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n"

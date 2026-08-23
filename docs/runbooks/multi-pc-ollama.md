@@ -33,7 +33,11 @@ worker lacks are ordered toward workers that have it. Inventory only reorders
 scheduling — it never excludes a worker, because a recorded list may be stale
 and Ollama can pull a model on demand. Running the `status` tool refreshes
 each worker's inventory (best-effort, per-worker `/api/tags` probes) and a
-worker that cannot answer keeps its previous record.
+ worker that cannot answer keeps its previous record. Idempotent control-plane
+ reads may fail over; model POSTs never do. A transport timeout cannot prove
+ that a remote worker did not receive a request body, so replaying that POST
+ could duplicate inference. Sonder surfaces the ambiguous failure instead.
+Transport errors retained in status are reduced to their exception class.
 
 ## Prepare each worker PC
 
@@ -86,13 +90,15 @@ workers = [
 ```
 
 Every remote worker must use HTTPS, have no credentials embedded in its URL,
-and have the matching model tag installed. If the consent gate, URL, or TLS
-requirements are wrong, startup fails closed rather than silently routing
-prompts over an insecure link.
+have no path/query/fragment in its configured origin, and have the matching
+model tag installed. Certificate and hostname verification use Python's system
+trust store; there is no insecure-skip-verify mode. If the consent gate, URL,
+or TLS requirements are wrong, startup fails closed rather than silently
+routing prompts over an insecure link.
 
 ## Verify
 
-Use the normal status surface. It reports the configured worker count, how
+ Use the normal status surface. It reports the configured worker count, how
 many workers are remote, and per-worker health: in-flight requests, consecutive
 failures, circuit trips, whether the worker is in its half-open probing state,
 and the smoothed request latency in milliseconds. A worker that goes down is
@@ -141,7 +147,11 @@ structured JSON logs before it is retained for the status surface.
 To pull the trace spans for one specific request or run, use the bounded
 local observability projection with a correlation filter, e.g.
 `GET /v1/observability/trace?correlation_id=<id>`; `category` and `severity`
-filters compose the same way.
+ filters compose the same way.
+ The status surface also reports the TLS verification mode and that
+ non-idempotent failover is disabled. Error status retains only the exception
+ class; free-form transport details are suppressed because they may contain
+ internal topology or credential-shaped text.
 
 ## Internet access
 

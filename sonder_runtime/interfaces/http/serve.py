@@ -704,11 +704,30 @@ def _state_principal(context):
     context = context or {}
     account = context.get("account") or {}
     if account:
-        identity = account.get("username") or account.get("id") or "unknown"
+        identity = _account_identity(account)
+        if not identity:
+            raise PermissionError("authenticated account identity is unavailable")
         return "account:%s" % identity
     if context.get("api_key"):
         return "api-key"
     return "local-open"
+
+
+def _account_identity(account) -> str:
+    """Return one bounded identity or ``""`` for malformed auth output."""
+    if not isinstance(account, dict):
+        return ""
+    identity = account.get("username") or account.get("id") or ""
+    if not isinstance(identity, str):
+        return ""
+    identity = identity.strip()
+    if (
+        not identity
+        or len(identity) > 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in identity)
+    ):
+        return ""
+    return identity
 
 
 def _request_idempotency_key(context, endpoint, supplied_key):
@@ -1250,6 +1269,11 @@ def _auth_context(auth_header="", account_header=""):
     )
     account_source = account_header or ("" if api_key_ok else auth_header)
     account = _auth_account(account_source) if account_source else None
+    # Authentication adapters are trusted code, but their output still forms
+    # every session/cache/receipt namespace.  A malformed account must not be
+    # accepted and collapsed into a shared "unknown" principal.
+    if account is not None and not _account_identity(account):
+        account = None
     authorized = {
         "api-key": api_key_ok,
         "account": account is not None,

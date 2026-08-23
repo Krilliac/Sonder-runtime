@@ -154,6 +154,31 @@ def test_source_mutation_after_prevalidation_rolls_back(workspace, monkeypatch):
     assert list(workspace.glob(".sonder-archive-*")) == []
 
 
+def test_same_size_same_mtime_source_mutation_is_detected(workspace, monkeypatch):
+    source = workspace / "bundle.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("a.txt", b"safe")
+    original_stat = source.stat()
+    original = archive_tools._extract_zip
+
+    def mutate_without_metadata_change(source_path, stage, plan, deadline):
+        original(source_path, stage, plan, deadline)
+        changed = source_path.read_bytes().replace(b"safe", b"evil")
+        source_path.write_bytes(changed)
+        os.utime(
+            source_path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+
+    monkeypatch.setattr(archive_tools, "_extract_zip", mutate_without_metadata_change)
+
+    with pytest.raises(archive_tools.ArchiveRejected, match="changed"):
+        archive_tools.extract_archive("bundle.zip", "output")
+
+    assert not (workspace / "output").exists()
+    assert list(workspace.glob(".sonder-archive-*")) == []
+
+
 @pytest.mark.parametrize("rows, message", [
     ([("a.txt", b"1"), ("a.txt", b"2")], "duplicate"),
     ([("Readme.txt", b"1"), ("README.TXT", b"2")], "case-colliding"),

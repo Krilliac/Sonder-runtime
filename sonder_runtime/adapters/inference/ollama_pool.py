@@ -37,6 +37,9 @@ _LATENCY_EWMA_ALPHA = 0.3
 # without bound (see platform/metrics.py's bounded-label-set contract).
 _MAX_METRIC_WORKERS = 16
 _METRIC_OVERFLOW_LABEL = "overflow"
+_configured_workers: tuple[str, ...] | None = None
+_configured_allow_remote: bool | None = None
+_configuration_lock = threading.RLock()
 
 
 def _is_loopback(origin: str) -> bool:
@@ -65,10 +68,14 @@ def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
     """Normalize one worker origin under the Ollama trust policy."""
     normalized = ollama_policy.normalize(origin)
     parsed = urlsplit(normalized)
+    if parsed.scheme.casefold() not in {"http", "https"}:
+        raise ValueError("worker endpoint must use http or https")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("worker endpoint must not contain inline credentials")
     if not parsed.hostname or parsed.port is None:
         raise ValueError("worker endpoint must include a host and explicit port")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("worker endpoint must be an origin without a path, query, or fragment")
     if not _is_loopback(normalized):
         if not allow_remote:
             raise ValueError(
@@ -77,6 +84,35 @@ def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
         if parsed.scheme.casefold() != "https":
             raise ValueError("remote worker endpoints must use https")
     return normalized.rstrip("/")
+
+
+def configure_typed_workers(
+    worker_origins: tuple[str, ...], *, allow_remote: bool,
+) -> None:
+    """Bind validated typed worker configuration before legacy composition.
+
+    The canonical serve path deliberately avoids round-tripping typed startup
+    authority through mutable environment variables.  Keep the same contract
+    for worker endpoints so a validated TOML worker list cannot be silently
+    ignored when the legacy model runtime is imported lazily.
+    """
+    if not isinstance(allow_remote, bool):
+        raise TypeError("allow_remote must be a boolean")
+    normalized = tuple(
+        validate_worker_origin(origin, allow_remote=allow_remote)
+        for origin in tuple(worker_origins)
+    )
+    global _configured_workers, _configured_allow_remote
+    with _configuration_lock:
+        _configured_workers = normalized
+        _configured_allow_remote = allow_remote
+
+
+def reset_typed_workers() -> None:
+    global _configured_workers, _configured_allow_remote
+    with _configuration_lock:
+        _configured_workers = None
+        _configured_allow_remote = None
 
 
 @dataclass(frozen=True)
@@ -260,6 +296,8 @@ class OllamaWorkerPool:
         state: _WorkerState,
         error: BaseException | None,
         elapsed: float | None = None,
+        *,
+        count_failure: bool = True,
     ) -> None:
         with self._lock:
             state.inflight = max(0, state.inflight - 1)
@@ -285,16 +323,16 @@ class OllamaWorkerPool:
                         worker=label, state="closed",
                     )
                 return
-            state.consecutive_failures += 1
-            # Truncate before redacting: an unbounded exception string should
-            # never reach the (relatively expensive) regex redaction passes,
-            # matching the local-observability sink's truncate-then-redact
-            # order for adapter-originated free text.
-            raw = "%s: %s" % (type(error).__name__, str(error)[:240])
-            state.last_error = self._redactor.redact(raw)[:240]
+            # Transport exception text can contain internal hostnames, proxy
+            # paths, or credential-shaped response fragments.  Status needs a
+            # stable category, not the provider's free-form detail.
+            state.last_error = type(error).__name__
             self._metrics.observe_ollama_worker_request(
                 worker=label, result="error", elapsed_seconds=elapsed or 0.0,
             )
+            if not count_failure:
+                return
+            state.consecutive_failures += 1
             if state.consecutive_failures >= self._failure_threshold:
                 now = self._time()
                 already_open = state.cooldown_until > now
@@ -358,12 +396,20 @@ class OllamaWorkerPool:
             results[endpoint.worker_id] = len(names)
         return results
 
-    def request(self, sender: Callable[[str], object], *, model: str | None = None):
-        """Send once per selected worker, failing over only before a response.
+    def request(
+        self,
+        sender: Callable[[str], object],
+        *,
+        model: str | None = None,
+        idempotent: bool = False,
+    ):
+        """Route one request without replaying ambiguous non-idempotent work.
 
-        ``model`` is an optional scheduling hint: workers whose recorded
-        inventory (see ``note_models``) lacks it are tried last. It never
-        changes the payload the sender transmits.
+        ``urllib`` transport exceptions do not prove that a request body was
+        never delivered.  Failover is therefore reserved for explicitly
+        idempotent control-plane reads.  Model POSTs select one worker exactly
+        once; a timeout or connection loss after send is surfaced as uncertain
+        instead of duplicating inference on another host.
         """
         last_error = None
         for state in self._ordered(model):
@@ -372,8 +418,14 @@ class OllamaWorkerPool:
             try:
                 result = sender(state.endpoint.origin)
             except Exception as error:
-                self._finish(state, error, self._time() - started)
-                if not self._retryable(error):
+                retryable = self._retryable(error)
+                self._finish(
+                    state,
+                    error,
+                    self._time() - started,
+                    count_failure=retryable,
+                )
+                if not idempotent or not retryable:
                     raise
                 last_error = error
                 continue
@@ -410,6 +462,11 @@ class OllamaWorkerPool:
                 1 for state in self._states
                 if not _is_loopback(state.endpoint.origin)
             ),
+            "remote_tls_required": self.has_remote_workers,
+            "tls_verification": (
+                "system-trust-store" if self.has_remote_workers else "not-applicable"
+            ),
+            "non_idempotent_failover": False,
             "workers": [snapshot.to_dict() for snapshot in self.snapshots()],
         }
 
@@ -417,12 +474,24 @@ class OllamaWorkerPool:
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     """Build the pool from ``SONDER_OLLAMA_WORKERS`` and consent settings."""
     env = os.environ if environment is None else environment
-    allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    with _configuration_lock:
+        configured_workers = _configured_workers
+        configured_allow_remote = _configured_allow_remote
+    if (
+        environment is None
+        and configured_workers is not None
+        and configured_allow_remote is not None
+    ):
+        worker_origins = configured_workers
+        allow_remote = configured_allow_remote
+    else:
+        worker_origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
+        allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
+            "1", "true", "yes", "on",
+        }
     return OllamaWorkerPool(
         primary_origin,
-        parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS")),
+        worker_origins,
         allow_remote=allow_remote,
     )
 
@@ -431,7 +500,9 @@ __all__ = [
     "OllamaWorkerPool",
     "WorkerEndpoint",
     "WorkerSnapshot",
+    "configure_typed_workers",
     "from_environment",
     "parse_worker_origins",
+    "reset_typed_workers",
     "validate_worker_origin",
 ]

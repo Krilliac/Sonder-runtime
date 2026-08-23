@@ -617,6 +617,28 @@ def test_authorized_accepts_account_when_flag_set(monkeypatch):
     assert ts._authorized("Bearer token") is True
 
 
+@pytest.mark.parametrize("account", [
+    {"role": "user"},
+    {"username": ""},
+    {"username": "u" * 129},
+    {"username": "bad\x00identity"},
+])
+def test_malformed_account_identity_fails_auth_closed(monkeypatch, account):
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", True)
+    monkeypatch.setattr(ts, "_auth_account", lambda _header: account)
+
+    context = ts._auth_context("Bearer token")
+    assert context["authorized"] is False
+    assert context["account"] is None
+
+
+def test_principal_derivation_refuses_identity_fallback_collision():
+    with pytest.raises(PermissionError, match="identity is unavailable"):
+        ts._state_principal({"account": {"role": "user"}})
+
+
 def test_execution_feed_detail_requires_flag_developer_and_non_local_open(
     monkeypatch,
 ):

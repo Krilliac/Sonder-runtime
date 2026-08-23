@@ -4320,7 +4320,10 @@ def _get(path: str) -> dict:
                 )
             return json.loads(raw.decode("utf-8"))
 
-    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
+    return (
+        OLLAMA_POOL.request(send, idempotent=True)
+        if OLLAMA_POOL.enabled else send(BASE)
+    )
 
 
 def _parse_schema_arg(schema):
@@ -22401,11 +22404,14 @@ def status() -> str:
     lines = [
         "Unsafe lab mode: %s" % unsafe_lab.status_line(),
         f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
-        "Ollama workers: %d configured (%d remote; least-inflight with transport failover)" % (
+        "Ollama workers: %d configured (%d remote; least-inflight, model POSTs never fail over)" % (
             len(OLLAMA_POOL.origins),
             sum(1 for origin in OLLAMA_POOL.origins if not ollama_endpoint.is_loopback(origin)),
         ),
         *worker_lines,
+        "Ollama worker TLS: %s; idempotent control reads may fail over" % (
+            OLLAMA_POOL.status()["tls_verification"],
+        ),
         "Tiers:",
         *tier_lines,
         f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",

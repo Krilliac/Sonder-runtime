@@ -322,6 +322,22 @@ def test_remote_ollama_workers_require_https_with_consent():
     assert any("workers remote entries must use https" in e for e in excinfo.value.errors)
 
 
+@pytest.mark.parametrize("variable, value, expected", [
+    ("OLLAMA_HOST", "http://127.0.0.1:11434/api", "must be an origin"),
+    ("OLLAMA_HOST", "http://user:pass@127.0.0.1:11434", "inline credentials"),
+    ("SONDER_OLLAMA_WORKERS", "ftp://127.0.0.1:11434", "must use http or https"),
+    ("SONDER_OLLAMA_WORKERS", "http://127.0.0.1:11434/api", "must be origins"),
+    ("OLLAMA_HOST", "http://[::1", "invalid"),
+    ("SONDER_OLLAMA_WORKERS", "http://127.0.0.1:not-a-port", "malformed"),
+])
+def test_ollama_origins_reject_ambiguous_or_credential_bearing_urls(
+    variable, value, expected,
+):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env={variable: value})
+    assert any(expected in error for error in excinfo.value.errors)
+
+
 def test_redacted_dump_never_contains_secret_values():
     secret = "extremely-secret-api-key-value-123"
     config = load_config(env={"SONDER_API_KEY": secret,
