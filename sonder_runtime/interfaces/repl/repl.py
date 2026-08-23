@@ -130,11 +130,14 @@ def run_jsonl(stream=None):
     """
     writer = _JsonLinesWriter(stream or sys.stdout)
     ansi_was_enabled = _Ansi.enabled
+    legacy_ndjson = os.environ.pop("SONDER_REPL_NDJSON", None)
     _Ansi.enabled = False
     try:
         with redirect_stdout(writer):
             main(machine_output=True)
     finally:
+        if legacy_ndjson is not None:
+            os.environ["SONDER_REPL_NDJSON"] = legacy_ndjson
         writer.close()
         _Ansi.enabled = ansi_was_enabled
 

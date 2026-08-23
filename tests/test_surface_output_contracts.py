@@ -47,6 +47,23 @@ def test_json_repl_uses_machine_mode_without_changing_the_normal_loop(monkeypatc
     assert sonder_repl._Ansi.enabled is original_ansi
 
 
+def test_explicit_json_repl_temporarily_disables_legacy_ndjson(monkeypatch):
+    target = io.StringIO()
+    seen = []
+
+    def fake_main(*, machine_output=False):
+        seen.append(sonder_repl.os.environ.get("SONDER_REPL_NDJSON"))
+        print("answer")
+
+    monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
+    monkeypatch.setattr(sonder_repl, "main", fake_main)
+
+    sonder_repl.run_jsonl(target)
+
+    assert seen == [None]
+    assert sonder_repl.os.environ["SONDER_REPL_NDJSON"] == "1"
+
+
 def test_repl_json_cli_help_advertises_json_lines_contract(capsys):
     parser = runtime_main.build_parser()
     args = parser.parse_args(["repl", "--json"])

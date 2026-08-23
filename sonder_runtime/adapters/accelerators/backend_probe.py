@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+from functools import lru_cache
 from collections.abc import Callable, Mapping
 
 
@@ -26,6 +27,24 @@ _BACKEND_PROBES = {
         "modules": ("tensorrt_llm",),
     },
 }
+
+
+@lru_cache(maxsize=1)
+def probe_cuda_runtime() -> bool:
+    """Return true only when an installed runtime reports usable CUDA.
+
+    A display adapter or ``nvidia-smi`` entry is not enough evidence for model
+    execution. PyTorch is optional; when it is absent or cannot initialize,
+    CUDA remains unconfirmed and callers retain their CPU/non-CUDA fallback.
+    """
+    try:
+        if importlib.util.find_spec("torch") is None:
+            return False
+        import torch  # type: ignore
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
 
 
 def _present(
@@ -118,4 +137,4 @@ def select_backend(
     }
 
 
-__all__ = ["probe_backend_inventory", "select_backend"]
+__all__ = ["probe_backend_inventory", "probe_cuda_runtime", "select_backend"]

@@ -1279,6 +1279,38 @@ void main() {
     },
   );
 
+  test('chatDetailed preserves structured unauthorized diagnostics', () async {
+    final client = MockClient(
+      (request) async => http.Response(
+        jsonEncode({
+          'error': {
+            'message': 'API key expired',
+            'type': 'authentication_error',
+            'code': 'AUTH_EXPIRED',
+            'correlation_id': 'req_auth',
+          },
+        }),
+        401,
+      ),
+    );
+
+    await expectLater(
+      http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+          const [ChatMessage(role: Role.user, content: 'hello')],
+        ),
+        () => client,
+      ),
+      throwsA(
+        isA<SonderException>()
+            .having((e) => e.httpStatus, 'status', 401)
+            .having((e) => e.code, 'code', 'AUTH_EXPIRED')
+            .having((e) => e.correlationId, 'request id', 'req_auth')
+            .having((e) => e.message, 'message', 'API key expired'),
+      ),
+    );
+  });
+
   test(
     'chatDetailed uses a stable fallback for a malformed error response',
     () async {
