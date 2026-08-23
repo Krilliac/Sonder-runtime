@@ -338,6 +338,7 @@ authentication, hosting, and full command details.
 - [Natural-language capability queries](docs/NATURAL_LANGUAGE_CAPABILITY_QUERIES.md)
 - [Training](TRAINING.md)
 - [Client and private hosting](CLIENT.md)
+- [Developer SDK contracts and plugin manifests](docs/developer-sdk.md)
 - [Unsafe lab model testing](docs/runbooks/unsafe-lab.md)
 - [Runbooks](docs/runbooks/README.md)
 - [Full wiki](docs/wiki/README.md)

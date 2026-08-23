@@ -653,7 +653,7 @@
       ]
     },
     {
-      "file_count": 32,
+      "file_count": 37,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -687,7 +687,12 @@
         "sonder_runtime/interfaces/repl/facades/__init__.py",
         "sonder_runtime/interfaces/repl/facades/status_model.py",
         "sonder_runtime/interfaces/repl/handler.py",
-        "sonder_runtime/interfaces/repl/repl.py"
+        "sonder_runtime/interfaces/repl/repl.py",
+        "sonder_runtime/interfaces/sdk/__init__.py",
+        "sonder_runtime/interfaces/sdk/client.py",
+        "sonder_runtime/interfaces/sdk/contracts.py",
+        "sonder_runtime/interfaces/sdk/discovery.py",
+        "sonder_runtime/interfaces/sdk/plugins.py"
       ]
     },
     {

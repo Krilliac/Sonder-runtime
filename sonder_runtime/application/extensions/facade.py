@@ -43,7 +43,14 @@ def build_extension_manifest(
         if isinstance(item, str):
             parsed_dependencies.append(ExtensionDependency(item, "*"))
         elif isinstance(item, Mapping) and isinstance(item.get("name"), str):
-            parsed_dependencies.append(ExtensionDependency(item["name"], str(item.get("version", "*"))))
+            required = item.get("required", True)
+            if not isinstance(required, bool):
+                raise TypeError("extension dependency required must be boolean")
+            parsed_dependencies.append(
+                ExtensionDependency(
+                    item["name"], str(item.get("version", "*")), required
+                )
+            )
         else:
             raise TypeError("extension dependencies must be names or objects")
     if any(not isinstance(item, str) or not item for item in permissions):
