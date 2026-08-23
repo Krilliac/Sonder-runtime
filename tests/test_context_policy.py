@@ -67,3 +67,17 @@ def test_default_context_follows_the_kv_cache_type(monkeypatch):
     monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
     monkeypatch.setenv("SONDER_CONTEXT_SIZE", "4096")
     assert context_policy.native() == 4096
+
+
+def test_auto_context_scales_with_model_size_and_advertised_limit(monkeypatch):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+
+    assert context_policy.auto_context(262144, "30.5B") == 16384
+    assert context_policy.auto_context(40960, "14.8B") == 24576
+    assert context_policy.auto_context(32768, "7.6B") == 32768
+    assert context_policy.auto_context(8192, "7.6B") == 8192
+
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "6k")
+    assert context_policy.auto_context(262144, "30.5B") == 6000
