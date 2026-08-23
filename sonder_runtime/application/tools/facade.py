@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ...domain.common.errors import Forbidden
+from ...domain.security import redaction as _redaction
 from ..ports.tool_execution import ToolExecutionResult, ToolExecutor
 from ..ports.tool_registry import ToolRegistry
 from .gateway_contract import (
@@ -59,6 +60,31 @@ class IdentityRedactor:
     def redact(self, tool_name: str, output: Any) -> Any:
         del tool_name
         return RedactedOutput(output, applied=False)
+
+
+class PatternOutputRedactor:
+    """Scrub credential shapes from every string in a tool output.
+
+    Applies the canonical domain pattern set (`domain.security.redaction`)
+    across a bounded structure walk. It cannot know live secret *values*
+    (the application layer has no environment access); a composition root
+    that can — e.g. the runtime container — should inject a ``redact``
+    callable built from the platform redactor so value- and pattern-based
+    scrubbing compose at one seam. Fails closed: if the walk itself fails,
+    the entire output is replaced rather than passed through unexamined.
+    """
+
+    def __init__(self, redact=None) -> None:
+        self._redact = redact
+
+    def redact(self, tool_name: str, output: Any) -> Any:
+        del tool_name
+        try:
+            return RedactedOutput(
+                _redaction.redact_structure(output, self._redact), applied=True
+            )
+        except Exception:
+            return RedactedOutput(_redaction.REDACTION_FAILED, applied=True)
 
 
 class ReceiptStore:
@@ -162,6 +188,7 @@ class _FailClosedTypedPolicy:
 
 
 __all__ = [
-    "DenyApprovalGate", "FailClosedToolExecutor", "IdentityRedactor", "ReceiptStore",
+    "DenyApprovalGate", "FailClosedToolExecutor", "IdentityRedactor",
+    "PatternOutputRedactor", "ReceiptStore",
     "ResourcePolicyEvaluator", "ToolApplicationFacade", "ToolGraph",
 ]

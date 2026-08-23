@@ -61,7 +61,17 @@ def build_runtime(
     # This graph is intentionally inert until a host supplies provider
     # adapters.  Its policy and executor defaults remain fail-closed.
     execution = ExecutionApplicationFacade.local()
-    tools = ToolApplicationFacade.compose(InMemoryToolRegistry())
+    # Redaction is the one gateway default that is honest-but-open
+    # (IdentityRedactor). The composition root can read the environment, so
+    # it injects the real authority: platform value-based scrubbing (live
+    # secret env values) composed with the canonical domain pattern set.
+    from ..application.tools.facade import PatternOutputRedactor
+    from ..platform.logging import Redactor
+
+    tools = ToolApplicationFacade.compose(
+        InMemoryToolRegistry(),
+        redactor=PatternOutputRedactor(Redactor().redact),
+    )
     # Derive the portable client/SDK schema from the same tool catalog.  No
     # live streams are invented here: hosts add authorized stream instances
     # through the protocol facade when they own a reconnectable session.
