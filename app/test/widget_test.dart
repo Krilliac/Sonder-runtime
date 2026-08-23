@@ -162,9 +162,9 @@ void main() {
     // The empty state also offers a "/stats" chip, so every palette
     // assertion is scoped to the palette itself.
     Finder inPalette(Finder matching) => find.descendant(
-      of: find.byKey(const Key('command-palette')),
-      matching: matching,
-    );
+          of: find.byKey(const Key('command-palette')),
+          matching: matching,
+        );
 
     await tester.enterText(find.byType(TextField), '/');
     await tester.pumpAndSettle();
@@ -273,6 +273,7 @@ void main() {
       await tester.enterText(find.byType(TextField), '/plan');
       await tester.pumpAndSettle();
       expect(find.text('/task_plan'), findsOneWidget);
+      expect(find.text('aliases: /plan'), findsOneWidget);
     }, () => client);
   });
 
@@ -491,9 +492,8 @@ void main() {
 
     if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
-        final boundary =
-            captureKey.currentContext!.findRenderObject()!
-                as RenderRepaintBoundary;
+        final boundary = captureKey.currentContext!.findRenderObject()!
+            as RenderRepaintBoundary;
         final image = await boundary.toImage(pixelRatio: 1);
         final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
         final output = File('build/ui-smoke-runtime-policy.png');
@@ -655,7 +655,8 @@ void main() {
         'total_listed': 1,
         'latest': {
           'id': 'auto-885ca53e8ef6',
-          'objective': 'Inspect the autonomous controller and verify its completion gates.',
+          'objective':
+              'Inspect the autonomous controller and verify its completion gates.',
           'project': 'sonder',
           'tier': 'code',
           'policy': 'observe',
@@ -763,9 +764,8 @@ void main() {
 
     if (Platform.environment['SONDER_CAPTURE_UI'] == '1') {
       await tester.runAsync(() async {
-        final boundary =
-            captureKey.currentContext!.findRenderObject()!
-                as RenderRepaintBoundary;
+        final boundary = captureKey.currentContext!.findRenderObject()!
+            as RenderRepaintBoundary;
         final image = await boundary.toImage(pixelRatio: 1);
         final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
         final output = File('build/ui-smoke-autopilot.png');
@@ -885,9 +885,17 @@ void main() {
           ChatMessage(role: Role.user, content: 'show formatting'),
           ChatMessage(
             role: Role.assistant,
-            content:
-                '**Bold answer**\n\n```python\nprint("ok")\n```\n\n'
+            content: '**Bold answer**\n\n```python\nprint("ok")\n```\n\n'
                 '=== ACTIVITY (observable work) ===\ntool calls: 1\n=== END ACTIVITY ===',
+            responseMetadata: ChatResponseMetadata(
+              requestId: 'req_saved_turn',
+              model: 'qwen:latest',
+              tier: 'code',
+              status: 'complete',
+              cache: 'hit',
+              elapsedMs: 800,
+              totalTokens: 42,
+            ),
           ),
         ],
       );
@@ -901,7 +909,13 @@ void main() {
       expect(find.byType(MarkdownBody), findsOneWidget);
       expect(find.text('Bold answer'), findsOneWidget);
       expect(find.text('Activity evidence'), findsOneWidget);
+      expect(find.text('Response details - cached replay'), findsOneWidget);
       expect(find.textContaining('**Bold answer**'), findsNothing);
+
+      await tester.tap(find.text('Response details - cached replay'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('request: req_saved_turn'), findsOneWidget);
+      expect(find.textContaining('cache: hit (replayed)'), findsOneWidget);
     },
   );
 
@@ -1281,7 +1295,8 @@ void main() {
     }, () => missing);
   });
 
-  testWidgets('A mode that stops being readable disappears instead of going '
+  testWidgets(
+      'A mode that stops being readable disappears instead of going '
       'stale', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -1324,7 +1339,8 @@ Map<String, dynamic> _permissionModeBody(
     'plan': 'reads only - no writes, no commands',
     'manual': 'ask before anything that is not a read',
     'acceptEdits': 'file changes proceed; running programs still asks',
-    'auto': 'file changes and programs proceed; destructive still asks at the console',
+    'auto':
+        'file changes and programs proceed; destructive still asks at the console',
   };
   const labels = <String, String>{
     'plan': 'plan',

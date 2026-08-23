@@ -30,7 +30,12 @@ through Sonder Runtime's bounded authenticated launcher. See
 ## Features
 
 - **Chat UI** with saved local chats, a chat drawer, per-chat project names,
-  and conversation memory (history is threaded to the server).
+  and conversation memory (history is threaded to the server). Each completed
+  turn preserves the server's content-free response receipt, usage totals,
+  aggregate activity status, resolved model/tier, and cache result in a
+  collapsed **Response details** panel. These diagnostics survive local chat
+  history without being replayed to the model; local error bubbles are likewise
+  excluded from later model-visible history.
 - **Inference picker** in the title bar — select the `sonder` local route or a
   model/tier exposed by the server. The list comes from `/v1/models`. Grounded
   outcomes feed memory and training-data preparation; actual adapter-weight
@@ -97,6 +102,10 @@ through Sonder Runtime's bounded authenticated launcher. See
 - **Slash commands** built in — `/stats`, `/context`, `/compact`, `/todo`,
   `/commands`, `/runtime`, `/mcp`, `/learning`, `/asset`, `/artifactcheck`, `/dump`, `/permissions`, `/train`, `/pass`, `/fail`, `/help` — handled
   by the serve layer exactly like the REPL.
+- **Accessible command and progress UX** — command discovery searches names,
+  aliases, tool names, usage, and parameters; rows publish full assistive labels.
+  In-flight turns announce a live `Working...` status, and structured server
+  errors retain bounded request IDs/codes/retry hints under **Error details**.
 - **Dark / light** themes, copy-to-clipboard, selectable text.
 - Works against a LAN server, a VPS, or `127.0.0.1` when the server runs on the
   same desktop machine.
