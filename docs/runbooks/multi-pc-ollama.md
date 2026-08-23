@@ -99,6 +99,26 @@ and the smoothed request latency in milliseconds. A worker that goes down is
 temporarily removed from selection and returns automatically through a
 successful half-open trial after its cooldown.
 
+Run `python -m sonder_runtime doctor` (or `sonder doctor`) to check worker
+health without sending inference traffic:
+
+- **`ollama_workers`** probes every configured worker's `/api/tags`
+  independently and reports which ones answered. `ok` means every worker
+  responded; `warn` names the unreachable ones while the rest still serve
+  requests; `fail` means none of the configured workers answered. A
+  single-endpoint deployment (no `workers` configured) reports `skipped`
+  here — that is expected, not an error.
+- **`ollama_residency`** reads `/api/ps` on the primary endpoint and flags
+  any resident model whose `keep_alive` deadline (`expires_at`) has already
+  passed. Ollama should have unloaded that model; still seeing it usually
+  means eviction stalled (e.g. after a killed or hung generation) and the
+  model is pinned in VRAM. This check only observes — it never unloads a
+  model itself.
+
+Pass `--skip-ollama` to omit `ollama`, `ollama_workers`, and
+`ollama_residency` when you only want the non-network checks, and `--json`
+for a machine-readable report to gate scripts or CI on.
+
 ## Internet access
 
 For Internet use, put the worker endpoint behind a VPN or an authenticated TLS

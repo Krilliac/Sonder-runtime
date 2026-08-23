@@ -3,8 +3,10 @@
 from types import SimpleNamespace
 
 from sonder_runtime.bootstrap.doctor_checks import (
+    bounded_join,
     summarize_memory_quality,
     summarize_self_heal,
+    summarize_worker_probe,
 )
 
 
@@ -97,3 +99,40 @@ def test_summarize_memory_quality_preserves_connection_and_audit_failures():
         "memory.sqlite",
     ) == {"status": "skipped", "detail": "audit failed (offline)"}
     assert closed == [True]
+
+
+def test_bounded_join_passes_through_short_lists():
+    assert bounded_join(["a", "b"]) == "a, b"
+    assert bounded_join([]) == ""
+
+
+def test_bounded_join_caps_long_lists_with_a_remainder_marker():
+    items = ["w%d" % i for i in range(12)]
+    assert bounded_join(items, limit=8) == (
+        "w0, w1, w2, w3, w4, w5, w6, w7, +4 more"
+    )
+
+
+def test_summarize_worker_probe_ok_when_every_worker_answers():
+    assert summarize_worker_probe(["a: 1 models", "b: 2 models"], [], 2) == {
+        "status": "ok",
+        "detail": "2 worker(s) reachable: a: 1 models, b: 2 models",
+    }
+
+
+def test_summarize_worker_probe_warns_on_partial_outage():
+    result = summarize_worker_probe(["a: 1 models"], ["b (connection refused)"], 2)
+    assert result["status"] == "warn"
+    assert "1/2 worker(s) unreachable" in result["detail"]
+    assert "b (connection refused)" in result["detail"]
+    assert "reachable: a: 1 models" in result["detail"]
+
+
+def test_summarize_worker_probe_fails_when_every_worker_is_unreachable():
+    result = summarize_worker_probe(
+        [], ["a (timed out)", "b (timed out)"], 2
+    )
+    assert result == {
+        "status": "fail",
+        "detail": "2/2 worker(s) unreachable: a (timed out), b (timed out)",
+    }
