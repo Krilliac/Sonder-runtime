@@ -11,19 +11,22 @@ void main() {
     late http.Request seen;
     final client = MockClient((request) async {
       seen = request;
-      return http.Response(jsonEncode({
-        'persistence': 'durable',
-        'records': [
-          {
-            'extension_id': 'sonder.worker',
-            'scope': 'global',
-            'version': '1.0.0',
-            'enabled': true,
-            'health_state': 'healthy',
-            'resources': {'memory_limit_bytes': 123},
-          },
-        ],
-      }), 200);
+      return http.Response(
+        jsonEncode({
+          'persistence': 'durable',
+          'records': [
+            {
+              'extension_id': 'sonder.worker',
+              'scope': 'global',
+              'version': '1.0.0',
+              'enabled': true,
+              'health_state': 'healthy',
+              'resources': {'memory_limit_bytes': 123},
+            },
+          ],
+        }),
+        200,
+      );
     });
     final result = await http.runWithClient(
       () => const SonderApi(
@@ -37,14 +40,17 @@ void main() {
     expect(result?.records.single.memoryLimitBytes, 123);
   });
 
-  test('model catalog refresh preserves a case-insensitive saved selection', () {
-    expect(
-      resolveCatalogModel(['sonder', 'gemma3:12b'], 'Gemma3:12B'),
-      'gemma3:12b',
-    );
-    expect(resolveCatalogModel(['sonder'], 'removed:latest'), 'sonder');
-    expect(resolveCatalogModel(const [], 'sonder'), 'sonder');
-  });
+  test(
+    'model catalog refresh preserves a case-insensitive saved selection',
+    () {
+      expect(
+        resolveCatalogModel(['sonder', 'gemma3:12b'], 'Gemma3:12B'),
+        'gemma3:12b',
+      );
+      expect(resolveCatalogModel(['sonder'], 'removed:latest'), 'sonder');
+      expect(resolveCatalogModel(const [], 'sonder'), 'sonder');
+    },
+  );
 
   test('host launcher status uses its independent bearer token', () async {
     late http.Request seen;
@@ -72,8 +78,7 @@ void main() {
       () => client,
     );
 
-    expect(seen.url.toString(),
-        'https://host.test:11436/v1/launcher/status');
+    expect(seen.url.toString(), 'https://host.test:11436/v1/launcher/status');
     expect(seen.headers['authorization'], 'Bearer launcher-secret');
     expect(status.launcher, 'ready');
     expect(status.serverRunning, isFalse);
@@ -111,10 +116,12 @@ void main() {
     expect(jsonDecode(seen.body), {'context_size': '32k'});
     expect(
       seen.headers['idempotency-key'],
-      matches(RegExp(
-        r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-'
-        r'[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-      )),
+      matches(
+        RegExp(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-'
+          r'[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+        ),
+      ),
     );
     expect(status.serverRunning, isTrue);
     expect(status.message, 'started');
@@ -124,131 +131,133 @@ void main() {
     );
   });
 
-  test('host launcher follows an accepted async operation to success',
-      () async {
-    final requests = <http.Request>[];
-    var operationReads = 0;
-    Map<String, dynamic> payload(String phase) => {
-          'ok': phase != 'failed',
-          'launcher': 'ready',
-          'server_running': phase == 'succeeded',
-          'server_host': '0.0.0.0',
-          'server_port': 11435,
-          'last_action': 'start',
-          'last_error': '',
-          'operation_id': 'op-12345678',
-          'operation_phase': phase,
-          'operation': {
-            'id': 'op-12345678',
-            'action': 'start',
-            'phase': phase,
-            'message': phase == 'succeeded' ? 'Server started.' : 'Working.',
-            'last_error': '',
-          },
-        };
-    final client = MockClient((request) async {
-      requests.add(request);
-      if (request.method == 'POST') {
-        return http.Response(jsonEncode(payload('queued')), 202);
-      }
-      operationReads += 1;
-      if (operationReads == 1) {
-        return http.Response(jsonEncode({'error': 'temporarily unavailable'}),
-            503);
-      }
-      return http.Response(
-        jsonEncode(payload(operationReads == 2 ? 'running' : 'succeeded')),
-        200,
-      );
-    });
-    final phases = <String>[];
-
-    final result = await http.runWithClient(
-      () => const SonderLauncherApi(
-        baseUrl: 'https://host.test:11436',
-        token: 'secret',
-      ).action(
-        'start',
-        idempotencyKey: 'tap-key-12345678',
-        maxWait: const Duration(seconds: 1),
-        pollInterval: Duration.zero,
-        onProgress: (status) {
-          phases.add(status.currentOperation!.phase);
-        },
-      ),
-      () => client,
-    );
-
-    expect(result.serverRunning, isTrue);
-    expect(phases, ['queued', 'running', 'succeeded']);
-    expect(requests, hasLength(4));
-    expect(requests.first.headers['idempotency-key'], 'tap-key-12345678');
-    expect(
-      requests.last.url.path,
-      '/v1/launcher/operations/op-12345678',
-    );
-  });
-
-  test('host launcher reports terminal async failures without another POST',
-      () async {
-    var posts = 0;
-    final client = MockClient((request) async {
-      if (request.method == 'POST') {
-        posts += 1;
-        return http.Response(
-          jsonEncode({
-            'ok': true,
+  test(
+    'host launcher follows an accepted async operation to success',
+    () async {
+      final requests = <http.Request>[];
+      var operationReads = 0;
+      Map<String, dynamic> payload(String phase) => {
+            'ok': phase != 'failed',
             'launcher': 'ready',
+            'server_running': phase == 'succeeded',
+            'server_host': '0.0.0.0',
+            'server_port': 11435,
+            'last_action': 'start',
+            'last_error': '',
+            'operation_id': 'op-12345678',
+            'operation_phase': phase,
             'operation': {
-              'id': 'op-failure',
-              'action': 'restart',
-              'phase': 'queued',
+              'id': 'op-12345678',
+              'action': 'start',
+              'phase': phase,
+              'message': phase == 'succeeded' ? 'Server started.' : 'Working.',
+              'last_error': '',
             },
-          }),
-          202,
+          };
+      final client = MockClient((request) async {
+        requests.add(request);
+        if (request.method == 'POST') {
+          return http.Response(jsonEncode(payload('queued')), 202);
+        }
+        operationReads += 1;
+        if (operationReads == 1) {
+          return http.Response(
+            jsonEncode({'error': 'temporarily unavailable'}),
+            503,
+          );
+        }
+        return http.Response(
+          jsonEncode(payload(operationReads == 2 ? 'running' : 'succeeded')),
+          200,
         );
-      }
-      return http.Response(
-        jsonEncode({
-          'ok': false,
-          'launcher': 'ready',
-          'last_error': 'server health check failed',
-          'operation': {
-            'id': 'op-failure',
-            'action': 'restart',
-            'phase': 'failed',
-            'last_error': 'server health check failed',
-          },
-        }),
-        200,
-      );
-    });
+      });
+      final phases = <String>[];
 
-    await expectLater(
-      http.runWithClient(
+      final result = await http.runWithClient(
         () => const SonderLauncherApi(
           baseUrl: 'https://host.test:11436',
           token: 'secret',
         ).action(
-          'restart',
+          'start',
+          idempotencyKey: 'tap-key-12345678',
           maxWait: const Duration(seconds: 1),
           pollInterval: Duration.zero,
+          onProgress: (status) {
+            phases.add(status.currentOperation!.phase);
+          },
         ),
         () => client,
-      ),
-      throwsA(
-        isA<SonderException>().having(
-          (error) => error.message,
-          'message',
-          contains('health check failed'),
-        ),
-      ),
-    );
-    expect(posts, 1);
-  });
+      );
 
-  test('stopping async wait does not send a second launcher request',
-      () async {
+      expect(result.serverRunning, isTrue);
+      expect(phases, ['queued', 'running', 'succeeded']);
+      expect(requests, hasLength(4));
+      expect(requests.first.headers['idempotency-key'], 'tap-key-12345678');
+      expect(requests.last.url.path, '/v1/launcher/operations/op-12345678');
+    },
+  );
+
+  test(
+    'host launcher reports terminal async failures without another POST',
+    () async {
+      var posts = 0;
+      final client = MockClient((request) async {
+        if (request.method == 'POST') {
+          posts += 1;
+          return http.Response(
+            jsonEncode({
+              'ok': true,
+              'launcher': 'ready',
+              'operation': {
+                'id': 'op-failure',
+                'action': 'restart',
+                'phase': 'queued',
+              },
+            }),
+            202,
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'ok': false,
+            'launcher': 'ready',
+            'last_error': 'server health check failed',
+            'operation': {
+              'id': 'op-failure',
+              'action': 'restart',
+              'phase': 'failed',
+              'last_error': 'server health check failed',
+            },
+          }),
+          200,
+        );
+      });
+
+      await expectLater(
+        http.runWithClient(
+          () => const SonderLauncherApi(
+            baseUrl: 'https://host.test:11436',
+            token: 'secret',
+          ).action(
+            'restart',
+            maxWait: const Duration(seconds: 1),
+            pollInterval: Duration.zero,
+          ),
+          () => client,
+        ),
+        throwsA(
+          isA<SonderException>().having(
+            (error) => error.message,
+            'message',
+            contains('health check failed'),
+          ),
+        ),
+      );
+      expect(posts, 1);
+    },
+  );
+
+  test('stopping async wait does not send a second launcher request', () async {
     var requests = 0;
     var cancelled = false;
     final client = MockClient((request) async {
@@ -293,19 +302,21 @@ void main() {
   });
 
   test('launcher status exposes a resumable active operation', () async {
-    final client = MockClient((request) async => http.Response(
-          jsonEncode({
-            'ok': true,
-            'launcher': 'ready',
-            'active_operation': {
-              'id': 'op-resume',
-              'action': 'start',
-              'phase': 'running',
-              'message': 'Downloading model.',
-            },
-          }),
-          200,
-        ));
+    final client = MockClient(
+      (request) async => http.Response(
+        jsonEncode({
+          'ok': true,
+          'launcher': 'ready',
+          'active_operation': {
+            'id': 'op-resume',
+            'action': 'start',
+            'phase': 'running',
+            'message': 'Downloading model.',
+          },
+        }),
+        200,
+      ),
+    );
 
     final result = await http.runWithClient(
       () => const SonderLauncherApi(
@@ -320,23 +331,25 @@ void main() {
     expect(result.currentOperation?.displayMessage, 'Downloading model.');
   });
 
-  test('launcher status distinguishes a foreign listener from Sonder Runtime',
-      () {
-    final status = LauncherStatus.fromJson({
-      'ok': true,
-      'launcher': 'ready',
-      'server_running': false,
-      'server_state': 'foreign_listener',
-      'server_host': '0.0.0.0',
-      'server_port': 11435,
-      'last_error': 'configured port is occupied by another service',
-    });
+  test(
+    'launcher status distinguishes a foreign listener from Sonder Runtime',
+    () {
+      final status = LauncherStatus.fromJson({
+        'ok': true,
+        'launcher': 'ready',
+        'server_running': false,
+        'server_state': 'foreign_listener',
+        'server_host': '0.0.0.0',
+        'server_port': 11435,
+        'last_error': 'configured port is occupied by another service',
+      });
 
-    expect(status.ok, isTrue);
-    expect(status.serverRunning, isFalse);
-    expect(status.serverState, 'foreign_listener');
-    expect(status.lastError, contains('another service'));
-  });
+      expect(status.ok, isTrue);
+      expect(status.serverRunning, isFalse);
+      expect(status.serverState, 'foreign_listener');
+      expect(status.lastError, contains('another service'));
+    },
+  );
 
   test('Sonder API uses the canonical status namespace', () async {
     late http.Request seen;
@@ -378,40 +391,41 @@ void main() {
     final client = MockClient((request) async {
       if (request.url.host == 'ipwho.is') {
         return http.Response(
-            jsonEncode({
-              'success': true,
-              'ip': '203.0.113.77',
-              'city': 'Chicago',
-              'region': 'Illinois',
-              'country': 'United States',
-              'country_code': 'US',
-              'latitude': 41.8,
-              'longitude': -87.6,
-              'timezone': {
-                'id': 'America/Chicago',
-                'abbr': 'CDT',
-                'offset': -18000,
-              },
-            }),
-            200);
+          jsonEncode({
+            'success': true,
+            'ip': '203.0.113.77',
+            'city': 'Chicago',
+            'region': 'Illinois',
+            'country': 'United States',
+            'country_code': 'US',
+            'latitude': 41.8,
+            'longitude': -87.6,
+            'timezone': {
+              'id': 'America/Chicago',
+              'abbr': 'CDT',
+              'offset': -18000,
+            },
+          }),
+          200,
+        );
       }
       chatBody = jsonDecode(request.body) as Map<String, dynamic>;
       return http.Response(
-          jsonEncode({
-            'choices': [
-              {
-                'message': {'role': 'assistant', 'content': 'weather live'}
-              }
-            ]
-          }),
-          200);
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'role': 'assistant', 'content': 'weather live'},
+            },
+          ],
+        }),
+        200,
+      );
     });
 
     final output = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').chat(
-        const [ChatMessage(role: Role.user, content: 'weather in my area')],
-        allowApproximateLocation: true,
-      ),
+      () => const SonderApi(baseUrl: 'http://sonder.test').chat(const [
+        ChatMessage(role: Role.user, content: 'weather in my area'),
+      ], allowApproximateLocation: true),
       () => client,
     );
 
@@ -426,40 +440,42 @@ void main() {
     expect(hint['timezone'], 'America/Chicago');
   });
 
-  test('explicit weather city does not perform an IP location lookup',
-      () async {
-    var locationRequests = 0;
-    Map<String, dynamic>? chatBody;
-    final client = MockClient((request) async {
-      if (request.url.host == 'ipwho.is') {
-        locationRequests += 1;
-        return http.Response('{}', 200);
-      }
-      chatBody = jsonDecode(request.body) as Map<String, dynamic>;
-      return http.Response(
+  test(
+    'explicit weather city does not perform an IP location lookup',
+    () async {
+      var locationRequests = 0;
+      Map<String, dynamic>? chatBody;
+      final client = MockClient((request) async {
+        if (request.url.host == 'ipwho.is') {
+          locationRequests += 1;
+          return http.Response('{}', 200);
+        }
+        chatBody = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
           jsonEncode({
             'choices': [
               {
-                'message': {'role': 'assistant', 'content': 'Tokyo weather'}
-              }
-            ]
+                'message': {'role': 'assistant', 'content': 'Tokyo weather'},
+              },
+            ],
           }),
-          200);
-    });
+          200,
+        );
+      });
 
-    final output = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').chat(
-        const [ChatMessage(role: Role.user, content: 'weather in Tokyo')],
-        allowApproximateLocation: true,
-      ),
-      () => client,
-    );
+      final output = await http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test').chat(const [
+          ChatMessage(role: Role.user, content: 'weather in Tokyo'),
+        ], allowApproximateLocation: true),
+        () => client,
+      );
 
-    expect(output, 'Tokyo weather');
-    expect(locationRequests, 0);
-    expect(chatBody?['location_consent'], isTrue);
-    expect(chatBody?.containsKey('location_hint'), isFalse);
-  });
+      expect(output, 'Tokyo weather');
+      expect(locationRequests, 0);
+      expect(chatBody?['location_consent'], isTrue);
+      expect(chatBody?.containsKey('location_hint'), isFalse);
+    },
+  );
 
   test('activity response preserves exact actions and checklist state', () {
     final status = ActivityStatus.fromJson({
@@ -660,86 +676,100 @@ void main() {
     });
     final event = feed.events.single;
     final rendered = [
-      event.responseId, event.responseStatus, event.kind, event.phase,
-      event.model, event.tool, event.title, event.fileOperation, event.path,
-      event.previewKind, event.preview,
+      event.responseId,
+      event.responseStatus,
+      event.kind,
+      event.phase,
+      event.model,
+      event.tool,
+      event.title,
+      event.fileOperation,
+      event.path,
+      event.previewKind,
+      event.preview,
     ].join('|');
-    expect(rendered, isNot(contains(RegExp(
-      r'[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]',
-    ))));
+    expect(
+      rendered,
+      isNot(
+        contains(RegExp(r'[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]')),
+      ),
+    );
     expect(event.kind.length, lessThanOrEqualTo(64));
   });
 
-  test('execution feed is additive and suppresses preview when detail is off', () {
-    final oldInfo = SystemInfo.fromJson({
-      'activity': {
-        'events': ['legacy activity is not an execution feed'],
-      },
-    });
-    final info = SystemInfo.fromJson({
-      'execution': {
-        'feed': {
-          'known': true,
-          'schema_version': 1,
-          'runtime_id': 'runtime-old',
-          'active_responses': null,
-          'truncated': false,
-          'redaction_applied': false,
-          'limits': {'events': 20, 'preview_chars': 1000},
-          'error': '',
-          'bytes': 100,
-          'events': [
-            {
-              'response_id': 'r1',
-              'response_status': 'running',
-              'seq': 1,
-              'kind': 'unknown-new-kind',
-              'phase': 'completed',
-              'summary_preview': {
-                'state': 'disabled',
-                'text': 'must not be exposed',
-                'chars': null,
-                'truncated': false,
-                'redacted': false,
-              },
-            },
-          ],
+  test(
+    'execution feed is additive and suppresses preview when detail is off',
+    () {
+      final oldInfo = SystemInfo.fromJson({
+        'activity': {
+          'events': ['legacy activity is not an execution feed'],
         },
-      },
-    });
+      });
+      final info = SystemInfo.fromJson({
+        'execution': {
+          'feed': {
+            'known': true,
+            'schema_version': 1,
+            'runtime_id': 'runtime-old',
+            'active_responses': null,
+            'truncated': false,
+            'redaction_applied': false,
+            'limits': {'events': 20, 'preview_chars': 1000},
+            'error': '',
+            'bytes': 100,
+            'events': [
+              {
+                'response_id': 'r1',
+                'response_status': 'running',
+                'seq': 1,
+                'kind': 'unknown-new-kind',
+                'phase': 'completed',
+                'summary_preview': {
+                  'state': 'disabled',
+                  'text': 'must not be exposed',
+                  'chars': null,
+                  'truncated': false,
+                  'redacted': false,
+                },
+              },
+            ],
+          },
+        },
+      });
 
-    expect(oldInfo.executionFeed, isNull);
-    expect(info.executionFeed?.known, isTrue);
-    expect(info.executionFeed?.activeResponses, isNull);
-    expect(info.executionFeed?.schemaVersion, 1);
-    expect(info.executionFeed?.events.single.kind, 'unknown-new-kind');
-    expect(info.executionFeed?.events.single.preview, isEmpty);
-    expect(info.executionFeed?.events.single.previewState, 'disabled');
+      expect(oldInfo.executionFeed, isNull);
+      expect(info.executionFeed?.known, isTrue);
+      expect(info.executionFeed?.activeResponses, isNull);
+      expect(info.executionFeed?.schemaVersion, 1);
+      expect(info.executionFeed?.events.single.kind, 'unknown-new-kind');
+      expect(info.executionFeed?.events.single.preview, isEmpty);
+      expect(info.executionFeed?.events.single.previewState, 'disabled');
 
-    final authoritativeNoGap = ExecutionFeed.fromJson({
-      'known': true,
-      'dropped_events': 0,
-      'sequence_gap': 0,
-      'events': [
-        {'response_id': 'r1', 'seq': 1},
-        {'response_id': 'r1', 'seq': 3},
-      ],
-    });
-    expect(authoritativeNoGap.hasGap, isFalse);
-    expect(authoritativeNoGap.oldestSeq, isNull);
-    expect(authoritativeNoGap.droppedEvents, 0);
+      final authoritativeNoGap = ExecutionFeed.fromJson({
+        'known': true,
+        'dropped_events': 0,
+        'sequence_gap': 0,
+        'events': [
+          {'response_id': 'r1', 'seq': 1},
+          {'response_id': 'r1', 'seq': 3},
+        ],
+      });
+      expect(authoritativeNoGap.hasGap, isFalse);
+      expect(authoritativeNoGap.oldestSeq, isNull);
+      expect(authoritativeNoGap.droppedEvents, 0);
 
-    final inferredLegacyGap = ExecutionFeed.fromJson({
-      'known': true,
-      'events': [
-        {'response_id': 'legacy-r1', 'seq': 1},
-        {'response_id': 'legacy-r1', 'seq': 3},
-      ],
-    });
-    expect(inferredLegacyGap.sequenceGap, isNull);
-    expect(inferredLegacyGap.droppedEvents, isNull);
-    expect(inferredLegacyGap.hasGap, isTrue);
-  });
+      final inferredLegacyGap = ExecutionFeed.fromJson({
+        'known': true,
+        'events': [
+          {'response_id': 'legacy-r1', 'seq': 1},
+          {'response_id': 'legacy-r1', 'seq': 3},
+        ],
+      });
+      expect(inferredLegacyGap.sequenceGap, isNull);
+      expect(inferredLegacyGap.droppedEvents, isNull);
+      expect(inferredLegacyGap.hasGap, isTrue);
+    },
+  );
 
   test('agent status preserves scheduler capacity and cancellation state', () {
     final status = AgentStatus.fromJson({
@@ -1019,50 +1049,52 @@ void main() {
     expect(health.hasWarning, isFalse);
   });
 
-  test('chatDetailed surfaces sonder_reasoning when the server sends it',
-      () async {
-    final client = MockClient((request) async {
-      return http.Response(
+  test(
+    'chatDetailed surfaces sonder_reasoning when the server sends it',
+    () async {
+      final client = MockClient((request) async {
+        return http.Response(
           jsonEncode({
             'choices': [
               {
-                'message': {'role': 'assistant', 'content': 'the answer'}
-              }
+                'message': {'role': 'assistant', 'content': 'the answer'},
+              },
             ],
             'sonder_reasoning': 'step one, step two',
           }),
-          200);
-    });
+          200,
+        );
+      });
 
-    final reply = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
-        const [ChatMessage(role: Role.user, content: 'hi')],
-      ),
-      () => client,
-    );
+      final reply = await http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test')
+            .chatDetailed(const [ChatMessage(role: Role.user, content: 'hi')]),
+        () => client,
+      );
 
-    expect(reply.text, 'the answer');
-    expect(reply.reasoning, 'step one, step two');
-    expect(reply.hasReasoning, isTrue);
-  });
+      expect(reply.text, 'the answer');
+      expect(reply.reasoning, 'step one, step two');
+      expect(reply.hasReasoning, isTrue);
+    },
+  );
 
   test('chatDetailed reports no reasoning when the server omits it', () async {
     final client = MockClient((request) async {
       return http.Response(
-          jsonEncode({
-            'choices': [
-              {
-                'message': {'role': 'assistant', 'content': 'the answer'}
-              }
-            ],
-          }),
-          200);
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'role': 'assistant', 'content': 'the answer'},
+            },
+          ],
+        }),
+        200,
+      );
     });
 
     final reply = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
-        const [ChatMessage(role: Role.user, content: 'hi')],
-      ),
+      () => const SonderApi(baseUrl: 'http://sonder.test')
+          .chatDetailed(const [ChatMessage(role: Role.user, content: 'hi')]),
       () => client,
     );
 
@@ -1071,81 +1103,225 @@ void main() {
     expect(reply.hasReasoning, isFalse);
   });
 
-  test('chatDetailed keeps the server error when an exact model is rejected',
-      () async {
-    final client = MockClient((request) async {
-      expect(request.url.path, '/v1/chat/completions');
-      expect(jsonDecode(request.body)['model'], 'nomic-embed-text:latest');
-      return http.Response(
-        jsonEncode({
-          'error': {
-            'message':
-                "model 'nomic-embed-text:latest' does not support chat",
-            'type': 'invalid_request_error',
-          },
-        }),
-        400,
+  test(
+    'chatDetailed preserves bounded receipt usage and activity metadata',
+    () async {
+      final client = MockClient(
+        (request) async => http.Response(
+          jsonEncode({
+            'id': 'chatcmpl-turn-1',
+            'model': 'requested-alias',
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'grounded answer'},
+                'finish_reason': 'stop',
+              },
+            ],
+            'usage': {
+              'prompt_tokens': 21,
+              'completion_tokens': 8,
+              'total_tokens': 29,
+            },
+            'sonder_receipt': {
+              'request_id': 'req_turn_1',
+              'elapsed_ms': 432,
+              'model': 'actual-model:latest',
+              'tier': 'code',
+              'cache': 'hit',
+            },
+            'sonder_activity': {
+              'status': 'complete',
+              'model_calls': 1,
+              'tool_calls': 3,
+            },
+          }),
+          200,
+          headers: {'x-sonder-correlation-id': 'req_header'},
+        ),
       );
-    });
 
-    await expectLater(
-      http.runWithClient(
+      final reply = await http.runWithClient(
         () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
-          const [ChatMessage(role: Role.user, content: 'hello')],
-          model: 'nomic-embed-text:latest',
+          const [ChatMessage(role: Role.user, content: 'hi')],
         ),
         () => client,
-      ),
-      throwsA(
-        isA<SonderException>().having(
-          (error) => error.message,
-          'message',
-          "model 'nomic-embed-text:latest' does not support chat",
-        ),
-      ),
-    );
-  });
+      );
 
-  test('chatDetailed uses a stable fallback for a malformed error response',
-      () async {
-    final client =
-        MockClient((request) async => http.Response('bad gateway', 502));
+      final metadata = reply.metadata!;
+      expect(metadata.requestId, 'req_turn_1');
+      expect(metadata.completionId, 'chatcmpl-turn-1');
+      expect(metadata.model, 'actual-model:latest');
+      expect(metadata.tier, 'code');
+      expect(metadata.elapsedMs, 432);
+      expect(metadata.totalTokens, 29);
+      expect(metadata.toolCalls, 3);
+      expect(metadata.cache, 'hit');
+      expect(metadata.diagnosticText, contains('cache: hit (replayed)'));
+    },
+  );
 
-    await expectLater(
-      http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
-          const [ChatMessage(role: Role.user, content: 'hello')],
-        ),
+  test(
+    'chat history excludes local error bubbles and their diagnostics',
+    () async {
+      late Map<String, dynamic> body;
+      final client = MockClient((request) async {
+        body = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'recovered'},
+              },
+            ],
+          }),
+          200,
+        );
+      });
+
+      await http.runWithClient(
+        () =>
+            const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(const [
+          ChatMessage(role: Role.user, content: 'first'),
+          ChatMessage(
+            role: Role.assistant,
+            content: 'Cannot reach server',
+            error: true,
+            diagnostic: 'socket token=private',
+          ),
+          ChatMessage(role: Role.user, content: 'second'),
+        ]),
         () => client,
-      ),
-      throwsA(
-        isA<SonderException>().having(
-          (error) => error.message,
-          'message',
-          'Server returned HTTP 502.',
+      );
+
+      final messages = body['messages'] as List<dynamic>;
+      expect(messages.length, 2);
+      expect(jsonEncode(messages), isNot(contains('Cannot reach server')));
+      expect(jsonEncode(messages), isNot(contains('token=private')));
+    },
+  );
+
+  test(
+    'chatDetailed keeps the server error when an exact model is rejected',
+    () async {
+      final client = MockClient((request) async {
+        expect(request.url.path, '/v1/chat/completions');
+        expect(jsonDecode(request.body)['model'], 'nomic-embed-text:latest');
+        return http.Response(
+          jsonEncode({
+            'error': {
+              'message':
+                  "model 'nomic-embed-text:latest' does not support chat",
+              'type': 'invalid_request_error',
+            },
+          }),
+          400,
+        );
+      });
+
+      await expectLater(
+        http.runWithClient(
+          () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+            const [ChatMessage(role: Role.user, content: 'hello')],
+            model: 'nomic-embed-text:latest',
+          ),
+          () => client,
         ),
-      ),
-    );
-  });
+        throwsA(
+          isA<SonderException>().having(
+            (error) => error.message,
+            'message',
+            "model 'nomic-embed-text:latest' does not support chat",
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'chatDetailed exposes structured retry diagnostics without raw bodies',
+    () async {
+      final client = MockClient(
+        (request) async => http.Response(
+          jsonEncode({
+            'error': {
+              'message': 'runtime is draining',
+              'type': 'server_error',
+              'code': 'DRAINING',
+              'correlation_id': 'req_drain',
+              'retryable': true,
+            },
+          }),
+          503,
+          headers: {'retry-after': '7'},
+        ),
+      );
+
+      await expectLater(
+        http.runWithClient(
+          () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+            const [ChatMessage(role: Role.user, content: 'hello')],
+          ),
+          () => client,
+        ),
+        throwsA(
+          isA<SonderException>()
+              .having((e) => e.httpStatus, 'status', 503)
+              .having((e) => e.code, 'code', 'DRAINING')
+              .having((e) => e.correlationId, 'request id', 'req_drain')
+              .having((e) => e.retryAfterSeconds, 'retry after', 7)
+              .having(
+                (e) => e.diagnosticText,
+                'diagnostic',
+                contains('req_drain'),
+              ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'chatDetailed uses a stable fallback for a malformed error response',
+    () async {
+      final client = MockClient(
+        (request) async => http.Response('bad gateway', 502),
+      );
+
+      await expectLater(
+        http.runWithClient(
+          () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+            const [ChatMessage(role: Role.user, content: 'hello')],
+          ),
+          () => client,
+        ),
+        throwsA(
+          isA<SonderException>().having(
+            (error) => error.message,
+            'message',
+            'Server returned HTTP 502.',
+          ),
+        ),
+      );
+    },
+  );
 
   test('chat still returns the answer text only', () async {
     final client = MockClient((request) async {
       return http.Response(
-          jsonEncode({
-            'choices': [
-              {
-                'message': {'role': 'assistant', 'content': 'the answer'}
-              }
-            ],
-            'sonder_reasoning': 'private deliberation',
-          }),
-          200);
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'role': 'assistant', 'content': 'the answer'},
+            },
+          ],
+          'sonder_reasoning': 'private deliberation',
+        }),
+        200,
+      );
     });
 
     final output = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').chat(
-        const [ChatMessage(role: Role.user, content: 'hi')],
-      ),
+      () => const SonderApi(baseUrl: 'http://sonder.test')
+          .chat(const [ChatMessage(role: Role.user, content: 'hi')]),
       () => client,
     );
 
@@ -1173,13 +1349,13 @@ void main() {
                   'name': 'title',
                   'type': 'str',
                   'required': true,
-                  'default': null
+                  'default': null,
                 },
                 {
                   'name': 'project',
                   'type': 'str',
                   'required': false,
-                  'default': 'default'
+                  'default': 'default',
                 },
               ],
             },
@@ -1196,7 +1372,7 @@ void main() {
                   'name': 'path',
                   'type': 'str',
                   'required': true,
-                  'default': null
+                  'default': null,
                 },
               ],
             },
@@ -1244,6 +1420,12 @@ void main() {
     expect(plan.usageLine, '/task_plan <title> <steps> [project]');
     expect(plan.matchesPrefix('/pl'), isTrue, reason: 'aliases match');
     expect(plan.matchesLoose('plan a task'), isTrue);
+    expect(plan.matchesLoose('task_plan'), isTrue, reason: 'tool names match');
+    expect(
+      plan.matchesLoose('project'),
+      isTrue,
+      reason: 'parameter names match',
+    );
 
     // No usage on the wire: synthesise one from the declared params so a
     // palette row still says what arguments the command takes.
@@ -1253,10 +1435,10 @@ void main() {
     expect(write.risk, 'mutation');
 
     expect(catalog.categories['meta'], 'Help and discovery');
-    expect(
-      catalog.popularCommands.map((c) => c.name).toList(),
-      ['/help', '/task_plan'],
-    );
+    expect(catalog.popularCommands.map((c) => c.name).toList(), [
+      '/help',
+      '/task_plan',
+    ]);
     // Grouping follows the server's own category ordering, not insertion
     // order of the commands.
     expect(catalog.byCategory.keys.toList(), ['meta', 'planning', 'files']);
@@ -1349,7 +1531,10 @@ void main() {
     late http.Request seen;
     final client = MockClient((request) async {
       seen = request;
-      return http.Response(jsonEncode({'text': 'usage: /task_plan <title> <steps>'}), 200);
+      return http.Response(
+        jsonEncode({'text': 'usage: /task_plan <title> <steps>'}),
+        200,
+      );
     });
 
     final text = await http.runWithClient(
@@ -1397,7 +1582,8 @@ void main() {
     });
 
     final mode = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+      () =>
+          const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
       () => client,
     );
 
@@ -1410,123 +1596,138 @@ void main() {
     expect(mode.displayLabel, 'accept edits');
     expect(mode.elevated, isTrue);
     expect(mode.elevationReason, 'installing a driver');
-    expect(mode.options.map((m) => m.name).toList(),
-        ['plan', 'manual', 'acceptEdits', 'auto']);
+    expect(mode.options.map((m) => m.name).toList(), [
+      'plan',
+      'manual',
+      'acceptEdits',
+      'auto',
+    ]);
     expect(mode.matrix['execution'], 'ask');
     // Destructive tools ask in every mode, including auto.
     expect(mode.matrix['dangerous'], 'ask');
   });
 
-  test('permission mode degrades a partial record instead of throwing',
-      () async {
-    final client = MockClient(
-      (request) async => http.Response(jsonEncode({'mode': 'plan'}), 200),
-    );
-
-    final mode = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
-      () => client,
-    );
-
-    expect(mode, isNotNull);
-    expect(mode!.isUsable, isTrue);
-    // No label published: show the wire name rather than an empty chip.
-    expect(mode.displayLabel, 'plan');
-    expect(mode.blurb, '');
-    expect(mode.matrix, isEmpty);
-    // Nothing absent is read as elevated, and an empty mode list still offers
-    // the active mode so the picker is never blank.
-    expect(mode.elevated, isFalse);
-    expect(mode.elevationReason, '');
-    expect(mode.options.single.name, 'plan');
-
-    // A record that names no mode at all is not a mode: usable is false, so
-    // the caller hides the indicator rather than rendering a blank one.
-    final empty = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
-      () => MockClient((request) async => http.Response('{}', 200)),
-    );
-    expect(empty!.isUsable, isFalse);
-    expect(empty.elevated, isFalse);
-  });
-
-  test('permission mode reports an absent route as unsupported, not as a mode',
-      () async {
-    final missing = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
-      () => MockClient((request) async => http.Response('', 404)),
-    );
-    expect(missing, isNull);
-
-    // Anything else is a failure, never a silently-invented mode.
-    await expectLater(
-      http.runWithClient(
-        () =>
-            const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
-        () => MockClient((request) async => http.Response('nope', 503)),
-      ),
-      throwsA(isA<SonderException>()),
-    );
-    await expectLater(
-      http.runWithClient(
-        () =>
-            const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
-        () => MockClient((request) async => http.Response('', 401)),
-      ),
-      throwsA(isA<SonderException>()),
-    );
-  });
-
-  test('setting the permission mode posts it and returns the server state',
-      () async {
-    late http.Request seen;
-    final client = MockClient((request) async {
-      seen = request;
-      return http.Response(
-        jsonEncode({
-          'mode': 'plan',
-          'label': 'plan',
-          'blurb': 'reads only - no writes, no commands',
-          'elevated': false,
-          'elevationReason': '',
-          'modes': [
-            {'name': 'plan', 'label': 'plan', 'blurb': 'reads only'},
-          ],
-          'matrix': {'safe': 'allow', 'mutation': 'deny'},
-        }),
-        200,
+  test(
+    'permission mode degrades a partial record instead of throwing',
+    () async {
+      final client = MockClient(
+        (request) async => http.Response(jsonEncode({'mode': 'plan'}), 200),
       );
-    });
 
-    final mode = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test')
-          .setPermissionMode('plan'),
-      () => client,
-    );
-
-    expect(seen.method, 'POST');
-    expect(seen.url.path, '/v1/permission-mode');
-    expect(jsonDecode(seen.body), {'mode': 'plan'});
-    expect(mode.mode, 'plan');
-    expect(mode.matrix['mutation'], 'deny');
-
-    // A rejected name surfaces the server's own wording.
-    await expectLater(
-      http.runWithClient(
+      final mode = await http.runWithClient(
         () => const SonderApi(baseUrl: 'http://sonder.test')
-            .setPermissionMode('nope'),
-        () => MockClient((request) async => http.Response(
+            .fetchPermissionMode(),
+        () => client,
+      );
+
+      expect(mode, isNotNull);
+      expect(mode!.isUsable, isTrue);
+      // No label published: show the wire name rather than an empty chip.
+      expect(mode.displayLabel, 'plan');
+      expect(mode.blurb, '');
+      expect(mode.matrix, isEmpty);
+      // Nothing absent is read as elevated, and an empty mode list still offers
+      // the active mode so the picker is never blank.
+      expect(mode.elevated, isFalse);
+      expect(mode.elevationReason, '');
+      expect(mode.options.single.name, 'plan');
+
+      // A record that names no mode at all is not a mode: usable is false, so
+      // the caller hides the indicator rather than rendering a blank one.
+      final empty = await http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test')
+            .fetchPermissionMode(),
+        () => MockClient((request) async => http.Response('{}', 200)),
+      );
+      expect(empty!.isUsable, isFalse);
+      expect(empty.elevated, isFalse);
+    },
+  );
+
+  test(
+    'permission mode reports an absent route as unsupported, not as a mode',
+    () async {
+      final missing = await http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test')
+            .fetchPermissionMode(),
+        () => MockClient((request) async => http.Response('', 404)),
+      );
+      expect(missing, isNull);
+
+      // Anything else is a failure, never a silently-invented mode.
+      await expectLater(
+        http.runWithClient(
+          () => const SonderApi(baseUrl: 'http://sonder.test')
+              .fetchPermissionMode(),
+          () => MockClient((request) async => http.Response('nope', 503)),
+        ),
+        throwsA(isA<SonderException>()),
+      );
+      await expectLater(
+        http.runWithClient(
+          () => const SonderApi(baseUrl: 'http://sonder.test')
+              .fetchPermissionMode(),
+          () => MockClient((request) async => http.Response('', 401)),
+        ),
+        throwsA(isA<SonderException>()),
+      );
+    },
+  );
+
+  test(
+    'setting the permission mode posts it and returns the server state',
+    () async {
+      late http.Request seen;
+      final client = MockClient((request) async {
+        seen = request;
+        return http.Response(
+          jsonEncode({
+            'mode': 'plan',
+            'label': 'plan',
+            'blurb': 'reads only - no writes, no commands',
+            'elevated': false,
+            'elevationReason': '',
+            'modes': [
+              {'name': 'plan', 'label': 'plan', 'blurb': 'reads only'},
+            ],
+            'matrix': {'safe': 'allow', 'mutation': 'deny'},
+          }),
+          200,
+        );
+      });
+
+      final mode = await http.runWithClient(
+        () => const SonderApi(baseUrl: 'http://sonder.test')
+            .setPermissionMode('plan'),
+        () => client,
+      );
+
+      expect(seen.method, 'POST');
+      expect(seen.url.path, '/v1/permission-mode');
+      expect(jsonDecode(seen.body), {'mode': 'plan'});
+      expect(mode.mode, 'plan');
+      expect(mode.matrix['mutation'], 'deny');
+
+      // A rejected name surfaces the server's own wording.
+      await expectLater(
+        http.runWithClient(
+          () => const SonderApi(baseUrl: 'http://sonder.test')
+              .setPermissionMode('nope'),
+          () => MockClient(
+            (request) async => http.Response(
               jsonEncode({'error': "unknown mode 'nope'"}),
               400,
-            )),
-      ),
-      throwsA(
-        isA<SonderException>().having(
-          (e) => e.message,
-          'message',
-          contains("unknown mode 'nope'"),
+            ),
+          ),
         ),
-      ),
-    );
-  });
+        throwsA(
+          isA<SonderException>().having(
+            (e) => e.message,
+            'message',
+            contains("unknown mode 'nope'"),
+          ),
+        ),
+      );
+    },
+  );
 }
