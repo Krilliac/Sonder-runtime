@@ -1,4 +1,8 @@
+import os
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,3 +56,30 @@ def test_terminal_launcher_cleans_only_its_generated_bootstrap_log():
     assert "SONDER_BOOT_LOG_GENERATED=1" in text
     assert "if defined SONDER_BOOT_LOG_GENERATED if exist" in text
     assert 'del /q "%SONDER_BOOT_LOG%"' in text
+
+
+def test_terminal_launcher_answers_version_flags_before_any_engine_bootstrap():
+    text = (ROOT / "sonder.cmd").read_text(encoding="utf-8")
+
+    # `python -m sonder_runtime --version` is a top-level flag; the `repl`
+    # subcommand this launcher forwards into does not accept it, so the
+    # launcher must special-case it rather than passing it straight through.
+    version_check = text.index('if /I "%~1"=="--version"')
+    bootstrap_start = text.index("Bootstrap is quiet on success")
+    assert version_check < bootstrap_start
+    assert '"%SONDER_PYTHON%" -m sonder_runtime --version' in text
+    assert 'if /I "%~1"=="-V"' in text
+
+
+@pytest.mark.skipif(os.name != "nt", reason="sonder.cmd is a Windows batch launcher")
+@pytest.mark.parametrize("flag", ["--version", "-V"])
+def test_terminal_launcher_reports_version_without_requiring_ollama(flag):
+    result = subprocess.run(
+        [str(ROOT / "sonder.cmd"), flag],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "sonder-runtime" in result.stdout

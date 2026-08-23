@@ -57,3 +57,7 @@ release-readiness, the exact commit, a compact display identity, and stable
 diagnostic codes suitable for CI annotations. The checker uses only the Python
 standard library and parses `sonder_version.py` without importing or executing
 it.
+
+Before proposing a tag, prefer
+[release-smoke-check](release-smoke-check.md), which runs this checker
+together with a real end-to-end runtime smoke test in one command.
