@@ -3934,7 +3934,14 @@ def _post_model(
         # Passed only when set: callers/tests that replace `_post` with a
         # narrower double keep working unless they specifically opt into the
         # local_only contract this call is making.
-        post_kwargs = {"local_only": True} if local_only else {}
+        post_kwargs = {}
+        if local_only:
+            post_kwargs["local_only"] = True
+        if idempotent:
+            # Preserve compatibility with narrow test doubles and legacy
+            # callers while forwarding the explicit replay-safety contract to
+            # the typed worker pool when it is actually declared.
+            post_kwargs["idempotent"] = True
         try:
             if timeout is None and attempt == 1:
                 result = _post(path, payload, **post_kwargs)
@@ -4267,7 +4274,12 @@ def _format_model_call_error(error: ModelCallError) -> str:
 
 
 def _post(
-    path: str, payload: dict, timeout: int | None = None, *, local_only: bool = False,
+    path: str,
+    payload: dict,
+    timeout: int | None = None,
+    *,
+    local_only: bool = False,
+    idempotent: bool = False,
 ) -> dict:
     _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
@@ -4294,7 +4306,7 @@ def _post(
     if local_only or not OLLAMA_POOL.enabled:
         return send(BASE)
     model_hint = payload.get("model") if isinstance(payload, dict) else None
-    return OLLAMA_POOL.request(send, model=model_hint)
+    return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent)
 
 
 _PREWARM_LOCK = threading.Lock()
@@ -12330,15 +12342,7 @@ def _vision_local_target() -> str:
     endpoint is not an acceptable fallback.  The runtime policy owns the tier
     binding; callers cannot turn a free-form model string into a backend target.
     """
-    if OLLAMA_POOL.has_remote_workers:
-        tier_lines = [
-            line.replace(
-                "  [local Ollama]",
-                "  [POOLED OLLAMA - may leave machine; explicit consent]",
-            )
-            for line in tier_lines
-        ]
-    elif not ollama_endpoint.is_loopback(BASE):
+    if not ollama_endpoint.is_loopback(BASE):
         raise ModelCallError(
             "configuration",
             "vision analysis requires a loopback Ollama endpoint; image bytes never leave this machine",
