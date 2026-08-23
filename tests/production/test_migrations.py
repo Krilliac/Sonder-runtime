@@ -1,6 +1,7 @@
 """SPEC-2 section 7: ledger, checksums, future-schema and edit refusal."""
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 import pytest
@@ -66,6 +67,8 @@ def test_future_schema_rejected(tmp_path):
             "INSERT INTO schema_migrations VALUES"
             " ('9999_from_the_future', '2999-01-01T00:00:00Z', '99.0', 'x', 1)"
         )
+        conn.execute("DROP TRIGGER schema_migrations_no_update")
+        conn.execute("DROP TRIGGER schema_migrations_no_delete")
         conn.commit()
     finally:
         conn.close()
@@ -74,24 +77,119 @@ def test_future_schema_rejected(tmp_path):
     assert not st.healthy
     with pytest.raises(FutureSchemaError):
         migrate_store("operations", db)
+    conn = sqlite3.connect(db)
+    try:
+        guards = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' "
+            "AND name LIKE 'schema_migrations_no_%'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert guards == [], "an older build must not modify a future database"
 
 
-def test_edited_migration_history_rejected(tmp_path):
+def test_migration_ledger_is_append_only(tmp_path):
     db = str(tmp_path / "operations.db")
     migrate_store("operations", db)
     conn = sqlite3.connect(db)
     try:
-        conn.execute(
-            "UPDATE schema_migrations SET checksum_sha256 = 'tampered'"
-            " WHERE migration_id = '0001_baseline'"
-        )
-        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            conn.execute(
+                "UPDATE schema_migrations SET checksum_sha256 = 'tampered'"
+                " WHERE migration_id = '0001_baseline'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            conn.execute(
+                "DELETE FROM schema_migrations"
+                " WHERE migration_id = '0001_baseline'"
+            )
     finally:
         conn.close()
+
+
+def test_edited_migration_source_is_reported_as_checksum_mismatch(
+    tmp_path, monkeypatch
+):
+    db = str(tmp_path / "operations.db")
+    migrate_store("operations", db)
+    real = sonder_migrations.discover_migrations("operations")
+    edited = sonder_migrations.Migration(
+        store=real[0].store,
+        migration_id=real[0].migration_id,
+        path=real[0].path,
+        checksum="0" * 64,
+    )
+    monkeypatch.setattr(
+        sonder_migrations,
+        "discover_migrations",
+        lambda store: (edited,) if store == "operations" else (),
+    )
+
     st = status("operations", db)
     assert st.checksum_mismatches == ("0001_baseline",)
     with pytest.raises(MigrationError):
         migrate_store("operations", db)
+
+
+def test_migration_source_replacement_after_discovery_fails_closed(tmp_path):
+    source = tmp_path / "0001_race.py"
+    source.write_text(
+        "def apply(conn):\n    conn.execute('CREATE TABLE expected (x INTEGER)')\n",
+        encoding="utf-8",
+    )
+    migration = sonder_migrations.Migration(
+        store="race",
+        migration_id="0001_race",
+        path=source,
+        checksum=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    source.write_text(
+        "def apply(conn):\n    conn.execute('CREATE TABLE replaced (x INTEGER)')\n",
+        encoding="utf-8",
+    )
+    conn = sonder_migrations.open_connection(str(tmp_path / "race.db"))
+    try:
+        with pytest.raises(MigrationError, match="changed after discovery"):
+            migration.run(conn)
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        conn.close()
+    assert "expected" not in tables
+    assert "replaced" not in tables
+
+
+def test_migration_cannot_commit_framework_transaction(tmp_path):
+    source = tmp_path / "0001_commit.py"
+    source.write_text(
+        "def apply(conn):\n"
+        "    conn.execute('CREATE TABLE escaped (x INTEGER)')\n"
+        "    conn.commit()\n",
+        encoding="utf-8",
+    )
+    migration = sonder_migrations.Migration(
+        store="commit",
+        migration_id="0001_commit",
+        path=source,
+        checksum=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    conn = sonder_migrations.open_connection(str(tmp_path / "commit.db"))
+    try:
+        with pytest.raises(MigrationError, match="attempted to control"):
+            migration.run(conn)
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        conn.close()
+    assert "escaped" not in tables
 
 
 def test_read_only_status_does_not_create_missing_database(tmp_path):
@@ -127,6 +225,25 @@ def test_read_only_status_does_not_create_missing_ledger(tmp_path):
     finally:
         conn.close()
     assert names == {"existing_state"}
+
+
+def test_immutable_backup_status_creates_no_wal_sidecars(tmp_path):
+    db = tmp_path / "operations.db"
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        conn.execute("CREATE TABLE existing_state (value TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = sonder_migrations.status_read_only(
+        "operations", str(db), immutable=True
+    )
+
+    assert result.pending == ("0001_baseline",)
+    assert not (tmp_path / "operations.db-wal").exists()
+    assert not (tmp_path / "operations.db-shm").exists()
 
 
 def test_all_registered_stores_report_status():
