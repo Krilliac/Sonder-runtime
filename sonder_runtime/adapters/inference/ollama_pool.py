@@ -16,6 +16,8 @@ from typing import Callable
 from urllib.parse import urlsplit
 import urllib.error
 
+from sonder_runtime.adapters import model_inventory
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain import ollama_policy
 
 
@@ -217,6 +219,14 @@ class OllamaWorkerPool:
 
     @staticmethod
     def _retryable(error: BaseException) -> bool:
+        if isinstance(error, ModelCallError):
+            # A classified failure means a worker answered and the response
+            # was judged (protocol, configuration, scope...). Replaying it on
+            # another host would violate the no-replay contract — except an
+            # upstream 502/503/504, where no model response was produced.
+            # ModelCallError subclasses URLError, so without this branch every
+            # classified failure would look like a transport failure below.
+            return error.status in _FAILOVER_HTTP_CODES
         if isinstance(error, urllib.error.HTTPError):
             return int(error.code or 0) in _FAILOVER_HTTP_CODES
         return isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, OSError))
@@ -274,6 +284,36 @@ class OllamaWorkerPool:
                     state.known_models = names
                     return True
         return False
+
+    def refresh_inventory(self, fetch_tags: Callable[[str], object]) -> dict:
+        """Record every worker's advertised model inventory (experimental).
+
+        ``fetch_tags(origin)`` must return that origin's parsed ``/api/tags``
+        payload. Failures are per-worker and non-fatal: a worker whose
+        inventory cannot be read keeps whatever record it already had, so a
+        transient probe failure cannot erase known affinity. Returns a map of
+        worker id to recorded model count, or to an error string.
+        """
+        with self._lock:
+            endpoints = [state.endpoint for state in self._states]
+        results = {}
+        for endpoint in endpoints:
+            try:
+                payload = fetch_tags(endpoint.origin)
+                rows = model_inventory.inventory_rows(payload, "/api/tags")
+                names = [
+                    name
+                    for name in (
+                        row.get("name") or row.get("model") for row in rows
+                    )
+                    if name
+                ]
+            except Exception as error:
+                results[endpoint.worker_id] = "error: %s" % str(error)[:120]
+                continue
+            self.note_models(endpoint.origin, names)
+            results[endpoint.worker_id] = len(names)
+        return results
 
     def request(self, sender: Callable[[str], object], *, model: str | None = None):
         """Send once per selected worker, failing over only before a response.
