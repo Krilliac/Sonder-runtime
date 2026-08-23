@@ -105,6 +105,43 @@ def test_facade_preserves_bootstrap_startup_fail_closed():
         manager.close()
 
 
+def test_preview_compatibility_reports_reasons_without_installing():
+    facade, manager = _facade()
+    manifest = ExtensionManifest(
+        ExtensionIdentity("search", "sonder"), "1.0.0", "extension-v1",
+        permissions=("network",),
+    )
+    try:
+        denied = facade.preview_compatibility(
+            manifest, protocol="extension-v1", authority=_authority("preview_compatibility"),
+        )
+        assert denied.compatible is False
+        assert denied.reasons == ("permission-denied:network",)
+
+        allowed = facade.preview_compatibility(
+            manifest, protocol="extension-v1", granted_permissions=("network",),
+            authority=_authority("preview_compatibility"),
+        )
+        assert allowed.compatible is True
+        assert allowed.reasons == ()
+        assert allowed.extension_id == manifest.extension_id
+
+        # Never mutated the registry -- this is a preflight, not an install.
+        assert facade.registry_health(_authority("registry_health")).snapshot.records == ()
+    finally:
+        manager.close()
+
+
+def test_preview_compatibility_requires_its_own_authority():
+    facade, manager = _facade()
+    manifest = ExtensionManifest(ExtensionIdentity("search", "sonder"), "1.0.0", "extension-v1")
+    try:
+        with pytest.raises(ExtensionAuthorityDenied):
+            facade.preview_compatibility(manifest, authority=_authority("registry_health"))
+    finally:
+        manager.close()
+
+
 def test_registry_health_exposes_quarantine_and_repair_diagnostics():
     facade, manager = _facade()
     manifest = ExtensionManifest(

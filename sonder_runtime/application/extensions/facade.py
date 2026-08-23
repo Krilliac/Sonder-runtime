@@ -84,6 +84,23 @@ class ExtensionAuthority:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtensionCompatibilityPreview:
+    """Read-only preflight verdict for a manifest that is not yet installed.
+
+    Mirrors the same ``compatibility_reasons`` check ``ExtensionRegistry.install``
+    runs internally, so a caller (an install wizard, an MCP capability-discovery
+    tool) can ask "would this be admitted?" without granting install authority
+    or mutating any state.
+    """
+
+    extension_id: str
+    version: str
+    protocol: str
+    compatible: bool
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ExtensionRegistryHealth:
     """Read-only registry projection with its non-persistence boundary stated."""
 
@@ -109,6 +126,33 @@ class ExtensionApplicationFacade:
             raise TypeError("experiments must be an EphemeralExperimentManager")
         self._registry = registry
         self._experiments = experiments
+
+    def preview_compatibility(
+        self,
+        manifest: ExtensionManifest,
+        *,
+        protocol: str | None = None,
+        available_dependencies: Sequence[str] = (),
+        granted_permissions: Sequence[str] = (),
+        authority: ExtensionAuthority,
+    ) -> ExtensionCompatibilityPreview:
+        """Report whether ``manifest`` would be admitted, without installing it.
+
+        Performs no artifact fetch, no persistence write, and grants nothing:
+        it evaluates the same declarative rule ``ExtensionManifest`` already
+        exposes via ``compatibility_reasons``, gated by its own narrow
+        ``preview_compatibility`` authority.
+        """
+        authority.require("preview_compatibility")
+        reasons = manifest.compatibility_reasons(
+            protocol=protocol or manifest.protocol,
+            available_dependencies=set(available_dependencies),
+            granted_permissions=set(granted_permissions),
+        )
+        return ExtensionCompatibilityPreview(
+            manifest.extension_id, manifest.version, manifest.protocol,
+            not reasons, reasons,
+        )
 
     def registry_health(self, authority: ExtensionAuthority) -> ExtensionRegistryHealth:
         authority.require("registry_health")
@@ -222,6 +266,7 @@ __all__ = [
     "ExtensionApplicationFacade",
     "ExtensionAuthority",
     "ExtensionAuthorityDenied",
+    "ExtensionCompatibilityPreview",
     "ExtensionFacadeError",
     "ExtensionRegistryHealth",
 ]
