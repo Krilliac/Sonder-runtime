@@ -33,6 +33,7 @@ backups, and a signed update path. It is not a foundation model.
 | 17 | [Benchmarking](17-benchmarking.md) | Measuring the runtime's lift over a bare model (prove the moat) |
 | 18 | [Model Catalog](18-model-catalog.md) | Recommended models per job + capability routing (per VRAM) |
 | 19 | [Model Requirements & Onboarding](19-model-requirements-and-onboarding.md) | What you must install, how to verify/select it, what happens when a model is absent |
+| 20 | [Terminal UI Conventions](20-terminal-ui-conventions.md) | REPL presentation rules, the scripted-output contract, NDJSON turns, error hints, replay |
 
 ## Operational tools
 

@@ -1345,6 +1345,7 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
                 answer, elapsed_ms=elapsed_ms, error=error,
                 interaction_id=interaction_id,
                 feedback_offered=offer_feedback, label=label,
+                hint=_error_hint(answer) if error else "",
             )))
             return
         print(answer)
