@@ -12504,6 +12504,20 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
     # MemoryRepository; passing _DB_PATH keeps the tool on the server's
     # database (tests repoint it), with the same connection semantics.
     with _application().unit_of_work(db_path=_DB_PATH) as uow:
+        # Facts are injected into EVERY project-scoped prompt, so storing the
+        # same assertion twice spends prompt budget on a repeat forever. The
+        # match is scoped to this one project: a fact another project already
+        # knows must still be stored here, never referenced across the scope.
+        duplicate = memory_store.find_duplicate_fact_in(
+            uow.memory.facts_for_project(project_id), text,
+        )
+        if duplicate is not None:
+            n = uow.memory.count_facts(project_id)
+            return (
+                "Already known for project '%s' (%d total): fact %s stores the "
+                "same statement. Use sonder_forget_fact first if it should be "
+                "replaced." % (project_id, n, duplicate.get("id"))
+            )
         uow.memory.add_fact(fact_id, project_id, text, blob)
         n = uow.memory.count_facts(project_id)
     return "Remembered fact for project '%s' (%d total). id=%s" % (project_id, n, fact_id)
