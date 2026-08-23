@@ -43,7 +43,7 @@ def _capture(monkeypatch, reply):
     """Answer every model request with `reply`, keeping the posted payloads."""
     seen = {"payloads": []}
 
-    def fake_post(path, payload, timeout=None):
+    def fake_post(path, payload, timeout=None, **_kwargs):
         seen["payloads"].append(payload)
         seen["payload"] = payload
         return {"message": {"content": reply}}

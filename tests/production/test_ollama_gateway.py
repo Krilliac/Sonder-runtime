@@ -202,6 +202,32 @@ def test_remote_ollama_requires_context_consent(monkeypatch):
     assert response.text == "generated text"
 
 
+def test_pool_configured_remote_worker_requires_consent_despite_loopback_primary(
+    monkeypatch,
+):
+    """A loopback primary is not sufficient once a worker pool can route a
+
+    request to a remote machine: SONDER_OLLAMA_WORKERS naming a remote
+    origin must gate the same as a directly-remote OLLAMA_HOST would.
+    """
+    _fake_target(monkeypatch)
+    _fake_gen(monkeypatch)
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        ollama_endpoint, "normalize", lambda value=None: "http://127.0.0.1:11434",
+    )
+    monkeypatch.setenv("SONDER_OLLAMA_WORKERS", "https://worker.example:11434")
+
+    with pytest.raises(Forbidden, match="remote Ollama"):
+        OllamaGateway().generate(ModelRequest(prompt="x", tier="code"), _context())
+
+    response = OllamaGateway().generate(
+        ModelRequest(prompt="x", tier="code"),
+        _context(remote_ollama_allowed=True),
+    )
+    assert response.text == "generated text"
+
+
 def test_embed_maps_empty_vector_to_dependency_error(monkeypatch):
     import sonder_runtime.adapters.embeddings as embeddings
 

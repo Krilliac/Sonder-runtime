@@ -96,6 +96,24 @@ trust store; there is no insecure-skip-verify mode. If the consent gate, URL,
 or TLS requirements are wrong, startup fails closed rather than silently
 routing prompts over an insecure link.
 
+## What never leaves the primary endpoint
+
+A few requests carry a stricter promise than ordinary pooled inference and are
+pinned to the primary (`OLLAMA_HOST`) endpoint regardless of pool
+configuration — they are refused outright if the primary itself is not
+loopback, and the pool is never consulted for them even when it is enabled:
+
+- Vision analysis (`vision_analyze`) — image bytes never leave this machine.
+- Fanout synthesis (`model_fanout_synthesize`) — the combined receipt stays on
+  the host.
+
+Every other pool-eligible request (ordinary chat/generate tiers) is free to
+land on any configured worker, local or remote, per the least-inflight
+scheduler above. Locality displays (`status`, error messages, cache
+eligibility) also treat any configured remote worker as non-local, not just a
+non-loopback primary — a loopback primary with a remote worker in
+`SONDER_OLLAMA_WORKERS` is reported and cached as remote.
+
 ## Verify
 
  Use the normal status surface. It reports the configured worker count, how
