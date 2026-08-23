@@ -177,13 +177,21 @@ class OllamaWorkerPool:
         with self._lock:
             state.inflight += 1
 
-    def _finish(self, state: _WorkerState, error: BaseException | None) -> None:
+    def _finish(
+        self,
+        state: _WorkerState,
+        error: BaseException | None,
+        *,
+        count_failure: bool = True,
+    ) -> None:
         with self._lock:
             state.inflight = max(0, state.inflight - 1)
             if error is None:
                 state.consecutive_failures = 0
                 state.last_error = ""
                 state.cooldown_until = 0.0
+                return
+            if not count_failure:
                 return
             state.consecutive_failures += 1
             state.last_error = "%s: %s" % (type(error).__name__, str(error)[:240])
@@ -198,8 +206,9 @@ class OllamaWorkerPool:
             try:
                 result = sender(state.endpoint.origin)
             except Exception as error:
-                self._finish(state, error)
-                if not self._retryable(error):
+                retryable = self._retryable(error)
+                self._finish(state, error, count_failure=retryable)
+                if not retryable:
                     raise
                 last_error = error
                 continue

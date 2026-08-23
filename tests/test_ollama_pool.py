@@ -65,6 +65,24 @@ def test_pool_does_not_fail_over_after_a_non_transport_failure():
     assert len(calls) == 1
 
 
+def test_non_retryable_failure_does_not_circuit_break_a_worker():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        ("http://127.0.0.2:11434",),
+        failure_threshold=1,
+    )
+
+    with pytest.raises(ValueError, match="invalid request"):
+        pool.request(lambda _origin: (_ for _ in ()).throw(ValueError("invalid request")))
+
+    primary = next(
+        snapshot for snapshot in pool.snapshots()
+        if snapshot.origin == "http://127.0.0.1:11434"
+    )
+    assert primary.healthy is True
+    assert primary.consecutive_failures == 0
+
+
 def test_pool_circuit_breaker_cools_a_repeatedly_failed_worker():
     pool = OllamaWorkerPool(
         "http://127.0.0.1:11434",
@@ -129,3 +147,47 @@ def test_server_posts_through_the_pool_selected_origin(monkeypatch):
 
     assert server._post("/api/tags", {}) == {"ok": True}
     assert seen[0][0] == "https://worker.example:11434/api/tags"
+
+
+def test_server_pool_failover_uses_one_total_timeout_budget(monkeypatch):
+    import server
+
+    class Clock:
+        values = iter((0.0, 0.0, 4.0))
+
+        def __call__(self):
+            return next(self.values)
+
+    class FakePool:
+        enabled = True
+
+        def request(self, sender):
+            try:
+                return sender("http://127.0.0.1:11434")
+            except URLError:
+                return sender("http://127.0.0.2:11434")
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok": true}'
+
+    timeouts = []
+
+    def open_url(request, timeout=0):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            raise URLError("first worker unavailable")
+        return Response()
+
+    monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
+    monkeypatch.setattr(server.time, "monotonic", Clock())
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+
+    assert server._post("/api/chat", {}, timeout=5) == {"ok": True}
+    assert timeouts == [5.0, 1.0]
