@@ -18,6 +18,8 @@ first-run case and uses the built-in local defaults.
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -237,17 +239,62 @@ def load(home):
 
 
 def save(home, rules):
+    """Atomically publish the policy file.
+
+    ``permissions.json`` is a security artifact: a torn write leaves invalid
+    JSON, which degrades every subsequent load to the built-in defaults and
+    silently discards the operator's deny rules until someone notices the
+    warning. Serialize first (so an unserializable rule set cannot destroy the
+    existing file), write to a same-directory temp file, fsync, and replace.
+    A symlinked policy path is refused rather than followed: policy saves must
+    not become writes to an arbitrary redirect target.
+    """
     path = policy_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(rules, indent=2) + "\n", encoding="utf-8")
+    if path.is_symlink():
+        raise OSError("refusing to save policy through a symbolic link: %s" % path)
+    payload = json.dumps(rules, indent=2) + "\n"
+    fd, temp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
     return str(path)
 
 
+def _preserve_degraded(report):
+    """Keep the original bytes of a degraded policy before overwriting them.
+
+    ``add_rule`` on a corrupt/partial policy file writes back only the *loaded*
+    rules, so unparseable entries would vanish. Copy the current file verbatim
+    to a ``permissions.json.invalid`` sidecar first so the operator can still
+    recover hand-written rules that failed to parse. If the sidecar cannot be
+    written, raise: silently destroying the only copy of a security policy is
+    worse than making the caller retry.
+    """
+    path = Path(report.path)
+    if not path.exists() or path.is_symlink():
+        return
+    sidecar = path.with_name(path.name + ".invalid")
+    sidecar.write_bytes(path.read_bytes())
+    _log.warning(
+        "preserved degraded policy bytes at %s before rewriting %s", sidecar, path
+    )
+
+
 def add_rule(home, pattern, action, note=""):
-    # Note: on a corrupt/partial policy file this writes back the *loaded* rules,
-    # so unparseable entries are not preserved. That is pre-existing behavior and
-    # deliberately unchanged here; the load warning now fires before the write.
-    rules = _policy.upsert_rule(load(home), pattern, action, note)
+    rules, report = load_report(home)
+    _warn_once(report)
+    if report.degraded:
+        _preserve_degraded(report)
+    rules = _policy.upsert_rule(rules, pattern, action, note)
     save(home, rules)
     return rules
 
