@@ -34,6 +34,8 @@ backups, and a signed update path. It is not a foundation model.
 | 18 | [Model Catalog](18-model-catalog.md) | Recommended models per job + capability routing (per VRAM) |
 | 19 | [Model Requirements & Onboarding](19-model-requirements-and-onboarding.md) | What you must install, how to verify/select it, what happens when a model is absent |
 | 20 | [Terminal UI Conventions](20-terminal-ui-conventions.md) | REPL presentation rules, the scripted-output contract, NDJSON turns, error hints, replay |
+| 20 | [Terminal UI Conventions](20-terminal-ui-conventions.md) | REPL presentation rules, the scripted-output contract, NDJSON turns, error hints, replay |
+| 20 | [Test-Suite Performance](20-test-suite-performance.md) | Running the suite fast: timing capture, slow-test ranking, hang visibility, bounded parallelism |
 
 ## Operational tools
 
