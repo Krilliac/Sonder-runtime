@@ -293,6 +293,68 @@ def test_model_affinity_orders_workers_lacking_the_model_last():
     assert failed == [SECOND]
 
 
+def test_pool_never_replays_a_classified_post_response_failure():
+    """ModelCallError subclasses URLError, but it means a worker answered and
+    the response was judged (oversized body, malformed envelope). Replaying it
+    on another host would violate the no-replay contract."""
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    pool = OllamaWorkerPool(PRIMARY, (SECOND,))
+    calls = []
+
+    def send(origin):
+        calls.append(origin)
+        raise ModelCallError("protocol", "response exceeded the safety limit")
+
+    with pytest.raises(ModelCallError):
+        pool.request(send)
+    assert len(calls) == 1
+
+    # An upstream 502/503/504 produced no model response, so it still fails over.
+    unavailable = []
+
+    def send_unavailable(origin):
+        unavailable.append(origin)
+        if origin == unavailable[0]:
+            raise ModelCallError("http", "worker overloaded", status=503)
+        return origin
+
+    assert pool.request(send_unavailable) not in (None, unavailable[0])
+    assert len(unavailable) == 2
+
+
+def test_refresh_inventory_records_models_and_keeps_stale_records_on_error():
+    pool = OllamaWorkerPool(PRIMARY, (SECOND,))
+    payloads = {
+        PRIMARY: {"models": [{"name": "llama3:latest"}, {"model": "sonder:latest"}, None, {}]},
+        SECOND: {"models": [{"name": "qwen3-coder:30b"}]},
+    }
+
+    results = pool.refresh_inventory(lambda origin: payloads[origin])
+    assert results == {"127.0.0.1:11434": 2, "127.0.0.2:11434": 1}
+
+    chosen = []
+    pool.request(lambda origin: chosen.append(origin) or origin, model="llama3")
+    assert chosen == [PRIMARY]
+
+    # A failed probe reports the error and keeps the previous inventory.
+    def failing_fetch(origin):
+        if origin == PRIMARY:
+            raise OSError("unreachable")
+        return {"models": []}
+
+    results = pool.refresh_inventory(failing_fetch)
+    assert results["127.0.0.1:11434"].startswith("error:")
+    assert results["127.0.0.2:11434"] == 0
+    chosen.clear()
+    pool.request(lambda origin: chosen.append(origin) or origin, model="llama3")
+    assert chosen == [PRIMARY]
+
+    # A malformed envelope is an error, never an empty catalog.
+    results = pool.refresh_inventory(lambda origin: {"models": "garbage"})
+    assert all(str(value).startswith("error:") for value in results.values())
+
+
 def test_worker_origin_rejects_inline_credentials_and_missing_port():
     with pytest.raises(ValueError, match="inline credentials"):
         validate_worker_origin("https://user:pw@worker.example:11434", allow_remote=True)
