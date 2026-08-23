@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 209,
+      "file_count": 210,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -213,6 +213,7 @@
         "sonder_runtime/adapters/recall_gateway.py",
         "sonder_runtime/adapters/repl_services.py",
         "sonder_runtime/adapters/repository_errors.py",
+        "sonder_runtime/adapters/reproducible_evaluation.py",
         "sonder_runtime/adapters/runtime_capabilities.py",
         "sonder_runtime/adapters/runtime_configuration.py",
         "sonder_runtime/adapters/runtime_container.py",
@@ -258,7 +259,7 @@
       ]
     },
     {
-      "file_count": 257,
+      "file_count": 258,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -308,6 +309,7 @@
         "sonder_runtime/application/evaluation/corpus_inventory.py",
         "sonder_runtime/application/evaluation/durable_lifecycle.py",
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
+        "sonder_runtime/application/evaluation/reproducible.py",
         "sonder_runtime/application/evaluation/service.py",
         "sonder_runtime/application/evaluation/trajectory_replay.py",
         "sonder_runtime/application/evaluation_history/__init__.py",

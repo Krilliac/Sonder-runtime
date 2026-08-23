@@ -1,0 +1,33 @@
+{
+  "schema": "sonder.deterministic-provider.v1",
+  "provider_id": "fixture-local",
+  "model_id": "reference-rules",
+  "revision": "1.0.0",
+  "responses": [
+    {
+      "input": {"operation": "canonicalize_tool", "tool": "/read"},
+      "kind": "response",
+      "output": {"tool": "file_read"},
+      "latency_ms": 0.25,
+      "tokens_in": 0,
+      "tokens_out": 0
+    },
+    {
+      "input": {"operation": "echo", "value": {"items": [1, 2], "ok": true}},
+      "kind": "response",
+      "output": {"items": [1, 2], "ok": true},
+      "latency_ms": 0.5,
+      "tokens_in": 0,
+      "tokens_out": 0
+    },
+    {
+      "input": {"operation": "echo", "value": "Sonder ☃"},
+      "kind": "response",
+      "output": "Sonder ☃",
+      "latency_ms": 0.75,
+      "tokens_in": 0,
+      "tokens_out": 0
+    }
+  ],
+  "provider_digest": "09eb6960752eb746006a54305b050f0c18934f151cf6519b9917c50de5c90a8b"
+}
