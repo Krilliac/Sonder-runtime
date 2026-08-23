@@ -258,7 +258,10 @@ def test_extraction_from_real_supplied_text_succeeds_with_spans(monkeypatch):
     assert result["fields"]["name"]["quote"] in SOURCE
     assert result["fields"]["birth_year"]["value"] == 1815
     assert result["fields"]["birth_year"]["quote_occurrences"] == 1
-    assert len(seen["payloads"]) == 1
+    # Model-aware context sizing may probe /api/show before the actual
+    # generation request.  The contract under test is one extraction call,
+    # not the absence of an internal metadata probe.
+    assert sum("messages" in payload for payload in seen["payloads"]) == 1
 
 
 def test_the_source_text_is_actually_handed_to_the_model(monkeypatch):

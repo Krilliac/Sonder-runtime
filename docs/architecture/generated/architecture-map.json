@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 208,
+      "file_count": 209,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -115,6 +115,7 @@
         "sonder_runtime/adapters/inference/ollama.py",
         "sonder_runtime/adapters/inference/ollama_endpoint.py",
         "sonder_runtime/adapters/inference/ollama_gateway.py",
+        "sonder_runtime/adapters/inference/ollama_pool.py",
         "sonder_runtime/adapters/inference/ollama_vision.py",
         "sonder_runtime/adapters/inference/openai_compat.py",
         "sonder_runtime/adapters/inference/openai_compat_gateway.py",

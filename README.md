@@ -306,6 +306,10 @@ authentication, hosting, and full command details.
   success is not treated as proof.
 - Remote access is powerful because Sonder can execute code and modify files.
   Never expose the convenience loopback service directly to a network.
+- Multi-PC inference is supported with `SONDER_OLLAMA_WORKERS`: each host runs
+  its own Ollama/model store and Sonder schedules requests across HTTPS worker
+  origins with bounded transport failover. This is request-level pooling, not
+  model-weight sharding or shared-memory GPU federation.
 - Deliberately unrestricted model testing is available only through the
   exact-acknowledgement [unsafe lab runbook](docs/runbooks/unsafe-lab.md). It
   removes model-loop host-tool policy; it does not provide OS isolation.

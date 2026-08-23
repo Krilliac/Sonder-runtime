@@ -1286,7 +1286,10 @@ def test_fanout_synthesis_refuses_incomplete_source_previews(monkeypatch, field,
 
 
 def test_fanout_synthesis_strips_inline_reasoning(monkeypatch):
-    monkeypatch.setattr(server, "_fanout_synthesis_prompt", lambda _bundle: ("prompt", 4096))
+    monkeypatch.setattr(
+        server, "_fanout_synthesis_prompt",
+        lambda _bundle, _model="": ("prompt", 4096),
+    )
     monkeypatch.setattr(
         server, "_post_model", lambda *_args, **_kwargs: (
             {"message": {"content": "<think>private synthesis reasoning</think>Final."}}, 1,

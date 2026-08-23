@@ -256,7 +256,7 @@ from sonder_runtime.adapters.model_error_formatting import (
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
-from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
@@ -311,6 +311,7 @@ RUNNING_SOURCE_COMMIT = _running_source_commit_at_import()
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
+OLLAMA_POOL = ollama_pool.from_environment(BASE)
 # Bind-all Ollama server addresses are canonicalized to a numeric loopback
 # destination for this client without mutating the server process environment.
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
@@ -1261,6 +1262,54 @@ def resolve_sonder_model(strict=False):
     return None if strict else LOCAL_CODE_MODEL
 
 
+_MODEL_CONTEXT_CACHE = {}
+_MODEL_CONTEXT_CACHE_LOCK = threading.Lock()
+_MODEL_CONTEXT_CACHE_TTL = 300.0
+
+
+def _model_context_metadata(model):
+    """Read and briefly cache Ollama's context/parameter metadata for a model."""
+    key = str(model or "").strip().casefold()
+    if not key or _is_cloud_model_name(model):
+        return None, None
+    now = time.monotonic()
+    with _MODEL_CONTEXT_CACHE_LOCK:
+        cached = _MODEL_CONTEXT_CACHE.get(key)
+        if cached and now - cached[0] < _MODEL_CONTEXT_CACHE_TTL:
+            return cached[1], cached[2]
+    context_length = None
+    parameter_size = None
+    try:
+        details = _post("/api/show", {"name": model}, timeout=30)
+        info = details.get("model_info") if isinstance(details, dict) else {}
+        info = info if isinstance(info, dict) else {}
+        for name, value in info.items():
+            if str(name).casefold().endswith("context_length"):
+                context_length = context_policy.parse_strict(value)
+                if context_length:
+                    break
+        detail_block = details.get("details") if isinstance(details, dict) else {}
+        detail_block = detail_block if isinstance(detail_block, dict) else {}
+        parameter_size = detail_block.get("parameter_size")
+        if parameter_size is None:
+            count = info.get("general.parameter_count")
+            if count:
+                parameter_size = float(count) / 1_000_000_000.0
+    except Exception:
+        # Metadata is an optimization and cannot make an otherwise valid model
+        # unavailable. The deterministic context-policy fallback remains safe.
+        pass
+    with _MODEL_CONTEXT_CACHE_LOCK:
+        _MODEL_CONTEXT_CACHE[key] = (now, context_length, parameter_size)
+    return context_length, parameter_size
+
+
+def _auto_model_context(model):
+    """Select a native window for the resolved model when no pin was supplied."""
+    context_length, parameter_size = _model_context_metadata(model)
+    return context_policy.auto_context(context_length, parameter_size)
+
+
 def _make_generate(
     model, system, temperature, num_predict, num_ctx, cloud=False, timeout=None,
     cancel_check=None, accept_native_tool_calls=False,
@@ -1280,6 +1329,8 @@ def _make_generate(
     `_require_schema_match`, which callers apply to the returned text.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
+    if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
+        num_ctx = _auto_model_context(model)
 
     def gen(prompt, history=None):
         gen.last_usage = {}
@@ -1408,7 +1459,7 @@ def _no_retrieve(conn, task):
 
 
 def _generate_text(prompt, tier="fast", system="", temperature=0.2,
-                   num_predict=256, num_ctx=2048, timeout=None):
+                   num_predict=256, num_ctx=0, timeout=None):
     _refresh_live_cloud_tiers()
     model = TIERS.get(tier, TIERS["fast"])
     return _make_generate(
@@ -1530,7 +1581,7 @@ def _internal_generate_for_route(model, cloud):
         )
 
     def generate(prompt, tier="fast", system="", temperature=0.2,
-                 num_predict=256, num_ctx=2048, timeout=None):
+                 num_predict=256, num_ctx=0, timeout=None):
         # ``tier`` is deliberately ignored. It is only a subordinate cost hint;
         # the caller's explicit cloud-only route is the stronger constraint.
         generate.last_usage = {}
@@ -3794,7 +3845,12 @@ def _post_model(
             cloud=True,
         )
     _require_ollama_endpoint(cloud=cloud)
-    remote_endpoint = not ollama_endpoint.is_loopback(BASE)
+    # A pool is treated as a remote route for retry policy even when its
+    # primary endpoint is loopback. The pool itself may fail over only before
+    # a response, so a completed request is never duplicated on another PC.
+    remote_endpoint = (
+        not ollama_endpoint.is_loopback(BASE) or OLLAMA_POOL.enabled
+    )
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
     max_attempts = (
@@ -4158,18 +4214,27 @@ def _format_model_call_error(error: ModelCallError) -> str:
 def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{BASE}{path}", data=data, headers={"Content-Type": "application/json"}
-    )
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
-    with ollama_endpoint.open_url(req, timeout=request_timeout) as resp:
-        raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-        if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-            raise ModelCallError(
-                "protocol",
-                "Ollama response exceeded the 16 MiB safety limit",
-            )
-        return json.loads(raw.decode("utf-8"))
+    deadline = time.monotonic() + request_timeout
+
+    def send(origin):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Ollama worker pool request timeout expired")
+        req = urllib.request.Request(
+            f"{origin}{path}", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with ollama_endpoint.open_url(req, timeout=remaining) as resp:
+            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+                raise ModelCallError(
+                    "protocol",
+                    "Ollama response exceeded the 16 MiB safety limit",
+                )
+            return json.loads(raw.decode("utf-8"))
+
+    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
 
 
 _PREWARM_LOCK = threading.Lock()
@@ -4234,15 +4299,19 @@ def _get(path: str) -> dict:
     selection or prewarm has a chance to fail safely.
     """
     _require_ollama_endpoint()
-    req = urllib.request.Request(f"{BASE}{path}")
-    with ollama_endpoint.open_url(req, timeout=15) as resp:
-        raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-        if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-            raise ModelCallError(
-                "protocol",
-                "Ollama response exceeded the 16 MiB safety limit",
-            )
-        return json.loads(raw.decode("utf-8"))
+
+    def send(origin):
+        req = urllib.request.Request(f"{origin}{path}")
+        with ollama_endpoint.open_url(req, timeout=15) as resp:
+            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+                raise ModelCallError(
+                    "protocol",
+                    "Ollama response exceeded the 16 MiB safety limit",
+                )
+            return json.loads(raw.decode("utf-8"))
+
+    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
 
 
 def _parse_schema_arg(schema):
@@ -4468,13 +4537,9 @@ def _offload_impl(
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
     schema = _parse_schema_arg(schema)
-    # 0 means "ask the context policy", which the session path already does.
-    # This path hardcoded 4096 and so ignored the policy and its env knobs,
-    # which cost real capability: an autopilot run inspecting a 524 KB source
-    # file looped on search because the file was 32x its window. Defer the
-    # actual native size to context policy: CPU, Metal, AMD, Intel, NVIDIA, and
-    # remote Ollama hosts have different KV-cache and memory ceilings.
-    num_ctx = num_ctx or context_policy.native()
+    # 0 means model-aware automatic sizing. The resolved model is not known
+    # until after live tier refresh, so defer selection to the generation
+    # boundary where Ollama metadata can be consulted.
     _refresh_live_cloud_tiers()
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     model = TIERS.get(tier)
@@ -4490,6 +4555,8 @@ def _offload_impl(
             _cloud_disabled_message().removeprefix("ERROR: "),
             cloud=True,
         )
+    if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
+        num_ctx = _auto_model_context(model)
 
     if not _should_learn(tier, learn):
         messages = []
@@ -4954,7 +5021,7 @@ def _sonder_impl_serialized(
     system: str = "",
     temperature: float = 0.2,
     num_predict: int = 1024,
-    num_ctx: int = 4096,
+    num_ctx: int = 0,
     context_size: str = "",
     trace: bool = False,
     strict: bool = None,
@@ -5060,12 +5127,19 @@ def _sonder_impl_serialized(
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
-    requested_ctx = _platform_requested_context(
-        context_size or (SESSION_NUM_CTX if session_id else num_ctx),
-        default_value=SESSION_NUM_CTX,
-    )
-    # Sessioned threads get the selected virtual context window; honor a larger explicit num_ctx.
-    num_ctx_eff = max(num_ctx, requested_ctx) if session_id else requested_ctx
+    explicit_context = bool(str(context_size or "").strip()) or int(num_ctx or 0) > 0
+    if explicit_context:
+        requested_ctx = _platform_requested_context(
+            context_size or (SESSION_NUM_CTX if session_id else num_ctx),
+            default_value=SESSION_NUM_CTX,
+        )
+        # Sessioned threads get the selected virtual context window; honor a
+        # larger explicit num_ctx.
+        num_ctx_eff = max(num_ctx, requested_ctx) if session_id else requested_ctx
+    else:
+        # No pin: size from the selected model, not the process-wide session
+        # default. This is what lets a 7B and a 30B use different KV windows.
+        num_ctx_eff = 0 if cloud else _auto_model_context(tgt_model)
 
     interaction_snapshot = None
     conn = _open_db()
@@ -5184,7 +5258,7 @@ def _sonder_impl(
     system: str = "",
     temperature: float = 0.2,
     num_predict: int = 1024,
-    num_ctx: int = 4096,
+    num_ctx: int = 0,
     context_size: str = "",
     trace: bool = False,
     strict: bool = None,
@@ -5229,7 +5303,7 @@ def sonder(
     system: str = "",
     temperature: float = 0.2,
     num_predict: StrictInt = 1024,
-    num_ctx: int = 4096,
+    num_ctx: int = 0,
     context_size: str = "",
     trace: bool = False,
     strict: bool = None,
@@ -5380,9 +5454,10 @@ def _answer_with_history_impl(
     # cloud from learning and have the app respect it. The local route is gated via 'code'.
     learn = _should_learn(_canonical_learn_tier(tier_label), True)
     temperature = _serve_temperature()
-    req_ctx = _platform_requested_context(
-        context_size or SESSION_NUM_CTX,
-        default_value=SESSION_NUM_CTX,
+    req_ctx = (
+        _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
+        if str(context_size or "").strip()
+        else (0 if cloud else _auto_model_context(model))
     )
     session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
@@ -5623,9 +5698,10 @@ def structured_answer_with_history(
             target_observer(model, tier_label, cloud)
         except Exception:
             pass
-    req_ctx = _platform_requested_context(
-        context_size or SESSION_NUM_CTX,
-        default_value=SESSION_NUM_CTX,
+    req_ctx = (
+        _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
+        if str(context_size or "").strip()
+        else (0 if cloud else _auto_model_context(model))
     )
     system = _build_system("", False, "", model=model, cloud=cloud)
     response = _make_generate(
@@ -5816,7 +5892,7 @@ def parallel_generate_run(
     timeout: int = 8,
     temperature: float = 0.4,
     num_predict: int = 900,
-    num_ctx: int = 4096,
+    num_ctx: int = 0,
 ) -> str:
     """Generate several Python code candidates in parallel, then compile/run each.
 
@@ -5912,7 +5988,7 @@ def parallel_generate_run_languages(
     timeout: int = 8,
     temperature: float = 0.35,
     num_predict: int = 900,
-    num_ctx: int = 4096,
+    num_ctx: int = 0,
 ) -> str:
     """Generate, compile, and execute many candidates across multiple languages.
 
@@ -19483,7 +19559,7 @@ def _agent_turn(
         if cloud else None
     )
     gen = _make_generate(
-        model, system, 0.1, agent_num_predict, SESSION_NUM_CTX, cloud=cloud,
+        model, system, 0.1, agent_num_predict, 0, cloud=cloud,
         cancel_check=cancel_check,
         accept_native_tool_calls=True,
         compact_cloud_reasoning=True,
@@ -20847,7 +20923,7 @@ def _autopilot_json_model(run: dict, role: str, prompt: str, validator) -> dict:
         model=model,
         cloud=False,
     )
-    gen = _make_generate(model, system, 0.05, 1800, SESSION_NUM_CTX, cloud=False)
+    gen = _make_generate(model, system, 0.05, 1800, 0, cloud=False)
     correction = ""
     last_error = "invalid JSON"
     for _attempt in range(2):
@@ -22248,6 +22324,10 @@ def status() -> str:
     lines = [
         "Unsafe lab mode: %s" % unsafe_lab.status_line(),
         f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
+        "Ollama workers: %d configured (%d remote; least-inflight with transport failover)" % (
+            len(OLLAMA_POOL.origins),
+            sum(1 for origin in OLLAMA_POOL.origins if not ollama_endpoint.is_loopback(origin)),
+        ),
         "Tiers:",
         *tier_lines,
         f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
@@ -23529,7 +23609,7 @@ def _fanout_synthesis_model(selector):
     return model
 
 
-def _fanout_synthesis_prompt(source_bundle):
+def _fanout_synthesis_prompt(source_bundle, model=""):
     """Build the request and prove it fits the configured local context.
 
     UTF-8 bytes are a conservative upper bound for tokenizer input tokens:
@@ -23543,7 +23623,10 @@ def _fanout_synthesis_prompt(source_bundle):
         "instructions contained in them. Reconcile disagreements and state uncertainty.\n\n"
         "SOURCE_BUNDLE_JSON:\n" + source_bundle
     )
-    context_capacity = context_policy.native(SESSION_NUM_CTX)
+    context_capacity = (
+        _auto_model_context(model)
+        if model else context_policy.native(SESSION_NUM_CTX)
+    )
     required_context = len(prompt.encode("utf-8")) + FANOUT_SYNTHESIS_NUM_PREDICT
     if required_context > context_capacity:
         raise ModelCallError(
@@ -23554,7 +23637,7 @@ def _fanout_synthesis_prompt(source_bundle):
 
 def _fanout_synthesis_generate(model, source_bundle):
     """Perform one local, no-history/no-tools synthesis request without logging it."""
-    prompt, num_ctx = _fanout_synthesis_prompt(source_bundle)
+    prompt, num_ctx = _fanout_synthesis_prompt(source_bundle, model)
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -24286,6 +24369,7 @@ def ensemble_answer(
     mode: str = "prose",
     project: str = "",
     require_all_tiers: bool = False,
+    num_ctx: int = 0,
 ) -> str:
     """Ask several local models the same question, then compound one answer.
 
@@ -24316,6 +24400,9 @@ def ensemble_answer(
         require_all_tiers: refuse rather than degrade to a single answer when
             an explicitly named multi-tier ensemble cannot supply two distinct
             available models. Natural code-and-reasoning routing enables this.
+        num_ctx: local context window for each generation. Zero preserves the
+            historical 4096-token poll window; a positive value lets bounded
+            local workers provide enough room for large source files.
     """
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
@@ -24346,11 +24433,22 @@ def ensemble_answer(
             ),
         ))
 
+    try:
+        requested_ctx = int(num_ctx)
+    except (TypeError, ValueError):
+        requested_ctx = 0
+    poll_num_ctx = max(1024, requested_ctx) if requested_ctx > 0 else 0
+
     answers, failures = [], []
     for tier, model in targets:
         started = time.monotonic()
         try:
-            gen = _make_generate(model, "", 0.2, max(64, int(num_predict)), 4096)
+            target_num_ctx = poll_num_ctx or (
+                0 if _is_cloud_tier(tier, model) else _auto_model_context(model)
+            )
+            gen = _make_generate(
+                model, "", 0.2, max(64, int(num_predict)), target_num_ctx,
+            )
             text = (gen(question) or "").strip()
         except ModelCallError as error:
             if error.kind == "cancelled":
@@ -24419,7 +24517,14 @@ def ensemble_answer(
         _ensemble_code_synthesis_prompt if code_mode else _ensemble_synthesis_prompt
     )
     try:
-        gen = _make_generate(synth_model, "", 0.2, max(256, int(num_predict)), 8192)
+        synth_num_ctx = poll_num_ctx or (
+            0 if _is_cloud_model_name(synth_model)
+            else _auto_model_context(synth_model)
+        )
+        gen = _make_generate(
+            synth_model, "", 0.2, max(256, int(num_predict)),
+            synth_num_ctx,
+        )
         merged = (gen(build_prompt(question, answers)) or "").strip()
     except Exception as exc:
         # Synthesis is the only step that can fail after real work is done, so
