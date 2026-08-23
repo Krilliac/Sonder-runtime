@@ -196,6 +196,19 @@ def reset_typed_workers() -> None:
         _configured_allow_remote = None
 
 
+def has_configured_remote_workers(environment=None) -> bool:
+    """Return whether typed or legacy worker configuration can leave localhost."""
+    with _configuration_lock:
+        typed_workers = _configured_workers
+        typed_allow_remote = _configured_allow_remote
+    if environment is None and typed_workers is not None and typed_allow_remote is not None:
+        origins = typed_workers
+    else:
+        env = os.environ if environment is None else environment
+        origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
+    return any(not _is_loopback(origin) for origin in origins)
+
+
 @dataclass(frozen=True)
 class WorkerEndpoint:
     origin: str
@@ -1057,6 +1070,7 @@ __all__ = [
     "WorkerSnapshot",
     "configure_typed_workers",
     "from_environment",
+    "has_configured_remote_workers",
     "parse_worker_origins",
     "reset_typed_workers",
     "validate_worker_origin",

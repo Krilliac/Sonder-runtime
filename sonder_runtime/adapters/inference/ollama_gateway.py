@@ -110,15 +110,14 @@ def _is_loopback(value: str) -> bool:
 
 
 def _configured_remote_worker() -> bool:
-    """Whether ``SONDER_OLLAMA_WORKERS`` names any non-loopback worker.
+    """Whether typed or legacy worker configuration names a remote worker.
 
     Re-derived from the environment rather than a shared pool instance: the
     architecture forbids this adapters-layer module depending on the
     server-owned pool singleton, and a fresh read keeps this consent check
     correct regardless of which composition root built the actual pool.
     """
-    origins = ollama_pool.parse_worker_origins(os.environ.get("SONDER_OLLAMA_WORKERS"))
-    return any(not _is_loopback(origin) for origin in origins)
+    return ollama_pool.has_configured_remote_workers()
 
 
 def _enforce_local_endpoint(base: str, context: OperationContext) -> None:

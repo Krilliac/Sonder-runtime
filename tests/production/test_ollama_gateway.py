@@ -6,6 +6,7 @@ import pytest
 from sonder_runtime.adapters import model_transport
 import server
 from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_pool
 from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -226,6 +227,26 @@ def test_pool_configured_remote_worker_requires_consent_despite_loopback_primary
         _context(remote_ollama_allowed=True),
     )
     assert response.text == "generated text"
+
+
+def test_typed_pool_worker_requires_consent_without_environment_round_trip(
+    monkeypatch,
+):
+    _fake_target(monkeypatch)
+    _fake_gen(monkeypatch)
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(
+        ollama_endpoint, "normalize", lambda value=None: "http://127.0.0.1:11434",
+    )
+    monkeypatch.delenv("SONDER_OLLAMA_WORKERS", raising=False)
+    ollama_pool.configure_typed_workers(
+        ("https://worker.example:11434",), allow_remote=True,
+    )
+    try:
+        with pytest.raises(Forbidden, match="remote Ollama"):
+            OllamaGateway().generate(ModelRequest(prompt="x", tier="code"), _context())
+    finally:
+        ollama_pool.reset_typed_workers()
 
 
 def test_embed_maps_empty_vector_to_dependency_error(monkeypatch):

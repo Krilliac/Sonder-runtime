@@ -196,7 +196,7 @@ def test_server_posts_through_the_pool_selected_origin(monkeypatch):
         origins = ("http://127.0.0.1:11434", "https://worker.example:11434")
         model_hints = []
 
-        def request(self, sender, *, model=None):
+        def request(self, sender, *, model=None, idempotent=False):
             self.model_hints.append(model)
             return sender("https://worker.example:11434")
 
