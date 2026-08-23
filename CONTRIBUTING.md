@@ -22,6 +22,10 @@ into file-grouped xdist execution; the harness refuses more than four workers.
 Selection is an iteration aid, not a replacement for the final full-suite gate.
 See [the performance runbook](docs/runbooks/performance.md) for profiling,
 diagnostic, and privacy details.
+For iterating on a change, `scripts/select_regression_tests.py` picks the
+test files your diff actually touches, and
+[docs/wiki/20-test-suite-performance.md](docs/wiki/20-test-suite-performance.md)
+covers timing captures, slow-test ranking, and bounded parallel runs.
 
 A green suite is expected, not impressive — say what you *verified*, not what
 you believe. "Reproduced the failure, fixed it, the new test fails without the
