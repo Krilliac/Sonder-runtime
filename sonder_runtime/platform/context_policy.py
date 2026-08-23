@@ -26,6 +26,46 @@ DEFAULT_VIRTUAL_MAX = 1_000_000
 MIN_CONTEXT = 512
 
 
+def _parameter_billions(value):
+    """Parse Ollama's human-readable parameter size into billions."""
+    if value is None:
+        return None
+    text = str(value).strip().upper().replace(",", "")
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([BM]?)$", text)
+    if not match:
+        return None
+    amount = float(match.group(1))
+    if match.group(2) == "M":
+        amount /= 1000.0
+    return amount if amount > 0 else None
+
+
+def auto_context(model_context=None, parameter_size=None) -> int:
+    """Choose a model-aware native context when the caller did not pin one.
+
+    Ollama's server default is process-wide, but model weights and KV-cache
+    pressure are not. Keep more room for small local models and reserve a
+    conservative share of the KV budget for larger models, then never exceed
+    the selected model's advertised maximum. Operators can still override the
+    result with ``SONDER_CONTEXT_SIZE`` or an explicit request value.
+    """
+    has_explicit_environment = bool(
+        str(os.environ.get("SONDER_CONTEXT_SIZE") or "").strip()
+        or str(os.environ.get("SONDER_SESSION_NUM_CTX") or "").strip()
+    )
+    base = default_requested() if has_explicit_environment else default_context()
+    parameters = _parameter_billions(parameter_size)
+    if parameters is not None:
+        if parameters >= 24:
+            base = min(base, 16_384)
+        elif parameters >= 12:
+            base = min(base, 24_576)
+    advertised = parse_strict(model_context)
+    if advertised is not None:
+        base = min(base, advertised)
+    return max(MIN_CONTEXT, min(base, native_max()))
+
+
 def parse_strict(value):
     """Parse a size token, returning ``None`` for invalid input."""
     if value is None or isinstance(value, bool):

@@ -55,6 +55,10 @@ minimum_free_disk_bytes = 5368709120
 url = "http://127.0.0.1:11434"
 allow_remote = false                # remote-Ollama consent gate
 
+# Optional multi-PC inference pool. Keep model tags installed on every host.
+# The environment form is preferred for deployment secrets and overrides:
+# SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434,https://192.168.1.21:11434
+
 [features]
 cloud = false                       # hosted-model consent gate
 web = false                         # web tools consent gate
@@ -118,6 +122,23 @@ ceiling and are visible in `master_capacity`. Without a per-run `worker_cap`,
 the conservative hardware-derived worker width is unchanged.
 
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
+`SONDER_ALLOW_REMOTE_OLLAMA`. To add independent Ollama hosts to the local
+inference pool, set `SONDER_OLLAMA_WORKERS` to a comma- or semicolon-separated
+list of origins, for example:
+
+```text
+SONDER_ALLOW_REMOTE_OLLAMA=1
+SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434;https://192.168.1.21:11434
+```
+
+The coordinator keeps its normal `[ollama].url` endpoint as the first worker,
+then schedules requests by least in-flight count. A worker is temporarily
+circuit-broken after three transport failures and requests fail over only
+before any response is received. Every host must have the selected model tag
+installed; Sonder does not copy model weights between PCs. Remote origins must
+use HTTPS and must not put credentials in the URL. For a private Ethernet or
+Wi-Fi link, use a private CA/VPN or a TLS reverse proxy; do not expose raw
+Ollama or Sonder loopback ports to the Internet.
 `SONDER_ALLOW_REMOTE_OLLAMA`, `SONDER_FILE_ROOTS`, `SONDER_LOCATION_CONSENT`,
 `SONDER_EXPOSE_REASONING`, `SONDER_ALLOW_PRIVATE_COT`.
 
