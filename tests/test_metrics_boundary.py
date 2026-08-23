@@ -54,6 +54,9 @@ def test_metric_names_and_labels_remain_unchanged():
     assert registry.requests_total is not None
     assert registry.request_duration_seconds is not None
     assert registry.active_requests is not None
+    assert registry.admission_queue_depth is not None
+    assert registry.admission_queue_wait_seconds is not None
+    assert registry.admission_rejections_total is not None
     assert registry.auth_failures_total is not None
 
 
@@ -68,6 +71,11 @@ def test_enabled_metric_names_and_label_sets_remain_unchanged():
         "sonder_requests": ("route", "result"),
         "sonder_request_duration_seconds": ("route",),
         "sonder_active_requests": (),
+        "sonder_admission_capacity": ("kind",),
+        "sonder_admission_queue_depth": (),
+        "sonder_admission_queue_high_watermark": (),
+        "sonder_admission_queue_wait_seconds": (),
+        "sonder_admission_rejections": ("reason",),
         "sonder_request_cache": ("result",),
         "sonder_model_calls": ("tier", "result"),
         "sonder_model_call_duration_seconds": ("tier",),

@@ -5,12 +5,23 @@ contributions are small, verified, and self-explaining.
 
 ## Before you open a PR
 
-Run the suite. It is fast and it is the gate:
+Run the focused regression set while iterating, then the complete suite before
+you open a PR. The suite contains more than ten thousand tests, so use the
+repository selector instead of guessing which files cover a change:
 
 ```bash
 python -m venv venv && venv/Scripts/pip install -r requirements-dev.txt
+venv/Scripts/python scripts/select_regression_tests.py --since main --format args
+venv/Scripts/python scripts/profile_tests.py --since main
 venv/Scripts/python -m pytest -q
 ```
+
+`profile_tests.py` is serial by default and writes a bounded, content-free
+timing report to `.pytest_cache/sonder-test-profile.json`. `--workers 2` opts
+into file-grouped xdist execution; the harness refuses more than four workers.
+Selection is an iteration aid, not a replacement for the final full-suite gate.
+See [the performance runbook](docs/runbooks/performance.md) for profiling,
+diagnostic, and privacy details.
 
 A green suite is expected, not impressive — say what you *verified*, not what
 you believe. "Reproduced the failure, fixed it, the new test fails without the
