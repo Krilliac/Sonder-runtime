@@ -1,0 +1,33 @@
+{
+  "schema": "sonder.eval-harness.suite/v1",
+  "suite": "smoke_python",
+  "version": 1,
+  "description": "Offline smoke suite: three curated python_function scenarios plus one training_tasks builtin, fully covered by a checked-in replay cassette.",
+  "builtin_tasks": ["reverse_string"],
+  "scenarios": [
+    {
+      "id": "reverse_words",
+      "prompt": "Write a Python function named `reverse_words(s)` that returns the whitespace-separated words of s in reverse order, joined by single spaces. Return ONLY the function in one python code block.",
+      "check": "assert reverse_words('the quick brown fox') == 'fox brown quick the'\nassert reverse_words('hello') == 'hello'\nassert reverse_words('') == ''",
+      "timeout_s": 8,
+      "max_attempts": 2,
+      "tags": ["smoke"]
+    },
+    {
+      "id": "slugify",
+      "prompt": "Write a Python function named `slugify(s)` that lowercases s, replaces every run of non-alphanumeric characters with a single hyphen, and strips leading and trailing hyphens. Return ONLY the function in one python code block.",
+      "check": "assert slugify('Hello, World!') == 'hello-world'\nassert slugify('  --Already--Slug--  ') == 'already-slug'\nassert slugify('MiXeD 123 CaSe') == 'mixed-123-case'",
+      "timeout_s": 8,
+      "max_attempts": 2,
+      "tags": ["smoke", "repair"]
+    },
+    {
+      "id": "sum_csv_column",
+      "prompt": "Write a Python function named `sum_csv_column(text, index)` that treats text as comma-separated lines, skips blank lines, and returns the sum of float(fields[index]) over the remaining lines (0.0 for empty input). Return ONLY the function in one python code block.",
+      "check": "assert sum_csv_column('a,1\\nb,2\\n\\nc,3.5', 1) == 6.5\nassert sum_csv_column('', 0) == 0.0",
+      "timeout_s": 8,
+      "max_attempts": 2,
+      "tags": ["smoke"]
+    }
+  ]
+}

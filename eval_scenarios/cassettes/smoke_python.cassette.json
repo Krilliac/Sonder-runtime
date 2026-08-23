@@ -1,0 +1,34 @@
+{
+  "entries": {
+    "reverse_string": [
+      {
+        "prompt_sha256": "586a1e61c97b2dfd8088571aa19e0d9c39c044f785923a618cc3a8a88caadcd0",
+        "response": "```python\ndef reverse_string(s):\n    return s[::-1]\n```"
+      }
+    ],
+    "reverse_words": [
+      {
+        "prompt_sha256": "985de10ead27da1fba24825fc27944a0927e5111d31d02e7ed5047709da0c59d",
+        "response": "```python\ndef reverse_words(s):\n    return ' '.join(reversed(s.split()))\n```"
+      }
+    ],
+    "slugify": [
+      {
+        "prompt_sha256": "053be0fe9ef5a25453c352e32ece705e3f696d367a62e607f3685bae79702534",
+        "response": "```python\ndef slugify(s):\n    out = []\n    for ch in s.lower():\n        out.append(ch if ch.isalnum() else '-')\n    return ''.join(out).strip('-')\n```"
+      },
+      {
+        "response": "```python\nimport re\n\ndef slugify(s):\n    return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')\n```"
+      }
+    ],
+    "sum_csv_column": [
+      {
+        "prompt_sha256": "cc29e9bb1d61a8fb51073041944aad5fdad80d0c8414cad3e2b72916dbdac909",
+        "response": "```python\ndef sum_csv_column(text, index):\n    total = 0.0\n    for line in text.splitlines():\n        if not line.strip():\n            continue\n        total += float(line.split(',')[index])\n    return total\n```"
+      }
+    ]
+  },
+  "recorded_from": "manual",
+  "schema": "sonder.eval-harness.cassette/v1",
+  "suite": "smoke_python"
+}
