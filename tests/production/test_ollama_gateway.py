@@ -17,12 +17,30 @@ from sonder_runtime.domain.common.errors import (
     InternalFailure,
     InvalidInput,
 )
+from sonder_runtime.domain.model_capabilities import (
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_TIERED_ROUTING,
+    KNOWN_GATEWAY_CAPABILITIES,
+)
 
 pytestmark = pytest.mark.unit
 
 
 def _context(**kwargs):
     return local_owner_context(correlation_id="req_gw", **kwargs)
+
+
+def test_capabilities_are_typed_and_advertise_tiered_routing():
+    capabilities = OllamaGateway().capabilities
+    assert capabilities == {
+        GATEWAY_CAPABILITY_CHAT,
+        GATEWAY_CAPABILITY_EMBEDDINGS,
+        GATEWAY_CAPABILITY_TIERED_ROUTING,
+    }
+    assert capabilities <= KNOWN_GATEWAY_CAPABILITIES
+    # Static per-instance fact, not derived from any live probe/config.
+    assert OllamaGateway().capabilities is OllamaGateway().capabilities
 
 
 def _fake_target(monkeypatch, *, model="sonder:latest", cloud=False,
