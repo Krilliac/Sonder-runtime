@@ -280,7 +280,9 @@ def _preserve_degraded(report):
     worse than making the caller retry.
     """
     path = Path(report.path)
-    if not path.exists() or path.is_symlink():
+    # A totally-failed load reports the home directory itself as the path;
+    # only a real, non-symlinked policy file has bytes worth preserving.
+    if not path.is_file() or path.is_symlink():
         return
     sidecar = path.with_name(path.name + ".invalid")
     sidecar.write_bytes(path.read_bytes())
