@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import importlib
 import http.client
+import inspect
 import json
 import math
 import os
@@ -3937,7 +3938,7 @@ def _post_model(
         post_kwargs = {}
         if local_only:
             post_kwargs["local_only"] = True
-        if idempotent:
+        if idempotent and _callable_accepts_keyword(_post, "idempotent"):
             # Preserve compatibility with narrow test doubles and legacy
             # callers while forwarding the explicit replay-safety contract to
             # the typed worker pool when it is actually declared.
@@ -4270,6 +4271,19 @@ def _format_model_call_error(error: ModelCallError) -> str:
         error,
         endpoint_loopback=ollama_endpoint.is_loopback(BASE),
         display=_ollama_display(),
+    )
+
+
+def _callable_accepts_keyword(callable_obj, name: str) -> bool:
+    """Keep narrow test/extension doubles compatible with new optional seams."""
+    try:
+        parameters = inspect.signature(callable_obj).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.name == name
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
     )
 
 

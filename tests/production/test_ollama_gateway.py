@@ -217,6 +217,7 @@ def test_pool_configured_remote_worker_requires_consent_despite_loopback_primary
     monkeypatch.setattr(
         ollama_endpoint, "normalize", lambda value=None: "http://127.0.0.1:11434",
     )
+    ollama_pool.reset_typed_workers()
     monkeypatch.setenv("SONDER_OLLAMA_WORKERS", "https://worker.example:11434")
 
     with pytest.raises(Forbidden, match="remote Ollama"):
