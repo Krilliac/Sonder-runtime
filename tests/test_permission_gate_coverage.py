@@ -167,6 +167,7 @@ def _maps():
 _DISPLAY_ONLY_BRANCHES = {
     "/help": "renders command_catalog text",
     "/why": "renders command_router.explain() evidence; dispatches nothing",
+    "/version": "prints the version literal and release stamp; no subprocess",
     "/exit": "ends the session; empty branch body",
     "/quit": "alias of /exit",
     "/q": "alias of /exit",

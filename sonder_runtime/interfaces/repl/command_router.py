@@ -317,6 +317,13 @@ _RULES = [
           _fixed("/env")),
     _rule(r"^(?:which|what)\s+(?:tools?|toolchains?|shells?|compilers?)\s+"
           r"(?:are|do\s+you\s+have)\s+(?:installed|available)\s*\??$", _fixed("/env")),
+    # Sonder's own build identity claims its forms before the generic
+    # tool-version probe below can read "sonder" as a discovered tool name.
+    _rule(r"^(?:what(?:'s|\s+is)\s+(?:your|the|sonder(?:'s)?)\s+version|"
+          r"what\s+version\s+(?:are\s+you(?:\s+running)?|is\s+(?:this|sonder)|"
+          r"of\s+sonder\s+is\s+this)|"
+          r"show\s+(?:me\s+)?(?:the\s+)?(?:sonder\s+)?version|"
+          r"sonder\s+version|version)\s*[?!.]*$", _fixed("/version")),
     _rule(r"^(?:what\s+)?version\s+(?:is|of)\s+(?P<arg>[A-Za-z][A-Za-z0-9+._-]{0,63})\s*\??$",
           _with_arg("/toolstatus")),
     _rule(r"^(?:show|inspect|check)\s+(?:me\s+)?(?:my\s+|this\s+|the\s+)?"
@@ -520,6 +527,18 @@ _RULES = [
           _fixed("/system_profile_text")),
 
     # --- help ---
+    # Per-command help. The bare-name form needs a help preposition ("help
+    # with the todo command"), so prose such as "help me with my homework"
+    # never fits -- the pattern is a complete turn and "my homework" is not
+    # one command token. The explain/usage forms require the explicit slash
+    # so "explain the parser" stays a real question.
+    _rule(r"^(?:show\s+)?help\s+(?:for|on|with|about)\s+(?:the\s+)?"
+          r"(?P<arg>/?[A-Za-z][A-Za-z0-9_-]*)(?:\s+command)?\s*[?!.]*$",
+          _with_arg("/help")),
+    _rule(r"^(?:what\s+does|explain)\s+(?:the\s+)?(?P<arg>/[A-Za-z][A-Za-z0-9_-]*)"
+          r"(?:\s+command)?(?:\s+do)?\s*[?!.]*$", _with_arg("/help")),
+    _rule(r"^how\s+do\s+i\s+use\s+(?P<arg>/[A-Za-z][A-Za-z0-9_-]*)\s*[?!.]*$",
+          _with_arg("/help")),
     _rule(r"^(?:help|what\s+can\s+you\s+do|show\s+help)\b", _fixed("/help")),
 ]
 
