@@ -351,9 +351,14 @@ def _resolve(conn, selector: str = "", request_owner: str | None = None):
     ).fetchone()
     if exact is not None:
         return exact
+    # Prefix matching treats the selector as literal text, exactly like
+    # fleet_store.get_agent: an unescaped LIKE would let "auto_" or "%" match
+    # unrelated runs and resolve an unintended target when only one exists.
+    escaped = selector.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = conn.execute(
-        "SELECT * FROM autopilot_runs WHERE id LIKE ?%s ORDER BY updated_ts DESC LIMIT 2" % scope_sql,
-        (selector + "%", *scope_args),
+        "SELECT * FROM autopilot_runs WHERE id LIKE ? ESCAPE '\\'%s "
+        "ORDER BY updated_ts DESC LIMIT 2" % scope_sql,
+        (escaped + "%", *scope_args),
     ).fetchall()
     return rows[0] if len(rows) == 1 else None
 

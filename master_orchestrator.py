@@ -1816,12 +1816,22 @@ def start_delegated(
     function returns.
     """
     ready = threading.Event()
+    abandoned = threading.Event()
     started_result: dict = {}
     startup_error: list[BaseException] = []
 
     def on_started(result: dict) -> None:
         started_result.update(result)
         ready.set()
+        if abandoned.is_set():
+            # The initiating caller already timed out and reported failure; a
+            # fleet that starts anyway would be an orphan the caller cannot
+            # name, and a caller retry would then duplicate the work.  Cancel
+            # it cooperatively as soon as its durable identity is known.
+            master_id = result.get("master_id")
+            if master_id:
+                with contextlib.suppress(Exception):
+                    request_cancel(master_id)
 
     def run() -> None:
         try:
@@ -1851,7 +1861,19 @@ def start_delegated(
     )
     thread.start()
     if not ready.wait(max(0.1, float(startup_timeout))):
-        raise RuntimeError("background fleet did not initialize its durable ledger")
+        abandoned.set()
+        # Cover the race where startup completed between the wait timing out
+        # and the abandon flag being visible: cancel by the identity that
+        # on_started already published.  Exactly one of these two paths sees
+        # both the flag and the master id.
+        master_id = started_result.get("master_id")
+        if master_id:
+            with contextlib.suppress(Exception):
+                request_cancel(master_id)
+        raise RuntimeError(
+            "background fleet did not initialize its durable ledger; "
+            "any late startup will be cancelled instead of running as an orphan"
+        )
     if startup_error:
         raise RuntimeError("background fleet failed to start: %s" % startup_error[0])
     result = dict(started_result)
