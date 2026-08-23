@@ -98,6 +98,16 @@ def _validated_manifest(manifest_path, manifest):
             backup_digest = record.get("sha256_backup")
             before_digest = record.get("sha256_before")
             size_before = record.get("size_before")
+            mode_before = record.get("mode_before")
+            # atomic_copy feeds this to os.chmod on POSIX; validate it here so
+            # a malformed manifest fails before any file is touched instead of
+            # raising mid-restore and leaving a partial recovery.
+            if mode_before is not None and (
+                isinstance(mode_before, bool)
+                or not isinstance(mode_before, int)
+                or not 0 <= mode_before <= 0o7777
+            ):
+                raise RuntimeError("manifest file mode is invalid for %s" % relative)
             if not isinstance(backup_value, str) or not isinstance(backup_digest, str) or not isinstance(before_digest, str):
                 raise RuntimeError("manifest backup metadata is invalid for %s" % relative)
             if not isinstance(size_before, int) or size_before < 0 or size_before > MAX_RECOVERY_FILE_BYTES:
@@ -129,7 +139,10 @@ def restore(manifest_path):
             atomic_copy(backup, target, record.get("mode_before"))
             if sha(target) != record["sha256_before"]:
                 raise RuntimeError("restored checksum failed for %s" % record["path"])
-        elif target.exists():
+        elif target.is_symlink() or target.exists():
+            # is_symlink() first: exists() follows links, so a file selfmod
+            # created that is now a dangling symlink would otherwise survive
+            # the rollback.
             target.unlink()
     return root
 
