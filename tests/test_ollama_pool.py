@@ -7,8 +7,10 @@ import pytest
 from sonder_runtime.adapters.inference.ollama_pool import (
     OllamaWorkerPool,
     _metric_label,
+    configure_typed_workers,
     from_environment,
     parse_worker_origins,
+    reset_typed_workers,
     validate_worker_origin,
 )
 from sonder_runtime.platform.logging import Redactor
@@ -42,6 +44,17 @@ def test_remote_worker_requires_https_and_explicit_consent():
     ) == "https://192.168.1.20:11434"
 
 
+@pytest.mark.parametrize("origin, message", [
+    ("ftp://127.0.0.1:11434", "http or https"),
+    ("http://127.0.0.1:11434/api", "without a path"),
+    ("http://127.0.0.1:11434?token=secret", "without a path"),
+    ("http://127.0.0.1:11434/#fragment", "without a path"),
+])
+def test_worker_origin_rejects_non_origin_and_ambiguous_url_syntax(origin, message):
+    with pytest.raises(ValueError, match=message):
+        validate_worker_origin(origin, allow_remote=False)
+
+
 def test_pool_fails_over_only_on_transport_failure():
     pool = OllamaWorkerPool(
         "http://127.0.0.1:11434",
@@ -56,7 +69,7 @@ def test_pool_fails_over_only_on_transport_failure():
             raise URLError("primary unavailable")
         return {"worker": origin}
 
-    result = pool.request(send)
+    result = pool.request(send, idempotent=True)
 
     assert result["worker"] != "http://127.0.0.1:11434"
     assert calls[0] == "http://127.0.0.1:11434"
@@ -79,6 +92,21 @@ def test_pool_does_not_fail_over_after_a_non_transport_failure():
     assert len(calls) == 1
 
 
+def test_pool_never_replays_ambiguous_non_idempotent_transport_failure():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434", ("http://127.0.0.2:11434",)
+    )
+    calls = []
+
+    def send(origin):
+        calls.append(origin)
+        raise URLError("connection disappeared after request send")
+
+    with pytest.raises(URLError):
+        pool.request(send)
+    assert calls == ["http://127.0.0.1:11434"]
+
+
 def test_pool_circuit_breaker_cools_a_repeatedly_failed_worker():
     pool = OllamaWorkerPool(
         "http://127.0.0.1:11434",
@@ -94,8 +122,8 @@ def test_pool_circuit_breaker_cools_a_repeatedly_failed_worker():
             raise URLError("primary unavailable")
         return origin
 
-    pool.request(send)
-    pool.request(send)
+    pool.request(send, idempotent=True)
+    pool.request(send, idempotent=True)
     status = pool.status()
     primary = next(item for item in status["workers"] if item["origin"].endswith(".1:11434"))
     assert primary["healthy"] is False
@@ -104,12 +132,44 @@ def test_pool_circuit_breaker_cools_a_repeatedly_failed_worker():
 
 
 def test_environment_builder_keeps_single_worker_compatible():
+    reset_typed_workers()
     pool = from_environment(
         "http://127.0.0.1:11434",
         {"SONDER_OLLAMA_WORKERS": "", "SONDER_ALLOW_REMOTE_OLLAMA": "0"},
     )
     assert pool.enabled is False
     assert pool.origins == ("http://127.0.0.1:11434",)
+
+
+def test_typed_workers_are_authoritative_without_environment_round_trip(monkeypatch):
+    try:
+        configure_typed_workers(
+            ("https://worker.example:443",), allow_remote=True,
+        )
+        monkeypatch.setenv("SONDER_OLLAMA_WORKERS", "")
+        monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "0")
+        pool = from_environment("http://127.0.0.1:11434")
+        assert pool.origins == (
+            "http://127.0.0.1:11434", "https://worker.example:443",
+        )
+        assert pool.status()["tls_verification"] == "system-trust-store"
+        assert pool.status()["non_idempotent_failover"] is False
+    finally:
+        reset_typed_workers()
+
+
+def test_explicit_environment_remains_an_injectable_compatibility_boundary():
+    try:
+        configure_typed_workers((), allow_remote=False)
+        pool = from_environment(
+            "http://127.0.0.1:11434",
+            {"SONDER_OLLAMA_WORKERS": "http://127.0.0.2:11434"},
+        )
+        assert pool.origins == (
+            "http://127.0.0.1:11434", "http://127.0.0.2:11434",
+        )
+    finally:
+        reset_typed_workers()
 
 
 def test_server_posts_through_the_pool_selected_origin(monkeypatch):

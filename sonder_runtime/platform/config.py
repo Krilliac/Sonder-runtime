@@ -521,9 +521,20 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if not Path(root).expanduser().is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
 
-    parts = urlsplit(config.ollama.url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    try:
+        parts = urlsplit(config.ollama.url)
+        ollama_port = parts.port
+    except ValueError:
+        parts = None
+        ollama_port = None
+    if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
         errors.append(f"[ollama].url invalid: {config.ollama.url!r}")
+    elif parts.username is not None or parts.password is not None:
+        errors.append("[ollama].url must not contain inline credentials")
+    elif ollama_port is None:
+        errors.append("[ollama].url must include an explicit port")
+    elif parts.path not in ("", "/") or parts.query or parts.fragment:
+        errors.append("[ollama].url must be an origin without a path, query, or fragment")
     elif not config.ollama.allow_remote and not _is_loopback_host(parts.hostname):
         errors.append(
             f"[ollama].url host {parts.hostname!r} is not loopback and "
@@ -536,16 +547,29 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         )
 
     for worker in config.ollama.workers:
-        worker_parts = urlsplit(worker)
+        try:
+            worker_parts = urlsplit(worker)
+            worker_port = worker_parts.port
+        except ValueError:
+            errors.append(f"[ollama].workers entry {worker!r} is malformed")
+            continue
+        if worker_parts.scheme not in ("http", "https"):
+            errors.append("[ollama].workers entries must use http or https")
+            continue
         if (
             worker_parts.username is not None
             or worker_parts.password is not None
         ):
             errors.append("[ollama].workers entries must not contain inline credentials")
             continue
-        if not worker_parts.hostname or worker_parts.port is None:
+        if not worker_parts.hostname or worker_port is None:
             errors.append(
                 f"[ollama].workers entry {worker!r} must include a host and explicit port"
+            )
+            continue
+        if worker_parts.path not in ("", "/") or worker_parts.query or worker_parts.fragment:
+            errors.append(
+                "[ollama].workers entries must be origins without paths, queries, or fragments"
             )
             continue
         if not _is_loopback_host(worker_parts.hostname):

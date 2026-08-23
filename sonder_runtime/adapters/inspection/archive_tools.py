@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ HARD_MAX_PATH_DEPTH = 128
 HARD_MAX_RESULTS = 10_000
 HARD_MAX_SECONDS = 60.0
 HARD_MAX_PATH_CHARS = 1_024
+HARD_MAX_SOURCE_BYTES = 1_100_000_000
 
 DEFAULT_MAX_ENTRIES = 2_000
 DEFAULT_MAX_FILE_BYTES = 64_000_000
@@ -320,7 +322,20 @@ def _archive_kind(source: Path) -> str:
     raise ArchiveRejected("source is not a supported ZIP or TAR archive")
 
 
-def _stat_signature(source: Path) -> tuple[int, int, int, int]:
+def _source_digest(source: Path, *, deadline: float | None = None) -> str:
+    digest = hashlib.sha256()
+    with source.open("rb") as stream:
+        while True:
+            if deadline is not None and time.monotonic() > deadline:
+                raise ArchiveRejected("archive validation exceeded time ceiling")
+            chunk = stream.read(CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stat_fields(source: Path) -> tuple[int, int, int, int]:
     value = source.stat()
     return (
         int(value.st_size), int(value.st_mtime_ns),
@@ -328,15 +343,31 @@ def _stat_signature(source: Path) -> tuple[int, int, int, int]:
     )
 
 
-def _require_same_source(source: Path, signature: tuple[int, int, int, int]) -> None:
-    if _stat_signature(source) != signature:
+def _stat_signature(
+    source: Path, *, deadline: float | None = None,
+) -> tuple[int, int, int, int, str]:
+    before = _stat_fields(source)
+    if before[0] > HARD_MAX_SOURCE_BYTES:
+        raise ArchiveRejected("archive source exceeds compressed byte ceiling")
+    digest = _source_digest(source, deadline=deadline)
+    after = _stat_fields(source)
+    if before != after:
+        raise ArchiveRejected("archive source changed while it was inspected")
+    return (*after, digest)
+
+
+def _require_same_source(
+    source: Path, signature: tuple[int, int, int, int, str], *,
+    deadline: float | None = None,
+) -> None:
+    if _stat_signature(source, deadline=deadline) != signature:
         raise ArchiveRejected("archive source changed after prevalidation")
 
 
 def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
     started = time.monotonic()
     deadline = deadline or (started + limits["max_seconds"])
-    signature = _stat_signature(source)
+    signature = _stat_signature(source, deadline=deadline)
     kind = _archive_kind(source)
     if time.monotonic() > deadline:
         raise ArchiveRejected("archive prevalidation exceeded time ceiling")
@@ -360,7 +391,7 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
                 entries.append(_tar_entry(info, limits))
                 if len(entries) > limits["max_entries"]:
                     raise ArchiveRejected("archive exceeds entry ceiling")
-    _require_same_source(source, signature)
+    _require_same_source(source, signature, deadline=deadline)
     _validate_entries(entries, limits, source.stat().st_size)
     entries.sort(key=lambda row: row["path"])
     return {
@@ -546,12 +577,12 @@ def extract_archive(
     stage = Path(tempfile.mkdtemp(prefix=".sonder-archive-", dir=destination.parent))
     promoted = False
     try:
-        _require_same_source(source, plan["source_signature"])
+        _require_same_source(source, plan["source_signature"], deadline=deadline)
         if plan["archive_type"] == "zip":
             _extract_zip(source, stage, plan, deadline)
         else:
             _extract_tar(source, stage, plan, deadline)
-        _require_same_source(source, plan["source_signature"])
+        _require_same_source(source, plan["source_signature"], deadline=deadline)
         _verify_stage(stage, plan, deadline)
         _promote_no_replace(stage, destination)
         promoted = True

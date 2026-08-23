@@ -10,6 +10,7 @@ from sonder_runtime.application.tools.facade import ToolApplicationFacade
 from sonder_runtime.application.tools.gateway_contract import ApprovalMode, ToolGatewayRequest, ToolPermission, ToolScope
 from sonder_runtime.application.tools.resource_policy import Decision, PolicyRule, ResourcePolicy
 from sonder_runtime.domain.common.errors import Forbidden
+from sonder_runtime.domain.tools.descriptors import ToolEffect
 
 
 class _Executor:
@@ -64,3 +65,42 @@ def test_tool_receipt_is_truthful_for_unredacted_default_output():
     assert receipt.execution_world == "local-execution"
     assert len(receipt.argument_digest) == 64
     assert len(receipt.result_digest) == 64
+
+
+def test_tool_facade_rejects_underdeclared_descriptor_effects():
+    registry = InMemoryToolRegistry((
+        ToolDescriptor("write", effects=frozenset({ToolEffect.WRITE_FILES})),
+    ))
+    policy = ResourcePolicy((PolicyRule("write", Decision.ALLOW, tool="write"),))
+    facade = ToolApplicationFacade.compose(registry, _Executor(), policy=policy)
+
+    with pytest.raises(Forbidden, match="do not match descriptor"):
+        facade.execute(ToolGatewayRequest(
+            request_id="req-underdeclared", tool_name="write", arguments={},
+            scope=ToolScope("owner", allowed_effects=frozenset({"write_files"})),
+            permission=ToolPermission(),
+        ))
+
+
+def test_tool_facade_requires_policy_for_every_declared_effect():
+    registry = InMemoryToolRegistry((
+        ToolDescriptor(
+            "transfer",
+            effects=frozenset({ToolEffect.READ_FILES, ToolEffect.NETWORK}),
+        ),
+    ))
+    policy = ResourcePolicy((
+        PolicyRule(
+            "read-only", Decision.ALLOW, tool="transfer",
+            side_effect_class="read_files",
+        ),
+    ))
+    facade = ToolApplicationFacade.compose(registry, _Executor(), policy=policy)
+    effects = frozenset({"read_files", "network"})
+
+    with pytest.raises(Forbidden, match="tool policy denied"):
+        facade.execute(ToolGatewayRequest(
+            request_id="req-multi-effect", tool_name="transfer", arguments={},
+            scope=ToolScope("owner", allowed_effects=effects),
+            permission=ToolPermission(effects),
+        ))

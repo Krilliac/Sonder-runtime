@@ -16,6 +16,8 @@ SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
 DEFAULT_RATE_LIMIT = 120
 RATE_WINDOW_SECONDS = 60
 BOOTSTRAP_SECRET_MIN_LENGTH = 16
+MAX_USERNAME_CHARS = 128
+MAX_PASSWORD_CHARS = 1_024
 
 # Historical development default.  It is public, so it must never key real
 # session-token HMACs.  We keep the constant only to recognise and refuse it
@@ -69,6 +71,32 @@ def _bootstrap_secret() -> str:
 
 def _now() -> int:
     return int(time.time())
+
+
+def _username(value, *, generic_error: bool = False) -> str:
+    """Normalize a bounded account identifier or fail before persistence."""
+    message = "invalid username or password" if generic_error else (
+        "username must be 3..%d printable characters" % MAX_USERNAME_CHARS
+    )
+    if not isinstance(value, str):
+        raise ValueError(message)
+    normalized = value.strip().lower()
+    if (
+        len(normalized) < 3
+        or len(normalized) > MAX_USERNAME_CHARS
+        or any(ord(char) < 32 or ord(char) == 127 for char in normalized)
+    ):
+        raise ValueError(message)
+    return normalized
+
+
+def _password(value, *, generic_error: bool = False) -> str:
+    message = "invalid username or password" if generic_error else (
+        "password must be 8..%d characters" % MAX_PASSWORD_CHARS
+    )
+    if not isinstance(value, str) or not 8 <= len(value) <= MAX_PASSWORD_CHARS:
+        raise ValueError(message)
+    return value
 
 
 def _new_token() -> str:
@@ -155,11 +183,8 @@ def register(
     both an admin actor and an explicit opt-in.
     """
     init(conn)
-    username = (username or "").strip().lower()
-    if not username or len(username) < 3:
-        raise ValueError("username must be at least 3 characters")
-    if not password or len(password) < 8:
-        raise ValueError("password must be at least 8 characters")
+    username = _username(username)
+    password = _password(password)
     role = role if role in ("user", "developer", "admin") else "user"
     salt, digest = _hash_password(password)
     conn.execute("BEGIN IMMEDIATE")
@@ -209,10 +234,11 @@ def register(
 
 def public_account(conn: sqlite3.Connection, username: str) -> dict:
     init(conn)
+    username = _username(username)
     row = conn.execute(
         "SELECT username, role, tier, dev_flags, banned, created_ts, last_login_ts "
         "FROM accounts WHERE username=?",
-        ((username or "").strip().lower(),),
+        (username,),
     ).fetchone()
     if not row:
         raise ValueError("unknown account")
@@ -229,7 +255,8 @@ def public_account(conn: sqlite3.Connection, username: str) -> dict:
 
 def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, dict]:
     init(conn)
-    username = (username or "").strip().lower()
+    username = _username(username, generic_error=True)
+    password = _password(password, generic_error=True)
     row = conn.execute("SELECT * FROM accounts WHERE username=?", (username,)).fetchone()
     if not row:
         raise ValueError("invalid username or password")
@@ -278,7 +305,7 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
 
 def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
     init(conn)
-    username = (username or "").strip().lower()
+    username = _username(username)
     allowed = {"role", "tier", "dev_flags", "banned"}
     assignments = []
     values = []

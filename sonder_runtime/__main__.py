@@ -588,6 +588,10 @@ def cmd_serve(args) -> int:
     _configure_typed_home(config)
     from sonder_runtime.adapters.inference import ollama_endpoint
     ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+    from sonder_runtime.adapters.inference import ollama_pool
+    ollama_pool.configure_typed_workers(
+        config.ollama.workers, allow_remote=config.ollama.allow_remote,
+    )
     from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
         require_epoch_2,
     )

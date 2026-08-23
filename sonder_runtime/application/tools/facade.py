@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Mapping
 
 from ...domain.common.errors import Forbidden
@@ -27,23 +28,44 @@ from .generated_catalogs import CatalogBundle, GeneratedCatalogs
 from .resource_policy import ResourcePolicy, ResourceRequest
 
 
+def _effect_name(effect: Any) -> str:
+    return effect.name.lower() if isinstance(effect, Enum) else str(effect).strip()
+
+
 class ResourcePolicyEvaluator:
     """Adapt the rich resource policy to the gateway's narrow permission port."""
 
-    def __init__(self, policy: ResourcePolicy) -> None:
+    def __init__(self, policy: ResourcePolicy, registry: ToolRegistry | None = None) -> None:
         self.policy = policy
+        self.registry = registry
 
     def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> None:
-        result = self.policy.evaluate(ResourceRequest(
-            request_id=f"policy:{tool_name}",
-            tool=tool_name,
-            workspace=scope.workspace_roots[0] if scope.workspace_roots else "",
-            side_effect_class=next(iter(permission.effects), ""),
-        ))
-        if not result.allowed:
-            raise Forbidden(f"tool policy denied {tool_name!r}: {result.receipt.reason}")
-        if result.approval_required and permission.approval.value == "not_required":
-            raise Forbidden(f"tool policy requires approval for {tool_name!r}")
+        requested_effects = frozenset(permission.effects)
+        if self.registry is not None:
+            descriptor = self.registry.get(tool_name)
+            if descriptor is None:
+                raise Forbidden(f"tool policy has no descriptor for {tool_name!r}")
+            declared_effects = frozenset(_effect_name(effect) for effect in descriptor.effects)
+            if requested_effects != declared_effects:
+                raise Forbidden(
+                    f"tool permission effects do not match descriptor for {tool_name!r}"
+                )
+
+        # A multi-effect tool must be admitted for every declared effect.  A
+        # single arbitrary set iteration previously allowed a read rule to
+        # authorize a tool that also wrote files or used the network.
+        effects = tuple(sorted(requested_effects)) or ("",)
+        for effect in effects:
+            result = self.policy.evaluate(ResourceRequest(
+                request_id=f"policy:{tool_name}:{effect or 'pure'}",
+                tool=tool_name,
+                workspace=scope.workspace_roots[0] if scope.workspace_roots else "",
+                side_effect_class=effect,
+            ))
+            if not result.allowed:
+                raise Forbidden(f"tool policy denied {tool_name!r}: {result.receipt.reason}")
+            if result.approval_required and permission.approval.value == "not_required":
+                raise Forbidden(f"tool policy requires approval for {tool_name!r}")
 
 
 class DenyApprovalGate:
@@ -168,7 +190,7 @@ class ToolApplicationFacade:
             registry,
             _FailClosedTypedPolicy(),
             executor or FailClosedToolExecutor(),
-            ResourcePolicyEvaluator(policy),
+            ResourcePolicyEvaluator(policy, registry),
             approvals or DenyApprovalGate(),
             redactor or IdentityRedactor(),
             receipts,

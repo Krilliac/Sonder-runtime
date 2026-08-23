@@ -174,3 +174,22 @@ def test_concurrent_bootstrap_creates_exactly_one_admin(monkeypatch, tmp_path):
     assert admin_auth.list_accounts(check)[0]["role"] == "admin"
     check.close()
 
+
+@pytest.mark.parametrize("username", ["ab", "u" * 129, "bad\x00name", 123])
+def test_registration_rejects_unbounded_or_nonprintable_usernames(username):
+    conn = memory_store.connect(":memory:")
+    with pytest.raises(ValueError, match="username"):
+        admin_auth.register(conn, username, "password123")
+
+
+def test_registration_and_login_bound_password_work():
+    conn = memory_store.connect(":memory:")
+    admin_auth.register(conn, "bounded-user", "p" * admin_auth.MAX_PASSWORD_CHARS)
+    token, account = admin_auth.login(
+        conn, "bounded-user", "p" * admin_auth.MAX_PASSWORD_CHARS,
+    )
+    assert token and account["username"] == "bounded-user"
+    with pytest.raises(ValueError, match="invalid username or password"):
+        admin_auth.login(
+            conn, "bounded-user", "p" * (admin_auth.MAX_PASSWORD_CHARS + 1),
+        )
