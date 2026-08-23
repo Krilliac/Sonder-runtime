@@ -132,8 +132,11 @@ SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434;https://192.168.1.21:11434
 ```
 
 The coordinator keeps its normal `[ollama].url` endpoint as the first worker,
-then schedules requests by least in-flight count. A worker is temporarily
-circuit-broken after three transport failures and requests fail over only
+then schedules requests by least in-flight count, breaking idle ties toward
+the host with the lowest observed request latency. A worker is temporarily
+circuit-broken after three transport failures; repeated trips double the
+cooldown up to 8x, and a worker returning from cooldown receives one trial
+request at a time until a success closes the circuit. Requests fail over only
 before any response is received. Every host must have the selected model tag
 installed; Sonder does not copy model weights between PCs. Remote origins must
 use HTTPS and must not put credentials in the URL. For a private Ethernet or
