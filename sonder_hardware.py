@@ -52,6 +52,7 @@ from sonder_runtime.platform.hardware_identity import (
 from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
 from sonder_runtime.adapters.accelerators.backend_probe import (
     probe_backend_inventory,
+    probe_cuda_runtime,
     select_backend,
 )
 from sonder_runtime.adapters.accelerators.inventory import dedupe_accelerators
@@ -73,6 +74,7 @@ _read_text = read_text
 _probe_total_ram_gb = probe_total_ram_gb
 _probe_gpu = probe_nvidia_gpu
 _probe_backends = probe_backend_inventory
+_probe_cuda = probe_cuda_runtime
 _dedupe_accelerators = dedupe_accelerators
 _band_for = band_for_capacity
 _largest_model_class = largest_model_class
@@ -416,6 +418,7 @@ _DEFAULT_PROBES = {
     "accelerators": _probe_accelerators,
     "platform": _probe_platform,
     "backends": _probe_backends,
+    "cuda": _probe_cuda,
 }
 
 
@@ -456,6 +459,7 @@ def detect_profile(probes=None) -> dict:
     gpu_result = _call("gpu", (False, None)) if use_legacy_gpu else (False, None)
     plat = _call("platform", "unknown")
     backend_inventory = _call("backends", {})
+    cuda_available = bool(_call("cuda", False))
     if not isinstance(backend_inventory, dict):
         backend_inventory = {}
 
@@ -498,7 +502,7 @@ def detect_profile(probes=None) -> dict:
         "vram_availability_live": primary_free is not None,
         "gpu_name": str(primary.get("name") or ""),
         "gpu_vendor": primary_vendor,
-        "cuda_available": primary_vendor.casefold() == "nvidia",
+        "cuda_available": cuda_available,
         "rocm_available": primary_vendor.casefold() == "amd",
         "compute_capability": str(primary.get("compute_capability") or ""),
         "platform": plat if isinstance(plat, str) else "unknown",
