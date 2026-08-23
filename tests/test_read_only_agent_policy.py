@@ -101,6 +101,25 @@ def test_project_scoped_read_only_dispatch_reads_host_authorized_root(monkeypatc
     assert "trusted cross-root read" in out
 
 
+def test_project_scoped_workbench_dispatch_reads_host_authorized_root(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+    target = project / "answer.txt"
+    target.write_text("trusted mutable-agent read", encoding="utf-8")
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: workspace)
+
+    out = server._agent_dispatch_observed(
+        "file_read",
+        {"path": "answer.txt"},
+        read_only=False,
+        project=str(project),
+    )
+
+    assert "trusted mutable-agent read" in out
+
+
 def test_direct_project_dispatch_rebases_relative_path_before_file_handler(
     monkeypatch, tmp_path,
 ):
