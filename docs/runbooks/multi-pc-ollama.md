@@ -87,6 +87,13 @@ workers = [
   "https://ollama-pc2.example.internal:443",
   "https://ollama-pc3.example.internal:443",
 ]
+worker_max_inflight = 1
+worker_queue_depth = 32
+worker_admission_timeout_ms = 1000
+worker_failure_threshold = 3
+worker_cooldown_seconds = 30
+worker_capability_ttl_seconds = 300
+worker_probe_timeout_ms = 2000
 ```
 
 Every remote worker must use HTTPS, have no credentials embedded in its URL,

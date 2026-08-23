@@ -533,6 +533,27 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     if include_typed_runtime:
         os.environ["OLLAMA_HOST"] = config.ollama.url
         os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
+        os.environ["SONDER_OLLAMA_WORKER_MAX_INFLIGHT"] = str(
+            config.ollama.worker_max_inflight
+        )
+        os.environ["SONDER_OLLAMA_WORKER_QUEUE_DEPTH"] = str(
+            config.ollama.worker_queue_depth
+        )
+        os.environ["SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS"] = str(
+            config.ollama.worker_admission_timeout_ms
+        )
+        os.environ["SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD"] = str(
+            config.ollama.worker_failure_threshold
+        )
+        os.environ["SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS"] = str(
+            config.ollama.worker_cooldown_seconds
+        )
+        os.environ["SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS"] = str(
+            config.ollama.worker_capability_ttl_seconds
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS"] = str(
+            config.ollama.worker_probe_timeout_ms
+        )
     os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
         "1" if config.ollama.allow_remote else "0"
     )

@@ -12330,7 +12330,15 @@ def _vision_local_target() -> str:
     endpoint is not an acceptable fallback.  The runtime policy owns the tier
     binding; callers cannot turn a free-form model string into a backend target.
     """
-    if not ollama_endpoint.is_loopback(BASE):
+    if OLLAMA_POOL.has_remote_workers:
+        tier_lines = [
+            line.replace(
+                "  [local Ollama]",
+                "  [POOLED OLLAMA - may leave machine; explicit consent]",
+            )
+            for line in tier_lines
+        ]
+    elif not ollama_endpoint.is_loopback(BASE):
         raise ModelCallError(
             "configuration",
             "vision analysis requires a loopback Ollama endpoint; image bytes never leave this machine",
@@ -22397,17 +22405,23 @@ def status() -> str:
     Use this to check whether the GPU is busy before offloading, or to confirm models pulled.
     """
     _maybe_live_reload()
+    if OLLAMA_POOL.enabled:
+        OLLAMA_POOL.refresh_capabilities()
     try:
         tags = _inventory_rows_policy(_get("/api/tags"), "/api/tags")
         ps = _inventory_rows_policy(_get("/api/ps"), "/api/ps")
     except ModelCallError as error:
-        return _format_runtime_model_call_error_policy(
+        message = _format_runtime_model_call_error_policy(
             error,
             endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
+        return "\n".join((message, *OLLAMA_POOL.operator_status_lines()))
     except urllib.error.URLError as e:
-        return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
+        return "\n".join((
+            f"ERROR contacting Ollama at {_ollama_display()}: {e}",
+            *OLLAMA_POOL.operator_status_lines(),
+        ))
 
     installed = _inventory_model_names(tags)
     loaded = [line for line in map(_residency_display, ps) if line]
@@ -25460,7 +25474,12 @@ def run_mcp(*, safety_checked: bool = False) -> None:
     """Run the MCP adapter only after the process-level lab gate succeeds."""
     if not safety_checked:
         require_mcp_startup_safety()
-    mcp.run()
+    try:
+        mcp.run()
+    finally:
+        # Stop distributed admission before the adapter exits and give active
+        # transports a bounded chance to release their worker slots.
+        OLLAMA_POOL.drain(timeout_seconds=5.0)
 
 
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):
