@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sonder-runtime.local/research/trace-event.schema.json",
+  "title": "Sonder trace event (EXPERIMENTAL)",
+  "description": "Proposed shape for one span-like runtime trace event, aligned with the OpenTelemetry GenAI semantic conventions (gen_ai.* attribute namespace) but self-contained and local-first: no exporter, no external collector, no off-host egress is implied by this schema. Intended to formalize what Sonder already records piecemeal (operations.db events, correlation IDs from the WP4 error envelope, fleet provenance rows) into one replayable event stream. This file is a research artifact under docs/research/ and is NOT read by the runtime.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "correlation_id",
+    "kind",
+    "name",
+    "started_at",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Unique id for this event. ULID/UUID; unique within the local store."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "The existing WP4 correlation id for the inbound request or fleet run this event belongs to. One correlation_id groups a whole trace."
+    },
+    "parent_event_id": {
+      "type": ["string", "null"],
+      "description": "Event id of the enclosing span (e.g. a tool call inside an agent turn). Null for root events."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "session_turn",
+        "model_call",
+        "tool_call",
+        "retrieval",
+        "fleet_task",
+        "eval_case",
+        "outcome"
+      ],
+      "description": "Event taxonomy. 'outcome' corresponds to a record_outcome grounding signal; 'eval_case' to one promotion/golden eval case."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable operation name: tool name, model alias, eval case id."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC start time."
+    },
+    "ended_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "UTC end time; null while in flight or if the process died."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "error", "cancelled", "timeout", "in_flight"],
+      "description": "Terminal status. Cancellation and timeout are first-class, matching Sonder's cooperative-cancellation semantics, so a killed step can never be confused with a passed one."
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Flat key/value details. Keys SHOULD reuse OpenTelemetry GenAI names where one exists (gen_ai.request.model, gen_ai.usage.input_tokens, gen_ai.usage.output_tokens, gen_ai.response.finish_reasons) and sonder.* otherwise (sonder.tier, sonder.risk, sonder.worker_host_fingerprint).",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean", "null"]
+      }
+    },
+    "redactions": {
+      "type": "array",
+      "description": "Names of attributes that were withheld or hashed before storage (prompt text, file contents, secrets). Presence of the name proves the field was considered, not forgotten.",
+      "items": { "type": "string" }
+    }
+  }
+}
