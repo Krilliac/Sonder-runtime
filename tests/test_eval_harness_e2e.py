@@ -106,6 +106,22 @@ def test_tampered_baseline_fails_green_run(tmp_path):
     assert exit_code == 1
 
 
+def test_focused_run_is_honestly_partial(tmp_path):
+    out_dir = str(tmp_path / "run")
+    exit_code = eh.main(["run", "--suite", SUITE, "--only", "slugify",
+                         "--out", out_dir])
+    assert exit_code == 0
+    summary = _read_summary(out_dir)
+    assert [case["scenario"] for case in summary["cases"]] == ["slugify"]
+    # the narrowed run carries its own suite identity, so it can never
+    # satisfy the full-suite baseline pin or blend into full-suite history
+    assert summary["suite_hash"] != eh.resolve_suite(SUITE)["suite_hash"]
+    assert summary["selection"]["only"] == ["slugify"]
+    baseline = eh.load_baseline()
+    assert any(v.startswith("suite_changed")
+               for v in eh.check_baseline(summary, baseline))
+
+
 def test_verify_replay_cli_proves_equivalence():
     assert eh.main(["verify-replay", "--suite", SUITE]) == 0
 
