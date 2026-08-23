@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 import urllib.error
 import urllib.request
 
-from sonder_runtime.adapters import model_inventory
+import sonder_runtime.adapters.model_inventory as model_inventory
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor

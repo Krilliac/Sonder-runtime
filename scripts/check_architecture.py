@@ -645,7 +645,9 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
             if top not in ALLOWED_ROOT_IMPORTS[layer]:
                 if (
                     rel.as_posix() == "sonder_runtime/adapters/learning_health.py"
-                    and top in {"calibration", "memory_quality", "retriever"}
+                    and top in {
+                        "calibration", "grounded_outcomes", "memory_quality", "retriever",
+                    }
                 ):
                     continue
                 violations.append(
