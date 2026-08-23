@@ -6,10 +6,24 @@ import pytest
 
 from sonder_runtime.adapters.inference.ollama_pool import (
     OllamaWorkerPool,
+    _metric_label,
     from_environment,
     parse_worker_origins,
     validate_worker_origin,
 )
+from sonder_runtime.platform.logging import Redactor
+
+
+class _Metrics:
+    def __init__(self):
+        self.requests = []
+        self.circuits = []
+
+    def observe_ollama_worker_request(self, *, worker, result, elapsed_seconds):
+        self.requests.append((worker, result))
+
+    def observe_ollama_worker_circuit(self, *, worker, state):
+        self.circuits.append((worker, state))
 
 
 def test_worker_origin_parser_accepts_comma_and_semicolon_lists():
@@ -373,3 +387,78 @@ def test_environment_builder_accepts_consented_https_remote_workers():
     assert pool.enabled is True
     assert pool.has_remote_workers is True
     assert pool.status()["remote_worker_count"] == 1
+def test_metric_label_is_a_bounded_ordinal_never_a_raw_hostname():
+    assert _metric_label(0) == "w0"
+    assert _metric_label(15) == "w15"
+    assert _metric_label(16) == "overflow"
+    assert _metric_label(500) == "overflow"
+
+
+def test_pool_records_request_metrics_by_bounded_worker_slot_on_success_and_failure():
+    metrics = _Metrics()
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        ("https://worker-a.example:11434",),
+        allow_remote=True,
+        metrics=metrics,
+    )
+
+    def send(origin):
+        if origin == "http://127.0.0.1:11434":
+            raise URLError("primary unavailable")
+        return "ok"
+
+    pool.request(send)
+
+    assert metrics.requests == [("w0", "error"), ("w1", "ok")]
+
+
+def test_pool_emits_one_circuit_open_transition_and_closes_on_recovery():
+    # Exercises _finish's breaker bookkeeping directly rather than through
+    # request(), because the least-inflight scheduler stops offering an
+    # already-cooling worker to new requests -- so a second consecutive
+    # transport failure on the *same* worker cannot be forced deterministically
+    # through the public request() path once one other healthy worker exists.
+    metrics = _Metrics()
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        ("http://127.0.0.2:11434",),
+        failure_threshold=2,
+        cooldown_seconds=60,
+        metrics=metrics,
+    )
+    state = pool._states[0]
+    error = URLError("down")
+
+    pool._finish(state, error, 0.01)
+    assert metrics.circuits == []
+
+    pool._finish(state, error, 0.01)
+    assert metrics.circuits.count(("w0", "open")) == 1
+
+    # A further failure while the breaker is already open must not re-emit
+    # the "open" transition.
+    pool._finish(state, error, 0.01)
+    assert metrics.circuits.count(("w0", "open")) == 1
+
+    pool._finish(state, None, 0.01)
+    assert metrics.circuits.count(("w0", "closed")) == 1
+
+
+def test_pool_redacts_secret_shaped_text_out_of_stored_last_error():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        ("http://127.0.0.2:11434",),
+        redactor=Redactor(),
+    )
+
+    def send(origin):
+        if origin == "http://127.0.0.1:11434":
+            raise ConnectionError("connect failed: api_key=sk-abcdef0123456789 rejected")
+        return origin
+
+    pool.request(send)
+
+    primary = next(s for s in pool.snapshots() if s.origin.endswith(".1:11434"))
+    assert "sk-abcdef0123456789" not in primary.last_error
+    assert "[REDACTED]" in primary.last_error

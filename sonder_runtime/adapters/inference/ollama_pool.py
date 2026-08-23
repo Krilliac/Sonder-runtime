@@ -19,6 +19,8 @@ import urllib.error
 from sonder_runtime.adapters import model_inventory
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain import ollama_policy
+from sonder_runtime.platform.logging import Redactor
+from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
 
 
 _FAILOVER_HTTP_CODES = frozenset({502, 503, 504})
@@ -29,6 +31,12 @@ _DEFAULT_COOLDOWN_SECONDS = 30.0
 _COOLDOWN_MAX_MULTIPLIER = 8
 # Exponential moving average weight for per-worker success latency.
 _LATENCY_EWMA_ALPHA = 0.3
+# Metric labels are assigned "w0".."w{_MAX_METRIC_WORKERS - 1}" in
+# registration order; any worker beyond the cap shares the "overflow" label so
+# an operator-supplied worker list can never grow Prometheus cardinality
+# without bound (see platform/metrics.py's bounded-label-set contract).
+_MAX_METRIC_WORKERS = 16
+_METRIC_OVERFLOW_LABEL = "overflow"
 
 
 def _is_loopback(origin: str) -> bool:
@@ -75,6 +83,7 @@ def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
 class WorkerEndpoint:
     origin: str
     worker_id: str
+    metric_label: str
 
 
 @dataclass(frozen=True)
@@ -139,6 +148,10 @@ def _worker_id(origin: str) -> str:
     return "%s:%s" % (host, port)
 
 
+def _metric_label(index: int) -> str:
+    return "w%d" % index if index < _MAX_METRIC_WORKERS else _METRIC_OVERFLOW_LABEL
+
+
 class OllamaWorkerPool:
     """Thread-safe least-inflight scheduler for independent Ollama hosts."""
 
@@ -151,6 +164,8 @@ class OllamaWorkerPool:
         failure_threshold: int = _DEFAULT_FAILURE_THRESHOLD,
         cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS,
         time_fn: Callable[[], float] = time.monotonic,
+        metrics: MetricsRegistry | None = None,
+        redactor: Redactor | None = None,
     ) -> None:
         if failure_threshold < 1:
             raise ValueError("failure threshold must be >= 1")
@@ -164,7 +179,10 @@ class OllamaWorkerPool:
             if origin in seen:
                 continue
             seen.add(origin)
-            states.append(_WorkerState(WorkerEndpoint(origin, _worker_id(origin))))
+            endpoint = WorkerEndpoint(
+                origin, _worker_id(origin), _metric_label(len(states))
+            )
+            states.append(_WorkerState(endpoint))
         if not states:
             raise ValueError("at least one Ollama worker is required")
         self._states = states
@@ -174,6 +192,8 @@ class OllamaWorkerPool:
         self._time = time_fn
         self._cursor = 0
         self._lock = threading.RLock()
+        self._metrics = metrics if metrics is not None else default_registry()
+        self._redactor = redactor if redactor is not None else Redactor()
 
     @property
     def enabled(self) -> bool:
@@ -243,7 +263,9 @@ class OllamaWorkerPool:
     ) -> None:
         with self._lock:
             state.inflight = max(0, state.inflight - 1)
+            label = state.endpoint.metric_label
             if error is None:
+                recovered = state.consecutive_failures > 0
                 state.consecutive_failures = 0
                 state.trips = 0
                 state.last_error = ""
@@ -255,16 +277,37 @@ class OllamaWorkerPool:
                         state.ewma_latency += _LATENCY_EWMA_ALPHA * (
                             float(elapsed) - state.ewma_latency
                         )
+                self._metrics.observe_ollama_worker_request(
+                    worker=label, result="ok", elapsed_seconds=elapsed or 0.0,
+                )
+                if recovered:
+                    self._metrics.observe_ollama_worker_circuit(
+                        worker=label, state="closed",
+                    )
                 return
             state.consecutive_failures += 1
-            state.last_error = "%s: %s" % (type(error).__name__, str(error)[:240])
+            # Truncate before redacting: an unbounded exception string should
+            # never reach the (relatively expensive) regex redaction passes,
+            # matching the local-observability sink's truncate-then-redact
+            # order for adapter-originated free text.
+            raw = "%s: %s" % (type(error).__name__, str(error)[:240])
+            state.last_error = self._redactor.redact(raw)[:240]
+            self._metrics.observe_ollama_worker_request(
+                worker=label, result="error", elapsed_seconds=elapsed or 0.0,
+            )
             if state.consecutive_failures >= self._failure_threshold:
+                now = self._time()
+                already_open = state.cooldown_until > now
                 state.trips += 1
                 backoff = min(
                     self._cooldown_seconds * (2 ** (state.trips - 1)),
                     self._cooldown_max_seconds,
                 )
-                state.cooldown_until = self._time() + backoff
+                state.cooldown_until = now + backoff
+                if not already_open:
+                    self._metrics.observe_ollama_worker_circuit(
+                        worker=label, state="open",
+                    )
 
     def note_models(self, origin_or_id: str, model_names) -> bool:
         """Record a worker's advertised model inventory (experimental seam).
@@ -329,7 +372,7 @@ class OllamaWorkerPool:
             try:
                 result = sender(state.endpoint.origin)
             except Exception as error:
-                self._finish(state, error)
+                self._finish(state, error, self._time() - started)
                 if not self._retryable(error):
                     raise
                 last_error = error
