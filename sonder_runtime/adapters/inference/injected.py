@@ -25,12 +25,14 @@ from ...domain.common.errors import (
 )
 
 
-def _check_context_liveness(context: OperationContext) -> None:
-    """Reject expired or cancelled work before entering a legacy adapter."""
+def _check_context_liveness(
+    context: OperationContext, *, phase: str = "before adapter call"
+) -> None:
+    """Reject expired or cancelled work at an adapter boundary."""
     if context.expired:
-        raise DeadlineExceeded("operation deadline exceeded before adapter call")
+        raise DeadlineExceeded(f"operation deadline exceeded {phase}")
     if context.cancellation is not None and context.cancellation.cancelled:
-        raise Cancelled("operation cancelled before adapter call")
+        raise Cancelled(f"operation cancelled {phase}")
 
 
 class InjectedModelGateway:
@@ -56,6 +58,10 @@ class InjectedModelGateway:
             history=list(request.history) or None,
             tier=request.tier or None,
         )
+        # A synchronous compatibility provider cannot always be interrupted in
+        # flight.  Re-check before publishing its result so a cancellation race
+        # cannot revive work the caller has already abandoned.
+        _check_context_liveness(context, phase="during adapter call")
         return ModelResponse(
             text=require_model_text(text),
             model=request.tier or "sonder",
@@ -73,8 +79,12 @@ class InjectedModelGateway:
         results = []
         for text in texts:
             _check_context_liveness(context)
-            results.append(Embedding(
-                vector=require_embedding_vector(provider(text)),
-                model="local",
-            ))
+            vector = provider(text)
+            _check_context_liveness(context, phase="during adapter call")
+            results.append(
+                Embedding(
+                    vector=require_embedding_vector(vector),
+                    model="local",
+                )
+            )
         return results

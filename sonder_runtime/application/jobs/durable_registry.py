@@ -73,6 +73,10 @@ class ProcessTreeCleanupReceipt:
             raise ValueError("cleanup counts cannot be negative")
         if self.descendants_terminated > self.descendants_seen:
             raise ValueError("terminated descendants cannot exceed seen descendants")
+        if self.complete and not self.requested:
+            raise ValueError("complete cleanup requires a requested cleanup")
+        if self.complete and self.descendants_terminated != self.descendants_seen:
+            raise ValueError("complete cleanup requires every seen descendant terminated")
 
 
 @dataclass(frozen=True, slots=True)

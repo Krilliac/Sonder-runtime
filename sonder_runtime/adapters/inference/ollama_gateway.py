@@ -72,13 +72,15 @@ CAPABILITIES = frozenset({
 })
 
 
-def _check_liveness(context: OperationContext) -> float | None:
+def _check_liveness(
+    context: OperationContext, *, phase: str = "before model call"
+) -> float | None:
     if context.expired:
         # Zero remaining time previously became timeout=None, turning an expired
         # request into an unbounded model call.
-        raise DeadlineExceeded("operation deadline exceeded before model call")
+        raise DeadlineExceeded(f"operation deadline exceeded {phase}")
     if context.cancellation is not None and context.cancellation.cancelled:
-        raise Cancelled("operation cancelled before model call")
+        raise Cancelled(f"operation cancelled {phase}")
     return context.remaining_seconds
 
 
@@ -228,6 +230,10 @@ class OllamaGateway:
             text = gen(request.prompt, list(request.history) or None)
         except ModelCallError as exc:
             raise _map_model_error(exc) from exc
+        # The transport cooperates with cancellation where possible, but the
+        # token may flip between its final check and returning the response.
+        # Never publish that raced response or account it as completed work.
+        _check_liveness(context, phase="during model call")
         usage = getattr(gen, "last_usage", None)
         if usage is None:
             usage = {}
@@ -271,12 +277,14 @@ class OllamaGateway:
                 EmbeddingRequest(tuple(texts), getattr(provider, "EMBED_MODEL", "")),
                 context,
             )
+            _check_liveness(context, phase="during embedding call")
             return tuple(item for result in (typed,) for item in result.embeddings)
         results = []
         for text in texts:
             _check_liveness(context)
             embed = getattr(provider, "embed", provider)
             vector = embed(text)
+            _check_liveness(context, phase="during embedding call")
             results.append(
                 Embedding(
                     vector=require_embedding_vector(vector),

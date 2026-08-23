@@ -133,11 +133,13 @@ class OpenAICompatibleGateway:
             )
 
     @staticmethod
-    def _check_liveness(context: OperationContext) -> float | None:
+    def _check_liveness(
+        context: OperationContext, *, phase: str = "before model call"
+    ) -> float | None:
         if context.expired:
-            raise DeadlineExceeded("operation deadline exceeded before model call")
+            raise DeadlineExceeded(f"operation deadline exceeded {phase}")
         if context.cancellation is not None and context.cancellation.cancelled:
-            raise Cancelled("operation cancelled before model call")
+            raise Cancelled(f"operation cancelled {phase}")
         return context.remaining_seconds
 
     # -- generate ----------------------------------------------------------
@@ -170,6 +172,9 @@ class OpenAICompatibleGateway:
 
         started = time.monotonic()
         data = self._post("/v1/chat/completions", payload, cfg, timeout)
+        # urllib cannot observe a token while blocked.  A final liveness gate
+        # prevents a response/cancellation race from publishing stale work.
+        self._check_liveness(context, phase="during model call")
         text = self._extract_text(data)
         usage = data.get("usage")
         if usage is None:
@@ -209,6 +214,7 @@ class OpenAICompatibleGateway:
         data = self._post(
             "/v1/embeddings", {"model": model, "input": items}, cfg, timeout
         )
+        self._check_liveness(context, phase="during embedding call")
         rows = data.get("data") or []
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise DependencyUnavailable("endpoint returned invalid embedding data")
