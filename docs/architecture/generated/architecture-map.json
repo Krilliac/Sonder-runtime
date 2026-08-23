@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 210,
+      "file_count": 214,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -154,11 +154,15 @@
         "sonder_runtime/adapters/observability/activity_tracker.py",
         "sonder_runtime/adapters/observability/chat_formatting.py",
         "sonder_runtime/adapters/observability/distillation_formatting.py",
+        "sonder_runtime/adapters/observability/error_hint_formatting.py",
         "sonder_runtime/adapters/observability/health_formatting.py",
         "sonder_runtime/adapters/observability/latency_formatting.py",
         "sonder_runtime/adapters/observability/repl_formatting.py",
+        "sonder_runtime/adapters/observability/repl_machine_output.py",
         "sonder_runtime/adapters/observability/response_formatting.py",
         "sonder_runtime/adapters/observability/run_result_formatting.py",
+        "sonder_runtime/adapters/observability/session_list_formatting.py",
+        "sonder_runtime/adapters/observability/session_replay_formatting.py",
         "sonder_runtime/adapters/observability/trace_buffer.py",
         "sonder_runtime/adapters/ollama/__init__.py",
         "sonder_runtime/adapters/ollama/gateway.py",
@@ -259,7 +263,7 @@
       ]
     },
     {
-      "file_count": 258,
+      "file_count": 260,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -306,6 +310,7 @@
         "sonder_runtime/application/control_plane/snapshot.py",
         "sonder_runtime/application/errors.py",
         "sonder_runtime/application/evaluation/__init__.py",
+        "sonder_runtime/application/evaluation/case_manifest.py",
         "sonder_runtime/application/evaluation/corpus_inventory.py",
         "sonder_runtime/application/evaluation/durable_lifecycle.py",
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
@@ -357,6 +362,7 @@
         "sonder_runtime/application/model_gateway/facade.py",
         "sonder_runtime/application/model_gateway/health_and_roles.py",
         "sonder_runtime/application/observability/__init__.py",
+        "sonder_runtime/application/observability/trace_context.py",
         "sonder_runtime/application/observability/trace_projection.py",
         "sonder_runtime/application/operations/__init__.py",
         "sonder_runtime/application/operations/admission_gate.py",
@@ -543,7 +549,7 @@
       ]
     },
     {
-      "file_count": 106,
+      "file_count": 107,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -635,6 +641,7 @@
         "sonder_runtime/domain/schema_policy.py",
         "sonder_runtime/domain/security/__init__.py",
         "sonder_runtime/domain/security/credential_egress.py",
+        "sonder_runtime/domain/security/redaction.py",
         "sonder_runtime/domain/selfmod/__init__.py",
         "sonder_runtime/domain/selfmod/models.py",
         "sonder_runtime/domain/session_privacy.py",
