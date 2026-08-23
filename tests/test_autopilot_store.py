@@ -243,3 +243,35 @@ def test_existing_database_is_migrated_without_losing_runs(isolated_autopilot_db
     assert run["checkpoints"] == 0
     assert run["replans"] == 0
     assert run["max_replans"] == 2
+
+
+def test_selector_wildcards_are_literal_not_like_patterns():
+    run = autopilot_store.create_run("harden the selector")
+
+    assert autopilot_store.get_run(run["id"][:9])["id"] == run["id"]
+    # With exactly one run stored, an unescaped LIKE would let these resolve.
+    assert autopilot_store.get_run("%") is None
+    assert autopilot_store.get_run("auto_") is None
+    assert autopilot_store.get_run("auto-%") is None
+
+
+def test_expired_lease_reconciles_to_interrupted_and_is_reclaimable():
+    import time as _time
+
+    run = autopilot_store.create_run("outlive the controller lease")
+    claimed = autopilot_store.claim_run(run["id"], "owner-a", owner_pid=os.getpid())
+    assert claimed and claimed["status"] == "planning"
+
+    changed = autopilot_store.reconcile_stale_runs(now=_time.time() + 7200)
+    stale = autopilot_store.get_run(run["id"])
+    reclaimed = autopilot_store.claim_run(run["id"], "owner-b", owner_pid=os.getpid())
+
+    assert changed == 1
+    assert stale["status"] == "interrupted"
+    assert stale["owner_id"] == ""
+    assert reclaimed and reclaimed["owner_id"] == "owner-b"
+    # The old controller's writes are fenced out after the takeover.
+    assert autopilot_store.save_progress(
+        run["id"], "owner-a", event_message="stale write",
+    ) is None
+    assert autopilot_store.heartbeat(run["id"], "owner-a") is False

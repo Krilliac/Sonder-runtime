@@ -8,6 +8,9 @@ creation, and resuming a master after an unsuccessful retry attempt.
 import sqlite3
 import subprocess
 import threading
+import time
+
+import pytest
 
 import master_orchestrator
 import server
@@ -243,6 +246,36 @@ def test_partial_fanout_child_creation_failure_cancels_created_children(
     assert len(children) == 2
     assert {row["status"] for row in children} == {"cancelled"}
     assert master["status"] == "failed"
+
+
+def test_abandoned_background_startup_is_cancelled_not_orphaned(monkeypatch):
+    """A startup-timeout fleet must not keep running where no caller can see it."""
+    cancelled = []
+
+    def slow_run_delegated(task, **kwargs):
+        time.sleep(0.5)
+        kwargs["_on_started"]({
+            "mode": "delegated", "master_id": "master-late",
+            "agents": [], "worker_slots": 1, "outputs": [], "output": "RUNNING",
+        })
+        return {}
+
+    monkeypatch.setattr(master_orchestrator, "run_delegated", slow_run_delegated)
+    monkeypatch.setattr(
+        master_orchestrator, "request_cancel",
+        lambda selector: cancelled.append(selector) or {"agents": []},
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled instead of running as an orphan"):
+        master_orchestrator.start_delegated(
+            "late task", worker_fn=lambda prompt: "x",
+            audit_fn=lambda prompt: "y", startup_timeout=0.1,
+        )
+    deadline = time.time() + 3
+    while not cancelled and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert cancelled == ["master-late"]
 
 
 # --- transient retry classification and cancellation-during-retry ----------
