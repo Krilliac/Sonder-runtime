@@ -22330,6 +22330,38 @@ def status() -> str:
             line.replace("  [local Ollama]", "  [REMOTE OLLAMA - leaves machine]")
             for line in tier_lines
         ]
+    worker_lines = []
+    if OLLAMA_POOL.enabled:
+        def _fetch_worker_tags(origin):
+            req = urllib.request.Request(f"{origin}/api/tags")
+            with ollama_endpoint.open_url(req, timeout=5) as resp:
+                raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+                if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+                    raise ModelCallError(
+                        "protocol",
+                        "Ollama response exceeded the 16 MiB safety limit",
+                    )
+                return json.loads(raw.decode("utf-8"))
+
+        # Best-effort per-worker inventory refresh: it feeds the pool's
+        # model-affinity ordering and the operator's health readout, and a
+        # worker that cannot answer keeps its previous inventory record.
+        inventory = OLLAMA_POOL.refresh_inventory(_fetch_worker_tags)
+        for snapshot in OLLAMA_POOL.snapshots():
+            health = (
+                "probing" if snapshot.probing
+                else "ok" if snapshot.healthy
+                else "cooling down"
+            )
+            worker_lines.append(
+                "  worker %s: %s, inflight=%d, failures=%d, trips=%d, "
+                "latency=%.0fms, models=%s" % (
+                    snapshot.worker_id, health, snapshot.inflight,
+                    snapshot.consecutive_failures, snapshot.trips,
+                    snapshot.ewma_latency_ms,
+                    inventory.get(snapshot.worker_id, "?"),
+                )
+            )
     lines = [
         "Unsafe lab mode: %s" % unsafe_lab.status_line(),
         f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
@@ -22337,6 +22369,7 @@ def status() -> str:
             len(OLLAMA_POOL.origins),
             sum(1 for origin in OLLAMA_POOL.origins if not ollama_endpoint.is_loopback(origin)),
         ),
+        *worker_lines,
         "Tiers:",
         *tier_lines,
         f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
