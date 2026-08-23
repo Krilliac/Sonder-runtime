@@ -33,6 +33,7 @@ env:
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: app
@@ -56,6 +57,10 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    # Generous headroom: the release-APK step retries transient Gradle
+    # artifact-download failures up to 3x with a 20/40/60s backoff on top of
+    # the build itself.
+    timeout-minutes: 40
     outputs:
       artifact_url: ${{ steps.upload-artifact.outputs.artifact-url }}
     defaults:
@@ -113,6 +118,7 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       artifact_url: ${{ steps.upload-artifact.outputs.artifact-url }}
     defaults:
@@ -155,6 +161,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     outputs:
       artifact_url: ${{ steps.upload-artifact.outputs.artifact-url }}
     defaults:
@@ -190,6 +197,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 30
     outputs:
       artifact_url: ${{ steps.upload-artifact.outputs.artifact-url }}
     defaults:
@@ -228,6 +236,7 @@ jobs:
   integrity:
     needs: [android, linux, windows, macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -262,6 +271,7 @@ jobs:
     needs: [integrity]
     if: startsWith(github.ref, 'refs/tags/app-v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

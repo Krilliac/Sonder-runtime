@@ -20,6 +20,59 @@ If you change behaviour, add the test that would have caught the bug. If you
 cannot write that test, say so in the PR and explain why; that is useful
 information, not a failure.
 
+### Reproducing CI exactly
+
+`.github/workflows/ci.yml`'s `tests` job runs, in order: the MCP compatibility
+import check, four `scripts/check_*.py` gate scripts, then the full suite. To
+reproduce the same run locally:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python scripts/check_architecture.py
+python scripts/check_requirement_evidence.py
+python scripts/check_error_signals.py
+python scripts/check_history_privacy.py --json
+python -m pytest -q -n auto --dist load --durations=25
+```
+
+`-n auto` picks worker count from local CPU count, same as `pytest-xdist` does
+on the runner; it will differ from CI's if your machine doesn't have 4 cores,
+but the tests themselves don't depend on the exact count. A run that fails in
+CI but passes locally is worth reproducing with the exact same flags before
+assuming it's environmental.
+
+If a CI run fails, its `pytest-report` artifact (JUnit XML) is attached to the
+workflow run summary — pull it down before re-running blind, it names the
+failing tests and their durations without needing to re-run the suite.
+
+### Test markers
+
+Defined in `pytest.ini`, applied selectively (most tests carry none and run
+unconditionally):
+
+| Marker | Meaning | Run it |
+|---|---|---|
+| `unit` | isolated, no external services | `pytest -m unit` |
+| `integration` | spans multiple Sonder modules/processes | `pytest -m integration` |
+| `network` | needs explicit network access | `pytest -m network --run-network` |
+| `model` | needs a live Ollama or hosted model | `pytest -m model --run-model` |
+
+`network` and `model` tests are **skipped by default** everywhere, including
+CI (see `pytest_collection_modifyitems` in the root `conftest.py`) — CI never
+opts in, since the runner has no live model or outbound network access. Pass
+`--run-network` / `--run-model` yourself if you're validating one of those
+paths locally.
+
+### CI job names are load-bearing
+
+`tests` (in `ci.yml`) and `analyze`, `android`, `linux`, `windows`, `macos`,
+`integrity` (in `build-apps.yml`) are required branch-protection status
+checks, matched by exact job id/context name. Turning one into a matrix job
+or renaming it changes the reported context name and silently strands every
+PR that can never satisfy the now-vanished required check — fix that in the
+repo's branch protection settings first if it's ever genuinely needed, not by
+editing the workflow alone.
+
 ## What tends to get merged
 
 - A bug with a reproduction, a fix, and a test that pins it.
