@@ -47,7 +47,7 @@ def test_vision_analysis_sends_guarded_png_to_bound_local_model(monkeypatch, tmp
     payload = seen["payload"]
     assert seen["kwargs"] == {
         "model": "qwen2.5vl:3b", "cloud": False, "timeout": server.TIMEOUT,
-        "idempotent": True,
+        "idempotent": True, "local_only": True,
     }
     assert payload["model"] == "qwen2.5vl:3b"
     assert payload["options"]["num_ctx"] == 4000

@@ -522,3 +522,83 @@ def test_pool_redacts_secret_shaped_text_out_of_stored_last_error():
     primary = next(s for s in pool.snapshots() if s.origin.endswith(".1:11434"))
     assert "sk-abcdef0123456789" not in primary.last_error
     assert "[REDACTED]" in primary.last_error
+def test_local_only_never_reaches_the_pool_even_with_remote_workers(monkeypatch):
+    """A caller-declared local_only contract (vision bytes, fanout receipts)
+
+    must stay pinned to the primary endpoint regardless of pool state -- the
+    least-inflight scheduler is never given a chance to pick a remote worker.
+    """
+    import server
+
+    class FakePool:
+        enabled = True
+        has_remote_workers = True
+
+        def request(self, _sender):
+            pytest.fail("local_only requests must bypass the worker pool entirely")
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok": true}'
+
+    seen = []
+
+    def open_url(request, timeout=0):
+        seen.append(request.full_url)
+        return Response()
+
+    monkeypatch.setattr(server, "OLLAMA_POOL", FakePool())
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", open_url)
+
+    assert server._post("/api/chat", {}, local_only=True) == {"ok": True}
+    assert seen == [server.BASE + "/api/chat"]
+
+
+def test_post_model_local_only_rejects_a_non_loopback_primary(monkeypatch):
+    """local_only is a hard refusal, not a silent downgrade to the primary."""
+    import server
+
+    monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: False)
+
+    with pytest.raises(server.ModelCallError, match="loopback Ollama endpoint"):
+        server._post_model(
+            "/api/chat", {}, model="local-model", local_only=True,
+        )
+
+
+def test_post_model_rejects_local_only_combined_with_cloud():
+    import server
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        server._post_model(
+            "/api/chat", {}, model="local-model", cloud=True, local_only=True,
+        )
+
+
+def test_endpoint_locality_reflects_a_configured_remote_worker(monkeypatch):
+    """Locality displays/caching must not call a loopback primary "local" once
+
+    a remote worker is configured -- the pool can route any ordinary request
+    there even though BASE itself never changed.
+    """
+    import server
+
+    monkeypatch.setattr(server.ollama_endpoint, "is_loopback", lambda _base: True)
+
+    class LocalOnlyPool:
+        has_remote_workers = False
+
+    class RemoteCapablePool:
+        has_remote_workers = True
+
+    monkeypatch.setattr(server, "OLLAMA_POOL", LocalOnlyPool())
+    assert server._ollama_endpoint_is_local() is True
+
+    monkeypatch.setattr(server, "OLLAMA_POOL", RemoteCapablePool())
+    assert server._ollama_endpoint_is_local() is False

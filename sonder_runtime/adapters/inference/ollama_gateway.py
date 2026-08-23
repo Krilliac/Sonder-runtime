@@ -19,6 +19,7 @@ from __future__ import annotations
 import ipaddress
 import importlib
 import math
+import os
 import time
 import urllib.parse
 from typing import Sequence
@@ -45,6 +46,9 @@ from .telemetry import from_ollama
 from ..model_transport import ModelCallError
 ollama_endpoint = importlib.import_module(
     "sonder_runtime.adapters.inference.ollama_endpoint"
+)
+ollama_pool = importlib.import_module(
+    "sonder_runtime.adapters.inference.ollama_pool"
 )
 from ...domain.common.errors import (
     Cancelled,
@@ -105,8 +109,25 @@ def _is_loopback(value: str) -> bool:
         return False
 
 
+def _configured_remote_worker() -> bool:
+    """Whether ``SONDER_OLLAMA_WORKERS`` names any non-loopback worker.
+
+    Re-derived from the environment rather than a shared pool instance: the
+    architecture forbids this adapters-layer module depending on the
+    server-owned pool singleton, and a fresh read keeps this consent check
+    correct regardless of which composition root built the actual pool.
+    """
+    origins = ollama_pool.parse_worker_origins(os.environ.get("SONDER_OLLAMA_WORKERS"))
+    return any(not _is_loopback(origin) for origin in origins)
+
+
 def _enforce_local_endpoint(base: str, context: OperationContext) -> None:
-    if not _is_loopback(base) and not context.remote_ollama_allowed:
+    # A loopback primary is not sufficient: a configured worker pool can route
+    # this same request to a remote machine (SONDER_OLLAMA_WORKERS) even while
+    # the primary endpoint stays local, so both must be local for consent to
+    # be unnecessary.
+    remote_capable = not _is_loopback(base) or _configured_remote_worker()
+    if remote_capable and not context.remote_ollama_allowed:
         # The adapter used to enforce hosted-tier consent but silently sent local-
         # tier prompts to a remotely configured Ollama endpoint without consent.
         raise Forbidden(
