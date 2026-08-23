@@ -58,6 +58,14 @@ allow_remote = false                # remote-Ollama consent gate
 # Optional multi-PC inference pool. Keep model tags installed on every host.
 # The environment form is preferred for deployment secrets and overrides:
 # SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434,https://192.168.1.21:11434
+workers = []
+worker_max_inflight = 1             # coordinator cap per host
+worker_queue_depth = 32             # bounded waiters across the pool
+worker_admission_timeout_ms = 1000
+worker_failure_threshold = 3
+worker_cooldown_seconds = 30
+worker_capability_ttl_seconds = 300
+worker_probe_timeout_ms = 2000
 
 [features]
 cloud = false                       # hosted-model consent gate

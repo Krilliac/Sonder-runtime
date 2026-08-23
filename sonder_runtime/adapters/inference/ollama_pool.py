@@ -1,20 +1,31 @@
 """Bounded multi-host Ollama inference routing.
 
 The pool is deliberately an inference transport, not a distributed model
-runtime. Each worker owns its Ollama process and model files; the coordinator
-selects one worker for a request and can fail over only when no response was
-received. A completed request is never replayed on another host.
+runtime. Each worker owns its Ollama process and model files. The coordinator
+performs bounded capability discovery, admits one request to one worker, and
+can fail over only when that worker did not return a response. Model and
+protocol errors are never replayed on another host.
+
+Remote endpoints remain behind the independent Ollama consent and HTTPS
+policy. Nothing in routing, health recovery, or capability probing can widen
+that policy.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import http.client
+import importlib
 import ipaddress
+import json
+import math
 import os
 import threading
 import time
-from typing import Callable
+from typing import Callable, Mapping
 from urllib.parse import urlsplit
 import urllib.error
+import urllib.request
 
 from sonder_runtime.adapters import model_inventory
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -54,13 +65,56 @@ def _is_loopback(origin: str) -> bool:
         return False
 
 
+def _safe_error(error: BaseException) -> str:
+    """Return bounded single-line diagnostics without response bodies."""
+    if isinstance(error, urllib.error.HTTPError):
+        return "HTTPError: HTTP %d" % int(error.code or 0)
+    if isinstance(error, urllib.error.URLError):
+        reason = getattr(error, "reason", error)
+        if isinstance(reason, TimeoutError):
+            return "URLError: transport timed out"
+        return "URLError: transport unavailable"
+    text = str(getattr(error, "reason", error) or type(error).__name__)
+    text = " ".join(text.replace("\x00", "").split())
+    return "%s: %s" % (type(error).__name__, text[:200])
+
+
+def _safe_scalar(value: object, *, limit: int) -> str:
+    return " ".join(str(value or "unknown").replace("\x00", "").split())[:limit]
+
+
+def _positive_int(
+    environment: Mapping[str, str],
+    key: str,
+    default: int,
+    *,
+    maximum: int,
+) -> int:
+    raw = str(environment.get(key, "")).strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError("%s must be an integer" % key) from error
+    if value < 1:
+        raise ValueError("%s must be >= 1" % key)
+    if value > maximum:
+        raise ValueError("%s must be <= %d" % (key, maximum))
+    return value
+
+
 def parse_worker_origins(raw: str | None) -> tuple[str, ...]:
-    """Parse a bounded comma/semicolon-separated worker origin list."""
+    """Parse a comma/semicolon-separated worker origin list."""
     values = []
     for item in str(raw or "").replace(";", ",").split(","):
         value = item.strip()
         if value:
             values.append(value)
+    if len(values) > _MAX_WORKERS - 1:
+        raise ValueError(
+            "at most %d additional Ollama workers are supported" % (_MAX_WORKERS - 1)
+        )
     return tuple(values)
 
 
@@ -72,7 +126,7 @@ def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
         raise ValueError("worker endpoint must use http or https")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("worker endpoint must not contain inline credentials")
-    if not parsed.hostname or parsed.port is None:
+    if not parsed.hostname or port is None:
         raise ValueError("worker endpoint must include a host and explicit port")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise ValueError("worker endpoint must be an origin without a path, query, or fragment")
@@ -123,11 +177,22 @@ class WorkerEndpoint:
 
 
 @dataclass(frozen=True)
+class WorkerCapabilities:
+    protocol: str
+    version: str
+    models: tuple[str, ...]
+    observed_at: float
+    effective_max_inflight: int
+
+
+@dataclass(frozen=True)
 class WorkerSnapshot:
     worker_id: str
     origin: str
+    state: str
     healthy: bool
     inflight: int
+    capacity: int
     consecutive_failures: int
     last_error: str
     cooldown_until: float
@@ -139,8 +204,10 @@ class WorkerSnapshot:
         return {
             "worker_id": self.worker_id,
             "origin": self.origin,
+            "state": self.state,
             "healthy": self.healthy,
             "inflight": self.inflight,
+            "capacity": self.capacity,
             "consecutive_failures": self.consecutive_failures,
             "last_error": self.last_error,
             "cooldown_until": self.cooldown_until,
@@ -189,7 +256,7 @@ def _metric_label(index: int) -> str:
 
 
 class OllamaWorkerPool:
-    """Thread-safe least-inflight scheduler for independent Ollama hosts."""
+    """Thread-safe, model-aware scheduler for independent Ollama hosts."""
 
     def __init__(
         self,
@@ -203,11 +270,21 @@ class OllamaWorkerPool:
         metrics: MetricsRegistry | None = None,
         redactor: Redactor | None = None,
     ) -> None:
-        if failure_threshold < 1:
-            raise ValueError("failure threshold must be >= 1")
-        if cooldown_seconds < 1:
-            raise ValueError("cooldown seconds must be >= 1")
+        if not 1 <= failure_threshold <= _MAX_FAILURE_THRESHOLD:
+            raise ValueError("failure threshold must be within 1..100")
+        if not 1 <= cooldown_seconds <= _MAX_COOLDOWN_SECONDS:
+            raise ValueError("cooldown seconds must be within 1..3600")
+        if not 1 <= max_inflight_per_worker <= _MAX_INFLIGHT_PER_WORKER:
+            raise ValueError("max inflight per worker must be within 1..64")
+        if not 0 <= queue_depth <= _MAX_QUEUE_DEPTH:
+            raise ValueError("queue depth must be within 0..4096")
+        if not 0 <= admission_timeout_seconds <= _MAX_ADMISSION_TIMEOUT_SECONDS:
+            raise ValueError("admission timeout must be within 0..60 seconds")
+        if not 1 <= capability_ttl_seconds <= _MAX_CAPABILITY_TTL_SECONDS:
+            raise ValueError("capability TTL must be within 1..86400 seconds")
         all_origins = (primary_origin, *worker_origins)
+        if len(all_origins) > _MAX_WORKERS:
+            raise ValueError("at most %d Ollama workers are supported" % _MAX_WORKERS)
         states = []
         seen = set()
         for raw in all_origins:
@@ -285,11 +362,22 @@ class OllamaWorkerPool:
             return error.status in _FAILOVER_HTTP_CODES
         if isinstance(error, urllib.error.HTTPError):
             return int(error.code or 0) in _FAILOVER_HTTP_CODES
-        return isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, OSError))
+        return isinstance(
+            error,
+            (
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                OSError,
+                http.client.IncompleteRead,
+            ),
+        )
 
-    def _start(self, state: _WorkerState) -> None:
-        with self._lock:
-            state.inflight += 1
+    def _capabilities_stale(self, state: _WorkerState, now: float) -> bool:
+        return (
+            state.capabilities is None
+            or now - state.capabilities.observed_at >= self._capability_ttl
+        )
 
     def _finish(
         self,
@@ -431,9 +519,19 @@ class OllamaWorkerPool:
                 continue
             self._finish(state, None, self._time() - started)
             return result
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("no Ollama worker is available")
+
+    def drain(self, *, timeout_seconds: float = 5.0) -> bool:
+        """Stop admission and wait a bounded interval for in-flight calls."""
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        with self._condition:
+            self._draining = True
+            self._condition.notify_all()
+            while any(state.inflight for state in self._states):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+            return True
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._time()
@@ -442,8 +540,10 @@ class OllamaWorkerPool:
                 WorkerSnapshot(
                     worker_id=state.endpoint.worker_id,
                     origin=state.endpoint.origin,
-                    healthy=state.cooldown_until <= now,
+                    state=label,
+                    healthy=healthy,
                     inflight=state.inflight,
+                    capacity=capacity,
                     consecutive_failures=state.consecutive_failures,
                     last_error=state.last_error,
                     cooldown_until=state.cooldown_until,
@@ -455,9 +555,15 @@ class OllamaWorkerPool:
             )
 
     def status(self) -> dict:
+        workers = self.snapshots()
+        with self._condition:
+            metrics = dict(self._metrics)
+            waiters = self._waiters
+            draining = self._draining
         return {
             "enabled": self.enabled,
-            "worker_count": len(self._states),
+            "admission": "draining" if draining else "accepting",
+            "worker_count": len(workers),
             "remote_worker_count": sum(
                 1 for state in self._states
                 if not _is_loopback(state.endpoint.origin)
@@ -470,9 +576,48 @@ class OllamaWorkerPool:
             "workers": [snapshot.to_dict() for snapshot in self.snapshots()],
         }
 
+    def operator_status_lines(self) -> tuple[str, ...]:
+        """Render compact, bounded status without response bodies or prompts."""
+        status = self.status()
+        metrics = status["metrics"]
+        lines = [
+            "Ollama pool: %s; %d/%d healthy; capacity=%d; queue=%d/%d; "
+            "failovers=%d; backpressure=%d" % (
+                status["admission"],
+                status["healthy_worker_count"],
+                status["worker_count"],
+                status["available_capacity"],
+                status["queue"]["waiting"],
+                status["queue"]["limit"],
+                metrics["failovers"],
+                metrics["backpressure_rejections"],
+            )
+        ]
+        for worker in status["workers"]:
+            latency = (
+                "unknown" if worker["latency_ewma_ms"] is None
+                else "%.1fms" % worker["latency_ewma_ms"]
+            )
+            lines.append(
+                "  %s: %s inflight=%d/%d latency=%s models=%d version=%s%s" % (
+                    worker["worker_id"],
+                    worker["state"],
+                    worker["inflight"],
+                    worker["capacity"],
+                    latency,
+                    len(worker["models"]),
+                    worker["version"],
+                    (
+                        " retry=%.1fs" % worker["cooldown_remaining_seconds"]
+                        if worker["cooldown_remaining_seconds"] else ""
+                    ),
+                )
+            )
+        return tuple(lines)
+
 
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
-    """Build the pool from ``SONDER_OLLAMA_WORKERS`` and consent settings."""
+    """Build the pool from consented, bounded environment configuration."""
     env = os.environ if environment is None else environment
     with _configuration_lock:
         configured_workers = _configured_workers
@@ -493,12 +638,43 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         primary_origin,
         worker_origins,
         allow_remote=allow_remote,
+        failure_threshold=_positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD",
+            _DEFAULT_FAILURE_THRESHOLD,
+            maximum=_MAX_FAILURE_THRESHOLD,
+        ),
+        cooldown_seconds=cooldown,
+        max_inflight_per_worker=_positive_int(
+            env, "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT,
+            maximum=_MAX_INFLIGHT_PER_WORKER,
+        ),
+        queue_depth=_positive_int(
+            env, "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", _DEFAULT_QUEUE_DEPTH,
+            maximum=_MAX_QUEUE_DEPTH,
+        ),
+        admission_timeout_seconds=admission_ms / 1000.0,
+        capability_ttl_seconds=_positive_int(
+            env,
+            "SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS",
+            int(_DEFAULT_CAPABILITY_TTL_SECONDS),
+            maximum=int(_MAX_CAPABILITY_TTL_SECONDS),
+        ),
+        capability_prober=_default_capability_prober(
+            allow_remote=allow_remote, timeout=probe_timeout_ms / 1000.0,
+        ),
     )
 
 
 __all__ = [
     "OllamaWorkerPool",
+    "WorkerCapabilities",
+    "WorkerCapabilityUnavailable",
     "WorkerEndpoint",
+    "WorkerPoolBackpressure",
+    "WorkerPoolDraining",
+    "WorkerPoolError",
+    "WorkerPoolUnavailable",
     "WorkerSnapshot",
     "configure_typed_workers",
     "from_environment",

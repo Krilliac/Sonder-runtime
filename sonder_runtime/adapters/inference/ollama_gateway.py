@@ -129,9 +129,9 @@ def _enforce_local_endpoint(base: str, context: OperationContext) -> None:
     remote_capable = not _is_loopback(base) or _configured_remote_worker()
     if remote_capable and not context.remote_ollama_allowed:
         # The adapter used to enforce hosted-tier consent but silently sent local-
-        # tier prompts to a remotely configured Ollama endpoint without consent.
+        # tier prompts to a remotely configured endpoint or worker without consent.
         raise Forbidden(
-            "Ollama endpoint is non-loopback but this operation context does "
+            "Ollama route may leave this machine but this operation context does "
             "not allow remote Ollama"
         )
 
