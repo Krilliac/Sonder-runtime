@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -27,12 +28,35 @@ def _architecture_module():
 
 def test_architecture_check_passes():
     result = subprocess.run(
-        [sys.executable, str(_REPO_ROOT / "scripts" / "check_architecture.py")],
+        [
+            sys.executable,
+            str(_REPO_ROOT / "scripts" / "check_architecture.py"),
+            "--stats",
+        ],
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    stats = json.loads(result.stderr)
+    assert stats["compatibility_rules"] >= 1
+    assert stats["parsed_files"] >= stats["tracked_files"]
+    assert stats["parsed_files"] >= stats["package_files"]
+    assert stats["violations"] == 0
+
+
+def test_absolute_import_index_preserves_compatibility_rule_semantics():
+    module = _architecture_module()
+    tree = ast.parse(
+        "import memory_store\n"
+        "import memory_store.child\n"
+        "from fleet_store import connect\n"
+        "from . import queued_actions\n"
+    )
+
+    assert module.absolute_imports(tree) == frozenset({
+        "memory_store", "memory_store.child", "fleet_store",
+    })
 
 
 def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
@@ -422,29 +446,17 @@ def test_checker_detects_a_violation(tmp_path):
 )
 def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
     """A completed root migration is a permanent shrink-only boundary."""
-    shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
-    (tmp_path / "scripts").mkdir()
-    checker = tmp_path / "scripts" / "check_architecture.py"
-    shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
-
-    retired = tmp_path / root_module
+    module = _architecture_module()
+    retired = module._repo_relative_path(tmp_path, Path(root_module))
+    retired.parent.mkdir(parents=True, exist_ok=True)
     retired.write_text("# retired migration boundary\n", encoding="utf-8")
-    for command in (["git", "init", "-q"], ["git", "add", "-A"]):
-        staged = subprocess.run(
-            command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
-        )
-        if staged.returncode != 0:
-            pytest.skip(
-                "git is required to stage the isolated copy: %s"
-                % (staged.stderr.strip() or staged.stdout.strip())
-            )
 
-    result = subprocess.run(
-        [sys.executable, str(checker)],
-        capture_output=True, text=True, timeout=120,
-    )
-    assert result.returncode == 1
-    assert f"{root_module}: retired root module was reintroduced" in result.stdout
+    violations = module.retired_module_violations(set(), tmp_path)
+
+    expected = str(Path(root_module.replace("\\", "/")))
+    assert violations == [
+        f"{expected}: retired root module was reintroduced"
+    ]
 
 
 def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():

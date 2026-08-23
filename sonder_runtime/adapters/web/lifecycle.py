@@ -65,6 +65,16 @@ from sonder_runtime.platform.shutdown import ShutdownCoordinator
 # Maintenance lock classes that block new application work entirely.
 BLOCKING_MAINTENANCE_LOCKS = ("update", "restore", "migration")
 
+# Closed metric/diagnostic vocabulary.  Request content, owner identities, and
+# free-text failure messages never enter telemetry labels or snapshots.
+_ADMISSION_REJECTION_CODES = frozenset({
+    "ADMISSION_TIMEOUT",
+    "CAPACITY_EXHAUSTED",
+    "DRAINING",
+    "MAINTENANCE_MODE",
+    "OWNER_CAPACITY_EXHAUSTED",
+})
+
 _AUTH_BUCKET_CAPACITY = 10
 _AUTH_BUCKET_REFILL_PER_SECOND = 0.5  # one new attempt every 2s after burst
 
@@ -367,7 +377,23 @@ class RuntimeLifecycle:
         self._drain_deadline_seconds = drain_deadline_seconds
         self._slots = threading.BoundedSemaphore(self._max_concurrent)
         self._waiters = 0
+        self._active_requests = 0
+        self._queue_high_watermark = 0
         self._admission_lock = threading.Lock()
+        self._admission_telemetry_lock = threading.Lock()
+        self._admission_wait_samples = 0
+        self._admission_wait_seconds_total = 0.0
+        self._admission_wait_seconds_max = 0.0
+        self._admission_rejections = {
+            code: 0 for code in sorted(_ADMISSION_REJECTION_CODES)
+        }
+        self._admission_rejections["other"] = 0
+        self.metrics.admission_capacity.labels(kind="active").set(
+            self._max_concurrent
+        )
+        self.metrics.admission_capacity.labels(kind="queue").set(
+            self._queue_depth
+        )
         # One authenticated principal must never occupy every slot and queue
         # position at once; the default cap always leaves the majority of
         # total admission capacity to other owners.
@@ -695,6 +721,47 @@ class RuntimeLifecycle:
 
     # -- admission ---------------------------------------------------------
 
+    def _record_admission_rejection(self, code: str) -> None:
+        reason = code if code in _ADMISSION_REJECTION_CODES else "other"
+        with self._admission_telemetry_lock:
+            self._admission_rejections[reason] += 1
+        self.metrics.admission_rejections_total.labels(reason=reason).inc()
+
+    def _observe_admission_wait(self, elapsed_seconds: float) -> None:
+        elapsed = max(0.0, float(elapsed_seconds))
+        with self._admission_telemetry_lock:
+            self._admission_wait_samples += 1
+            self._admission_wait_seconds_total += elapsed
+            self._admission_wait_seconds_max = max(
+                self._admission_wait_seconds_max, elapsed
+            )
+        self.metrics.admission_queue_wait_seconds.observe(elapsed)
+
+    def admission_telemetry_snapshot(self) -> dict[str, object]:
+        """Return bounded, content-free admission and resource telemetry."""
+        with self._admission_lock:
+            active = self._active_requests
+            queued = self._waiters
+            high_watermark = self._queue_high_watermark
+        with self._admission_telemetry_lock:
+            samples = self._admission_wait_samples
+            total = self._admission_wait_seconds_total
+            maximum = self._admission_wait_seconds_max
+            rejections = dict(self._admission_rejections)
+        return {
+            "active_requests": active,
+            "active_limit": self._max_concurrent,
+            "available_slots": max(0, self._max_concurrent - active),
+            "queued_requests": queued,
+            "queue_limit": self._queue_depth,
+            "queue_high_watermark": high_watermark,
+            "queue_wait_samples": samples,
+            "queue_wait_seconds_total": round(total, 6),
+            "queue_wait_seconds_average": round(total / samples, 6) if samples else 0.0,
+            "queue_wait_seconds_max": round(maximum, 6),
+            "rejections": rejections,
+        }
+
     def blocking_maintenance(self) -> tuple[str, ...]:
         now = time.monotonic()
         cached_at, cached = self._maintenance_cache
@@ -746,24 +813,33 @@ class RuntimeLifecycle:
                         # concurrently active owners.
                         lifecycle._owner_inflight.pop(owner, None)
 
+            @staticmethod
+            def _rejection(
+                status: int, code: str, message: str, *, retryable: bool
+            ) -> AdmissionRejected:
+                lifecycle._record_admission_rejection(code)
+                return AdmissionRejected(
+                    status, code, message, retryable=retryable
+                )
+
             def __enter__(self):
                 if mutating:
                     try:
                         lifecycle.admission.admit()
                     except AdmissionClosed as exc:
-                        raise AdmissionRejected(
+                        raise self._rejection(
                             503, "DRAINING", str(exc), retryable=True,
                         ) from exc
                     blocked = lifecycle.blocking_maintenance()
                     if blocked:
-                        raise AdmissionRejected(
+                        raise self._rejection(
                             503,
                             "MAINTENANCE_MODE",
                             "maintenance in progress: " + ", ".join(blocked),
                             retryable=True,
                         )
                     if lifecycle.coordinator.draining:
-                        raise AdmissionRejected(
+                        raise self._rejection(
                             503,
                             "DRAINING",
                             "the runtime is draining for shutdown",
@@ -773,7 +849,7 @@ class RuntimeLifecycle:
                     if owner:
                         held = lifecycle._owner_inflight.get(owner, 0)
                         if held >= lifecycle._owner_max_inflight:
-                            raise AdmissionRejected(
+                            raise self._rejection(
                                 429,
                                 "OWNER_CAPACITY_EXHAUSTED",
                                 "this account has reached its concurrent "
@@ -781,16 +857,26 @@ class RuntimeLifecycle:
                                 retryable=True,
                             )
                     if lifecycle._waiters >= lifecycle._queue_depth:
-                        raise AdmissionRejected(
+                        raise self._rejection(
                             429,
                             "CAPACITY_EXHAUSTED",
                             "the runtime is at its configured concurrency limit",
                             retryable=True,
                         )
                     lifecycle._waiters += 1
+                    lifecycle._queue_high_watermark = max(
+                        lifecycle._queue_high_watermark, lifecycle._waiters
+                    )
+                    lifecycle.metrics.admission_queue_depth.set(
+                        lifecycle._waiters
+                    )
+                    lifecycle.metrics.admission_queue_high_watermark.set(
+                        lifecycle._queue_high_watermark
+                    )
                     if owner:
                         lifecycle._owner_inflight[owner] = held + 1
                         self._counted_owner = True
+                wait_started = time.monotonic()
                 try:
                     acquired = lifecycle._slots.acquire(
                         timeout=lifecycle._admission_timeout
@@ -798,13 +884,27 @@ class RuntimeLifecycle:
                 except BaseException:
                     with lifecycle._admission_lock:
                         lifecycle._waiters -= 1
+                        lifecycle.metrics.admission_queue_depth.set(
+                            lifecycle._waiters
+                        )
+                    lifecycle._observe_admission_wait(
+                        time.monotonic() - wait_started
+                    )
                     self._release_owner()
                     raise
                 with lifecycle._admission_lock:
                     lifecycle._waiters -= 1
+                    lifecycle.metrics.admission_queue_depth.set(
+                        lifecycle._waiters
+                    )
+                    if acquired:
+                        lifecycle._active_requests += 1
+                lifecycle._observe_admission_wait(
+                    time.monotonic() - wait_started
+                )
                 if not acquired:
                     self._release_owner()
-                    raise AdmissionRejected(
+                    raise self._rejection(
                         504,
                         "ADMISSION_TIMEOUT",
                         "no execution slot became available in time",
@@ -821,6 +921,8 @@ class RuntimeLifecycle:
                     lifecycle.coordinator.end_mutation()
                 if self._acquired:
                     lifecycle.metrics.active_requests.dec()
+                    with lifecycle._admission_lock:
+                        lifecycle._active_requests -= 1
                     lifecycle._slots.release()
                 self._release_owner()
                 return False
@@ -959,6 +1061,7 @@ class RuntimeLifecycle:
             "stop_reason": admission.stop_reason,
             "accepted": admission.accepted,
             "rejected": admission.rejected,
+            "resources": self.admission_telemetry_snapshot(),
         }
         payload["telemetry"] = self.telemetry_snapshot()
         try:

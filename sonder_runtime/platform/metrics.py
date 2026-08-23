@@ -84,6 +84,31 @@ class MetricsRegistry:
                 "sonder_active_requests", "In-flight HTTP requests",
                 registry=self._registry,
             )
+            self.admission_capacity = Gauge(
+                "sonder_admission_capacity",
+                "Configured HTTP admission capacity by kind",
+                ["kind"], registry=self._registry,
+            )
+            self.admission_queue_depth = Gauge(
+                "sonder_admission_queue_depth",
+                "Requests currently waiting for an execution slot",
+                registry=self._registry,
+            )
+            self.admission_queue_high_watermark = Gauge(
+                "sonder_admission_queue_high_watermark",
+                "Highest observed admission queue depth since process start",
+                registry=self._registry,
+            )
+            self.admission_queue_wait_seconds = Histogram(
+                "sonder_admission_queue_wait_seconds",
+                "Time from admission enqueue to slot acquisition or timeout",
+                registry=self._registry,
+            )
+            self.admission_rejections_total = Counter(
+                "sonder_admission_rejections_total",
+                "Admission rejections by bounded reason code",
+                ["reason"], registry=self._registry,
+            )
             self.request_cache_total = Counter(
                 "sonder_request_cache_total",
                 "Deterministic request cache consultations by result",
@@ -169,6 +194,9 @@ class MetricsRegistry:
             for name in (
                 "build_info", "process_state", "requests_total",
                 "request_duration_seconds", "active_requests", "request_cache_total",
+                "admission_capacity", "admission_queue_depth",
+                "admission_queue_high_watermark", "admission_queue_wait_seconds",
+                "admission_rejections_total",
                 "model_calls_total", "model_call_duration_seconds",
                 "model_backend_phase_duration_seconds",
                 "model_token_throughput_per_second", "model_load_states_total",

@@ -21,9 +21,12 @@ listed one per line and exit 1.
 from __future__ import annotations
 
 import ast
+import argparse
+import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -185,10 +188,12 @@ APPROVED_RETIRED_SHIMS = {
 }
 
 
-def is_approved_retired_shim(path: Path) -> bool:
+def is_approved_retired_shim(
+    path: Path, repo_root: Path = REPO_ROOT,
+) -> bool:
     """Return whether a retired package path is its exact reviewed shim."""
     try:
-        key = path.relative_to(REPO_ROOT)
+        key = path.relative_to(repo_root)
     except ValueError:
         key = path
     expected = APPROVED_RETIRED_SHIMS.get(key)
@@ -205,6 +210,37 @@ def _repo_relative_path(repo_root: Path, relative: Path) -> Path:
     """Resolve policy paths written with either host's separators."""
     parts = str(relative).replace("\\", "/").split("/")
     return repo_root.joinpath(*parts)
+
+
+def retired_module_violations(
+    tracked: set[Path], repo_root: Path = REPO_ROOT,
+) -> list[str]:
+    """Evaluate the permanent retired-path ratchet against one inventory."""
+    violations: list[str] = []
+    for retired in sorted(RETIRED_ROOT_MODULES, key=Path.as_posix):
+        # Keep the ratchet effective when the checker is exercised from a
+        # copied source tree that does not carry the original .git metadata.
+        retired_paths = (
+            repo_root / str(retired),
+            repo_root / str(retired).replace("/", "\\"),
+            _repo_relative_path(repo_root, retired),
+        )
+        present_paths = [path for path in retired_paths if path.is_file()]
+        if retired not in tracked and not present_paths:
+            continue
+        non_shim_paths = [
+            path for path in present_paths
+            if not is_approved_retired_shim(path, repo_root)
+        ]
+        if not non_shim_paths and present_paths:
+            continue
+        present_path = non_shim_paths[0] if non_shim_paths else None
+        display_path = (
+            present_path.relative_to(repo_root)
+            if present_path is not None else retired
+        )
+        violations.append(f"{display_path}: retired root module was reintroduced")
+    return violations
 
 # Applied migrations are immutable historical artifacts. They may retain an
 # import that production code has since moved behind a compatibility adapter;
@@ -278,28 +314,53 @@ def compatibility_import_offenders(
     repo_root: Path = REPO_ROOT,
     *,
     allowed_paths: frozenset[Path] = frozenset(),
+    tracked_files: tuple[Path, ...] | None = None,
+    imports_by_path: dict[Path, frozenset[str]] | None = None,
 ) -> tuple[Path, ...]:
-    """Find production callers that bypass a compatibility module's adapter."""
+    """Find production callers that bypass a compatibility module's adapter.
+
+    ``check`` supplies one immutable import index shared by every compatibility
+    rule.  Standalone callers keep the historical behavior and build exactly
+    the one scan they requested.  The index is intentionally process-local:
+    persisting parsed source across invocations would make this security gate
+    vulnerable to stale-cache false negatives.
+    """
     offenders: list[Path] = []
-    for path in tracked_production_python_files(repo_root):
+    files = (
+        tracked_files
+        if tracked_files is not None
+        else tracked_production_python_files(repo_root)
+    )
+    for path in files:
         relative = path.relative_to(repo_root)
         if relative == compatibility_path or relative in allowed_paths:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(
-                alias.name == module for alias in node.names
-            ):
-                offenders.append(relative)
-                break
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.level == 0
-                and node.module == module
-            ):
-                offenders.append(relative)
-                break
+        imported = (
+            imports_by_path.get(path)
+            if imports_by_path is not None
+            else None
+        )
+        if imported is None:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported = absolute_imports(tree)
+        if module in imported:
+            offenders.append(relative)
     return tuple(offenders)
+
+
+def absolute_imports(tree: ast.AST) -> frozenset[str]:
+    """Return absolute import targets using the checker's exact old semantics."""
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module
+        ):
+            imported.add(node.module)
+    return frozenset(imported)
 
 
 def layer_of(path: Path) -> str:
@@ -328,39 +389,11 @@ def resolve_relative(module: str, node: ast.ImportFrom) -> str:
     return ".".join(anchor + ([node.module] if node.module else []))
 
 
-def check() -> list[str]:
+def check(diagnostics: dict[str, int] | None = None) -> list[str]:
     violations: list[str] = []
-    tracked = {
-        path.relative_to(REPO_ROOT)
-        for path in tracked_production_python_files()
-    }
-    for retired in sorted(RETIRED_ROOT_MODULES, key=Path.as_posix):
-        # Keep the ratchet effective when the checker is exercised from a
-        # copied source tree (for example by a release/package validation
-        # test) that does not carry the original .git metadata.  A retired
-        # production path is a violation by presence; the Git inventory is
-        # still authoritative for dependency and packaging checks below.
-        retired_paths = (
-            REPO_ROOT / str(retired),
-            REPO_ROOT / str(retired).replace("/", "\\"),
-            _repo_relative_path(REPO_ROOT, retired),
-        )
-        present_paths = [path for path in retired_paths if path.is_file()]
-        if retired in tracked or present_paths:
-            non_shim_paths = [
-                path for path in present_paths
-                if not is_approved_retired_shim(path)
-            ]
-            if not non_shim_paths and present_paths:
-                continue
-            present_path = non_shim_paths[0] if non_shim_paths else None
-            display_path = (
-                present_path.relative_to(REPO_ROOT)
-                if present_path is not None else retired
-            )
-            violations.append(
-                f"{display_path}: retired root module was reintroduced"
-            )
+    tracked_files = tracked_production_python_files()
+    tracked = {path.relative_to(REPO_ROOT) for path in tracked_files}
+    violations.extend(retired_module_violations(tracked))
     unexpected_legacy = ROOT_LEGACY_MODULES - BASELINE_ROOT_LEGACY_MODULES
     if unexpected_legacy:
         violations.append(
@@ -452,6 +485,7 @@ def check() -> list[str]:
             violations.append(f"{LOCATION_CANONICAL_MODULE}: missing canonical location entrypoints")
     imports: dict[str, set[str]] = {}
     files = sorted(PACKAGE_ROOT.rglob("*.py"))
+    imports_by_path: dict[Path, frozenset[str]] = {}
 
     for path in files:
         source = path.read_text(encoding="utf-8")
@@ -493,6 +527,9 @@ def check() -> list[str]:
                     )
 
         imports[module] = {i for i in imported if i.startswith("sonder_runtime")}
+        # Absolute imports are also the complete input to every compatibility
+        # rule below.  Reuse this walk instead of traversing package ASTs again.
+        imports_by_path[path] = frozenset(imported)
 
         for name in sorted(imported):
             if not name:
@@ -582,6 +619,16 @@ def check() -> list[str]:
                     f"module {top!r}"
                 )
 
+    # Compatibility rules cover tracked production outside sonder_runtime too.
+    # Parse those files once, then replay all rules against the immutable index.
+    # This reduces N rules x M files to M files without weakening the inventory.
+    package_paths = set(files)
+    for path in tracked_files:
+        if path in package_paths:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imports_by_path[path] = absolute_imports(tree)
+
     violations.extend(find_cycles(imports))
     for module, compatibility_path in COMPATIBILITY_ROOT_MODULES.items():
         for offender in compatibility_import_offenders(
@@ -590,11 +637,21 @@ def check() -> list[str]:
             allowed_paths=COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS.get(
                 module, frozenset()
             ),
+            tracked_files=tracked_files,
+            imports_by_path=imports_by_path,
         ):
             violations.append(
                 f"{offender}: production caller imports compatibility root "
                 f"module {module!r}"
             )
+    if diagnostics is not None:
+        diagnostics.update({
+            "tracked_files": len(tracked_files),
+            "package_files": len(files),
+            "parsed_files": len(imports_by_path),
+            "compatibility_rules": len(COMPATIBILITY_ROOT_MODULES),
+            "violations": len(violations),
+        })
     return violations
 
 
@@ -624,13 +681,25 @@ def find_cycles(imports: dict[str, set[str]]) -> list[str]:
     return problems
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="emit bounded JSON scan diagnostics to stderr",
+    )
+    args = parser.parse_args(argv)
     if not PACKAGE_ROOT.is_dir():
         print(f"package not found: {PACKAGE_ROOT}", file=sys.stderr)
         return 2
-    violations = check()
+    started = time.perf_counter()
+    diagnostics: dict[str, int | float] = {}
+    violations = check(diagnostics)
+    diagnostics["elapsed_seconds"] = round(time.perf_counter() - started, 6)
     for violation in violations:
         print(violation)
+    if args.stats:
+        print(json.dumps(diagnostics, sort_keys=True), file=sys.stderr)
     if violations:
         print(f"\n{len(violations)} architecture violation(s)", file=sys.stderr)
         return 1

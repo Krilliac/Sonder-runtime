@@ -333,6 +333,18 @@ def test_health_reports_state_dependencies_schemas(http_server):
     assert "build" in payload
     assert payload["typed_health"]["states"]
     assert payload["admission"]["accepting"] is True
+    resources = payload["admission"]["resources"]
+    assert resources["active_limit"] >= 1
+    assert resources["queue_limit"] >= 1
+    assert resources["active_requests"] >= 0
+    assert set(resources["rejections"]) == {
+        "ADMISSION_TIMEOUT",
+        "CAPACITY_EXHAUSTED",
+        "DRAINING",
+        "MAINTENANCE_MODE",
+        "OWNER_CAPACITY_EXHAUSTED",
+        "other",
+    }
     assert payload["telemetry"]["export"] == "disabled"
 
 
