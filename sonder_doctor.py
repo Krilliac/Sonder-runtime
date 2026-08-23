@@ -244,6 +244,87 @@ def schema_check(config=None):
     return check
 
 
+def backup_check(config=None, *, max_age_hours: float = 48.0):
+    """Bind a non-mutating check reporting the most recent backup outcome.
+
+    Reads ``operations.db`` directly in ``mode=ro`` rather than opening an
+    :class:`OperationsStore`, whose constructor auto-migrates the database on
+    open -- a write side effect this read-only surface must not have.
+    """
+    def check():
+        cfg = config if config is not None else _load_config_or_none()
+        if cfg is None:
+            return _skip("config unavailable for backup inspection")
+        if not cfg.backup.enabled:
+            return {"status": STATUS_OK, "detail": "backups disabled by configuration"}
+        try:
+            import sqlite3
+            from pathlib import Path
+
+            db_path = Path(cfg.state.home).expanduser() / "operations.db"
+            if not db_path.is_file():
+                row = None
+            else:
+                uri = db_path.resolve(strict=True).as_uri() + "?mode=ro"
+                conn = sqlite3.connect(uri, uri=True)
+                try:
+                    has_table = conn.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='backup_run'"
+                    ).fetchone()
+                    row = (
+                        conn.execute(
+                            "SELECT backup_id, completed_at_utc, status, error_code"
+                            " FROM backup_run ORDER BY started_at_utc DESC LIMIT 1"
+                        ).fetchone()
+                        if has_table
+                        else None
+                    )
+                finally:
+                    conn.close()
+        except Exception as exc:
+            return _skip("backup history unavailable (%s)" % exc.__class__.__name__)
+
+        if row is None:
+            return {"status": STATUS_WARN, "detail": "no backups have been created yet"}
+        backup_id, completed_at_utc, run_status, error_code = row
+        if run_status == "running":
+            return {
+                "status": STATUS_WARN,
+                "detail": "backup %s has not finished (status=running)" % backup_id,
+            }
+        if run_status != "verified":
+            detail = "latest backup %s: %s" % (backup_id, run_status)
+            if error_code:
+                detail += " (%s)" % error_code
+            return {"status": STATUS_FAIL, "detail": detail}
+        try:
+            import calendar
+            import time
+
+            completed_epoch = calendar.timegm(
+                time.strptime(completed_at_utc, "%Y-%m-%dT%H:%M:%SZ")
+            )
+            age_hours = (time.time() - completed_epoch) / 3600.0
+        except (TypeError, ValueError):
+            return {
+                "status": STATUS_OK,
+                "detail": "latest backup %s verified" % backup_id,
+            }
+        if age_hours > max_age_hours:
+            return {
+                "status": STATUS_WARN,
+                "detail": "latest verified backup is %.1fh old (limit %.0fh)"
+                % (age_hours, max_age_hours),
+            }
+        return {
+            "status": STATUS_OK,
+            "detail": "latest backup verified %.1fh ago" % age_hours,
+        }
+
+    return check
+
+
 def _check_ollama(*, timeout: float = 5.0) -> dict:
     """Probe Ollama reachability read-only via GET /api/tags."""
     config = _load_config_or_none()
@@ -467,6 +548,7 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("config", _check_config),
         *storage_checks(),
         ("schemas", schema_check()),
+        ("backup", backup_check()),
         ("self_heal", _check_self_heal),
         ("memory_quality", _check_memory_quality),
         ("runtime_policy", _check_runtime_policy),

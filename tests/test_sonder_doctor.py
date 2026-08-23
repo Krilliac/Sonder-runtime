@@ -229,6 +229,7 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
         "storage_state",
         "storage_models",
         "schemas",
+        "backup",
         "self_heal",
         "memory_quality",
         "runtime_policy",
@@ -298,3 +299,90 @@ def test_schema_check_fails_safely_for_modified_history(monkeypatch):
         ("schemas", sonder_doctor.schema_check(config))
     ])
     assert report["overall"] == "fail"
+
+
+def _backup_config(tmp_path, *, enabled=True):
+    return SimpleNamespace(
+        backup=SimpleNamespace(enabled=enabled),
+        state=SimpleNamespace(home=str(tmp_path)),
+    )
+
+
+def test_backup_check_is_ok_when_backups_are_disabled(tmp_path):
+    config = _backup_config(tmp_path, enabled=False)
+    assert sonder_doctor.backup_check(config)() == {
+        "status": "ok",
+        "detail": "backups disabled by configuration",
+    }
+
+
+def test_backup_check_warns_when_no_backup_has_ever_run(tmp_path):
+    config = _backup_config(tmp_path)
+    result = sonder_doctor.backup_check(config)()
+    assert result["status"] == "warn"
+    assert "no backups have been created yet" in result["detail"]
+
+
+def test_backup_check_does_not_create_operations_db(tmp_path):
+    """A read-only check must never have the write side effect that a plain
+    OperationsStore() open would (auto-migration on first use)."""
+    config = _backup_config(tmp_path)
+    sonder_doctor.backup_check(config)()
+    assert not (tmp_path / "operations.db").exists()
+
+
+def _make_operations_store(tmp_path):
+    from sonder_runtime.adapters.persistence.operations_store import OperationsStore
+
+    return OperationsStore(str(tmp_path / "operations.db"))
+
+
+def test_backup_check_warns_for_a_backup_still_running(tmp_path):
+    store = _make_operations_store(tmp_path)
+    store.start_backup_run("1.0.0")
+    config = _backup_config(tmp_path)
+    result = sonder_doctor.backup_check(config)()
+    assert result["status"] == "warn"
+    assert "running" in result["detail"]
+
+
+def test_backup_check_fails_for_a_failed_backup(tmp_path):
+    store = _make_operations_store(tmp_path)
+    backup_id = store.start_backup_run("1.0.0")
+    store.finish_backup_run(backup_id, status="failed", error_code="BackupError")
+    config = _backup_config(tmp_path)
+    result = sonder_doctor.backup_check(config)()
+    assert result["status"] == "fail"
+    assert backup_id in result["detail"]
+    assert "BackupError" in result["detail"]
+
+
+def test_backup_check_is_ok_for_a_fresh_verified_backup(tmp_path):
+    store = _make_operations_store(tmp_path)
+    backup_id = store.start_backup_run("1.0.0")
+    store.finish_backup_run(backup_id, status="verified", total_bytes=100)
+    config = _backup_config(tmp_path)
+    result = sonder_doctor.backup_check(config)()
+    assert result["status"] == "ok"
+    assert "verified" in result["detail"]
+
+
+def test_backup_check_warns_for_a_stale_verified_backup(tmp_path):
+    import sqlite3
+
+    store = _make_operations_store(tmp_path)
+    backup_id = store.start_backup_run("1.0.0")
+    store.finish_backup_run(backup_id, status="verified", total_bytes=100)
+    conn = sqlite3.connect(str(tmp_path / "operations.db"))
+    try:
+        conn.execute(
+            "UPDATE backup_run SET completed_at_utc = ? WHERE backup_id = ?",
+            ("2000-01-01T00:00:00Z", backup_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    config = _backup_config(tmp_path)
+    result = sonder_doctor.backup_check(config, max_age_hours=48.0)()
+    assert result["status"] == "warn"
+    assert "old" in result["detail"]

@@ -60,8 +60,7 @@ def test_future_migrations_block_even_when_the_count_looks_fine(monkeypatch, tmp
         sonder_updates.sonder_migrations, "status",
         lambda store: _status(applied=("m1",), unknown=("m9_from_a_newer_build",)),
     )
-    schema = {"%s_target" % s: 5 for s in
-              ("memory", "autopilot", "fleet", "operations", "updates")}
+    schema = {"%s_target" % s: 5 for s in sonder_updates.sonder_migrations.STORE_NAMES}
     problems = check_compatibility(_manifest(schema), releases_dir=tmp_path)
     assert any("does not ship" in p for p in problems), problems
 
@@ -71,8 +70,7 @@ def test_modified_migration_history_blocks(monkeypatch, tmp_path):
         sonder_updates.sonder_migrations, "status",
         lambda store: _status(applied=("m1",), mismatches=("m1",)),
     )
-    schema = {"%s_target" % s: 5 for s in
-              ("memory", "autopilot", "fleet", "operations", "updates")}
+    schema = {"%s_target" % s: 5 for s in sonder_updates.sonder_migrations.STORE_NAMES}
     problems = check_compatibility(_manifest(schema), releases_dir=tmp_path)
     assert any("history was modified" in p for p in problems), problems
 
@@ -83,8 +81,7 @@ def test_a_healthy_store_still_passes(monkeypatch, tmp_path):
         sonder_updates.sonder_migrations, "status",
         lambda store: _status(applied=("m1", "m2")),
     )
-    schema = {"%s_target" % s: 5 for s in
-              ("memory", "autopilot", "fleet", "operations", "updates")}
+    schema = {"%s_target" % s: 5 for s in sonder_updates.sonder_migrations.STORE_NAMES}
     problems = check_compatibility(_manifest(schema), releases_dir=tmp_path)
     schema_problems = [p for p in problems if "store " in p]
     assert not schema_problems, schema_problems
@@ -95,7 +92,21 @@ def test_a_newer_store_than_the_bundle_supports_still_blocks(monkeypatch, tmp_pa
         sonder_updates.sonder_migrations, "status",
         lambda store: _status(applied=("m1", "m2", "m3")),
     )
-    schema = {"%s_target" % s: 1 for s in
-              ("memory", "autopilot", "fleet", "operations", "updates")}
+    schema = {"%s_target" % s: 1 for s in sonder_updates.sonder_migrations.STORE_NAMES}
     problems = check_compatibility(_manifest(schema), releases_dir=tmp_path)
     assert any("forward recovery required" in p for p in problems), problems
+
+
+def test_a_store_missing_from_an_older_manifest_fails_closed(monkeypatch, tmp_path):
+    """A manifest built before a store existed (e.g. queued_actions/jobs) has
+    no ``<store>_target`` key at all. The guard must treat that as target=0,
+    not skip the store -- an applied migration for it is then correctly read
+    as newer than anything the old bundle declares support for."""
+    monkeypatch.setattr(
+        sonder_updates.sonder_migrations, "status",
+        lambda store: _status(applied=("m1",) if store == "jobs" else ()),
+    )
+    schema = {"%s_target" % s: 5 for s in
+              ("memory", "autopilot", "fleet", "operations", "updates")}
+    problems = check_compatibility(_manifest(schema), releases_dir=tmp_path)
+    assert any("jobs" in p and "forward recovery required" in p for p in problems), problems

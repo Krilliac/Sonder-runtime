@@ -36,6 +36,19 @@ python -m sonder_runtime backup prune --keep 7
 
 Prune never removes the newest verified backup, regardless of `--keep`.
 
+## Monitoring backup health
+
+```bash
+python -m sonder_runtime doctor --json --skip-ollama
+```
+
+The `backup` check reads the most recent `backup_run` record in
+operations.db (read-only; it never creates or migrates the database) and
+reports `warn` when no backup has ever completed or the newest verified one
+is older than 48 hours, and `fail` when the most recent run did not verify.
+It reports `ok` without reading anything further when `[backup].enabled` is
+`false`.
+
 ## Restore
 
 Restoration targets an **empty** directory; it never overwrites a live

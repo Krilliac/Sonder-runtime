@@ -212,26 +212,35 @@ def _operations_db_path() -> str:
     return platform_paths.state_path("operations.db", "SONDER_OPERATIONS_DB")
 
 
-# Store registry: name -> callable returning the database path.  The
-# memory/autopilot/fleet baselines are established by SPEC-2 WP5; the
-# framework treats a store with no migration directory as "no ledger yet".
+# Store registry: name -> (filename, env override).  ``memory`` is
+# special-cased below because its path carries extra legacy-migration
+# logic in ``platform_paths.memory_db_path()``.  This tuple is the single
+# source of truth for store names: it is a plain literal (no path
+# resolution, no filesystem access), so callers such as the CLI argument
+# parser can import ``STORE_NAMES`` to stay in sync without triggering the
+# home-directory creation that resolving a real path performs.
+_STORE_FILENAMES: tuple[tuple[str, str, str], ...] = (
+    ("autopilot", "autopilot.db", "SONDER_AUTOPILOT_DB"),
+    ("fleet", "fleet.db", "SONDER_FLEET_DB"),
+    ("operations", "operations.db", "SONDER_OPERATIONS_DB"),
+    ("queued_actions", "queued_actions.db", "SONDER_QUEUED_ACTION_DB"),
+    ("updates", "updates.db", "SONDER_UPDATES_DB"),
+    ("jobs", "jobs.db", "SONDER_JOBS_DB"),
+)
+
+STORE_NAMES: tuple[str, ...] = ("memory",) + tuple(
+    name for name, _, _ in _STORE_FILENAMES
+)
+
+
 def store_db_paths() -> dict[str, str]:
-    return {
-        "memory": platform_paths.memory_db_path(),
-        # Keep the registry independent of store implementations.  Store
-        # modules consume this registry when opening their databases, so
-        # importing them here would create a persistence-layer cycle.
-        "autopilot": platform_paths.state_path(
-            "autopilot.db", "SONDER_AUTOPILOT_DB"
-        ),
-        "fleet": platform_paths.state_path("fleet.db", "SONDER_FLEET_DB"),
-        "operations": _operations_db_path(),
-        "queued_actions": platform_paths.state_path(
-            "queued_actions.db", "SONDER_QUEUED_ACTION_DB"
-        ),
-        "updates": platform_paths.state_path("updates.db", "SONDER_UPDATES_DB"),
-        "jobs": platform_paths.state_path("jobs.db", "SONDER_JOBS_DB"),
-    }
+    # Keep the registry independent of store implementations.  Store
+    # modules consume this registry when opening their databases, so
+    # importing them here would create a persistence-layer cycle.
+    paths: dict[str, str] = {"memory": platform_paths.memory_db_path()}
+    for name, filename, env_var in _STORE_FILENAMES:
+        paths[name] = platform_paths.state_path(filename, env_var)
+    return paths
 
 
 def discover_migrations(store: str) -> tuple[Migration, ...]:
