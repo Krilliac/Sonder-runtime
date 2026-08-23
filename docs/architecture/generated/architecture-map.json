@@ -43,11 +43,12 @@
       "python_files": []
     },
     {
-      "file_count": 214,
+      "file_count": 215,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
         "sonder_runtime/adapters/accelerators/__init__.py",
+        "sonder_runtime/adapters/accelerators/backend_probe.py",
         "sonder_runtime/adapters/accelerators/gpu_probe.py",
         "sonder_runtime/adapters/accelerators/inventory.py",
         "sonder_runtime/adapters/accelerators/npu/__init__.py",

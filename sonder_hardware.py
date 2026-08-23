@@ -50,6 +50,10 @@ from sonder_runtime.platform.hardware_identity import (
     looks_integrated,
 )
 from sonder_runtime.adapters.accelerators.gpu_probe import probe_nvidia_gpu
+from sonder_runtime.adapters.accelerators.backend_probe import (
+    probe_backend_inventory,
+    select_backend,
+)
 from sonder_runtime.adapters.accelerators.inventory import dedupe_accelerators
 from sonder_runtime.platform.hardware_probe import (
     parse_memory_gb,
@@ -68,6 +72,7 @@ _probe_cpu_count = probe_cpu_count
 _read_text = read_text
 _probe_total_ram_gb = probe_total_ram_gb
 _probe_gpu = probe_nvidia_gpu
+_probe_backends = probe_backend_inventory
 _dedupe_accelerators = dedupe_accelerators
 _band_for = band_for_capacity
 _largest_model_class = largest_model_class
@@ -410,6 +415,7 @@ _DEFAULT_PROBES = {
     "gpu": _probe_gpu,
     "accelerators": _probe_accelerators,
     "platform": _probe_platform,
+    "backends": _probe_backends,
 }
 
 
@@ -449,6 +455,9 @@ def detect_profile(probes=None) -> dict:
     accelerators = [item for item in accelerators if isinstance(item, dict)]
     gpu_result = _call("gpu", (False, None)) if use_legacy_gpu else (False, None)
     plat = _call("platform", "unknown")
+    backend_inventory = _call("backends", {})
+    if not isinstance(backend_inventory, dict):
+        backend_inventory = {}
 
     try:
         gpu_present, vram_gb = gpu_result
@@ -496,6 +505,7 @@ def detect_profile(probes=None) -> dict:
         "accelerators": accelerators,
         "accelerator_count": len(accelerators),
         "runtime_readiness": "not-probed",
+        "backend_inventory": backend_inventory,
     }
 
 
@@ -893,6 +903,22 @@ def render(hw: dict, rec: dict) -> str:
             ) or "unknown",
         )
     )
+    inventory = hw.get("backend_inventory") or {}
+    if isinstance(inventory, dict):
+        selection = select_backend(
+            inventory,
+            cuda_available=bool(hw.get("cuda_available")),
+            model_format="gguf" if "q4" in str((rec.get("model") or "")).lower() else "",
+        )
+        present = [
+            name for name, item in sorted(inventory.items())
+            if isinstance(item, dict) and item.get("installed") is True
+        ]
+        lines.append("  installed  : %s" % (", ".join(present) if present else "none detected"))
+        lines.append(
+            "  selection   : %s (advisory; %s)"
+            % (selection["backend"], selection["reason"])
+        )
     model_profile = rec.get("model_profile")
     execution = rec.get("model_execution")
     if model_profile is None and execution is None:
