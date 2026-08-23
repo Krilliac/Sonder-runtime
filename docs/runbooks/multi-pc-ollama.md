@@ -119,6 +119,30 @@ Pass `--skip-ollama` to omit `ollama`, `ollama_workers`, and
 `ollama_residency` when you only want the non-network checks, and `--json`
 for a machine-readable report to gate scripts or CI on.
 
+When Prometheus metrics are enabled (`prometheus_client` installed and
+`SONDER_METRICS=1`), each worker also gets its own bounded slot in the
+metrics endpoint:
+
+- `sonder_ollama_worker_requests_total{worker,result}` -- attempts per worker
+  by `ok`/`error`.
+- `sonder_ollama_worker_duration_seconds{worker}` -- per-worker request
+  latency histogram.
+- `sonder_ollama_worker_circuit_state_total{worker,state}` -- circuit breaker
+  `open`/`closed` transitions per worker.
+
+The `worker` label is a bounded ordinal ("w0", "w1", ...) assigned in
+configuration order, capped at 16 distinct slots with any remainder
+collapsed into `overflow` -- it never carries the worker's hostname, so a
+Prometheus scrape target never learns your worker topology. Use the status
+surface (not metrics) to map a slot back to an origin. Each failed attempt's
+error text is redacted with the same secret-value and pattern filters as the
+structured JSON logs before it is retained for the status surface.
+
+To pull the trace spans for one specific request or run, use the bounded
+local observability projection with a correlation filter, e.g.
+`GET /v1/observability/trace?correlation_id=<id>`; `category` and `severity`
+filters compose the same way.
+
 ## Internet access
 
 For Internet use, put the worker endpoint behind a VPN or an authenticated TLS

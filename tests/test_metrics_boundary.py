@@ -63,8 +63,8 @@ def test_enabled_metric_names_and_label_sets_remain_unchanged():
     registry = platform_metrics.MetricsRegistry()
     collectors = registry._registry._names_to_collectors
     expected = {
-        "sonder_build": ("version", "commit"),
-        "sonder_process": (),
+        "sonder_build_info": ("version", "commit"),
+        "sonder_process_state": (),
         "sonder_requests": ("route", "result"),
         "sonder_request_duration_seconds": ("route",),
         "sonder_active_requests": (),
@@ -82,6 +82,9 @@ def test_enabled_metric_names_and_label_sets_remain_unchanged():
         "sonder_disk_free_bytes": ("path_class",),
         "sonder_redaction_failures": (),
         "sonder_auth_failures": ("reason",),
+        "sonder_ollama_worker_requests": ("worker", "result"),
+        "sonder_ollama_worker_duration_seconds": ("worker",),
+        "sonder_ollama_worker_circuit_state": ("worker", "state"),
     }
     for name, labels in expected.items():
         collector = collectors[name]
