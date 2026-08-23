@@ -33,7 +33,9 @@ def test_canonical_serve_export_preserves_toml_ollama_workers(monkeypatch):
         include_typed_runtime=False,
     )
 
-    assert __import__("os").environ["OLLAMA_HOST"] == "http://127.0.0.1:11434"
+    # Canonical serve binds the typed endpoint directly; it must not overwrite
+    # the legacy environment override while still exporting the worker list.
+    assert __import__("os").environ["OLLAMA_HOST"] == "http://127.0.0.1:1"
     assert __import__("os").environ["SONDER_OLLAMA_WORKERS"] == (
         "https://worker.example:11434"
     )
