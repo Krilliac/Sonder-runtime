@@ -4,11 +4,14 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
 from threading import Lock
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
+from typing import Iterator
+from uuid import uuid4
 
 from sonder_runtime.application.execution.world_control import (
     BoundedOutputBuffer, OutputPage, OutputStream, OutputWatermark, SpillReference,
@@ -21,7 +24,8 @@ from sonder_runtime.application.operations.startup_reconciliation import (
     DrainAction, DrainPlan, RecordKind, StartupObservation, build_drain_plan,
 )
 from sonder_runtime.application.ports.jobs import (
-    JobClaim, JobIdentity, JobRecord, JobStatus, TERMINAL_JOB_STATUSES,
+    JobClaim, JobCompletionReceipt, JobIdentity, JobReconciliationReport,
+    JobRecord, JobStatus, MAX_JOB_ATTEMPTS, TERMINAL_JOB_STATUSES,
 )
 from sonder_runtime.domain.common.errors import (
     CapacityExceeded,
@@ -41,13 +45,27 @@ CREATE TABLE IF NOT EXISTS durable_job (
     process_id INTEGER, process_group_id INTEGER, output_next INTEGER NOT NULL DEFAULT 1,
     output_dropped_before INTEGER NOT NULL DEFAULT 0,
     worker_id TEXT,
-    lease_until TEXT
+    lease_until TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    claim_token TEXT
 );
 CREATE INDEX IF NOT EXISTS durable_job_parent ON durable_job(parent_job_id);
 CREATE INDEX IF NOT EXISTS durable_job_operation ON durable_job(operation_id);
 CREATE TABLE IF NOT EXISTS durable_job_output (
     job_id TEXT NOT NULL, sequence INTEGER NOT NULL, stream TEXT NOT NULL,
     data TEXT NOT NULL, spill_json TEXT, PRIMARY KEY(job_id, sequence),
+    FOREIGN KEY(job_id) REFERENCES durable_job(job_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS durable_job_receipt (
+    job_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    receipt_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    committed_at TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    PRIMARY KEY(job_id, attempt),
     FOREIGN KEY(job_id) REFERENCES durable_job(job_id) ON DELETE CASCADE
 );
 """
@@ -145,18 +163,25 @@ class SQLiteDurableJobRegistry:
             return None
         job_id, kind, operation, idem, parent, parent_session, status, revision, created, updated, result, error, *_ = row
         identity = JobIdentity(job_id, kind, operation, idem, parent, parent_session)
-        return JobRecord(identity, JobStatus(status), revision, created, updated,
-                         None if result is None else json.loads(result), error)
+        attempt = int(row[18]) if len(row) > 18 else 0
+        max_attempts = int(row[19]) if len(row) > 19 else 3
+        return JobRecord(
+            identity, JobStatus(status), revision, created, updated,
+            None if result is None else json.loads(result), error,
+            attempt, max_attempts,
+        )
 
     def _row(self, connection: sqlite3.Connection, job_id: str) -> tuple[Any, ...] | None:
         return connection.execute(
             "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
             "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
-            "output_dropped_before,worker_id,lease_until FROM durable_job WHERE job_id=?", (job_id,)
+            "output_dropped_before,worker_id,lease_until,attempt,max_attempts,claim_token "
+            "FROM durable_job WHERE job_id=?", (job_id,)
         ).fetchone()
 
     def start(self, identity: JobIdentity, *, parent_job_id: str | None = None,
-              process_id: int | None = None, process_group_id: int | None = None) -> JobRecord:
+              process_id: int | None = None, process_group_id: int | None = None,
+              max_attempts: int = 3) -> JobRecord:
         if not isinstance(identity, JobIdentity):
             raise TypeError("identity must be a JobIdentity")
         parent = parent_job_id if parent_job_id is not None else identity.parent_job_id
@@ -166,6 +191,9 @@ class SQLiteDurableJobRegistry:
             raise ValueError("process_id must be positive")
         if process_group_id is not None and (isinstance(process_group_id, bool) or process_group_id <= 0):
             raise ValueError("process_group_id must be positive")
+        if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
+                or not 1 <= max_attempts <= MAX_JOB_ATTEMPTS):
+            raise ValueError(f"max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}")
         if parent is not None and parent == identity.parent_job_id:
             pass
         elif parent is not None:
@@ -180,21 +208,25 @@ class SQLiteDurableJobRegistry:
             try:
                 connection.execute(
                     "INSERT INTO durable_job(job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,"
-                    "status,revision,created_at,updated_at,result_json,error,process_id,process_group_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "status,revision,created_at,updated_at,result_json,error,process_id,process_group_id,max_attempts) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identity.job_id, identity.kind, identity.operation_id, identity.idempotency_key,
                      identity.parent_job_id, identity.parent_session_id, JobStatus.PENDING.value, 0,
-                     now, now, None, "", process_id, process_group_id),
+                     now, now, None, "", process_id, process_group_id, max_attempts),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"job {identity.job_id!r} already exists") from exc
-        return JobRecord(identity, JobStatus.PENDING, 0, now, now)
+        return JobRecord(
+            identity, JobStatus.PENDING, 0, now, now,
+            attempt=0, max_attempts=max_attempts,
+        )
 
     def create(self, identity: JobIdentity, *, metadata: dict[str, Any] | None = None) -> JobRecord:
         """Satisfy the persistence-neutral JobRegistry creation port."""
         if metadata is not None and not isinstance(metadata, dict):
             raise TypeError("metadata must be a dict when provided")
-        return self.start(identity)
+        max_attempts = 3 if metadata is None else metadata.get("max_attempts", 3)
+        return self.start(identity, max_attempts=max_attempts)
 
     def poll(self, job_id: str) -> JobRecord:
         with self._connect() as connection:
@@ -225,7 +257,8 @@ class SQLiteDurableJobRegistry:
             rows = connection.execute(
                 "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
                 "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
-                "output_dropped_before,worker_id,lease_until FROM durable_job WHERE " + " AND ".join(clauses) +
+                "output_dropped_before,worker_id,lease_until,attempt,max_attempts,claim_token "
+                "FROM durable_job WHERE " + " AND ".join(clauses) +
                 " ORDER BY rowid LIMIT ?", (*args, limit)
             ).fetchall()
         return tuple(self._record(row) for row in rows if row is not None)  # type: ignore[misc]
@@ -237,7 +270,8 @@ class SQLiteDurableJobRegistry:
             rows = connection.execute(
                 "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
                 "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
-                "output_dropped_before,worker_id,lease_until FROM durable_job ORDER BY rowid LIMIT ?", (limit,)
+                "output_dropped_before,worker_id,lease_until,attempt,max_attempts,claim_token "
+                "FROM durable_job ORDER BY rowid LIMIT ?", (limit,)
             ).fetchall()
         return tuple(self._record(row) for row in rows if row is not None)  # type: ignore[misc]
 
@@ -366,22 +400,34 @@ class SQLiteDurableJobRegistry:
             if current is None:
                 return None
             now = self._clock()
-            if current.is_terminal or (row[16] and self._lease_active(row[17], now)):
+            if current.is_terminal or current.attempt >= current.max_attempts:
+                return None
+            if row[16] and self._lease_active(row[17], now):
                 return None
             until = self._lease_until(now, lease_seconds)
+            claim_token = uuid4().hex
+            attempt = current.attempt + 1
             changed = connection.execute(
-                "UPDATE durable_job SET status=?,revision=?,updated_at=?,worker_id=?,lease_until=? "
+                "UPDATE durable_job SET status=?,revision=?,updated_at=?,worker_id=?,lease_until=?,"
+                "attempt=?,claim_token=? "
                 "WHERE job_id=? AND revision=?",
                 (JobStatus.CLAIMED.value, current.revision + 1, now, worker_id, until,
+                 attempt, claim_token,
                  job_id, current.revision),
             ).rowcount
-            return JobClaim(job_id, worker_id, until, current.revision + 1) if changed == 1 else None
+            return JobClaim(
+                job_id, worker_id, until, current.revision + 1,
+                claim_token, attempt,
+            ) if changed == 1 else None
 
-    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> bool:
+    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: int = 300,
+                  claim_token: str | None = None) -> bool:
         if not isinstance(worker_id, str) or not worker_id.strip():
             raise ValueError("worker_id must be non-empty")
         if isinstance(lease_seconds, bool) or lease_seconds < 1:
             raise ValueError("lease_seconds must be positive")
+        if claim_token is not None and (not isinstance(claim_token, str) or not claim_token.strip()):
+            raise ValueError("claim_token must be non-empty when provided")
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = self._row(connection, job_id)
@@ -390,6 +436,8 @@ class SQLiteDurableJobRegistry:
                 return False
             now = self._clock()
             if row[16] != worker_id or not self._lease_active(row[17], now):
+                return False
+            if claim_token is not None and row[20] != claim_token:
                 return False
             until = self._lease_until(now, lease_seconds)
             changed = connection.execute(
@@ -401,13 +449,15 @@ class SQLiteDurableJobRegistry:
             return changed == 1
 
     def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None,
-               error: str = "") -> JobRecord | None:
+               error: str = "", claim_token: str | None = None) -> JobRecord | None:
         if not isinstance(status, JobStatus):
             raise TypeError("status must be a JobStatus")
         if status not in TERMINAL_JOB_STATUSES:
             raise ValueError("finish status must be terminal")
         if not isinstance(worker_id, str) or not worker_id.strip():
             raise ValueError("worker_id must be non-empty")
+        if claim_token is not None and (not isinstance(claim_token, str) or not claim_token.strip()):
+            raise ValueError("claim_token must be non-empty when provided")
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = self._row(connection, job_id)
@@ -417,23 +467,179 @@ class SQLiteDurableJobRegistry:
             now = self._clock()
             if row[16] != worker_id or not self._lease_active(row[17], now):
                 return None
+            if claim_token is not None and row[20] != claim_token:
+                return None
             if status is JobStatus.SUCCEEDED and error:
                 raise ValueError("successful jobs cannot carry an error")
             changed = connection.execute(
                 "UPDATE durable_job SET status=?,revision=?,updated_at=?,result_json=?,error=?,"
-                "worker_id=NULL,lease_until=NULL WHERE job_id=? AND revision=? AND worker_id=?",
+                "worker_id=NULL,lease_until=NULL,claim_token=NULL "
+                "WHERE job_id=? AND revision=? AND worker_id=?",
                 (status.value, current.revision + 1, now,
                  None if result is None else _json(result), error,
                  job_id, current.revision, worker_id),
             ).rowcount
             return self._record(self._row(connection, job_id)) if changed == 1 else None
 
-    def cancel(self, job_id: str, *, reason: str = "cancelled") -> tuple[JobRecord, ...]:
+    @staticmethod
+    def _receipt(row: tuple[Any, ...] | None) -> JobCompletionReceipt | None:
+        if row is None:
+            return None
+        job_id, attempt, receipt_key, status, digest, committed_at, revision = row
+        return JobCompletionReceipt(
+            str(job_id), int(attempt), str(receipt_key), JobStatus(str(status)),
+            str(digest), str(committed_at), int(revision),
+        )
+
+    @staticmethod
+    def _completion_digest(status: JobStatus, result: Any, error: str) -> str:
+        payload = _json({"status": status.value, "result": result, "error": error})
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def completion_receipt(
+        self, job_id: str, *, attempt: int | None = None,
+    ) -> JobCompletionReceipt | None:
+        if attempt is not None and (isinstance(attempt, bool) or attempt < 1):
+            raise ValueError("attempt must be positive when provided")
+        with self._connect() as connection:
+            if attempt is None:
+                row = connection.execute(
+                    "SELECT job_id,attempt,receipt_key,status,payload_digest,committed_at,revision "
+                    "FROM durable_job_receipt WHERE job_id=? ORDER BY attempt DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT job_id,attempt,receipt_key,status,payload_digest,committed_at,revision "
+                    "FROM durable_job_receipt WHERE job_id=? AND attempt=?",
+                    (job_id, attempt),
+                ).fetchone()
+        return self._receipt(row)
+
+    def finish_once(
+        self,
+        job_id: str,
+        worker_id: str,
+        status: JobStatus,
+        *,
+        receipt_key: str,
+        result: Any = None,
+        error: str = "",
+        claim_token: str | None = None,
+    ) -> JobCompletionReceipt | None:
+        """Atomically commit one terminal result and its per-attempt receipt.
+
+        Replaying the same receipt key and payload returns the stored receipt.
+        A conflicting key or payload is rejected without changing job state.
+        """
+        if status not in TERMINAL_JOB_STATUSES:
+            raise ValueError("finish status must be terminal")
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ValueError("worker_id must be non-empty")
+        if not isinstance(receipt_key, str) or not receipt_key.strip():
+            raise ValueError("receipt_key must be non-empty")
+        if claim_token is not None and (not isinstance(claim_token, str) or not claim_token.strip()):
+            raise ValueError("claim_token must be non-empty when provided")
+        if status is JobStatus.SUCCEEDED and error:
+            raise ValueError("successful jobs cannot carry an error")
+        digest = self._completion_digest(status, result, error)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            current = self._record(row)
+            if current is None:
+                return None
+            replay_row = connection.execute(
+                "SELECT job_id,attempt,receipt_key,status,payload_digest,committed_at,revision "
+                "FROM durable_job_receipt WHERE receipt_key=?",
+                (receipt_key,),
+            ).fetchone()
+            replay = self._receipt(replay_row)
+            if replay is not None:
+                if (replay.job_id, replay.status, replay.payload_digest) != (
+                    job_id, status, digest,
+                ):
+                    raise ValueError("completion receipt key is already committed")
+                return replay
+            existing_row = connection.execute(
+                "SELECT job_id,attempt,receipt_key,status,payload_digest,committed_at,revision "
+                "FROM durable_job_receipt WHERE job_id=? AND attempt=?",
+                (job_id, current.attempt),
+            ).fetchone()
+            existing = self._receipt(existing_row)
+            if existing is not None:
+                if (existing.receipt_key, existing.status, existing.payload_digest) != (
+                    receipt_key, status, digest,
+                ):
+                    raise ValueError("completion receipt conflicts with committed attempt")
+                return existing
+            if current.is_terminal:
+                raise ValueError("terminal job has no matching completion receipt")
+            now = self._clock()
+            if row[16] != worker_id or not self._lease_active(row[17], now):
+                return None
+            if claim_token is not None and row[20] != claim_token:
+                return None
+            revision = current.revision + 1
+            changed = connection.execute(
+                "UPDATE durable_job SET status=?,revision=?,updated_at=?,result_json=?,error=?,"
+                "worker_id=NULL,lease_until=NULL,claim_token=NULL "
+                "WHERE job_id=? AND revision=? AND worker_id=?",
+                (status.value, revision, now, None if result is None else _json(result),
+                 error, job_id, current.revision, worker_id),
+            ).rowcount
+            if changed != 1:
+                return None
+            try:
+                connection.execute(
+                    "INSERT INTO durable_job_receipt(job_id,attempt,receipt_key,status,"
+                    "payload_digest,committed_at,revision) VALUES (?,?,?,?,?,?,?)",
+                    (job_id, current.attempt, receipt_key, status.value, digest, now, revision),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("completion receipt key is already committed") from exc
+            return JobCompletionReceipt(
+                job_id, current.attempt, receipt_key, status, digest, now, revision,
+            )
+
+    def retry(self, job_id: str, *, expected_revision: int | None = None) -> JobRecord | None:
+        """Explicitly requeue a failed/interrupted job within its persisted budget."""
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            current = self._record(row)
+            if current is None:
+                return None
+            if expected_revision is not None and current.revision != expected_revision:
+                return None
+            if current.status not in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+                raise ValueError("only failed or interrupted jobs can be retried")
+            if current.attempt >= current.max_attempts:
+                raise ValueError("job retry budget is exhausted")
+            now = self._clock()
+            changed = connection.execute(
+                "UPDATE durable_job SET status=?,revision=revision+1,updated_at=?,"
+                "result_json=NULL,error='',worker_id=NULL,lease_until=NULL,claim_token=NULL "
+                "WHERE job_id=? AND revision=?",
+                (JobStatus.PENDING.value, now, job_id, current.revision),
+            ).rowcount
+            return self._record(self._row(connection, job_id)) if changed == 1 else None
+
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        reason: str = "cancelled",
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
         if not reason.strip():
             raise ValueError("cancellation reason is required")
+        if isinstance(max_descendants, bool) or max_descendants < 0:
+            raise ValueError("max_descendants must be a non-negative integer")
         queue = [job_id]
         ids: list[str] = []
-        with self._connect() as connection:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             while queue:
                 current = queue.pop(0)
                 if current in ids:
@@ -441,10 +647,22 @@ class SQLiteDurableJobRegistry:
                 if self._row(connection, current) is None:
                     raise KeyError(f"unknown job {current!r}")
                 ids.append(current)
+                if len(ids) - 1 > max_descendants:
+                    raise ValueError("job cancellation exceeds max_descendants")
                 queue.extend(item[0] for item in connection.execute(
                     "SELECT job_id FROM durable_job WHERE parent_job_id=? ORDER BY rowid", (current,)
                 ).fetchall())
-        return tuple(self.transition(item, JobStatus.CANCELLED, error=reason) for item in ids)
+            now = self._clock()
+            for current in ids:
+                connection.execute(
+                    "UPDATE durable_job SET status=?,revision=revision+1,updated_at=?,error=?,"
+                    "worker_id=NULL,lease_until=NULL,claim_token=NULL "
+                    "WHERE job_id=? AND status NOT IN (?,?,?)",
+                    (JobStatus.CANCELLED.value, now, reason, current,
+                     JobStatus.SUCCEEDED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value),
+                )
+            records = tuple(self._record(self._row(connection, item)) for item in ids)
+            return tuple(record for record in records if record is not None)
 
     def collect(self, job_id: str) -> JobRecord:
         record = self.poll(job_id)
@@ -452,18 +670,41 @@ class SQLiteDurableJobRegistry:
             raise ValueError("job is not terminal")
         return record
 
-    def reconcile(self, *, now: str | None = None) -> int:
-        """Mark expired worker leases interrupted and return their count."""
+    def reconcile_stale(
+        self, *, now: str | None = None, max_records: int = 100,
+    ) -> JobReconciliationReport:
+        """Reconcile one bounded page of expired leases with stable diagnostics."""
+        if isinstance(max_records, bool) or max_records < 1:
+            raise ValueError("max_records must be positive")
         current_time = self._clock() if now is None else now
         with self._lock, self._connect() as connection:
-            changed = connection.execute(
-                "UPDATE durable_job SET status=?, revision=revision+1, "
-                "updated_at=?, worker_id=NULL, lease_until=NULL "
-                "WHERE status IN (?,?) AND lease_until IS NOT NULL AND lease_until<=?",
-                (JobStatus.INTERRUPTED.value, current_time,
-                 JobStatus.CLAIMED.value, JobStatus.RUNNING.value, current_time),
-            ).rowcount
-        return changed
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT job_id,revision FROM durable_job WHERE status IN (?,?) "
+                "AND lease_until IS NOT NULL AND lease_until<=? "
+                "ORDER BY lease_until,job_id LIMIT ?",
+                (JobStatus.CLAIMED.value, JobStatus.RUNNING.value,
+                 current_time, max_records + 1),
+            ).fetchall()
+            selected = rows[:max_records]
+            interrupted: list[str] = []
+            for job_id, revision in selected:
+                changed = connection.execute(
+                    "UPDATE durable_job SET status=?,revision=revision+1,updated_at=?,"
+                    "worker_id=NULL,lease_until=NULL,claim_token=NULL "
+                    "WHERE job_id=? AND revision=? AND status IN (?,?) AND lease_until<=?",
+                    (JobStatus.INTERRUPTED.value, current_time, job_id, revision,
+                     JobStatus.CLAIMED.value, JobStatus.RUNNING.value, current_time),
+                ).rowcount
+                if changed == 1:
+                    interrupted.append(str(job_id))
+        return JobReconciliationReport(
+            len(selected), tuple(interrupted), truncated=len(rows) > max_records,
+        )
+
+    def reconcile(self, *, now: str | None = None, max_records: int = 100) -> int:
+        """Compatibility projection of bounded stale-lease reconciliation."""
+        return self.reconcile_stale(now=now, max_records=max_records).interrupted
 
     def reconcile_recovery(self, *, owner_instance_id: str = "", owner_alive: bool | None = None,
                            max_records: int = 100, max_process_descendants: int = 64) -> DrainPlan:
@@ -519,6 +760,20 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE durable_job ADD COLUMN worker_id TEXT")
     if "lease_until" not in columns:
         connection.execute("ALTER TABLE durable_job ADD COLUMN lease_until TEXT")
+    if "attempt" not in columns:
+        connection.execute(
+            "ALTER TABLE durable_job ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0"
+        )
+    if "max_attempts" not in columns:
+        connection.execute(
+            "ALTER TABLE durable_job ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3"
+        )
+    if "claim_token" not in columns:
+        connection.execute("ALTER TABLE durable_job ADD COLUMN claim_token TEXT")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS durable_job_stale_lease "
+        "ON durable_job(status, lease_until)"
+    )
 
 
 __all__ = ["JobRecoveryReport", "SQLiteDurableJobRegistry", "initialize_schema"]

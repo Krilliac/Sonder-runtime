@@ -11,6 +11,8 @@ from .common.errors import InvalidInput
 
 MAX_LEDGER_ITEMS = 256
 _MAX_TEXT = 4096
+COMPLETED_TASK_STATUSES = frozenset({"done", "completed", "succeeded"})
+RUNNABLE_TASK_STATUSES = frozenset({"pending", "ready", "queued"})
 
 
 def _text(value: object, label: str) -> str:
@@ -73,6 +75,25 @@ class TaskLedger:
         missing = sorted({dependency for item in self.items for dependency in item.dependencies} - ids)
         if missing:
             raise InvalidInput("task ledger references missing dependency: " + missing[0])
+        by_id = {item.task_id: item for item in self.items}
+        remaining = {task_id: len(item.dependencies) for task_id, item in by_id.items()}
+        dependents: dict[str, list[str]] = {task_id: [] for task_id in by_id}
+        for item in self.items:
+            for dependency in item.dependencies:
+                dependents[dependency].append(item.task_id)
+        ready = sorted(task_id for task_id, count in remaining.items() if count == 0)
+        visited = 0
+        while ready:
+            task_id = ready.pop(0)
+            visited += 1
+            for dependent in sorted(dependents[task_id]):
+                remaining[dependent] -= 1
+                if remaining[dependent] == 0:
+                    ready.append(dependent)
+            ready.sort()
+        if visited != len(by_id):
+            cycle = sorted(task_id for task_id, count in remaining.items() if count > 0)
+            raise InvalidInput("task ledger dependency cycle: " + " -> ".join(cycle))
         if isinstance(self.replan_count, bool) or not isinstance(self.replan_count, int) or self.replan_count < 0:
             raise InvalidInput("replan_count must be a non-negative integer")
         if self.last_replan_reason is not None:
@@ -91,6 +112,63 @@ class TaskLedger:
     def digest(self) -> str:
         encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def ready_items(
+        self,
+        *,
+        max_fanout: int = 8,
+        runnable_statuses: frozenset[str] = RUNNABLE_TASK_STATUSES,
+        completed_statuses: frozenset[str] = COMPLETED_TASK_STATUSES,
+    ) -> tuple[TaskLedgerItem, ...]:
+        """Return a deterministic, bounded dependency-ready dispatch batch."""
+        if isinstance(max_fanout, bool) or not isinstance(max_fanout, int) or max_fanout < 1:
+            raise InvalidInput("max_fanout must be a positive integer")
+        by_id = {item.task_id: item for item in self.items}
+        ready = (
+            item for item in self.items
+            if item.status in runnable_statuses
+            and all(by_id[dependency].status in completed_statuses for dependency in item.dependencies)
+        )
+        return tuple(sorted(ready, key=lambda item: item.task_id))[:max_fanout]
+
+    def blocked_dependencies(
+        self,
+        *,
+        runnable_statuses: frozenset[str] = RUNNABLE_TASK_STATUSES,
+        completed_statuses: frozenset[str] = COMPLETED_TASK_STATUSES,
+    ) -> dict[str, tuple[str, ...]]:
+        """Explain why runnable tasks are not dependency-ready."""
+        by_id = {item.task_id: item for item in self.items}
+        return {
+            item.task_id: tuple(
+                dependency for dependency in item.dependencies
+                if by_id[dependency].status not in completed_statuses
+            )
+            for item in self.items
+            if item.status in runnable_statuses
+            and any(by_id[dependency].status not in completed_statuses for dependency in item.dependencies)
+        }
+
+    def dependency_batches(self, *, max_fanout: int = 8) -> tuple[tuple[str, ...], ...]:
+        """Project a stable topological schedule split into bounded batches."""
+        if isinstance(max_fanout, bool) or not isinstance(max_fanout, int) or max_fanout < 1:
+            raise InvalidInput("max_fanout must be a positive integer")
+        remaining = {item.task_id: set(item.dependencies) for item in self.items}
+        batches: list[tuple[str, ...]] = []
+        while remaining:
+            level = sorted(task_id for task_id, dependencies in remaining.items() if not dependencies)
+            # Cycles are rejected during construction, so this is defensive only.
+            if not level:
+                raise InvalidInput("task ledger dependency cycle")
+            for offset in range(0, len(level), max_fanout):
+                batches.append(tuple(level[offset:offset + max_fanout]))
+            completed = set(level)
+            remaining = {
+                task_id: dependencies - completed
+                for task_id, dependencies in remaining.items()
+                if task_id not in completed
+            }
+        return tuple(batches)
 
 
 def build_task_ledger(
@@ -115,4 +193,7 @@ def build_task_ledger(
     return TaskLedger(goal_id, items, replan_count, last_replan_reason)
 
 
-__all__ = ["MAX_LEDGER_ITEMS", "TaskLedger", "TaskLedgerItem", "build_task_ledger"]
+__all__ = [
+    "COMPLETED_TASK_STATUSES", "MAX_LEDGER_ITEMS", "RUNNABLE_TASK_STATUSES",
+    "TaskLedger", "TaskLedgerItem", "build_task_ledger",
+]
