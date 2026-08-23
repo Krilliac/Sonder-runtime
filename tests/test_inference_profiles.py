@@ -108,3 +108,33 @@ def test_unknown_quantization_and_invalid_parameter_counts_fail_closed():
         quantized_model_profile(quantization="made-up")
     with pytest.raises(ValueError):
         quantized_model_profile(total_params_b=3, active_params_b=4)
+
+
+def test_kv_planning_envelope_scales_with_model_size():
+    from sonder_runtime.domain.inference_profiles import (
+        kv_gb_per_8k,
+        quantized_model_profile,
+    )
+
+    assert kv_gb_per_8k(3.0) == 0.25
+    assert kv_gb_per_8k(7.6) == 0.35
+    assert kv_gb_per_8k(30.0) == 0.5
+    assert kv_gb_per_8k(70.6) == 1.0
+    # Unknown sizes take the most conservative band.
+    assert kv_gb_per_8k(None) == 1.0
+
+    small = quantized_model_profile(
+        model="qwen3:7b", total_params_b=7.6, active_params_b=7.6,
+        quantization="Q4_K_M", context_size=8192,
+    )
+    assert small.kv_cache_gb == 0.35
+
+    large = quantized_model_profile(
+        model="llama3:70b", total_params_b=70.0, active_params_b=70.0,
+        quantization="Q4_K_M", context_size=16384,
+    )
+    assert large.kv_cache_gb == 2.0
+
+    # The checked-in 30B default envelope is unchanged.
+    from sonder_runtime.domain.inference_profiles import default_30b_profile
+    assert default_30b_profile().kv_cache_gb == 0.5
