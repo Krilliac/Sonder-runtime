@@ -2452,6 +2452,12 @@
           "name": "require_all_tiers",
           "required": false,
           "type": "bool"
+        },
+        {
+          "default": 0,
+          "name": "num_ctx",
+          "required": false,
+          "type": "int"
         }
       ],
       "risk": "ask",
@@ -5258,7 +5264,7 @@
           "type": "int"
         },
         {
-          "default": 4096,
+          "default": 0,
           "name": "num_ctx",
           "required": false,
           "type": "int"
@@ -5329,7 +5335,7 @@
           "type": "int"
         },
         {
-          "default": 4096,
+          "default": 0,
           "name": "num_ctx",
           "required": false,
           "type": "int"
@@ -6888,7 +6894,7 @@
           "type": "int"
         },
         {
-          "default": 4096,
+          "default": 0,
           "name": "num_ctx",
           "required": false,
           "type": "int"
@@ -8909,6 +8915,12 @@
       "type": "bool"
     },
     {
+      "default": [],
+      "field": "workers",
+      "section": "ollama",
+      "type": "tuple[str, ...]"
+    },
+    {
       "default": 60,
       "field": "startup_timeout_seconds",
       "section": "ollama",
@@ -9053,11 +9065,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 301,
-    "configuration": 66,
+    "configuration": 67,
     "events": 43,
     "tools": 205
   },
-  "digest": "23ea9473220662d08d3fc2a748af537dec889fd98b616c3fb5e8acb27ac33fd5",
+  "digest": "9ec4aa688fa6adbab278c755be286068a488b6333a705a0a5db98dfe289fecb5",
   "events": [
     {
       "name": "session.started",
@@ -9528,10 +9540,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "b8468458b47f64022d09ad3539b7142ed6a6ad7979e7acf58207385162fb36b5",
+    "server.py": "e4815244616c1091b9ce5505ee8e9a399fa95a75a71ea679d03401ea02b16c42",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "d387d1858abb3684e606cd75805a07610de91f4585b9212a7220ab4587abd612"
+    "sonder_runtime/platform/config.py": "aa8caaeec49393f1460681d752ce3ee59e300f8b843ba035c83921b77ae384fb"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
@@ -11398,7 +11410,7 @@
       }
     },
     {
-      "description": "Ask several local models the same question, then compound one answer.\n\n    Each model answers independently, then one model merges the answers --\n    agreeing points stated once, disagreements named rather than hidden.\n\n    Args:\n        prompt: the question to put to every model.\n        tiers: comma-separated tiers to poll. Default: every bound local text\n            tier. Deduplicated by resolved model, capped at 4. A cloud tier\n            named here joins the poll when SONDER_ALLOW_CLOUD=1; the implicit\n            default never leaves the box.\n        synth_tier: tier that writes the compounded answer. Default: the last\n            tier that answered successfully.\n        num_predict: output cap per model.\n        mode: \"prose\" (default) merges the answers into one explanation.\n            \"code\" switches to a pick-and-patch contract and returns a bare\n            source file -- blending two implementations line by line yields\n            something that resembles both and compiles as neither, and the\n            prose contract's \"name the disagreements\" rule would emit\n            commentary where a file is wanted.\n        project: add that project's durable facts (sonder_remember_fact) as\n            fenced reference material before every model's prompt. The task\n            remains authoritative; the ensemble builds prompts directly rather\n            than through the learning orchestrator, so without this it never\n            sees the facts -- and code generation is exactly where recorded\n            failure modes pay off.\n        require_all_tiers: refuse rather than degrade to a single answer when\n            an explicitly named multi-tier ensemble cannot supply two distinct\n            available models. Natural code-and-reasoning routing enables this.\n    ",
+      "description": "Ask several local models the same question, then compound one answer.\n\n    Each model answers independently, then one model merges the answers --\n    agreeing points stated once, disagreements named rather than hidden.\n\n    Args:\n        prompt: the question to put to every model.\n        tiers: comma-separated tiers to poll. Default: every bound local text\n            tier. Deduplicated by resolved model, capped at 4. A cloud tier\n            named here joins the poll when SONDER_ALLOW_CLOUD=1; the implicit\n            default never leaves the box.\n        synth_tier: tier that writes the compounded answer. Default: the last\n            tier that answered successfully.\n        num_predict: output cap per model.\n        mode: \"prose\" (default) merges the answers into one explanation.\n            \"code\" switches to a pick-and-patch contract and returns a bare\n            source file -- blending two implementations line by line yields\n            something that resembles both and compiles as neither, and the\n            prose contract's \"name the disagreements\" rule would emit\n            commentary where a file is wanted.\n        project: add that project's durable facts (sonder_remember_fact) as\n            fenced reference material before every model's prompt. The task\n            remains authoritative; the ensemble builds prompts directly rather\n            than through the learning orchestrator, so without this it never\n            sees the facts -- and code generation is exactly where recorded\n            failure modes pay off.\n        require_all_tiers: refuse rather than degrade to a single answer when\n            an explicitly named multi-tier ensemble cannot supply two distinct\n            available models. Natural code-and-reasoning routing enables this.\n        num_ctx: local context window for each generation. Zero preserves the\n            historical 4096-token poll window; a positive value lets bounded\n            local workers provide enough room for large source files.\n    ",
       "name": "ensemble_answer",
       "parameters": {
         "properties": {
@@ -11406,6 +11418,11 @@
             "default": "prose",
             "title": "Mode",
             "type": "string"
+          },
+          "num_ctx": {
+            "default": 0,
+            "title": "Num Ctx",
+            "type": "integer"
           },
           "num_predict": {
             "default": 700,
@@ -13623,7 +13640,7 @@
             "type": "integer"
           },
           "num_ctx": {
-            "default": 4096,
+            "default": 0,
             "title": "Num Ctx",
             "type": "integer"
           },
@@ -13685,7 +13702,7 @@
             "type": "integer"
           },
           "num_ctx": {
-            "default": 4096,
+            "default": 0,
             "title": "Num Ctx",
             "type": "integer"
           },
@@ -14812,7 +14829,7 @@
             "type": "string"
           },
           "num_ctx": {
-            "default": 4096,
+            "default": 0,
             "title": "Num Ctx",
             "type": "integer"
           },
