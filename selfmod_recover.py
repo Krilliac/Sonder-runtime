@@ -89,8 +89,13 @@ def _validated_manifest(manifest_path, manifest):
         seen.add(relative)
         if not isinstance(existed, bool):
             raise RuntimeError("manifest existence flag is invalid for %s" % relative)
-        target = (root / relative).resolve()
-        if not _within(target, root):
+        # Keep the lexical leaf so rollback can unlink a dangling symlink.
+        # Resolve a separate containment probe: ``Path.resolve()`` turns a
+        # dangling leaf link into its target path and would otherwise make the
+        # created link invisible to the restore phase.
+        target = root / relative
+        resolved_target = target.resolve()
+        if not _within(resolved_target, root):
             raise RuntimeError("manifest path escapes repository")
 
         if existed:
