@@ -3,6 +3,28 @@
 from __future__ import annotations
 
 
+# Canonical ModelGateway capability vocabulary.  Adapters publish a subset of
+# these as typed, static facts about their own transport shape — never a
+# live probe result — so callers (routing, ``ProviderHealth.capabilities``)
+# can compare gateways without importing a specific adapter module.
+GATEWAY_CAPABILITY_CHAT = "chat"
+GATEWAY_CAPABILITY_EMBEDDINGS = "embeddings"
+# The gateway resolves model identity per request (a tier may select a
+# different local or hosted model each call), rather than always talking to
+# one fixed configured endpoint/model.
+GATEWAY_CAPABILITY_TIERED_ROUTING = "tiered-routing"
+# The inverse: one configured endpoint and model serve every request: there
+# is no per-request local/cloud tier resolution.
+GATEWAY_CAPABILITY_FIXED_ENDPOINT = "fixed-endpoint"
+
+KNOWN_GATEWAY_CAPABILITIES = frozenset({
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_TIERED_ROUTING,
+    GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+})
+
+
 def fanout_capabilities(record) -> set[str]:
     """Return normalized capabilities from a catalog record.
 

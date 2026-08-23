@@ -43,6 +43,7 @@ from ...platform.metrics import default_registry
 from .telemetry import from_openai_compatible
 from ...domain.common.errors import (
     Cancelled,
+    CapacityExceeded,
     DeadlineExceeded,
     DependencyUnavailable,
     Forbidden,
@@ -53,9 +54,23 @@ from ...domain.chat_template_policy import (
     ChatTemplateOptionsError,
     normalize_chat_template_options,
 )
+from ...domain.model_capabilities import (
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+)
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _DEFAULT_TIMEOUT = 300
+
+# Static, provider-shape facts — never a live probe result.  One configured
+# endpoint and model serve every request; there is no per-request local/cloud
+# tier resolution the way the Ollama gateway has.
+CAPABILITIES = frozenset({
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+})
 
 
 @dataclass(frozen=True)
@@ -88,6 +103,11 @@ class OpenAICompatibleGateway:
     def __init__(self, config: OpenAICompatibleConfig | None = None, *, transport=None):
         self._config = config
         self._transport = transport
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        """Typed capability metadata; shape matches ``ProviderHealth.capabilities``."""
+        return CAPABILITIES
 
     # -- configuration & consent ------------------------------------------
 
@@ -258,6 +278,10 @@ class OpenAICompatibleGateway:
                 raise Forbidden("endpoint rejected credentials (HTTP %d)" % code) from exc
             if code in (400, 404, 422):
                 raise InvalidInput("endpoint rejected request (HTTP %d)" % code) from exc
+            if code == 429:
+                raise CapacityExceeded(
+                    "endpoint is rate limiting requests (HTTP 429)"
+                ) from exc
             raise DependencyUnavailable("endpoint returned HTTP %d" % code) from exc
         except (socket.timeout, TimeoutError) as exc:
             raise DeadlineExceeded("endpoint timed out") from exc

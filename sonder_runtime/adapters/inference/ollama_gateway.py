@@ -54,6 +54,22 @@ from ...domain.common.errors import (
     InternalFailure,
     InvalidInput,
 )
+from ...domain.model_capabilities import (
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_TIERED_ROUTING,
+)
+
+
+# Static, provider-shape facts — never a live probe result.  Ollama resolves
+# its model identity per request (a tier may select a different local or
+# hosted model each call), so it advertises tiered routing rather than one
+# fixed endpoint/model.
+CAPABILITIES = frozenset({
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_TIERED_ROUTING,
+})
 
 
 def _check_liveness(context: OperationContext) -> float | None:
@@ -147,6 +163,11 @@ class OllamaGateway:
             context_policy.default_requested()
             if session_num_ctx is None else int(session_num_ctx)
         )
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        """Typed capability metadata; shape matches ``ProviderHealth.capabilities``."""
+        return CAPABILITIES
 
     def generate(
         self, request: ModelRequest, context: OperationContext

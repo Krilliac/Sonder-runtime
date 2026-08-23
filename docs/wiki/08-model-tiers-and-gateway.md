@@ -85,6 +85,25 @@ All model transport is moving behind a single port,
 Session summarization and titling already route through it
 (`ChatService` → `OllamaGateway`); more call-sites migrate incrementally.
 
+### Backend selection and typed capability metadata
+
+`SONDER_MODEL_BACKEND` (default `ollama`) picks the transport constructed by
+`adapters/model_gateway_factory.py`: unset/`ollama` builds `OllamaGateway`;
+`openai`, `openai-compatible`, `llamacpp`, or `vllm` build
+`OpenAICompatibleGateway`. An unrecognized value raises `InvalidInput`
+instead of silently falling back to Ollama — a typo in the operator's
+configuration must not route requests through a different transport than
+intended.
+
+Each gateway exposes a static `.capabilities` property (a `frozenset[str]`
+drawn from `domain/model_capabilities.py`'s `KNOWN_GATEWAY_CAPABILITIES`
+vocabulary — the same shape `ProviderHealth.capabilities` accepts). It is
+never a live probe result, only a fact about the adapter's own shape:
+`OllamaGateway` advertises `tiered-routing` because it resolves model
+identity per request (a tier may select a different local or hosted model
+each call); `OpenAICompatibleGateway` advertises `fixed-endpoint` because one
+configured endpoint and model serve every request.
+
 ### Measured inference telemetry
 
 `ModelResponse.telemetry` optionally carries backend-measured phase data:
