@@ -249,3 +249,49 @@ records nor changes their comparability rules.
 - [Training](15-training.md) — the other axis of improvement (adapters); this
   harness measures retrieval lift, not adapter lift.
 - Root [README](../../README.md) — the "moat" claim this page exists to measure.
+
+## Reproducible provider/model matrices
+
+The application-level harness in
+`sonder_runtime.application.evaluation.reproducible` fills the gap between the
+specialized benchmark scripts above and the existing proposal lifecycle. It
+provides:
+
+- immutable scenario IDs and versions, digest-bound golden cases, and an
+  immutable-by-version registry;
+- explicit provider/model/revision identities and deterministic target
+  ordering for matrix runs;
+- per-case pass, assertion, timeout, provider, protocol, and invalid-response
+  outcomes;
+- replayable `TrajectoryRecord` evidence using the existing evaluation replay
+  contract;
+- absolute pass/error/timeout thresholds plus pass-rate-drop and per-case
+  regression gates against an exact-scenario baseline; and
+- a bridge from a run report to the existing `EvaluationResult` proposal
+  lifecycle contract.
+
+The checked-in public fixtures under `tests/fixtures/evaluation/` prove the
+complete offline path. Run them without Ollama, a GPU, or network access:
+
+```bash
+python scripts/run_reproducible_eval.py \
+  --scenario tests/fixtures/evaluation/scenario.local-tools.v1.json \
+  --provider tests/fixtures/evaluation/provider.local-reference.v1.json \
+  --output .local/evaluation-matrix.json
+```
+
+Repeat `--provider` to build a provider/model matrix. Add `--baseline` with a
+previous single-run report or single-target matrix to enable relative
+regression gates. The command
+returns `0` when every target clears its gates, `1` for a measured regression,
+and `2` for invalid/tampered fixtures or harness errors.
+
+Provider fixtures are deterministic request/result tables. They validate the
+harness and CI plumbing; they do not claim model quality. Real model adapters
+must implement the same injected provider contract, enforce their request
+deadline, and pin a model/provider digest.
+
+Run reports intentionally omit raw values from the diagnostic summary. The
+saved matrix includes raw trajectory inputs and outputs because those are
+required for replay. Treat it like prompt/response data: choose the destination
+explicitly, review it before sharing, and never commit private evaluations.

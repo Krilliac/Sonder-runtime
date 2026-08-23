@@ -105,6 +105,44 @@ class TrajectoryRecord:
             "trajectory_digest": self.digest,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TrajectoryRecord":
+        """Restore a persisted trajectory and verify every recorded digest."""
+        if not isinstance(payload, Mapping) or payload.get("schema") != SCHEMA:
+            raise ValueError("unsupported trajectory payload")
+        if set(payload) != {"schema", "trajectory_id", "metadata", "steps", "trajectory_digest"}:
+            raise ValueError("trajectory payload fields are unsupported or missing")
+        raw_steps = payload.get("steps")
+        if not isinstance(raw_steps, list):
+            raise ValueError("trajectory steps are missing")
+        try:
+            required_step_fields = {
+                "index", "input", "output", "state", "input_digest",
+                "output_digest", "state_digest",
+            }
+            if any(not isinstance(item, Mapping) or set(item) != required_step_fields for item in raw_steps):
+                raise ValueError("trajectory step fields are unsupported or missing")
+            steps = tuple(
+                TrajectoryStep(int(item["index"]), item["input"], item["output"], item.get("state"))
+                for item in raw_steps
+            )
+            record = cls.from_steps(
+                str(payload["trajectory_id"]), steps, metadata=payload.get("metadata")
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("trajectory payload is malformed") from exc
+        for raw, step in zip(raw_steps, record.steps):
+            expected = {
+                "input_digest": step.input_digest,
+                "output_digest": step.output_digest,
+                "state_digest": step.state_digest,
+            }
+            if any(raw.get(name) != digest for name, digest in expected.items()):
+                raise ValueError("trajectory step digest mismatch")
+        if payload.get("trajectory_digest") != record.digest:
+            raise ValueError("trajectory digest mismatch")
+        return record
+
     @property
     def digest(self) -> str:
         payload = {
