@@ -31,6 +31,25 @@ def test_task_create_list_update_and_events():
     assert [event["event"] for event in events] == ["updated", "created"]
 
 
+def test_task_dependency_rejects_direct_and_transitive_cycles():
+    conn = memory_store.connect(":memory:")
+    first = memory_store.create_task(conn, "design")
+    second = memory_store.create_task(conn, "implement")
+    third = memory_store.create_task(conn, "validate")
+    memory_store.add_task_dep(conn, second["id"], first["id"])
+    memory_store.add_task_dep(conn, third["id"], second["id"])
+
+    with pytest.raises(ValueError, match="cannot depend on itself"):
+        memory_store.add_task_dep(conn, first["id"], first["id"])
+    with pytest.raises(ValueError, match="would create a cycle"):
+        memory_store.add_task_dep(conn, first["id"], second["id"])
+    with pytest.raises(ValueError, match="would create a cycle"):
+        memory_store.add_task_dep(conn, first["id"], third["id"])
+    # The reverse-direction edge that does not close a loop is still legal.
+    result = memory_store.add_task_dep(conn, third["id"], first["id"])
+    assert result["depends_on"] == first["id"]
+
+
 def test_task_list_hides_done_by_default():
     conn = memory_store.connect(":memory:")
     done = memory_store.create_task(conn, "finished", status="done")

@@ -8814,7 +8814,29 @@ def master_retry(agent_id: str, tier: str = "") -> str:
                 break
     if retry_project:
         retry_kwargs["project"] = retry_project
-    result = master_orchestrate(**retry_kwargs)
+    # Idempotency fence: two concurrent (or rapidly repeated) retries of the
+    # same persisted master must not both replay a full fleet.  The pending
+    # lease bridges only this dispatch; once the retry master row is durable it
+    # carries the fence itself, so the lease is always released afterwards.
+    retry_lease = None
+    if master_orchestrator.retry_fence_available() and master_orchestrator.fleet_store.get_agent(
+        candidate["id"], role="master",
+    ):
+        retry_lease = master_orchestrator.acquire_retry_lease(candidate["id"])
+        if retry_lease is None:
+            return (
+                "ERROR: master %s already has a retry in flight, was already "
+                "retried, or was just claimed by another caller; check "
+                "master_status() and retry after the active attempt finishes."
+                % candidate["id"]
+            )
+    try:
+        result = master_orchestrate(**retry_kwargs)
+    finally:
+        if retry_lease:
+            master_orchestrator.release_retry_lease(
+                candidate["id"], retry_lease["token"],
+            )
     return "\n".join([
         "persisted master retry",
         "  source: %s [%s] | mode: %s | agents: %d" % (
