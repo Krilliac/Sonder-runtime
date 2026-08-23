@@ -143,13 +143,13 @@ def test_partition_opens_all_circuits_and_fails_fast_until_retry_deadline():
         raise URLError("network partition")
 
     with pytest.raises(URLError, match="network partition"):
-        pool.request(partitioned)
+        pool.request(partitioned, idempotent=True)
     assert len(calls) == 2
     assert {row["state"] for row in pool.status()["workers"]} == {"circuit_open"}
     assert pool.status()["metrics"]["failovers"] == 1
 
     with pytest.raises(WorkerPoolUnavailable, match="retry after 10.000s"):
-        pool.request(partitioned)
+        pool.request(partitioned, idempotent=True)
     assert len(calls) == 2
 
 
@@ -172,11 +172,11 @@ def test_half_open_worker_reconnects_after_cooldown():
             raise URLError("link down")
         return origin
 
-    assert pool.request(send) == workers[0]
+    assert pool.request(send, idempotent=True) == workers[0]
     assert pool.snapshots()[0].state == "circuit_open"
     clock.advance(5)
 
-    assert pool.request(send) == primary
+    assert pool.request(send, idempotent=True) == primary
     primary_status = pool.status()["workers"][0]
     assert primary_status["state"] == "unknown"
     assert primary_status["consecutive_failures"] == 0
@@ -255,7 +255,7 @@ def test_drain_wakes_queued_admission_and_clears_waiter_accounting():
 
 
 def test_origin_inventory_is_bounded_and_rejects_non_origin_urls():
-    with pytest.raises(ValueError, match="without path"):
+    with pytest.raises(ValueError, match="without a path"):
         validate_worker_origin(
             "https://worker.example:443/api", allow_remote=True,
         )

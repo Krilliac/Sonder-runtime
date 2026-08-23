@@ -28,8 +28,8 @@ import urllib.error
 import urllib.request
 
 from sonder_runtime.adapters import model_inventory
-from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain import ollama_policy
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor
 from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
 
@@ -37,20 +37,45 @@ from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
 _FAILOVER_HTTP_CODES = frozenset({502, 503, 504})
 _DEFAULT_FAILURE_THRESHOLD = 3
 _DEFAULT_COOLDOWN_SECONDS = 30.0
-# Repeated circuit trips double the cooldown up to this multiple of the base,
-# so a host that stays down is probed progressively less often.
-_COOLDOWN_MAX_MULTIPLIER = 8
-# Exponential moving average weight for per-worker success latency.
-_LATENCY_EWMA_ALPHA = 0.3
-# Metric labels are assigned "w0".."w{_MAX_METRIC_WORKERS - 1}" in
-# registration order; any worker beyond the cap shares the "overflow" label so
-# an operator-supplied worker list can never grow Prometheus cardinality
-# without bound (see platform/metrics.py's bounded-label-set contract).
+_DEFAULT_MAX_INFLIGHT = 1
+_DEFAULT_QUEUE_DEPTH = 32
+_DEFAULT_ADMISSION_TIMEOUT_SECONDS = 1.0
+_DEFAULT_CAPABILITY_TTL_SECONDS = 300.0
+_MAX_WORKERS = 16
+_MAX_MODELS_PER_WORKER = 2048
+_MAX_INFLIGHT_PER_WORKER = 64
+_MAX_QUEUE_DEPTH = 4096
+_MAX_ADMISSION_TIMEOUT_SECONDS = 60.0
+_MAX_FAILURE_THRESHOLD = 100
+_MAX_COOLDOWN_SECONDS = 3600.0
+_MAX_CAPABILITY_TTL_SECONDS = 86_400.0
+_PROBE_RESPONSE_LIMIT = 1_048_576
+_PROTOCOL = "ollama-http-v1"
 _MAX_METRIC_WORKERS = 16
 _METRIC_OVERFLOW_LABEL = "overflow"
 _configured_workers: tuple[str, ...] | None = None
 _configured_allow_remote: bool | None = None
 _configuration_lock = threading.RLock()
+
+
+class WorkerPoolError(urllib.error.URLError):
+    """Base for privacy-safe pool admission and availability failures."""
+
+
+class WorkerPoolBackpressure(WorkerPoolError):
+    """No worker capacity or bounded queue slot was available."""
+
+
+class WorkerPoolDraining(WorkerPoolError):
+    """New work was refused because pool drain has begun."""
+
+
+class WorkerPoolUnavailable(WorkerPoolError):
+    """No healthy worker can currently accept the request."""
+
+
+class WorkerCapabilityUnavailable(WorkerPoolError):
+    """Healthy workers do not advertise a required model/capability."""
 
 
 def _is_loopback(origin: str) -> bool:
@@ -118,18 +143,33 @@ def parse_worker_origins(raw: str | None) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _model_key(name) -> str:
+    text = str(name or "").strip().casefold()
+    return text[:-7] if text.endswith(":latest") else text
+
+
+def _metric_label(index: int) -> str:
+    return "w%d" % index if index < _MAX_METRIC_WORKERS else _METRIC_OVERFLOW_LABEL
+
+
 def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
     """Normalize one worker origin under the Ollama trust policy."""
     normalized = ollama_policy.normalize(origin)
     parsed = urlsplit(normalized)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("worker endpoint has an invalid port") from error
     if parsed.scheme.casefold() not in {"http", "https"}:
         raise ValueError("worker endpoint must use http or https")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("worker endpoint must not contain inline credentials")
     if not parsed.hostname or port is None:
         raise ValueError("worker endpoint must include a host and explicit port")
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        raise ValueError("worker endpoint must be an origin without a path, query, or fragment")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            "worker endpoint must be an origin without a path, query, or fragment"
+        )
     if not _is_loopback(normalized):
         if not allow_remote:
             raise ValueError(
@@ -140,22 +180,9 @@ def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
     return normalized.rstrip("/")
 
 
-def configure_typed_workers(
-    worker_origins: tuple[str, ...], *, allow_remote: bool,
-) -> None:
-    """Bind validated typed worker configuration before legacy composition.
-
-    The canonical serve path deliberately avoids round-tripping typed startup
-    authority through mutable environment variables.  Keep the same contract
-    for worker endpoints so a validated TOML worker list cannot be silently
-    ignored when the legacy model runtime is imported lazily.
-    """
-    if not isinstance(allow_remote, bool):
-        raise TypeError("allow_remote must be a boolean")
-    normalized = tuple(
-        validate_worker_origin(origin, allow_remote=allow_remote)
-        for origin in tuple(worker_origins)
-    )
+def configure_typed_workers(worker_origins: tuple[str, ...], *, allow_remote: bool) -> None:
+    normalized = tuple(validate_worker_origin(origin, allow_remote=allow_remote)
+                       for origin in tuple(worker_origins))
     global _configured_workers, _configured_allow_remote
     with _configuration_lock:
         _configured_workers = normalized
@@ -173,7 +200,7 @@ def reset_typed_workers() -> None:
 class WorkerEndpoint:
     origin: str
     worker_id: str
-    metric_label: str
+    metric_label: str = "w0"
 
 
 @dataclass(frozen=True)
@@ -195,10 +222,19 @@ class WorkerSnapshot:
     capacity: int
     consecutive_failures: int
     last_error: str
-    cooldown_until: float
+    cooldown_remaining_seconds: float
+    latency_ewma_ms: float | None
+    protocol: str
+    version: str
+    models: tuple[str, ...]
+    capabilities_stale: bool
+    cooldown_until: float = 0.0
     trips: int = 0
     probing: bool = False
-    ewma_latency_ms: float = 0.0
+
+    @property
+    def ewma_latency_ms(self):
+        return self.latency_ewma_ms
 
     def to_dict(self) -> dict:
         return {
@@ -210,10 +246,16 @@ class WorkerSnapshot:
             "capacity": self.capacity,
             "consecutive_failures": self.consecutive_failures,
             "last_error": self.last_error,
+            "cooldown_remaining_seconds": self.cooldown_remaining_seconds,
+            "latency_ewma_ms": self.latency_ewma_ms,
+            "protocol": self.protocol,
+            "version": self.version,
+            "models": list(self.models),
+            "capabilities_stale": self.capabilities_stale,
             "cooldown_until": self.cooldown_until,
             "trips": self.trips,
             "probing": self.probing,
-            "ewma_latency_ms": self.ewma_latency_ms,
+            "ewma_latency_ms": self.latency_ewma_ms or 0.0,
         }
 
 
@@ -224,24 +266,13 @@ class _WorkerState:
     consecutive_failures: int = 0
     last_error: str = ""
     cooldown_until: float = 0.0
-    # Circuit trips since the last success; nonzero after cooldown expiry
-    # marks the half-open state (a single trial request at a time).
+    half_open_inflight: bool = False
+    latency_ewma_ms: float | None = None
+    capabilities: WorkerCapabilities | None = None
+    compatibility_error: str = ""
+    capability_probe_failed: bool = False
     trips: int = 0
-    # Exponential moving average of successful request latency in seconds;
-    # 0.0 means unmeasured, which deliberately sorts first so a fresh worker
-    # receives traffic and gets measured.
-    ewma_latency: float = 0.0
-    # Case-normalized model inventory advertised by this worker, or None when
-    # never recorded.  Experimental affinity seam: see ``note_models``.
-    known_models: frozenset | None = None
-
-
-def _model_key(name) -> str:
-    """Case-normalized model comparison key; ``:latest`` is implicit."""
-    text = str(name or "").strip().casefold()
-    if text.endswith(":latest"):
-        text = text[: -len(":latest")]
-    return text
+    known_models: frozenset[str] | None = None
 
 
 def _worker_id(origin: str) -> str:
@@ -251,8 +282,55 @@ def _worker_id(origin: str) -> str:
     return "%s:%s" % (host, port)
 
 
-def _metric_label(index: int) -> str:
-    return "w%d" % index if index < _MAX_METRIC_WORKERS else _METRIC_OVERFLOW_LABEL
+def _model_names(payload) -> tuple[str, ...]:
+    names = []
+    for row in (payload or {}).get("models") or ():
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if name and len(name) <= 256:
+            names.append(name)
+        if len(names) >= _MAX_MODELS_PER_WORKER:
+            break
+    return tuple(sorted(set(names)))
+
+
+def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0):
+    """Build a bounded prober using the same no-proxy/no-redirect transport."""
+    ollama_endpoint = importlib.import_module(
+        "sonder_runtime.adapters.inference.ollama_endpoint"
+    )
+
+    def read(origin: str, path: str) -> dict:
+        request = urllib.request.Request(origin + path, method="GET")
+        with ollama_endpoint.open_url(
+            request, timeout=timeout, allow_remote=allow_remote,
+        ) as response:
+            raw = response.read(_PROBE_RESPONSE_LIMIT + 1)
+        if len(raw) > _PROBE_RESPONSE_LIMIT:
+            raise ValueError("capability response exceeded 1 MiB")
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("capability response must be an object")
+        return payload
+
+    def probe(origin: str) -> dict:
+        try:
+            version = read(origin, "/api/version")
+        except urllib.error.HTTPError as error:
+            # Older compatible Ollama builds may lack the informational
+            # version route. Model inventory is the load-bearing capability.
+            if int(error.code or 0) != 404:
+                raise
+            version = {"version": "unknown"}
+        tags = read(origin, "/api/tags")
+        return {
+            "protocol": _PROTOCOL,
+            "version": str(version.get("version") or "unknown")[:80],
+            "models": _model_names(tags),
+        }
+
+    return probe
 
 
 class OllamaWorkerPool:
@@ -266,7 +344,13 @@ class OllamaWorkerPool:
         allow_remote: bool = False,
         failure_threshold: int = _DEFAULT_FAILURE_THRESHOLD,
         cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS,
-        time_fn: Callable[[], float] = time.monotonic,
+        max_inflight_per_worker: int = _DEFAULT_MAX_INFLIGHT,
+        queue_depth: int = _DEFAULT_QUEUE_DEPTH,
+        admission_timeout_seconds: float = _DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+        capability_ttl_seconds: float = _DEFAULT_CAPABILITY_TTL_SECONDS,
+        capability_prober: Callable[[str], object] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        time_fn: Callable[[], float] | None = None,
         metrics: MetricsRegistry | None = None,
         redactor: Redactor | None = None,
     ) -> None:
@@ -292,21 +376,38 @@ class OllamaWorkerPool:
             if origin in seen:
                 continue
             seen.add(origin)
-            endpoint = WorkerEndpoint(
-                origin, _worker_id(origin), _metric_label(len(states))
-            )
-            states.append(_WorkerState(endpoint))
+            states.append(_WorkerState(
+                WorkerEndpoint(origin, _worker_id(origin), _metric_label(len(states)))
+            ))
         if not states:
             raise ValueError("at least one Ollama worker is required")
         self._states = states
         self._failure_threshold = int(failure_threshold)
         self._cooldown_seconds = float(cooldown_seconds)
-        self._cooldown_max_seconds = float(cooldown_seconds) * _COOLDOWN_MAX_MULTIPLIER
-        self._time = time_fn
+        self._max_inflight = int(max_inflight_per_worker)
+        self._queue_depth = int(queue_depth)
+        self._admission_timeout = float(admission_timeout_seconds)
+        self._capability_ttl = float(capability_ttl_seconds)
+        self._capability_prober = capability_prober
+        self._clock = time_fn or clock
         self._cursor = 0
-        self._lock = threading.RLock()
-        self._metrics = metrics if metrics is not None else default_registry()
-        self._redactor = redactor if redactor is not None else Redactor()
+        self._waiters = 0
+        self._draining = False
+        self._condition = threading.Condition(threading.RLock())
+        self._probe_lock = threading.Lock()
+        self._metrics = {
+            "logical_requests": 0,
+            "dispatches": 0,
+            "failovers": 0,
+            "transport_failures": 0,
+            "backpressure_rejections": 0,
+            "drain_rejections": 0,
+            "capability_probes": 0,
+            "capability_probe_failures": 0,
+            "reconnects": 0,
+        }
+        self._metrics_observer = metrics
+        self._redactor = redactor or Redactor()
 
     @property
     def enabled(self) -> bool:
@@ -320,46 +421,12 @@ class OllamaWorkerPool:
     def origins(self) -> tuple[str, ...]:
         return tuple(state.endpoint.origin for state in self._states)
 
-    def _ordered(self, model: str | None = None) -> list[_WorkerState]:
-        wanted = _model_key(model)
-        now = self._time()
-        with self._lock:
-            ready = []
-            for state in self._states:
-                if state.cooldown_until > now:
-                    continue
-                if state.trips and state.inflight > 0:
-                    # Half-open: an expired cooldown admits one trial request
-                    # at a time until a success closes the circuit again.
-                    continue
-                ready.append(state)
-            if not ready:
-                ready = [min(self._states, key=lambda item: item.cooldown_until)]
-            start = self._cursor % len(ready)
-            self._cursor += 1
-            rotated = ready[start:] + ready[:start]
-
-            def rank(item: _WorkerState):
-                lacks_model = (
-                    1
-                    if wanted and item.known_models is not None
-                    and wanted not in item.known_models
-                    else 0
-                )
-                return (lacks_model, item.inflight, item.ewma_latency)
-
-            return sorted(rotated, key=rank)
-
     @staticmethod
     def _retryable(error: BaseException) -> bool:
         if isinstance(error, ModelCallError):
-            # A classified failure means a worker answered and the response
-            # was judged (protocol, configuration, scope...). Replaying it on
-            # another host would violate the no-replay contract — except an
-            # upstream 502/503/504, where no model response was produced.
-            # ModelCallError subclasses URLError, so without this branch every
-            # classified failure would look like a transport failure below.
-            return error.status in _FAILOVER_HTTP_CODES
+            return int(getattr(error, "status", 0) or 0) in _FAILOVER_HTTP_CODES
+        if isinstance(error, WorkerPoolError):
+            return False
         if isinstance(error, urllib.error.HTTPError):
             return int(error.code or 0) in _FAILOVER_HTTP_CODES
         return isinstance(
@@ -379,75 +446,171 @@ class OllamaWorkerPool:
             or now - state.capabilities.observed_at >= self._capability_ttl
         )
 
-    def _finish(
-        self,
-        state: _WorkerState,
-        error: BaseException | None,
-        elapsed: float | None = None,
-        *,
-        count_failure: bool = True,
+    def _normalize_capabilities(
+        self, payload: object, *, now: float, measured_ms: float,
+    ) -> tuple[WorkerCapabilities, float]:
+        if isinstance(payload, WorkerCapabilities):
+            protocol = payload.protocol
+            version = payload.version
+            models = payload.models
+            advertised = payload.effective_max_inflight
+        elif isinstance(payload, Mapping):
+            protocol = str(payload.get("protocol") or _PROTOCOL)
+            version = _safe_scalar(payload.get("version"), limit=80)
+            raw_models = payload.get("models") or ()
+            if isinstance(raw_models, (str, bytes)) or not hasattr(
+                raw_models, "__iter__"
+            ):
+                raise ValueError("worker models capability must be a collection")
+            models = tuple(
+                sorted({
+                    str(name).strip()[:256]
+                    for name in raw_models
+                    if str(name).strip()
+                })
+            )[:_MAX_MODELS_PER_WORKER]
+            try:
+                advertised = int(payload.get("max_inflight") or self._max_inflight)
+            except (TypeError, ValueError):
+                advertised = self._max_inflight
+            try:
+                reported_latency = float(payload.get("latency_ms"))
+            except (TypeError, ValueError):
+                reported_latency = measured_ms
+            if math.isfinite(reported_latency) and reported_latency >= 0:
+                measured_ms = reported_latency
+        else:
+            raise ValueError("capability prober returned an invalid report")
+        if protocol != _PROTOCOL:
+            raise ValueError("incompatible worker protocol %r" % protocol)
+        if advertised < 1:
+            raise ValueError("worker advertised invalid capacity")
+        if not math.isfinite(measured_ms) or measured_ms < 0:
+            measured_ms = 0.0
+        return WorkerCapabilities(
+            protocol=protocol,
+            version=_safe_scalar(version, limit=80),
+            models=models,
+            observed_at=now,
+            effective_max_inflight=min(self._max_inflight, advertised),
+        ), round(measured_ms, 3)
+
+    def _record_transport_failure(
+        self, state: _WorkerState, error: BaseException,
     ) -> None:
-        with self._lock:
-            state.inflight = max(0, state.inflight - 1)
-            label = state.endpoint.metric_label
-            if error is None:
-                recovered = state.consecutive_failures > 0
-                state.consecutive_failures = 0
-                state.trips = 0
-                state.last_error = ""
-                state.cooldown_until = 0.0
-                if elapsed is not None and elapsed >= 0:
-                    if state.ewma_latency <= 0:
-                        state.ewma_latency = float(elapsed)
-                    else:
-                        state.ewma_latency += _LATENCY_EWMA_ALPHA * (
-                            float(elapsed) - state.ewma_latency
+        was_open = state.cooldown_until > self._clock()
+        now = self._clock()
+        state.consecutive_failures += 1
+        state.last_error = self._redactor.redact(_safe_error(error))[:200]
+        self._metrics["transport_failures"] += 1
+        if state.consecutive_failures >= self._failure_threshold:
+            exponent = min(3, state.consecutive_failures - self._failure_threshold)
+            state.trips += 1
+            state.cooldown_until = now + self._cooldown_seconds * (2 ** exponent)
+            if not was_open and self._metrics_observer is not None:
+                self._metrics_observer.observe_ollama_worker_circuit(
+                    worker=state.endpoint.metric_label, state="open"
+                )
+
+    def _record_success(self, state: _WorkerState, latency_ms: float) -> None:
+        reconnect = state.consecutive_failures >= self._failure_threshold
+        state.consecutive_failures = 0
+        state.last_error = ""
+        state.cooldown_until = 0.0
+        state.trips = 0
+        state.half_open_inflight = False
+        if state.latency_ewma_ms is None:
+            state.latency_ewma_ms = latency_ms
+        else:
+            state.latency_ewma_ms = 0.25 * latency_ms + 0.75 * state.latency_ewma_ms
+        if reconnect:
+            self._metrics["reconnects"] += 1
+            if self._metrics_observer is not None:
+                self._metrics_observer.observe_ollama_worker_circuit(
+                    worker=state.endpoint.metric_label, state="closed"
+                )
+
+    def refresh_capabilities(
+        self, *, force: bool = False,
+    ) -> tuple[WorkerSnapshot, ...]:
+        """Probe stale workers concurrently and retain deterministic state order.
+
+        Circuit-open workers are not probed before their retry deadline unless
+        ``force`` is explicitly requested by an operator-facing caller.
+        """
+        if self._capability_prober is None:
+            return self.snapshots()
+        if not self._probe_lock.acquire(blocking=False):
+            return self.snapshots()
+        try:
+            now = self._clock()
+            with self._condition:
+                candidates = [
+                    state for state in self._states
+                    if (force or self._capabilities_stale(state, now))
+                    and (force or state.cooldown_until <= now)
+                    and not state.half_open_inflight
+                ]
+            if not candidates:
+                return self.snapshots()
+
+            def run(state: _WorkerState):
+                started = self._clock()
+                try:
+                    payload = self._capability_prober(state.endpoint.origin)
+                    elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
+                    return payload, elapsed_ms, None
+                except Exception as error:
+                    return None, 0.0, error
+
+            workers = min(4, len(candidates))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(run, state) for state in candidates]
+                outcomes = [future.result() for future in futures]
+
+            with self._condition:
+                for state, (payload, measured_ms, error) in zip(candidates, outcomes):
+                    self._metrics["capability_probes"] += 1
+                    if error is not None:
+                        self._metrics["capability_probe_failures"] += 1
+                        state.capability_probe_failed = True
+                        if self._retryable(error):
+                            self._record_transport_failure(state, error)
+                        else:
+                            state.compatibility_error = self._redactor.redact(_safe_error(error))
+                            state.last_error = state.compatibility_error
+                        continue
+                    try:
+                        capabilities, latency_ms = self._normalize_capabilities(
+                            payload, now=self._clock(), measured_ms=measured_ms,
                         )
-                self._metrics.observe_ollama_worker_request(
-                    worker=label, result="ok", elapsed_seconds=elapsed or 0.0,
-                )
-                if recovered:
-                    self._metrics.observe_ollama_worker_circuit(
-                        worker=label, state="closed",
-                    )
-                return
-            # Transport exception text can contain internal hostnames, proxy
-            # paths, or credential-shaped response fragments.  Status needs a
-            # stable category, not the provider's free-form detail.
-            state.last_error = type(error).__name__
-            self._metrics.observe_ollama_worker_request(
-                worker=label, result="error", elapsed_seconds=elapsed or 0.0,
-            )
-            if not count_failure:
-                return
-            state.consecutive_failures += 1
-            if state.consecutive_failures >= self._failure_threshold:
-                now = self._time()
-                already_open = state.cooldown_until > now
-                state.trips += 1
-                backoff = min(
-                    self._cooldown_seconds * (2 ** (state.trips - 1)),
-                    self._cooldown_max_seconds,
-                )
-                state.cooldown_until = now + backoff
-                if not already_open:
-                    self._metrics.observe_ollama_worker_circuit(
-                        worker=label, state="open",
-                    )
+                    except (TypeError, ValueError) as capability_error:
+                        self._metrics["capability_probe_failures"] += 1
+                        state.capability_probe_failed = True
+                        state.compatibility_error = self._redactor.redact(_safe_error(capability_error))
+                        state.last_error = state.compatibility_error
+                        continue
+                    state.capabilities = capabilities
+                    state.compatibility_error = ""
+                    state.capability_probe_failed = False
+                    self._record_success(state, latency_ms)
+                self._condition.notify_all()
+            return self.snapshots()
+        finally:
+            self._probe_lock.release()
+
+    def _supports_model(self, state: _WorkerState, model: str | None) -> bool:
+        if not model:
+            return True
+        if state.capabilities is None:
+            return not state.capability_probe_failed
+        wanted = _model_key(model)
+        return any(_model_key(name) == wanted for name in state.capabilities.models)
 
     def note_models(self, origin_or_id: str, model_names) -> bool:
-        """Record a worker's advertised model inventory (experimental seam).
-
-        Inventory only *orders* selection — a worker whose recorded inventory
-        lacks the requested model sorts last but is never excluded, because a
-        recorded list may be stale and a worker can pull a model on demand.
-        Returns whether a matching worker was found.
-        """
         target = str(origin_or_id or "").strip().rstrip("/")
-        names = frozenset(
-            key for key in (_model_key(name) for name in (model_names or ())) if key
-        )
-        with self._lock:
+        names = frozenset(_model_key(name) for name in (model_names or ()) if _model_key(name))
+        with self._condition:
             for state in self._states:
                 if target in (state.endpoint.origin, state.endpoint.worker_id):
                     state.known_models = names
@@ -455,69 +618,222 @@ class OllamaWorkerPool:
         return False
 
     def refresh_inventory(self, fetch_tags: Callable[[str], object]) -> dict:
-        """Record every worker's advertised model inventory (experimental).
-
-        ``fetch_tags(origin)`` must return that origin's parsed ``/api/tags``
-        payload. Failures are per-worker and non-fatal: a worker whose
-        inventory cannot be read keeps whatever record it already had, so a
-        transient probe failure cannot erase known affinity. Returns a map of
-        worker id to recorded model count, or to an error string.
-        """
-        with self._lock:
-            endpoints = [state.endpoint for state in self._states]
         results = {}
+        with self._condition:
+            endpoints = [state.endpoint for state in self._states]
         for endpoint in endpoints:
             try:
-                payload = fetch_tags(endpoint.origin)
-                rows = model_inventory.inventory_rows(payload, "/api/tags")
-                names = [
-                    name
-                    for name in (
-                        row.get("name") or row.get("model") for row in rows
-                    )
-                    if name
-                ]
+                rows = model_inventory.inventory_rows(
+                    fetch_tags(endpoint.origin), "/api/tags"
+                )
+                names = [row.get("name") or row.get("model") for row in rows]
+                self.note_models(endpoint.origin, names)
+                results[endpoint.worker_id] = len([name for name in names if name])
             except Exception as error:
-                results[endpoint.worker_id] = "error: %s" % str(error)[:120]
-                continue
-            self.note_models(endpoint.origin, names)
-            results[endpoint.worker_id] = len(names)
+                results[endpoint.worker_id] = "error: %s" % _safe_error(error)
         return results
+
+    def _capacity(self, state: _WorkerState) -> int:
+        if state.capabilities is None:
+            return self._max_inflight
+        return state.capabilities.effective_max_inflight
+
+    def _choose(
+        self, *, model: str | None, excluded: set[str], now: float,
+    ) -> _WorkerState | None:
+        candidates = [
+            state for state in self._states
+            if state.endpoint.worker_id not in excluded
+            and not state.compatibility_error
+            and self._supports_model(state, model)
+            and state.cooldown_until <= now
+            and not state.half_open_inflight
+            and state.inflight < self._capacity(state)
+        ]
+        if not candidates:
+            return None
+        half_open = [
+            state for state in candidates
+            if state.consecutive_failures >= self._failure_threshold
+        ]
+        if half_open:
+            candidates = half_open
+        start = self._cursor % len(candidates)
+        self._cursor += 1
+        rotated = candidates[start:] + candidates[:start]
+
+        def score(state: _WorkerState):
+            latency = state.latency_ewma_ms
+            if latency is None:
+                latency = 1000.0
+            lacks_model = (
+                1 if model and state.known_models is not None
+                and _model_key(model) not in state.known_models else 0
+            )
+            return (lacks_model, (state.inflight + 1) * latency, state.inflight)
+
+        return min(rotated, key=score)
+
+    def _acquire(
+        self,
+        *,
+        model: str | None,
+        excluded: set[str],
+        admission_timeout: float,
+    ) -> _WorkerState:
+        deadline = time.monotonic() + admission_timeout
+        queued = False
+        with self._condition:
+            while True:
+                if self._draining:
+                    if queued:
+                        self._waiters -= 1
+                    self._metrics["drain_rejections"] += 1
+                    raise WorkerPoolDraining("Ollama worker pool is draining")
+                now = self._clock()
+                state = self._choose(model=model, excluded=excluded, now=now)
+                if state is not None:
+                    state.inflight += 1
+                    if state.consecutive_failures >= self._failure_threshold:
+                        state.half_open_inflight = True
+                    if queued:
+                        self._waiters -= 1
+                    return state
+
+                remaining_states = [
+                    state for state in self._states
+                    if state.endpoint.worker_id not in excluded
+                    and not state.compatibility_error
+                    and self._supports_model(state, model)
+                ]
+                if not remaining_states:
+                    if queued:
+                        self._waiters -= 1
+                    known = all(state.capabilities is not None for state in self._states)
+                    if model and known:
+                        raise WorkerCapabilityUnavailable(
+                            "no Ollama worker advertises model %r" % model
+                        )
+                    raise WorkerPoolUnavailable("no Ollama worker is available")
+
+                saturated = any(
+                    state.cooldown_until <= now
+                    and state.inflight >= self._capacity(state)
+                    for state in remaining_states
+                )
+                if not saturated:
+                    if queued:
+                        self._waiters -= 1
+                    retry_after = min(
+                        max(0.0, state.cooldown_until - now)
+                        for state in remaining_states
+                    )
+                    raise WorkerPoolUnavailable(
+                        "all Ollama workers are unavailable; retry after %.3fs"
+                        % retry_after
+                    )
+                if not queued:
+                    if self._waiters >= self._queue_depth:
+                        self._metrics["backpressure_rejections"] += 1
+                        raise WorkerPoolBackpressure("Ollama worker queue is full")
+                    self._waiters += 1
+                    queued = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._waiters -= 1
+                    self._metrics["backpressure_rejections"] += 1
+                    raise WorkerPoolBackpressure(
+                        "timed out waiting for Ollama worker capacity"
+                    )
+                self._condition.wait(timeout=remaining)
+
+    def _finish(
+        self,
+        state: _WorkerState,
+        error: BaseException | None = None,
+        elapsed: float | None = None,
+        *,
+        latency_ms: float | None = None,
+        count_failure: bool = True,
+    ) -> None:
+        if latency_ms is None:
+            latency_ms = max(0.0, float(elapsed or 0.0) * 1000.0)
+        with self._condition:
+            state.inflight = max(0, state.inflight - 1)
+            state.half_open_inflight = False
+            if error is None:
+                self._record_success(state, latency_ms)
+                result = "ok"
+            elif count_failure and self._retryable(error):
+                self._record_transport_failure(state, error)
+                result = "error"
+            else:
+                state.last_error = self._redactor.redact(_safe_error(error))[:200]
+                result = "error"
+            if self._metrics_observer is not None:
+                self._metrics_observer.observe_ollama_worker_request(
+                    worker=state.endpoint.metric_label,
+                    result=result,
+                    elapsed_seconds=max(0.0, latency_ms / 1000.0),
+                )
+            self._condition.notify_all()
 
     def request(
         self,
         sender: Callable[[str], object],
         *,
         model: str | None = None,
+        admission_timeout_seconds: float | None = None,
         idempotent: bool = False,
     ):
-        """Route one request without replaying ambiguous non-idempotent work.
-
-        ``urllib`` transport exceptions do not prove that a request body was
-        never delivered.  Failover is therefore reserved for explicitly
-        idempotent control-plane reads.  Model POSTs select one worker exactly
-        once; a timeout or connection loss after send is surfaced as uncertain
-        instead of duplicating inference on another host.
-        """
+        """Admit and send one logical request with pre-response failover only."""
+        model = str(model or "").strip() or None
+        with self._condition:
+            self._metrics["logical_requests"] += 1
+        if model:
+            self.refresh_capabilities()
+        admission_timeout = (
+            self._admission_timeout
+            if admission_timeout_seconds is None
+            else max(0.0, float(admission_timeout_seconds))
+        )
+        admission_deadline = time.monotonic() + admission_timeout
+        attempted: set[str] = set()
         last_error = None
-        for state in self._ordered(model):
-            self._start(state)
-            started = self._time()
+        while True:
+            try:
+                state = self._acquire(
+                    model=model,
+                    excluded=attempted,
+                    admission_timeout=max(
+                        0.0, admission_deadline - time.monotonic(),
+                    ),
+                )
+            except WorkerPoolUnavailable:
+                if last_error is not None:
+                    raise last_error
+                raise
+            with self._condition:
+                if attempted:
+                    self._metrics["failovers"] += 1
+                self._metrics["dispatches"] += 1
+            attempted.add(state.endpoint.worker_id)
+            started = self._clock()
             try:
                 result = sender(state.endpoint.origin)
             except Exception as error:
+                latency_ms = max(0.0, (self._clock() - started) * 1000.0)
                 retryable = self._retryable(error)
                 self._finish(
-                    state,
-                    error,
-                    self._time() - started,
+                    state, error=error, latency_ms=latency_ms,
                     count_failure=retryable,
                 )
                 if not idempotent or not retryable:
                     raise
                 last_error = error
                 continue
-            self._finish(state, None, self._time() - started)
+            latency_ms = max(0.0, (self._clock() - started) * 1000.0)
+            self._finish(state, error=None, latency_ms=latency_ms)
             return result
 
     def drain(self, *, timeout_seconds: float = 5.0) -> bool:
@@ -534,10 +850,40 @@ class OllamaWorkerPool:
             return True
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
-        now = self._time()
-        with self._lock:
-            return tuple(
-                WorkerSnapshot(
+        now = self._clock()
+        with self._condition:
+            snapshots = []
+            for state in self._states:
+                stale = self._capabilities_stale(state, now)
+                healthy = (
+                    not state.compatibility_error
+                    and not (
+                        state.capabilities is None
+                        and state.capability_probe_failed
+                    )
+                    and state.cooldown_until <= now
+                )
+                capacity = self._capacity(state)
+                if self._draining:
+                    label = "draining" if state.inflight else "drained"
+                elif state.compatibility_error:
+                    label = "incompatible"
+                elif state.cooldown_until > now:
+                    label = "circuit_open"
+                elif state.capabilities is None and state.capability_probe_failed:
+                    label = "unreachable"
+                elif state.half_open_inflight:
+                    label = "reconnecting"
+                elif state.inflight >= capacity:
+                    label = "saturated"
+                elif state.capabilities is None:
+                    label = "unknown"
+                elif stale:
+                    label = "stale"
+                else:
+                    label = "ready"
+                capabilities = state.capabilities
+                snapshots.append(WorkerSnapshot(
                     worker_id=state.endpoint.worker_id,
                     origin=state.endpoint.origin,
                     state=label,
@@ -546,13 +892,22 @@ class OllamaWorkerPool:
                     capacity=capacity,
                     consecutive_failures=state.consecutive_failures,
                     last_error=state.last_error,
+                    cooldown_remaining_seconds=round(
+                        max(0.0, state.cooldown_until - now), 3,
+                    ),
+                    latency_ewma_ms=(
+                        None if state.latency_ewma_ms is None
+                        else round(state.latency_ewma_ms, 3)
+                    ),
+                    protocol=capabilities.protocol if capabilities else "unknown",
+                    version=capabilities.version if capabilities else "unknown",
+                    models=capabilities.models if capabilities else (),
+                    capabilities_stale=stale,
                     cooldown_until=state.cooldown_until,
                     trips=state.trips,
-                    probing=bool(state.trips) and state.cooldown_until <= now,
-                    ewma_latency_ms=round(state.ewma_latency * 1000.0, 3),
-                )
-                for state in self._states
-            )
+                    probing=state.half_open_inflight,
+                ))
+            return tuple(snapshots)
 
     def status(self) -> dict:
         workers = self.snapshots()
@@ -568,12 +923,23 @@ class OllamaWorkerPool:
                 1 for state in self._states
                 if not _is_loopback(state.endpoint.origin)
             ),
+            "healthy_worker_count": sum(1 for worker in workers if worker.healthy),
+            "available_capacity": sum(
+                max(0, worker.capacity - worker.inflight)
+                for worker in workers
+                if not draining
+                and worker.healthy
+                and worker.state not in {"incompatible", "circuit_open"}
+            ),
             "remote_tls_required": self.has_remote_workers,
             "tls_verification": (
                 "system-trust-store" if self.has_remote_workers else "not-applicable"
             ),
             "non_idempotent_failover": False,
-            "workers": [snapshot.to_dict() for snapshot in self.snapshots()],
+            "queue": {"waiting": waiters, "limit": self._queue_depth},
+            "routing": "latency-aware-least-inflight",
+            "metrics": metrics,
+            "workers": [snapshot.to_dict() for snapshot in workers],
         }
 
     def operator_status_lines(self) -> tuple[str, ...]:
@@ -620,20 +986,32 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     """Build the pool from consented, bounded environment configuration."""
     env = os.environ if environment is None else environment
     with _configuration_lock:
-        configured_workers = _configured_workers
-        configured_allow_remote = _configured_allow_remote
-    if (
-        environment is None
-        and configured_workers is not None
-        and configured_allow_remote is not None
-    ):
-        worker_origins = configured_workers
-        allow_remote = configured_allow_remote
+        typed_workers = _configured_workers
+        typed_allow_remote = _configured_allow_remote
+    if environment is None and typed_workers is not None and typed_allow_remote is not None:
+        worker_origins = typed_workers
+        allow_remote = typed_allow_remote
     else:
         worker_origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
         allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
             "1", "true", "yes", "on",
         }
+    cooldown = _positive_int(
+        env,
+        "SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS",
+        int(_DEFAULT_COOLDOWN_SECONDS),
+        maximum=int(_MAX_COOLDOWN_SECONDS),
+    )
+    admission_ms = _positive_int(
+        env,
+        "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS",
+        int(_DEFAULT_ADMISSION_TIMEOUT_SECONDS * 1000),
+        maximum=int(_MAX_ADMISSION_TIMEOUT_SECONDS * 1000),
+    )
+    probe_timeout_ms = _positive_int(
+        env, "SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS", 2000,
+        maximum=30_000,
+    )
     return OllamaWorkerPool(
         primary_origin,
         worker_origins,
@@ -663,6 +1041,7 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         capability_prober=_default_capability_prober(
             allow_remote=allow_remote, timeout=probe_timeout_ms / 1000.0,
         ),
+        metrics=default_registry(),
     )
 
 

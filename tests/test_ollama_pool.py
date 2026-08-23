@@ -253,11 +253,11 @@ def test_pool_breaks_idle_ties_toward_the_lower_latency_worker():
         return origin
 
     # Unmeasured workers sort first, so the first two requests measure both.
-    pool.request(send)
-    pool.request(send)
+    pool.request(send, idempotent=True)
+    pool.request(send, idempotent=True)
     assert set(chosen) == {PRIMARY, SECOND}
     # With both idle and measured, the faster host wins the tie.
-    pool.request(send)
+    pool.request(send, idempotent=True)
     pool.request(send)
     assert chosen[2:] == [SECOND, SECOND]
 
@@ -281,20 +281,20 @@ def test_circuit_cooldown_backs_off_exponentially_up_to_a_cap():
     def primary_snapshot():
         return next(s for s in pool.snapshots() if s.origin == PRIMARY)
 
-    pool.request(send)
+    pool.request(send, idempotent=True)
     snap = primary_snapshot()
     assert snap.trips == 1
     assert snap.cooldown_until == pytest.approx(clock.now + 30, abs=1)
 
     clock.advance(31)
-    pool.request(send)  # the half-open trial fails: the cooldown doubles
+    pool.request(send, idempotent=True)  # the half-open trial fails: the cooldown doubles
     snap = primary_snapshot()
     assert snap.trips == 2
     assert snap.cooldown_until == pytest.approx(clock.now + 60, abs=1)
 
     for _ in range(6):
         clock.advance(1000)
-        pool.request(send)
+        pool.request(send, idempotent=True)
     snap = primary_snapshot()
     # The backoff is capped at 8x the base cooldown.
     assert snap.cooldown_until - clock.now == pytest.approx(240, abs=1)
@@ -312,7 +312,7 @@ def test_half_open_worker_admits_one_trial_and_recovers_on_success():
         clock.advance(0.5)  # gives the healthy worker a measured latency
         return origin
 
-    pool.request(fail_primary)  # trips the primary circuit
+    pool.request(fail_primary, idempotent=True)  # trips the primary circuit
     clock.advance(31)
 
     concurrent = []
@@ -325,7 +325,7 @@ def test_half_open_worker_admits_one_trial_and_recovers_on_success():
         return origin
 
     # The unmeasured, idle primary ranks first, so it receives the trial.
-    assert pool.request(trial) == PRIMARY
+    assert pool.request(trial, idempotent=True) == PRIMARY
     assert concurrent == [SECOND]
 
     snap = next(s for s in pool.snapshots() if s.origin == PRIMARY)
@@ -363,7 +363,9 @@ def test_model_affinity_orders_workers_lacking_the_model_last():
             raise URLError("second down")
         return origin
 
-    assert pool.request(send_failing_second, model="qwen3-coder:30b") == PRIMARY
+    assert pool.request(
+        send_failing_second, model="qwen3-coder:30b", idempotent=True,
+    ) == PRIMARY
     assert failed == [SECOND]
 
 
@@ -393,7 +395,7 @@ def test_pool_never_replays_a_classified_post_response_failure():
             raise ModelCallError("http", "worker overloaded", status=503)
         return origin
 
-    assert pool.request(send_unavailable) not in (None, unavailable[0])
+    assert pool.request(send_unavailable, idempotent=True) not in (None, unavailable[0])
     assert len(unavailable) == 2
 
 
@@ -468,7 +470,7 @@ def test_pool_records_request_metrics_by_bounded_worker_slot_on_success_and_fail
             raise URLError("primary unavailable")
         return "ok"
 
-    pool.request(send)
+    pool.request(send, idempotent=True)
 
     assert metrics.requests == [("w0", "error"), ("w1", "ok")]
 
@@ -517,7 +519,7 @@ def test_pool_redacts_secret_shaped_text_out_of_stored_last_error():
             raise ConnectionError("connect failed: api_key=sk-abcdef0123456789 rejected")
         return origin
 
-    pool.request(send)
+    pool.request(send, idempotent=True)
 
     primary = next(s for s in pool.snapshots() if s.origin.endswith(".1:11434"))
     assert "sk-abcdef0123456789" not in primary.last_error
