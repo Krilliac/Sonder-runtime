@@ -1,0 +1,53 @@
+{
+  "schema": "sonder.evaluation-case-manifest.v1",
+  "suite": {
+    "schema": "sonder.evaluation-proposal-lifecycle.v1",
+    "suite_id": "research-golden",
+    "version": "1",
+    "dimensions": [
+      {"name": "split", "value": "holdout"}
+    ],
+    "metric_names": ["passed"],
+    "suite_digest": "e2c1ac2130c116373aa507811e81ea448de1b6bb8dc827f9b9c4aa1e6ddeda69"
+  },
+  "cases": [
+    {
+      "case_id": "json-shape",
+      "input": "Return an object with a non-empty name.",
+      "target": {"name": "example"},
+      "grader": {
+        "verifier": "json_schema",
+        "spec": {
+          "schema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {"name": {"type": "string", "minLength": 1}}
+          }
+        },
+        "advisory": false
+      },
+      "provenance": {
+        "source": "docs/research/examples",
+        "revision": "v1",
+        "artifact_digest": ""
+      },
+      "tags": ["json", "smoke"]
+    },
+    {
+      "case_id": "python-reverse",
+      "input": "Implement reverse_string(s).",
+      "target": "reverse_string('abc') == 'cba'",
+      "grader": {
+        "verifier": "python_exec",
+        "spec": {"check": "assert reverse_string('abc') == 'cba'"},
+        "advisory": false
+      },
+      "provenance": {
+        "source": "training_tasks.py",
+        "revision": "99162cf9",
+        "artifact_digest": ""
+      },
+      "tags": ["python", "smoke"]
+    }
+  ]
+}

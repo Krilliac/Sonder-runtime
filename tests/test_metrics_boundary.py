@@ -54,6 +54,9 @@ def test_metric_names_and_labels_remain_unchanged():
     assert registry.requests_total is not None
     assert registry.request_duration_seconds is not None
     assert registry.active_requests is not None
+    assert registry.admission_queue_depth is not None
+    assert registry.admission_queue_wait_seconds is not None
+    assert registry.admission_rejections_total is not None
     assert registry.auth_failures_total is not None
 
 
@@ -63,11 +66,16 @@ def test_enabled_metric_names_and_label_sets_remain_unchanged():
     registry = platform_metrics.MetricsRegistry()
     collectors = registry._registry._names_to_collectors
     expected = {
-        "sonder_build": ("version", "commit"),
-        "sonder_process": (),
+        "sonder_build_info": ("version", "commit"),
+        "sonder_process_state": (),
         "sonder_requests": ("route", "result"),
         "sonder_request_duration_seconds": ("route",),
         "sonder_active_requests": (),
+        "sonder_admission_capacity": ("kind",),
+        "sonder_admission_queue_depth": (),
+        "sonder_admission_queue_high_watermark": (),
+        "sonder_admission_queue_wait_seconds": (),
+        "sonder_admission_rejections": ("reason",),
         "sonder_request_cache": ("result",),
         "sonder_model_calls": ("tier", "result"),
         "sonder_model_call_duration_seconds": ("tier",),
@@ -82,6 +90,9 @@ def test_enabled_metric_names_and_label_sets_remain_unchanged():
         "sonder_disk_free_bytes": ("path_class",),
         "sonder_redaction_failures": (),
         "sonder_auth_failures": ("reason",),
+        "sonder_ollama_worker_requests": ("worker", "result"),
+        "sonder_ollama_worker_duration_seconds": ("worker",),
+        "sonder_ollama_worker_circuit_state": ("worker", "state"),
     }
     for name, labels in expected.items():
         collector = collectors[name]

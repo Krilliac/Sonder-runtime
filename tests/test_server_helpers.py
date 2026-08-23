@@ -384,6 +384,57 @@ def test_make_generate_auto_sizes_context_from_selected_model(monkeypatch):
     assert seen["options"]["num_ctx"] == 16384
 
 
+def test_model_context_metadata_failure_is_cached_only_briefly(monkeypatch):
+    """A failed /api/show pins the conservative context fallback; that verdict
+    must expire on the short negative TTL, not the 5-minute positive TTL."""
+    calls = []
+
+    def failing_post(path, payload, **_kwargs):
+        calls.append(path)
+        raise RuntimeError("ollama briefly unavailable")
+
+    monkeypatch.setattr(server, "_post", failing_post)
+    server._MODEL_CONTEXT_CACHE.clear()
+
+    assert server._model_context_metadata("local-7b") == (None, None)
+    assert server._model_context_metadata("local-7b") == (None, None)
+    assert calls == ["/api/show"]  # the fresh negative entry served the retry
+
+    # Age the negative entry past the negative TTL but far under the positive
+    # TTL, then let the provider recover.
+    stamp, ctx, params = server._MODEL_CONTEXT_CACHE["local-7b"]
+    server._MODEL_CONTEXT_CACHE["local-7b"] = (
+        stamp - server._MODEL_CONTEXT_CACHE_NEGATIVE_TTL - 1, ctx, params,
+    )
+
+    def good_post(path, payload, **_kwargs):
+        calls.append(path)
+        return {
+            "details": {"parameter_size": "30.5B"},
+            "model_info": {"qwen3moe.context_length": 262144},
+        }
+
+    monkeypatch.setattr(server, "_post", good_post)
+    assert server._model_context_metadata("local-7b") == (262144, "30.5B")
+    assert len(calls) == 2
+
+    # A positive entry of the same age still rides the long TTL.
+    stamp, ctx, params = server._MODEL_CONTEXT_CACHE["local-7b"]
+    server._MODEL_CONTEXT_CACHE["local-7b"] = (
+        stamp - server._MODEL_CONTEXT_CACHE_NEGATIVE_TTL - 1, ctx, params,
+    )
+    assert server._model_context_metadata("local-7b") == (262144, "30.5B")
+    assert len(calls) == 2
+
+
+def test_model_context_metadata_never_probes_cloud_models(monkeypatch):
+    def unexpected_post(path, payload, **_kwargs):
+        raise AssertionError("cloud models must not be probed via /api/show")
+
+    monkeypatch.setattr(server, "_post", unexpected_post)
+    assert server._model_context_metadata("qwen3-coder:cloud") == (None, None)
+
+
 def test_make_generate_marks_partial_provider_usage_as_mixed(monkeypatch):
     def fake_post(_path, _payload):
         return {"message": {"content": "ok"}, "eval_count": 2}

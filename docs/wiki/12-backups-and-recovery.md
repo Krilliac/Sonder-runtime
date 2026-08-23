@@ -19,7 +19,7 @@ consistent because SQLite databases are copied with the online-backup API.
 
 ```bash
 python -m sonder_runtime backup create --json     # -> backup_id, path, files, bytes
-python -m sonder_runtime backup verify <dir>      # presence + size + SHA-256 of every entry
+python -m sonder_runtime backup verify <dir>      # hashes + SQLite/schema/policy integrity
 python -m sonder_runtime backup list --json
 python -m sonder_runtime backup prune             # tiered retention (default)
 python -m sonder_runtime backup prune --keep 7    # simple keep-N
@@ -28,7 +28,9 @@ python -m sonder_runtime backup prune --keep 7    # simple keep-N
 **Algorithm:** acquire the `backup` maintenance lock; reject concurrent
 migration/restore/promotion/update; online-copy each live DB into a
 staging dir; copy authoritative files; fsync; hash + manifest; verify
-every staged file; atomically rename staging → final; record `verified`;
+every staged file; run read-only SQLite quick/foreign-key checks and compare
+the copied migration ledgers to the manifest; atomically rename staging →
+final; record `verified`;
 apply retention **only after** the new backup verifies. A failed backup
 never prunes the last verified one.
 
@@ -49,8 +51,10 @@ python -m sonder_runtime restore apply  <backup-dir> /var/lib/sonder-restore --c
 python -m sonder_runtime restore smoke  <backup-dir>
 ```
 
-`restore smoke` restores into a disposable directory and checks each DB's
-`PRAGMA integrity_check`, foreign keys, and migration-ledger health.
+Normal verification already checks hashes, state inventory, policy JSON,
+`PRAGMA quick_check`, foreign keys, and migration-ledger health. `restore
+smoke` additionally restores into a disposable directory and runs each DB's
+full `PRAGMA integrity_check` against the copied result.
 Swapping the restored directory into place is a stopped-service operator
 step ([backup-restore](../runbooks/backup-restore.md)).
 

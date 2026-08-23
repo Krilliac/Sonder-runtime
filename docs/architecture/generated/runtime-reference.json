@@ -5859,6 +5859,29 @@
     },
     {
       "aliases": [],
+      "category": "basic",
+      "name": "/replay",
+      "native": true,
+      "params": [
+        {
+          "default": "",
+          "name": "thread",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 20,
+          "name": "turns",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "safe",
+      "summary": "re-render the last N stored turns of a thread (default: this one)",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "repo",
       "name": "/repo_blame",
       "native": false,
@@ -8062,6 +8085,16 @@
       "tool": "verify_artifact"
     },
     {
+      "aliases": [],
+      "category": "basic",
+      "name": "/version",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show the runtime version and release stamp",
+      "tool": ""
+    },
+    {
       "aliases": [
         "/analyzeimage"
       ],
@@ -8222,6 +8255,16 @@
       "params": [],
       "risk": "safe",
       "summary": "show current account",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "system",
+      "name": "/why",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "explain how the previous plain-language turn (or [text]) routed",
       "tool": ""
     },
     {
@@ -8921,6 +8964,48 @@
       "type": "tuple[str, ...]"
     },
     {
+      "default": 1,
+      "field": "worker_max_inflight",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 32,
+      "field": "worker_queue_depth",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 1000,
+      "field": "worker_admission_timeout_ms",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 3,
+      "field": "worker_failure_threshold",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 30,
+      "field": "worker_cooldown_seconds",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 300,
+      "field": "worker_capability_ttl_seconds",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
+      "default": 2000,
+      "field": "worker_probe_timeout_ms",
+      "section": "ollama",
+      "type": "int"
+    },
+    {
       "default": 60,
       "field": "startup_timeout_seconds",
       "section": "ollama",
@@ -9064,12 +9149,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 301,
-    "configuration": 67,
+    "commands": 304,
+    "configuration": 74,
     "events": 43,
     "tools": 205
   },
-  "digest": "9ab0af259d8db8564b1c381691fe1d9505c16853882481e426a2ed070e90b374",
+  "digest": "274cf30536ab679bf25028ccd19c23b831d2e15001382ceec8e09c6248721ea1",
   "events": [
     {
       "name": "session.started",
@@ -9540,10 +9625,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "379cab6b94709800c03f8cdca08ca82f6494f01ce4a2d63860a55c7bfb19d22f",
+    "server.py": "18af5f1b161e678b214674a07fae713d825f6d8b109a680235c9d1b8ea3d66ca",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "aa8caaeec49393f1460681d752ce3ee59e300f8b843ba035c83921b77ae384fb"
+    "sonder_runtime/platform/config.py": "8828256187e05826f8140fe8605e4406ed4dfcf2b17c2376f09477bc9935498c"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [

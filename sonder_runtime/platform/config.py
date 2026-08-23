@@ -102,6 +102,13 @@ class OllamaConfig:
     url: str = "http://127.0.0.1:11434"
     allow_remote: bool = False
     workers: tuple[str, ...] = ()
+    worker_max_inflight: int = 1
+    worker_queue_depth: int = 32
+    worker_admission_timeout_ms: int = 1_000
+    worker_failure_threshold: int = 3
+    worker_cooldown_seconds: int = 30
+    worker_capability_ttl_seconds: int = 300
+    worker_probe_timeout_ms: int = 2_000
     startup_timeout_seconds: int = 60
     request_timeout_seconds: int = 300
 
@@ -398,6 +405,37 @@ def _apply_environment(
         ollama = replace(
             ollama, allow_remote=_env_bool(env["SONDER_ALLOW_REMOTE_OLLAMA"])
         )
+    ollama = replace(
+        ollama,
+        worker_max_inflight=_env_int(
+            "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", env,
+            ollama.worker_max_inflight, errors,
+        ),
+        worker_queue_depth=_env_int(
+            "SONDER_OLLAMA_WORKER_QUEUE_DEPTH", env,
+            ollama.worker_queue_depth, errors,
+        ),
+        worker_admission_timeout_ms=_env_int(
+            "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS", env,
+            ollama.worker_admission_timeout_ms, errors,
+        ),
+        worker_failure_threshold=_env_int(
+            "SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD", env,
+            ollama.worker_failure_threshold, errors,
+        ),
+        worker_cooldown_seconds=_env_int(
+            "SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS", env,
+            ollama.worker_cooldown_seconds, errors,
+        ),
+        worker_capability_ttl_seconds=_env_int(
+            "SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS", env,
+            ollama.worker_capability_ttl_seconds, errors,
+        ),
+        worker_probe_timeout_ms=_env_int(
+            "SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS", env,
+            ollama.worker_probe_timeout_ms, errors,
+        ),
+    )
     if "SONDER_ALLOW_CLOUD" in env:
         features = replace(features, cloud=_env_bool(env["SONDER_ALLOW_CLOUD"]))
     if "SONDER_WEB_TOOLS" in env:
@@ -521,9 +559,20 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if not Path(root).expanduser().is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
 
-    parts = urlsplit(config.ollama.url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    try:
+        parts = urlsplit(config.ollama.url)
+        ollama_port = parts.port
+    except ValueError:
+        parts = None
+        ollama_port = None
+    if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
         errors.append(f"[ollama].url invalid: {config.ollama.url!r}")
+    elif parts.username is not None or parts.password is not None:
+        errors.append("[ollama].url must not contain inline credentials")
+    elif ollama_port is None:
+        errors.append("[ollama].url must include an explicit port")
+    elif parts.path not in ("", "/") or parts.query or parts.fragment:
+        errors.append("[ollama].url must be an origin without a path, query, or fragment")
     elif not config.ollama.allow_remote and not _is_loopback_host(parts.hostname):
         errors.append(
             f"[ollama].url host {parts.hostname!r} is not loopback and "
@@ -536,16 +585,29 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         )
 
     for worker in config.ollama.workers:
-        worker_parts = urlsplit(worker)
+        try:
+            worker_parts = urlsplit(worker)
+            worker_port = worker_parts.port
+        except ValueError:
+            errors.append(f"[ollama].workers entry {worker!r} is malformed")
+            continue
+        if worker_parts.scheme not in ("http", "https"):
+            errors.append("[ollama].workers entries must use http or https")
+            continue
         if (
             worker_parts.username is not None
             or worker_parts.password is not None
         ):
             errors.append("[ollama].workers entries must not contain inline credentials")
             continue
-        if not worker_parts.hostname or worker_parts.port is None:
+        if not worker_parts.hostname or worker_port is None:
             errors.append(
                 f"[ollama].workers entry {worker!r} must include a host and explicit port"
+            )
+            continue
+        if worker_parts.path not in ("", "/") or worker_parts.query or worker_parts.fragment:
+            errors.append(
+                "[ollama].workers entries must be origins without paths, queries, or fragments"
             )
             continue
         if not _is_loopback_host(worker_parts.hostname):
@@ -555,6 +617,32 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 )
             elif worker_parts.scheme != "https":
                 errors.append("[ollama].workers remote entries must use https")
+
+    if len(config.ollama.workers) > 15:
+        errors.append("[ollama].workers supports at most 15 additional workers")
+    for name in (
+        "worker_max_inflight",
+        "worker_queue_depth",
+        "worker_admission_timeout_ms",
+        "worker_failure_threshold",
+        "worker_cooldown_seconds",
+        "worker_capability_ttl_seconds",
+        "worker_probe_timeout_ms",
+    ):
+        if getattr(config.ollama, name) < 1:
+            errors.append(f"[ollama].{name} must be >= 1")
+    worker_upper_bounds = {
+        "worker_max_inflight": 64,
+        "worker_queue_depth": 4096,
+        "worker_admission_timeout_ms": 60_000,
+        "worker_failure_threshold": 100,
+        "worker_cooldown_seconds": 3600,
+        "worker_capability_ttl_seconds": 86_400,
+        "worker_probe_timeout_ms": 30_000,
+    }
+    for name, maximum in worker_upper_bounds.items():
+        if getattr(config.ollama, name) > maximum:
+            errors.append(f"[ollama].{name} must be <= {maximum}")
 
     for name in ("model_generations", "http_requests", "tool_processes",
                  "fleet_workers", "autopilot_runs", "training_jobs",

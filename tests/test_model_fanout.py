@@ -1234,6 +1234,7 @@ def test_model_fanout_synthesize_uses_exact_complete_previews_without_persistenc
     }
     assert captured["path"] == "/api/chat"
     assert captured["kwargs"]["cloud"] is False
+    assert captured["kwargs"]["local_only"] is True
     assert captured["payload"]["messages"] and len(captured["payload"]["messages"]) == 1
     assert "tools" not in captured["payload"]
     assert "history" not in captured["payload"]

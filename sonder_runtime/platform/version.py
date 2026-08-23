@@ -64,7 +64,13 @@ def _commit_from_git() -> str:
     return running_source_commit_at_import() or "unknown"
 
 
-def build_info() -> BuildInfo:
+def stamped_build_info() -> BuildInfo | None:
+    """The release stamp's identity, or None on a source checkout.
+
+    Unlike :func:`build_info`, this never starts a git subprocess, so
+    display-only surfaces (the console's ``/version``) can call it without
+    breaking their "touches nothing outside the process" claim.
+    """
     if _BUILD_STAMP.exists():
         try:
             raw = json.loads(_BUILD_STAMP.read_text(encoding="utf-8"))
@@ -73,4 +79,11 @@ def build_info() -> BuildInfo:
             return BuildInfo(version=version, commit_sha=commit, stamped=True)
         except (OSError, ValueError):
             pass
+    return None
+
+
+def build_info() -> BuildInfo:
+    stamped = stamped_build_info()
+    if stamped is not None:
+        return stamped
     return BuildInfo(version=VERSION, commit_sha=_commit_from_git(), stamped=False)

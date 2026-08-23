@@ -19,6 +19,10 @@ from typing import Iterable, Mapping, Sequence
 MAX_CONTENT_LENGTH = 1_000_000
 MAX_ITEMS_PER_CONTEXT = 256
 MAX_PROVENANCE_DEPTH = 16
+MAX_SOURCE_ID_LENGTH = 512
+MAX_ORIGIN_LENGTH = 2_048
+MAX_PARENT_ID_LENGTH = 512
+MAX_OBSERVED_AT_LENGTH = 64
 
 
 class ProvenanceError(ValueError):
@@ -37,10 +41,13 @@ class TrustLabel(str, Enum):
     INDEPENDENTLY_VERIFIED = "independently_verified"
 
 
-def _text(value: str, name: str) -> str:
+def _text(value: str, name: str, *, max_length: int | None = None) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ProvenanceError(f"{name} must not be empty")
-    return value.strip()
+    normalized = value.strip()
+    if max_length is not None and len(normalized) > max_length:
+        raise ProvenanceError(f"{name} exceeds the provenance boundary")
+    return normalized
 
 
 def _digest(content: str) -> str:
@@ -95,14 +102,18 @@ class Provenance:
             raise ProvenanceError("source_kind must be a supported SourceKind")
         if not isinstance(self.trust, TrustLabel):
             raise ProvenanceError("trust must be a supported TrustLabel")
-        _text(self.source_id, "source_id")
-        _text(self.origin, "origin")
+        _text(self.source_id, "source_id", max_length=MAX_SOURCE_ID_LENGTH)
+        _text(self.origin, "origin", max_length=MAX_ORIGIN_LENGTH)
         if len(self.content_digest) != 64 or any(c not in "0123456789abcdef" for c in self.content_digest):
             raise ProvenanceError("content_digest must be a SHA-256 hex digest")
         if len(self.parent_ids) > MAX_PROVENANCE_DEPTH:
             raise ProvenanceError("provenance chain is too deep")
+        for parent_id in self.parent_ids:
+            _text(parent_id, "parent_id", max_length=MAX_PARENT_ID_LENGTH)
         if not self.observed_at:
             object.__setattr__(self, "observed_at", datetime.now(timezone.utc).isoformat())
+        elif not isinstance(self.observed_at, str) or len(self.observed_at) > MAX_OBSERVED_AT_LENGTH:
+            raise ProvenanceError("observed_at exceeds the provenance boundary")
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -165,6 +176,15 @@ class ContextPacket:
 
     items: tuple[PromptItem, ...]
     packet_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, tuple) or len(self.items) > MAX_ITEMS_PER_CONTEXT:
+            raise ProvenanceError("invalid context packet items")
+        if any(not isinstance(item, PromptItem) for item in self.items):
+            raise ProvenanceError("context packet contains an invalid item")
+        expected = _digest(_canonical([item.as_dict() for item in self.items]))
+        if self.packet_digest != expected:
+            raise ProvenanceError("context packet digest mismatch")
 
     @classmethod
     def create(cls, items: Sequence[PromptItem]) -> "ContextPacket":
@@ -237,10 +257,13 @@ class PromptProvenanceBoundary:
             kind = source_kind if isinstance(source_kind, SourceKind) else SourceKind(source_kind)
         except ValueError as exc:
             raise ProvenanceError("unknown prompt source kind") from exc
-        content = _text(content, "content")
-        parents = tuple(dict.fromkeys(_text(parent, "parent_id") for parent in parent_ids))
-        source_id = _text(source_id, "source_id")
-        origin = _text(origin, "origin")
+        content = _text(content, "content", max_length=MAX_CONTENT_LENGTH)
+        parents = tuple(dict.fromkeys(
+            _text(parent, "parent_id", max_length=MAX_PARENT_ID_LENGTH)
+            for parent in parent_ids
+        ))
+        source_id = _text(source_id, "source_id", max_length=MAX_SOURCE_ID_LENGTH)
+        origin = _text(origin, "origin", max_length=MAX_ORIGIN_LENGTH)
         provenance = Provenance(
             kind, source_id, origin,
             _provenance_digest(content, kind, source_id, origin, parents),
@@ -323,6 +346,11 @@ class PromptProvenanceBoundary:
         metadata = PromptProvenanceBoundary.event_metadata(context)
         if binding.packet_digest != context.packet_digest:
             raise ProvenanceError("request binding does not match context packet")
+        expected_items = tuple(
+            item.provenance.content_digest for item in context.items
+        )
+        if binding.item_digests != expected_items:
+            raise ProvenanceError("request binding item digests do not match context packet")
         metadata["request_digest"] = binding.request_digest
         return metadata
 
@@ -352,6 +380,14 @@ class PromptProvenanceBoundary:
                 metadata["source_id"], metadata["origin"], metadata["content_digest"],
                 TrustLabel(metadata["trust"]), tuple(metadata.get("parent_ids", ())), metadata.get("observed_at", ""),
             )
+            # Serialized content carries no independent authority capable of
+            # proving a trust promotion.  It may replay the untrusted label
+            # produced at ingestion, but cannot self-assert user confirmation
+            # or independent verification by recomputing an unkeyed digest.
+            if provenance.trust is not TrustLabel.UNTRUSTED:
+                raise ProvenanceError(
+                    "serialized provenance cannot self-assert a trusted label"
+                )
             return PromptItem(value["content"], provenance)
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, ProvenanceError):

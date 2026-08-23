@@ -1,3 +1,5 @@
+import pytest
+
 from sonder_runtime.application.evaluation.trajectory_replay import (
     TrajectoryRecord,
     TrajectoryStep,
@@ -47,3 +49,12 @@ def test_compare_detects_metadata_and_length_differences():
     report = compare_trajectories(expected, actual)
     assert not report.equivalent
     assert {(item.index, item.field) for item in report.divergences} == {(-1, "metadata"), (-1, "step_count")}
+
+
+def test_persisted_trajectory_round_trip_rejects_tampering():
+    record = _record()
+    assert TrajectoryRecord.from_dict(record.as_dict()) == record
+    payload = record.as_dict()
+    payload["steps"][0]["output"] = {"answer": 999}
+    with pytest.raises(ValueError, match="step digest mismatch"):
+        TrajectoryRecord.from_dict(payload)

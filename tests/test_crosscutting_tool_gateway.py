@@ -92,3 +92,17 @@ def test_scope_and_permission_are_typed_and_immutable():
     assert scope.principal_id == "owner" and permission.approval is ApprovalMode.REQUIRED
     with pytest.raises(InvalidInput): ToolScope("")
     with pytest.raises(InvalidInput): ToolPermission(frozenset({""}))
+
+
+def test_permission_effects_cannot_exceed_request_scope():
+    events = []
+    gateway, _ = make_gateway(events)
+    with pytest.raises(Forbidden, match="exceeds the request scope"):
+        gateway.execute(ToolGatewayRequest(
+            request_id="r-scope",
+            tool_name="write",
+            arguments={},
+            scope=ToolScope("owner", ("project",), frozenset({"read"})),
+            permission=ToolPermission(frozenset({"write"})),
+        ))
+    assert events == [("schema", "write", {})]

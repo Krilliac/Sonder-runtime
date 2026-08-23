@@ -24,6 +24,18 @@ QUANTIZATION_GB_PER_BILLION = {
     "q8_0": 1.05,
 }
 
+# KV-cache planning envelope in decimal GB per 8192 tokens of context, keyed
+# by total parameter count.  KV bytes per token grow with layer count and
+# hidden width, so a 70B-class model reserves roughly four times the KV of a
+# 7B at the same window.  Like the weight table above, these are conservative
+# planning values, not a measured residency report.
+_KV_GB_PER_8K_BANDS = (
+    (5.0, 0.25),
+    (13.0, 0.35),
+    (40.0, 0.5),
+    (float("inf"), 1.0),
+)
+
 DEFAULT_30B_MODEL = "qwen3-coder:30b-a3b-q4_K_M"
 DEFAULT_30B_QUANTIZATION = "Q4_K_M"
 DEFAULT_30B_CONTEXT = 8192
@@ -199,6 +211,17 @@ def build_hardware_capabilities(
     )
 
 
+def kv_gb_per_8k(total_params_b: float) -> float:
+    """Planning KV-cache envelope in GB per 8192 tokens for a model size."""
+    total = _positive(total_params_b)
+    if total is None:
+        return _KV_GB_PER_8K_BANDS[-1][1]
+    for ceiling, kv_gb in _KV_GB_PER_8K_BANDS:
+        if total < ceiling:
+            return kv_gb
+    return _KV_GB_PER_8K_BANDS[-1][1]
+
+
 def quantized_model_profile(
     *,
     model: str = DEFAULT_30B_MODEL,
@@ -230,9 +253,10 @@ def quantized_model_profile(
     if overhead is None or safety is None:
         raise ValueError("runtime overhead and safety margin must be positive")
     weight = round(total * per_billion, 2)
-    # KV grows with context, but this remains a deliberately conservative
-    # planning envelope; the live provider remains authoritative.
-    kv = round(0.5 * context / 8192.0, 2)
+    # KV grows with context and with model depth/width; this remains a
+    # deliberately conservative planning envelope and the live provider
+    # remains authoritative.
+    kv = round(kv_gb_per_8k(total) * context / 8192.0, 2)
     return QuantizedModelProfile(
         model=str(model).strip() or DEFAULT_30B_MODEL,
         total_params_b=total,
@@ -308,6 +332,7 @@ __all__ = [
     "QuantizedModelProfile",
     "build_hardware_capabilities",
     "default_30b_profile",
+    "kv_gb_per_8k",
     "plan_model_execution",
     "quantized_model_profile",
 ]

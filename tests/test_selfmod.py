@@ -768,3 +768,70 @@ def test_prune_reaches_runs_older_than_the_list_runs_window(isolated):
 
     assert selfmod.prune_workspaces(retention_days=1) == ["selfmod-000"]
     assert not stale.exists()
+
+
+# --- selfmod_recover manifest hardening ------------------------------------
+
+
+def _recovery_bundle(tmp_path, records, repo_files):
+    """Hand-craft a checksummed recovery bundle for adversarial manifests."""
+    root = tmp_path / "recover-repo"
+    root.mkdir(exist_ok=True)
+    for name, content in repo_files.items():
+        (root / name).write_text(content, encoding="utf-8")
+    bundle = tmp_path / "recover-bundle"
+    bundle.mkdir(exist_ok=True)
+    manifest = {"repository_root": str(root), "files": records}
+    manifest_path = bundle / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (bundle / "manifest.sha256").write_text(
+        selfmod_recover.sha(manifest_path), encoding="ascii"
+    )
+    return root, bundle, manifest_path
+
+
+def _existing_record(bundle, name, original):
+    backup = bundle / (name + ".bak")
+    backup.write_bytes(original.encode("utf-8"))
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    return {
+        "path": name,
+        "existed_before": True,
+        "backup_path": str(backup),
+        "sha256_backup": digest,
+        "sha256_before": digest,
+        "size_before": len(original.encode("utf-8")),
+    }
+
+
+def test_invalid_manifest_mode_fails_before_any_file_is_touched(tmp_path):
+    bundle_dir = tmp_path / "recover-bundle"
+    bundle_dir.mkdir()
+    first = _existing_record(bundle_dir, "one.py", "original one\n")
+    second = _existing_record(bundle_dir, "two.py", "original two\n")
+    second["mode_before"] = "0755"  # malformed: os.chmod would raise mid-restore
+    root, _bundle, manifest_path = _recovery_bundle(
+        tmp_path,
+        [first, second],
+        {"one.py": "live one\n", "two.py": "live two\n"},
+    )
+    with pytest.raises(RuntimeError, match="mode is invalid"):
+        selfmod_recover.restore(manifest_path)
+    # Prevalidation refused the whole bundle: nothing was restored.
+    assert (root / "one.py").read_text(encoding="utf-8") == "live one\n"
+    assert (root / "two.py").read_text(encoding="utf-8") == "live two\n"
+
+
+def test_rollback_removes_a_created_file_that_became_a_dangling_symlink(tmp_path):
+    root, _bundle, manifest_path = _recovery_bundle(
+        tmp_path,
+        [{"path": "created.py", "existed_before": False}],
+        {},
+    )
+    link = root / "created.py"
+    try:
+        link.symlink_to(root / "no-such-target.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform/privilege level")
+    selfmod_recover.restore(manifest_path)
+    assert not link.is_symlink() and not link.exists()

@@ -288,7 +288,7 @@ def build_bundle(
 
     schema_targets = {
         store: len(sonder_migrations.discover_migrations(store))
-        for store in ("memory", "autopilot", "fleet", "operations", "updates")
+        for store in sonder_migrations.STORE_NAMES
     }
     manifest_raw = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -911,7 +911,7 @@ def check_compatibility(
         problems.append(f"bundle needs Python {wanted}, host has {have}")
     # State schema: the bundle must not require newer state than it ships.
     state_schema = manifest["state_schema"]
-    for store in ("memory", "autopilot", "fleet", "operations", "updates"):
+    for store in sonder_migrations.STORE_NAMES:
         try:
             status = sonder_migrations.status(store)
         except Exception as exc:

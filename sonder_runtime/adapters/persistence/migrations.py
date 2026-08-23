@@ -25,7 +25,7 @@ import hashlib
 import os
 import sqlite3
 import time
-import importlib.util
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +48,23 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 )
 """
 
+LEDGER_GUARD_DDL = (
+    """
+    CREATE TRIGGER IF NOT EXISTS schema_migrations_no_update
+    BEFORE UPDATE ON schema_migrations
+    BEGIN
+      SELECT RAISE(ABORT, 'schema_migrations is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS schema_migrations_no_delete
+    BEFORE DELETE ON schema_migrations
+    BEGIN
+      SELECT RAISE(ABORT, 'schema_migrations is append-only');
+    END
+    """,
+)
+
 
 class MigrationError(RuntimeError):
     pass
@@ -65,13 +82,40 @@ class Migration:
     checksum: str
 
     def _load(self):
-        spec = importlib.util.spec_from_file_location(
-            f"sonder_migration_{self.store}_{self.migration_id}", self.path
-        )
-        if spec is None or spec.loader is None:
-            raise MigrationError(f"cannot load migration {self.path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        """Load exactly the bytes whose digest was discovered.
+
+        Importlib normally opens the migration a second time.  A replacement
+        between discovery and that open would execute one program while the
+        ledger recorded another program's checksum.  Read, verify, compile,
+        and execute one byte string so that race fails closed.
+        """
+        try:
+            source = self.path.read_bytes()
+        except OSError as exc:
+            raise MigrationError(
+                f"cannot read migration {self.store}/{self.migration_id}: "
+                f"{type(exc).__name__}"
+            ) from exc
+        actual = hashlib.sha256(source).hexdigest()
+        if actual != self.checksum:
+            raise MigrationError(
+                f"migration {self.store}/{self.migration_id} changed after "
+                "discovery; refusing to execute unchecksummed source"
+            )
+        module_name = f"sonder_migration_{self.store}_{self.migration_id}"
+        module = types.ModuleType(module_name)
+        module.__file__ = str(self.path)
+        module.__package__ = ""
+        try:
+            code = compile(source, str(self.path), "exec")
+            exec(code, module.__dict__)
+        except MigrationError:
+            raise
+        except Exception as exc:
+            raise MigrationError(
+                f"cannot load migration {self.store}/{self.migration_id}: "
+                f"{type(exc).__name__}"
+            ) from exc
         for required in ("apply",):
             if not callable(getattr(module, required, None)):
                 raise MigrationError(
@@ -100,17 +144,48 @@ class Migration:
             return duration_ms
         else:
             conn.execute("BEGIN")
+            transaction_control_attempted = False
             try:
-                module.apply(conn)
-                verify = getattr(module, "verify", None)
-                if callable(verify):
-                    verify(conn)
+                # Framework-owned migrations may not commit, roll back, or
+                # create savepoints behind the runner's back.  Otherwise their
+                # schema changes could commit before the ledger insert and a
+                # crash would strand unrecorded state.
+                def authorizer(action, _arg1, _arg2, _db_name, _trigger):
+                    nonlocal transaction_control_attempted
+                    transaction_actions = {sqlite3.SQLITE_TRANSACTION}
+                    savepoint = getattr(sqlite3, "SQLITE_SAVEPOINT", None)
+                    if savepoint is not None:
+                        transaction_actions.add(savepoint)
+                    if action in transaction_actions:
+                        transaction_control_attempted = True
+                        return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+
+                conn.set_authorizer(authorizer)
+                try:
+                    module.apply(conn)
+                    verify = getattr(module, "verify", None)
+                    if callable(verify):
+                        verify(conn)
+                finally:
+                    conn.set_authorizer(None)
+                if not conn.in_transaction:
+                    raise MigrationError(
+                        f"migration {self.store}/{self.migration_id} ended its "
+                        "framework-owned transaction"
+                    )
                 duration_ms = int((time.monotonic() - started) * 1000)
                 if record_applied is not None:
                     record_applied(duration_ms)
                 conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
+            except Exception as exc:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                if transaction_control_attempted:
+                    raise MigrationError(
+                        f"migration {self.store}/{self.migration_id} attempted "
+                        "to control its framework-owned transaction"
+                    ) from exc
                 raise
         return duration_ms
 
@@ -137,26 +212,35 @@ def _operations_db_path() -> str:
     return platform_paths.state_path("operations.db", "SONDER_OPERATIONS_DB")
 
 
-# Store registry: name -> callable returning the database path.  The
-# memory/autopilot/fleet baselines are established by SPEC-2 WP5; the
-# framework treats a store with no migration directory as "no ledger yet".
+# Store registry: name -> (filename, env override).  ``memory`` is
+# special-cased below because its path carries extra legacy-migration
+# logic in ``platform_paths.memory_db_path()``.  This tuple is the single
+# source of truth for store names: it is a plain literal (no path
+# resolution, no filesystem access), so callers such as the CLI argument
+# parser can import ``STORE_NAMES`` to stay in sync without triggering the
+# home-directory creation that resolving a real path performs.
+_STORE_FILENAMES: tuple[tuple[str, str, str], ...] = (
+    ("autopilot", "autopilot.db", "SONDER_AUTOPILOT_DB"),
+    ("fleet", "fleet.db", "SONDER_FLEET_DB"),
+    ("operations", "operations.db", "SONDER_OPERATIONS_DB"),
+    ("queued_actions", "queued_actions.db", "SONDER_QUEUED_ACTION_DB"),
+    ("updates", "updates.db", "SONDER_UPDATES_DB"),
+    ("jobs", "jobs.db", "SONDER_JOBS_DB"),
+)
+
+STORE_NAMES: tuple[str, ...] = ("memory",) + tuple(
+    name for name, _, _ in _STORE_FILENAMES
+)
+
+
 def store_db_paths() -> dict[str, str]:
-    return {
-        "memory": platform_paths.memory_db_path(),
-        # Keep the registry independent of store implementations.  Store
-        # modules consume this registry when opening their databases, so
-        # importing them here would create a persistence-layer cycle.
-        "autopilot": platform_paths.state_path(
-            "autopilot.db", "SONDER_AUTOPILOT_DB"
-        ),
-        "fleet": platform_paths.state_path("fleet.db", "SONDER_FLEET_DB"),
-        "operations": _operations_db_path(),
-        "queued_actions": platform_paths.state_path(
-            "queued_actions.db", "SONDER_QUEUED_ACTION_DB"
-        ),
-        "updates": platform_paths.state_path("updates.db", "SONDER_UPDATES_DB"),
-        "jobs": platform_paths.state_path("jobs.db", "SONDER_JOBS_DB"),
-    }
+    # Keep the registry independent of store implementations.  Store
+    # modules consume this registry when opening their databases, so
+    # importing them here would create a persistence-layer cycle.
+    paths: dict[str, str] = {"memory": platform_paths.memory_db_path()}
+    for name, filename, env_var in _STORE_FILENAMES:
+        paths[name] = platform_paths.state_path(filename, env_var)
+    return paths
 
 
 def discover_migrations(store: str) -> tuple[Migration, ...]:
@@ -185,8 +269,13 @@ def open_connection(db_path: str, *, busy_timeout_ms: int = 5000) -> sqlite3.Con
     return conn
 
 
-def _ledger_rows(conn: sqlite3.Connection) -> dict[str, str]:
+def _ledger_rows(
+    conn: sqlite3.Connection, *, install_guards: bool = True
+) -> dict[str, str]:
     conn.execute(LEDGER_DDL)
+    if install_guards:
+        for statement in LEDGER_GUARD_DDL:
+            conn.execute(statement)
     return {
         row[0]: row[1]
         for row in conn.execute(
@@ -203,7 +292,10 @@ def status(store: str, db_path: str | None = None) -> StoreStatus:
         return StoreStatus(store, path, (), (), (), ())
     conn = open_connection(path)
     try:
-        recorded = _ledger_rows(conn)
+        # Inspect before installing this build's trigger definitions.  A
+        # future or checksum-mismatched database must be refused without an
+        # older process modifying it on the way out.
+        recorded = _ledger_rows(conn, install_guards=False)
     finally:
         conn.close()
     applied = tuple(mid for mid in known if mid in recorded)
@@ -217,8 +309,15 @@ def status(store: str, db_path: str | None = None) -> StoreStatus:
     return StoreStatus(store, path, applied, pending, unknown, mismatched)
 
 
-def status_read_only(store: str, db_path: str) -> StoreStatus:
-    """Inspect one migration ledger without creating a database or table."""
+def status_read_only(
+    store: str, db_path: str, *, immutable: bool = False
+) -> StoreStatus:
+    """Inspect one migration ledger without creating a database or table.
+
+    ``immutable`` is for standalone backup images.  It prevents SQLite from
+    creating WAL shared-memory sidecars while a verifier inspects an otherwise
+    read-only backup directory; callers must not use it for a live WAL database.
+    """
     path = Path(db_path).expanduser()
     migrations = discover_migrations(store)
     known = {migration.migration_id: migration for migration in migrations}
@@ -226,6 +325,8 @@ def status_read_only(store: str, db_path: str) -> StoreStatus:
         return StoreStatus(store, str(path), (), tuple(known), (), ())
 
     uri = path.resolve(strict=True).as_uri() + "?mode=ro"
+    if immutable:
+        uri += "&immutable=1"
     conn = sqlite3.connect(uri, uri=True)
     try:
         has_ledger = conn.execute(

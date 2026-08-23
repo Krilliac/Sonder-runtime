@@ -3406,6 +3406,40 @@ def good_interactions_with_embeddings(
 
 # --- project facts ---------------------------------------------------------
 
+def normalize_fact_text(text):
+    """Canonical fact text for exact duplicate detection.
+
+    Whitespace collapse plus casefold (the stricter cousin of the lowercase
+    fold memory_quality applies to lessons); owned here because the write path
+    (sonder_remember_fact) must apply it before a row exists for any audit to
+    see.
+    """
+    return re.sub(r"\s+", " ", (text or "").strip().casefold())
+
+
+def find_duplicate_fact_in(rows, text):
+    """Return the first fact row whose normalized text matches, else None.
+
+    Takes already-loaded rows so callers holding a repository (which exposes
+    ``facts_for_project`` but not the connection) can ask the same question the
+    connection-level helper below answers. Callers must pass rows from ONE
+    project only: matching across projects would let a fact leak between
+    scopes, and scoping is a privacy boundary, not a convenience filter.
+    """
+    wanted = normalize_fact_text(text)
+    if not wanted:
+        return None
+    for row in rows or []:
+        if normalize_fact_text(row.get("text")) == wanted:
+            return row
+    return None
+
+
+def find_duplicate_fact(conn, project, text):
+    """Existing fact in ``project`` with the same normalized text, else None."""
+    return find_duplicate_fact_in(facts_for_project(conn, project), text)
+
+
 def add_fact(conn, fact_id, project, text, embedding=None):
     conn.execute(
         "INSERT INTO facts(id, project, text, embedding) VALUES(?, ?, ?, ?)",
@@ -3529,6 +3563,30 @@ def add_task_dep(conn, task_id, depends_on, account_scope=None):
         raise ValueError("no unique task '%s'" % depends_on)
     if resolved == dep_resolved:
         raise ValueError("a task cannot depend on itself")
+    # Reject an edge that would close a dependency cycle.  A cycle leaves every
+    # task on it permanently blocked with no diagnosis: each one waits for a
+    # predecessor that transitively waits for it.  Walk the existing edges from
+    # the proposed dependency; if this task is reachable, the new edge would
+    # complete a loop.  The walk is bounded so a corrupt graph cannot spin.
+    frontier = [dep_resolved]
+    seen = set()
+    while frontier:
+        current = frontier.pop()
+        if current == resolved:
+            raise ValueError(
+                "dependency would create a cycle: '%s' already depends on '%s'"
+                % (dep_resolved[:8], resolved[:8])
+            )
+        if current in seen:
+            continue
+        seen.add(current)
+        if len(seen) > 10_000:
+            raise ValueError("task dependency graph is too large to verify")
+        frontier.extend(
+            row["depends_on"] for row in conn.execute(
+                "SELECT depends_on FROM task_deps WHERE task_id=?", (current,)
+            ).fetchall()
+        )
     conn.execute(
         "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(?, ?)",
         (resolved, dep_resolved),

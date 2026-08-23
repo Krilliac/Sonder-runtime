@@ -51,6 +51,18 @@ MESSAGE_RATE_WINDOW_SECONDS = 60
 DEFAULT_MESSAGE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_MESSAGE_PENDING_TTL_SECONDS = 24 * 60 * 60
 MESSAGE_MODES = frozenset(("follow_up", "steer"))
+# Retry idempotency fence.  ``retried_by`` normally holds either '' or the
+# agent id of a successful retry; while a retry is being dispatched it holds a
+# short-lived ``retry-pending:<token>:<expiry>`` claim so two concurrent
+# ``master_retry`` calls cannot both replay the same persisted master.  The
+# pending claim only bridges the acquire-to-dispatch window: once the retry
+# master row exists, the active-row check in :func:`acquire_retry_lease` is the
+# durable fence, so an orphaned claim (process death mid-dispatch) simply
+# expires instead of requiring reconciliation.
+RETRY_LEASE_PREFIX = "retry-pending:"
+DEFAULT_RETRY_LEASE_SECONDS = 120
+MAX_RETRY_LEASE_SECONDS = 3600
+RETRYABLE_STATUSES = frozenset(("interrupted", "failed", "cancelled", "task_drift"))
 
 _SCHEMA_LOCK = threading.RLock()
 # Cache the database identity, not merely its pathname.  A recovered or
@@ -830,6 +842,25 @@ def finish_agent(
         if (
             stored_dict
             and stored_dict.get("role") == "master"
+            and stored_dict.get("retry_of")
+            and stored_dict.get("status") in ("failed", "cancelled", "task_drift")
+        ):
+            # The retry attempt itself ended without success.  Clear any
+            # pending dispatch claim on the source promptly so an operator can
+            # retry again without waiting out the claim TTL.  This transaction
+            # also removes the retry master from the active set, so no other
+            # dispatcher can hold a live claim at this moment.
+            conn.execute(
+                "UPDATE fleet_agents SET retried_by='', updated_ts=? "
+                "WHERE id=? AND retried_by LIKE ? ESCAPE '\\'",
+                (
+                    now, stored_dict["retry_of"],
+                    RETRY_LEASE_PREFIX.replace("_", "\\_") + "%",
+                ),
+            )
+        if (
+            stored_dict
+            and stored_dict.get("role") == "master"
             and stored_dict.get("status") == "done"
             and stored_dict.get("retry_of")
         ):
@@ -940,6 +971,90 @@ def cancellation_requested(agent_id: str) -> bool:
         )
     finally:
         conn.close()
+
+
+def _retry_lease_expiry(value: str) -> float | None:
+    """Parse the expiry of a pending retry claim, or ``None`` for non-claims."""
+    text = str(value or "")
+    if not text.startswith(RETRY_LEASE_PREFIX):
+        return None
+    parts = text.split(":")
+    if len(parts) != 3:
+        return 0.0  # malformed claim: treat as immediately expired, never valid
+    try:
+        return float(parts[2])
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def acquire_retry_lease(
+    agent_id: str, *, lease_seconds: int = DEFAULT_RETRY_LEASE_SECONDS,
+    now: float | None = None,
+) -> dict | None:
+    """Atomically claim the right to dispatch one retry of a persisted master.
+
+    Returns ``None`` when the master is missing, not in a retryable terminal
+    state, already successfully retried, currently claimed by an unexpired
+    pending lease, or already has an active (queued/running) retry master.
+    The returned token must be released with :func:`release_retry_lease` after
+    dispatch; once the retry master row exists it carries the fence itself.
+    """
+    target = str(agent_id or "").strip()
+    if not target:
+        return None
+    current = float(now if now is not None else time.time())
+    ttl = max(5, min(int(lease_seconds), MAX_RETRY_LEASE_SECONDS))
+    with _write_transaction() as conn:
+        row = conn.execute(
+            "SELECT id, role, status, retried_by FROM fleet_agents WHERE id=?",
+            (target,),
+        ).fetchone()
+        if row is None or row["role"] != "master":
+            return None
+        if row["status"] not in RETRYABLE_STATUSES:
+            return None
+        expiry = _retry_lease_expiry(row["retried_by"])
+        if expiry is None and str(row["retried_by"] or ""):
+            # A non-claim value means a recorded successful retry; the status
+            # check above should already exclude this, but fail closed anyway.
+            return None
+        if expiry is not None and expiry > current:
+            return None
+        active = conn.execute(
+            "SELECT 1 FROM fleet_agents WHERE retry_of=? AND role='master' "
+            "AND status IN ('queued', 'running') LIMIT 1",
+            (target,),
+        ).fetchone()
+        if active is not None:
+            return None
+        token = uuid.uuid4().hex
+        expires_ts = current + ttl
+        claim = "%s%s:%.3f" % (RETRY_LEASE_PREFIX, token, expires_ts)
+        changed = conn.execute(
+            "UPDATE fleet_agents SET retried_by=?, updated_ts=? "
+            "WHERE id=? AND retried_by=?",
+            (claim, current, target, str(row["retried_by"] or "")),
+        ).rowcount
+        if not changed:
+            return None
+        return {"agent_id": target, "token": token, "expires_ts": expires_ts}
+
+
+def release_retry_lease(agent_id: str, token: str) -> bool:
+    """Release one pending retry claim; never touches a recorded retry id."""
+    target = str(agent_id or "").strip()
+    value = str(token or "").strip()
+    if not target or not value:
+        return False
+    with _write_transaction() as conn:
+        return conn.execute(
+            "UPDATE fleet_agents SET retried_by='', updated_ts=? "
+            "WHERE id=? AND retried_by LIKE ? ESCAPE '\\'",
+            (
+                time.time(), target,
+                RETRY_LEASE_PREFIX.replace("_", "\\_") + value + ":%",
+            ),
+        ).rowcount > 0
 
 
 def get_agent(selector: str, *, role: str = "") -> dict | None:

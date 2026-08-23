@@ -45,3 +45,7 @@ examples/codegen-arena-shooter/FpsGame_Skeleton/
 /pytest-cache-*/
 /probe-*/
 /tmp/pytest-cache-*/
+# eval_harness run artifacts: traces hold raw prompts/model responses and are
+# local diagnostic output, never source. The checked-in fixtures live in
+# eval_scenarios/ instead.
+/eval_runs/

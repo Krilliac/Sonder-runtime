@@ -9,7 +9,7 @@ import uuid
 from typing import Any
 
 from ...application.context import OperationContext, local_owner_context
-from ...application.errors import SonderError
+from ...application.errors import InvalidInput, SonderError
 
 
 def context_for_mcp_call(
@@ -24,7 +24,7 @@ def context_for_mcp_call(
 
 
 def error_result(err: SonderError) -> dict[str, Any]:
-    return {"isError": True, "error": err.code, "message": str(err)}
+    return {"isError": True, "error": err.code, "message": str(err), "retryable": err.retryable}
 
 
 class McpRecallHandler:
@@ -58,7 +58,7 @@ class McpOutcomeHandler:
         signal = arguments.get("signal", "")
 
         if not interaction_id or not signal:
-            return {"isError": True, "error": "INVALID_INPUT", "message": "interaction_id and signal required"}
+            return error_result(InvalidInput("interaction_id and signal required"))
 
         try:
             score = self._outcome.record(interaction_id, signal)

@@ -64,14 +64,31 @@ Stored durably and injected into project-scoped prompts. In the live A/B
 runs, a scoped fact was recalled exactly ("HELIOS") where a bare model
 invented an answer.
 
+Re-asserting a fact the project already holds (same statement up to
+whitespace/case) is refused with the existing fact's id rather than stored
+twice — facts are injected into every prompt for the project, so a duplicate
+would spend prompt budget on a repeat forever. The duplicate check never
+looks across projects: project scope is a privacy boundary, and a match
+against another project's facts would leak them.
+
 ## Observability & hygiene
 
 - `/stats` — lessons, interactions, outcomes, token ledgers by tier.
 - `memory_search`, `memory_export`, `session_export` — inspect local memory.
 - `learning_health_status` — outcome coverage, signal quality, distillation
-  yield.
+  yield, the evidence-level findings above, and the attribution lane's own
+  session counters (`grounded_outcomes`: noted / attributed / self-blocked /
+  unmeasured / write-failed — process-local, so a fresh server reports zeros
+  while the store keeps every outcome ever written).
 - `memory_quality_report`/`_repair` — audit and dry-run/prune duplicate
-  lessons.
+  lessons. The audit also reports evidence-level findings, all read-only and
+  fail-closed on missing provenance (no stored embedding or no scored outcome
+  means no claim): **conflicting lesson pairs** (similar embeddings, opposite
+  grounded outcomes, caller judgement deciding polarity over the runtime's
+  own grades), **stale lessons** (positive evidence at least two half-lives
+  old whose age-decayed effective score fell below a floor — experimental,
+  diagnostics only), and **duplicate facts** (per-project only; removal stays
+  with `sonder_forget_fact`).
 - `memory_privacy_review`/`_repair` — redacted privacy findings and removal.
 - `memory_embedding_backfill` — refresh stale/missing vectors.
 

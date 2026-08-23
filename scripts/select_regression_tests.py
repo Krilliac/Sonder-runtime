@@ -36,31 +36,40 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Directories whose contents are tests (searched), and directories that are
 # never sources of change we should key on.
 TEST_DIRS = ("tests", "proposals")
 IGNORED_PREFIXES = ("app/build/",)
+MAX_UNTRACKED_SOURCE_BYTES = 4 * 1024 * 1024
 
 # A changed line's identifiers.  Deliberately includes dunder-free private
 # names (_AGENT_...), because those are exactly the policy constants whose
 # movement the old rule kept missing.
 IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{3,}\b")
+DELETED_DEFINITION_RE = re.compile(
+    r"^(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+)
+DELETED_ASSIGNMENT_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=(?!=)"
+)
 
 # Identifiers too generic to select on: matching them would select everything
 # and hide the signal.  Keep this list short and boring -- anything domain
 # specific belongs in the selection, not here.
 STOPWORDS = frozenset("""
 self none true false return import from class None True False
-value name text args kwargs error result output data item items
+value name text args kwargs error result output data item items schema
 list dict set str int bool float tuple frozenset
 if elif else for while with try except finally raise assert
 def lambda yield await async global nonlocal pass break continue
-test tests the and not for that this with when then
+test tests the and not for that this with when then main check
 """.split())
 
 
@@ -74,19 +83,86 @@ def run_git(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
+def try_git(repo: Path, *args: str) -> str | None:
+    """Return Git output, or ``None`` for an unavailable revision/query."""
+    proc = subprocess.run(
+        ("git", "-C", str(repo)) + args,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def default_base(repo: Path) -> str:
+    """Resolve a useful base without requiring every local branch to track one."""
+    upstream = try_git(
+        repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}",
+    )
+    if upstream and upstream.strip():
+        return upstream.strip()
+    current = (try_git(repo, "branch", "--show-current") or "").strip()
+    for candidate in ("origin/main", "main", "origin/master", "master"):
+        if candidate == current:
+            continue
+        if try_git(repo, "rev-parse", "--verify", "--quiet", candidate):
+            return candidate
+    # A dirty main checkout still has a meaningful working-tree diff.  Using
+    # HEAD here is explicit and safe; a committed untracked branch should pass
+    # --since rather than receiving a guessed historical base.
+    return "HEAD"
+
+
 def changed_diff(repo: Path, since: str | None) -> str:
     """Unified diff of the change under review, working tree included."""
     if since:
         return run_git(repo, "diff", "-U0", "%s...HEAD" % since) + run_git(
             repo, "diff", "-U0", "HEAD",
-        )
+        ) + untracked_python_diff(repo)
     # Include commits not yet pushed, not merely a dirty working tree.  HEAD
     # always exists in a normal repository, so using it as the probe made this
     # branch silently vacuous after a commit.
-    upstream = run_git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").strip()
-    return run_git(repo, "diff", "-U0", "%s...HEAD" % upstream) + run_git(
+    base = default_base(repo)
+    return run_git(repo, "diff", "-U0", "%s...HEAD" % base) + run_git(
         repo, "diff", "-U0", "HEAD",
+    ) + untracked_python_diff(repo)
+
+
+def untracked_python_diff(repo: Path) -> str:
+    """Render bounded untracked Python files as synthetic added-file diffs."""
+    raw = run_git(
+        repo, "ls-files", "-z", "--others", "--exclude-standard", "--", "*.py",
     )
+    repo = repo.resolve()
+    chunks: list[str] = []
+    for name in raw.split("\0"):
+        if not name:
+            continue
+        relative = Path(name)
+        path = repo / relative
+        try:
+            path.resolve().relative_to(repo)
+        except (OSError, ValueError) as exc:
+            raise SystemExit("untracked source escapes repository: %s" % name) from exc
+        if path.is_symlink() or not path.is_file():
+            raise SystemExit("untracked source is not a regular file: %s" % name)
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise SystemExit("cannot inspect untracked source: %s" % name) from exc
+        if size > MAX_UNTRACKED_SOURCE_BYTES:
+            raise SystemExit(
+                "untracked source exceeds %d-byte selection limit: %s"
+                % (MAX_UNTRACKED_SOURCE_BYTES, name)
+            )
+        source = path.read_text(encoding="utf-8", errors="replace")
+        lines = source.splitlines()
+        normalized = relative.as_posix()
+        chunks.extend([
+            "--- /dev/null",
+            "+++ b/%s" % normalized,
+            "@@ -0,0 +1,%d @@" % len(lines),
+            *("+" + line for line in lines),
+        ])
+    return ("\n".join(chunks) + "\n") if chunks else ""
 
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -170,19 +246,68 @@ def parse_diff(repo: Path, diff: str) -> tuple[set[str], set[str]]:
                 if match in api and match.lower() not in STOPWORDS:
                     identifiers.add(match)
             for start, end, name in spans:
-                if start <= new_line_number <= end:
+                if (
+                    start <= new_line_number <= end
+                    and name.lower() not in STOPWORDS
+                ):
                     identifiers.add(name)
             new_line_number += 1
         elif line.startswith("-") and not line.startswith("---"):
             # A deleted line's own numbering does not advance the new file, but
             # its identifiers still name surfaces the change touched.
             code = line[1:].split("#", 1)[0]
+            stripped = code.strip()
+            deleted_binding = (
+                DELETED_DEFINITION_RE.match(stripped)
+                or (
+                    DELETED_ASSIGNMENT_RE.match(stripped)
+                    if code == code.lstrip() else None
+                )
+            )
+            if (
+                deleted_binding
+                and deleted_binding.group(1).lower() not in STOPWORDS
+            ):
+                identifiers.add(deleted_binding.group(1))
             for match in IDENTIFIER_RE.findall(code):
                 if match in api and match.lower() not in STOPWORDS:
                     identifiers.add(match)
+            for start, end, name in spans:
+                if (
+                    start <= new_line_number <= end
+                    and name.lower() not in STOPWORDS
+                ):
+                    identifiers.add(name)
         elif line.startswith(" "):
             new_line_number += 1
     return modules, identifiers
+
+
+def changed_test_paths(diff: str) -> set[str]:
+    """Return non-deleted test files named by the diff itself.
+
+    A test-only change has no production identifier to search for, but the
+    changed test is always part of the minimum safe regression set.
+    """
+    paths: set[str] = set()
+    for line in diff.splitlines():
+        if not line.startswith("+++ "):
+            continue
+        path = line[4:].strip()
+        if path.startswith(("a/", "b/")):
+            path = path[2:]
+        normalized = path.replace("\\", "/")
+        if normalized == "/dev/null":
+            continue
+        candidate = Path(normalized)
+        if (
+            candidate.name.startswith("test_")
+            and candidate.suffix == ".py"
+            and candidate.parts
+            and candidate.parts[0] in TEST_DIRS
+        ):
+            paths.add(candidate.as_posix())
+    return paths
 
 
 def scan_tests(repo: Path, terms: set[str]) -> tuple[dict[str, set[str]], list[str]]:
@@ -218,13 +343,15 @@ def main() -> int:
     parser.add_argument("--repo", default=".", help="repository root")
     parser.add_argument("--since", default=None,
                         help="base rev; compares <since>...HEAD plus working tree")
-    parser.add_argument("--format", choices=("list", "args"), default="list")
+    parser.add_argument("--format", choices=("list", "args", "json"), default="list")
     parser.add_argument("--show-uncovered", action="store_true", default=True)
     arguments = parser.parse_args()
 
     repo = Path(arguments.repo).resolve()
+    started = time.perf_counter()
     diff = changed_diff(repo, arguments.since)
     modules, identifiers = parse_diff(repo, diff)
+    direct_tests = changed_test_paths(diff)
     # The changed API names are the selection.  A bare module name is only a
     # fallback: for a package like this one nearly every test imports
     # ``server``, so keying on it selects 129 of 313 files and stops being a
@@ -233,7 +360,7 @@ def main() -> int:
     terms = identifiers or modules
     fallback = not identifiers
 
-    if not terms:
+    if not terms and not direct_tests:
         print(
             "SELECTION VACUOUS: the diff yielded no identifiers. This is an "
             "infrastructure failure (empty diff? wrong --since?), not a clean "
@@ -243,6 +370,10 @@ def main() -> int:
         return 2
 
     selected, all_tests = scan_tests(repo, terms)
+    all_test_set = set(all_tests)
+    direct_tests &= all_test_set
+    for path in direct_tests:
+        selected.setdefault(path, set()).add("<changed-test>")
 
     if not selected:
         print(
@@ -257,7 +388,21 @@ def main() -> int:
         covered_terms |= hits
     uncovered = sorted(identifiers - covered_terms)
 
-    if arguments.format == "args":
+    elapsed = time.perf_counter() - started
+    if arguments.format == "json":
+        print(json.dumps({
+            "schema": "sonder.incremental-test-selection.v1",
+            "selected": sorted(selected),
+            "selected_count": len(selected),
+            "test_file_count": len(all_tests),
+            "changed_modules": sorted(modules),
+            "changed_identifiers": sorted(identifiers),
+            "directly_changed_tests": sorted(direct_tests),
+            "uncovered_identifiers": uncovered,
+            "fallback_to_module": fallback,
+            "elapsed_seconds": round(elapsed, 6),
+        }, indent=2, sort_keys=True))
+    elif arguments.format == "args":
         print(" ".join(sorted(selected)))
     else:
         for path in sorted(selected):
@@ -265,8 +410,9 @@ def main() -> int:
 
     print(
         "\n# selected %d of %d test files from %d changed identifier(s) "
-        "across %d module(s): %s%s"
+        "across %d module(s) in %.3fs: %s%s"
         % (len(selected), len(all_tests), len(identifiers), len(modules),
+           elapsed,
            ", ".join(sorted(modules)),
            "  [FALLBACK: no API identifier changed, keyed on module name]"
            if fallback else ""),

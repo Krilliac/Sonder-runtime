@@ -695,12 +695,28 @@ def execute_run(
             task["status"] = "running"
             task["attempts"] = int(task.get("attempts") or 0) + 1
             plan[task_index] = task
-            run = autopilot_store.save_progress(
+            started = autopilot_store.save_progress(
                 run["id"], owner_id, plan=plan, status="running", phase="execute",
                 current_task=task_index,
                 event_kind="task_start",
                 event_message="%s: %s" % (task["id"], task["title"]),
-            ) or run
+            )
+            if started is None:
+                # The conditional task-start write refused: ownership was lost
+                # or a cancel won the race since the loop-top flag check.
+                # Falling back to the stale in-memory run here used to let one
+                # more model/tool call execute under a lost lease (or after a
+                # cancel) before the next flag checkpoint caught it.
+                flags = autopilot_store.control_flags(run["id"], owner_id)
+                if flags.get("cancel") and not flags.get("lost"):
+                    return autopilot_store.finish_run(
+                        run["id"], owner_id, "cancelled",
+                        summary="cancelled before task execution",
+                    ) or run
+                raise AutopilotError(
+                    "autopilot ownership was lost before task execution"
+                )
+            run = started
             prior = "\n".join(
                 "- %s [%s]: %s" % (
                     item.get("title", ""), item.get("status", ""),

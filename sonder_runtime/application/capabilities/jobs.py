@@ -16,7 +16,8 @@ from ..jobs.durable_registry import (
     ProcessTreeCleanupRequest,
 )
 from ..ports.jobs import (
-    JobClaim, JobIdentity, JobRecord, JobRegistry, JobStatus,
+    JobClaim, JobCompletionReceipt, JobIdentity, JobReconciliationReport,
+    JobRecord, JobRegistry, JobStatus, MAX_JOB_ATTEMPTS,
     WorkflowCheckpoint, WorkflowDefinition, WorkflowRepository, WorkflowResume,
 )
 from ..jobs.session_lifecycle import JobRegistryLifecycleAdapter
@@ -59,17 +60,25 @@ class JobRegistryService:
         parent_job_id: str | None = None,
         process_id: int | None = None,
         process_group_id: int | None = None,
+        max_attempts: int | None = None,
     ) -> JobRecord:
         """Start a durable job when the backing adapter exposes the richer seam."""
         starter = getattr(self._port, "start", None)
         if not callable(starter):
             return self.create(identity)
-        record = starter(
-            identity,
-            parent_job_id=parent_job_id,
-            process_id=process_id,
-            process_group_id=process_group_id,
-        )
+        kwargs = {
+            "parent_job_id": parent_job_id,
+            "process_id": process_id,
+            "process_group_id": process_group_id,
+        }
+        if max_attempts is not None:
+            if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
+                    or not 1 <= max_attempts <= MAX_JOB_ATTEMPTS):
+                raise InvalidInput(
+                    f"max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}"
+                )
+            kwargs["max_attempts"] = max_attempts
+        record = starter(identity, **kwargs)
         if self._lifecycle is not None:
             self._lifecycle.record(record)
         return record
@@ -121,7 +130,10 @@ class JobRegistryService:
             raise InvalidInput("limit must be positive")
         return self._port.list(include_terminal=include_terminal, limit=limit)
 
-    def cancel(self, job_id: str, reason: str = "cancelled") -> tuple[JobRecord, ...]:
+    def cancel(
+        self, job_id: str, reason: str = "cancelled", *,
+        max_descendants: int | None = None,
+    ) -> tuple[JobRecord, ...]:
         """Cancel through the durable adapter's optional capability."""
         if not isinstance(job_id, str) or not job_id.strip():
             raise InvalidInput("job_id is required")
@@ -131,7 +143,14 @@ class JobRegistryService:
         if not callable(cancel):
             raise InvalidInput("job cancellation is not supported")
         try:
-            records = cancel(job_id, reason=reason)
+            if max_descendants is None:
+                records = cancel(job_id, reason=reason)
+            else:
+                if isinstance(max_descendants, bool) or max_descendants < 0:
+                    raise InvalidInput("max_descendants must be a non-negative integer")
+                records = cancel(
+                    job_id, reason=reason, max_descendants=max_descendants,
+                )
         except KeyError as exc:
             raise NotFound(f"job {job_id!r} not found") from exc
         records = tuple(records)
@@ -213,22 +232,80 @@ class JobRegistryService:
             raise ConcurrencyConflict(f"job {job_id!r} could not be claimed")
         return claim
 
-    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> None:
-        if not self._port.heartbeat(job_id, worker_id, lease_seconds=lease_seconds):
+    def heartbeat(
+        self, job_id: str, worker_id: str, *, lease_seconds: int = 300,
+        claim_token: str | None = None,
+    ) -> None:
+        kwargs: dict[str, Any] = {"lease_seconds": lease_seconds}
+        if claim_token is not None:
+            kwargs["claim_token"] = claim_token
+        if not self._port.heartbeat(job_id, worker_id, **kwargs):
             raise ConcurrencyConflict(f"job {job_id!r} heartbeat rejected")
 
-    def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None, error: str = "") -> JobRecord:
+    def finish(
+        self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None,
+        error: str = "", claim_token: str | None = None,
+    ) -> JobRecord:
         if status not in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}:
             raise InvalidInput("finish requires a terminal job status")
-        job = self._port.finish(job_id, worker_id, status, result=result, error=error)
+        kwargs = {"result": result, "error": error}
+        if claim_token is not None:
+            kwargs["claim_token"] = claim_token
+        job = self._port.finish(job_id, worker_id, status, **kwargs)
         if job is None:
             raise ConcurrencyConflict(f"job {job_id!r} finish rejected")
         if self._lifecycle is not None:
             self._lifecycle.record(job)
         return job
 
-    def reconcile(self, *, now: str | None = None) -> int:
+    def finish_once(
+        self, job_id: str, worker_id: str, status: JobStatus, *, receipt_key: str,
+        result: Any = None, error: str = "", claim_token: str | None = None,
+    ) -> JobCompletionReceipt:
+        """Commit and replay an adapter-backed exactly-once attempt receipt."""
+        finisher = getattr(self._port, "finish_once", None)
+        if not callable(finisher):
+            raise InvalidInput("exactly-once completion receipts are not supported")
+        receipt = finisher(
+            job_id, worker_id, status, receipt_key=receipt_key,
+            result=result, error=error, claim_token=claim_token,
+        )
+        if receipt is None:
+            raise ConcurrencyConflict(f"job {job_id!r} receipt commit rejected")
+        if self._lifecycle is not None:
+            self._lifecycle.record(self.get(job_id))
+        return receipt
+
+    def retry(self, job_id: str, *, expected_revision: int | None = None) -> JobRecord:
+        retry = getattr(self._port, "retry", None)
+        if not callable(retry):
+            raise InvalidInput("job retry is not supported")
+        try:
+            record = retry(job_id, expected_revision=expected_revision)
+        except KeyError as exc:
+            raise NotFound(f"job {job_id!r} not found") from exc
+        if record is None:
+            raise ConcurrencyConflict(f"job {job_id!r} retry rejected")
+        if self._lifecycle is not None:
+            self._lifecycle.record(record)
+        return record
+
+    def reconcile(self, *, now: str | None = None, max_records: int = 100) -> int:
+        if isinstance(max_records, bool) or max_records < 1:
+            raise InvalidInput("max_records must be positive")
+        bounded = getattr(self._port, "reconcile_stale", None)
+        if callable(bounded):
+            return bounded(now=now, max_records=max_records).interrupted
+        # Compatibility for adapters implementing the original unbounded port.
         return self._port.reconcile(now=now)
+
+    def reconcile_report(
+        self, *, now: str | None = None, max_records: int = 100,
+    ) -> JobReconciliationReport:
+        reconcile = getattr(self._port, "reconcile_stale", None)
+        if not callable(reconcile):
+            raise InvalidInput("stale-worker reconciliation diagnostics are not supported")
+        return reconcile(now=now, max_records=max_records)
 
     def recover(
         self,
@@ -280,15 +357,18 @@ class ResumableWorkflowEngine:
         return job
 
     def resume(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> WorkflowResume:
-        self._jobs.claim(job_id, worker_id, lease_seconds=lease_seconds)
+        claim = self._jobs.claim(job_id, worker_id, lease_seconds=lease_seconds)
         job = self._jobs.get(job_id)
         checkpoint = self._checkpoints.get_checkpoint(job_id)
         if checkpoint is None:
             raise NotFound(f"workflow checkpoint for {job_id!r} not found")
-        return WorkflowResume(job, checkpoint)
+        return WorkflowResume(job, checkpoint, claim)
 
-    def checkpoint(self, job_id: str, worker_id: str, *, next_step: int, state: dict[str, Any], completed_step_id: str | None = None) -> WorkflowCheckpoint:
-        self._jobs.heartbeat(job_id, worker_id)
+    def checkpoint(
+        self, job_id: str, worker_id: str, *, next_step: int, state: dict[str, Any],
+        completed_step_id: str | None = None, claim_token: str | None = None,
+    ) -> WorkflowCheckpoint:
+        self._jobs.heartbeat(job_id, worker_id, claim_token=claim_token)
         current = self._checkpoints.get_checkpoint(job_id)
         if current is None:
             raise NotFound(f"workflow checkpoint for {job_id!r} not found")
@@ -300,8 +380,14 @@ class ResumableWorkflowEngine:
             raise ConcurrencyConflict(f"workflow {job_id!r} checkpoint conflict")
         return saved
 
-    def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None, error: str = "") -> JobRecord:
-        return self._jobs.finish(job_id, worker_id, status, result=result, error=error)
+    def finish(
+        self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None,
+        error: str = "", claim_token: str | None = None,
+    ) -> JobRecord:
+        return self._jobs.finish(
+            job_id, worker_id, status, result=result, error=error,
+            claim_token=claim_token,
+        )
 
 
 __all__ = ["JobCancellationResult", "JobRegistryService", "ResumableWorkflowEngine"]

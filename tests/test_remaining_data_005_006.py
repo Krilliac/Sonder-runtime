@@ -45,6 +45,7 @@ def test_data_005_rehearsal_proves_backup_restore_and_leaves_source_untouched(tm
     assert report.backup_verified
     assert report.restore_verified
     assert report.crash_recovery_verified
+    assert report.resume_verified
     assert report.epoch2_verified
     assert report.cleanup.allowed
     assert _digest(tmp_path / "memory.db") == before

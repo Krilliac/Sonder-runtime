@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sonder-runtime.local/research/golden-eval-case.schema.json",
+  "title": "Sonder golden eval case (EXPERIMENTAL)",
+  "description": "Proposed shape for one pinned regression-eval case, borrowing the task/solver/scorer decomposition popularized by Inspect AI and the assertion style of Promptfoo, adapted to Sonder's grounded-outcome discipline: every scorer must be a deterministic host-side check (compile, test, schema, exact/contains match) or an explicitly-labeled model grader that can never be the sole gate for promotion. This file is a research artifact under docs/research/ and is NOT read by the runtime.",
+  "type": "object",
+  "required": ["case_id", "task", "input", "scorers"],
+  "additionalProperties": false,
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Stable id; renaming a case is a history break and should be treated like deleting one."
+    },
+    "task": {
+      "type": "string",
+      "description": "Which Sonder lane the case exercises: e.g. codegen_build_loop, retrieval, solver, chat, fleet_task."
+    },
+    "input": {
+      "type": "object",
+      "description": "Everything needed to replay the case deterministically.",
+      "required": ["prompt"],
+      "additionalProperties": false,
+      "properties": {
+        "prompt": { "type": "string" },
+        "fixture_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Workspace-relative fixture files; each should be committed or referenced by hash."
+        },
+        "fixture_sha256": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "description": "Pin of each fixture's bytes so a drifted fixture fails loudly instead of silently changing the case."
+        },
+        "tier": {
+          "type": "string",
+          "description": "Model tier alias the case targets (fast/code/general); omitted means the router decides."
+        }
+      }
+    },
+    "scorers": {
+      "type": "array",
+      "minItems": 1,
+      "description": "All scorers must pass for the case to pass. Deterministic scorers are the promotion authority; model_grader results are advisory diagnostics only.",
+      "items": {
+        "type": "object",
+        "required": ["kind"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "exact_match",
+              "contains",
+              "regex",
+              "json_schema",
+              "python_compiles",
+              "tests_pass",
+              "tool_call_sequence",
+              "model_grader"
+            ]
+          },
+          "value": {
+            "description": "Scorer payload: expected string, regex, schema path, test command, or expected tool-name sequence.",
+            "type": ["string", "array", "object"]
+          },
+          "advisory": {
+            "type": "boolean",
+            "default": false,
+            "description": "MUST be true when kind is model_grader; advisory scorers report but never gate."
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Where the case came from: a real grounded outcome id, a regression (link the fix), or an authored probe."
+        },
+        "added": { "type": "string", "format": "date" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

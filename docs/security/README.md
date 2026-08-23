@@ -1,12 +1,15 @@
 # Sonder Runtime — Security Review
 
-This directory holds a **read-only** security review of Sonder's most sensitive
-surfaces. It changed no runtime code; it only records what was inspected, what
-holds up, and what does not.
+This directory holds security reviews and implementation evidence for Sonder's
+most sensitive surfaces. The original ranked review was read-only; later dated
+passes record the narrow runtime hardening and adversarial coverage they added.
 
 - **[REVIEW.md](./REVIEW.md)** — the ranked findings list (CONFIRMED,
   NEEDS-VERIFICATION, and WELL-DEFENDED sections, each with `file:line` anchors,
   a concrete failure scenario, and a remediation).
+- **[DEFENSIVE-BOUNDARIES-2026-08-22.md](./DEFENSIVE-BOUNDARIES-2026-08-22.md)**
+  — implemented tool-policy, remote-worker, identity, provenance, archive, and
+  redaction hardening with adversarial coverage and residual risks.
 
 See also **[ISOLATED_EXECUTION.md](./ISOLATED_EXECUTION.md)** for the optional
 Docker/Podman-backed `isolated_run` contract, fixed controls, availability, and

@@ -431,15 +431,29 @@ class LocalObservabilitySink:
                 },
             }
 
-    def trace_projection(self, limit: int = 256):
+    def trace_projection(
+        self,
+        limit: int = 256,
+        *,
+        correlation_id: str = "",
+        category: str = "",
+        severity: str = "",
+    ):
         """Return a bounded export-neutral projection of retained events.
 
         The application projection receives only this sink's already-redacted
         event view. It never receives the delegate's raw event arguments and
-        does not enable export or delivery.
+        does not enable export or delivery. The optional filters narrow the
+        projection to one request/run/worker's correlation_id (or category or
+        severity) using the same equality filters as ``recent_events``.
         """
         from sonder_runtime.application.observability.trace_projection import (
             project_trace,
         )
 
-        return project_trace(self.recent_events(limit=limit))
+        return project_trace(self.recent_events(
+            limit=limit,
+            correlation_id=correlation_id,
+            category=category,
+            severity=severity,
+        ))

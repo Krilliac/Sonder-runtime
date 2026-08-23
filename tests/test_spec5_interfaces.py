@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import pytest
 
 from sonder_runtime.domain.common.errors import (
+    CapacityExceeded,
     Forbidden,
     InvalidInput,
     NotFound,
@@ -137,6 +138,13 @@ class TestHTTPHandlers:
         resp = error_response(InvalidInput("bad"))
         assert resp.status == 400
 
+    def test_error_response_carries_structured_retryable_flag(self):
+        from sonder_runtime.interfaces.http.handlers import error_response
+        transient = error_response(CapacityExceeded("busy"))
+        assert transient.body["retryable"] is True
+        permanent = error_response(InvalidInput("bad"))
+        assert permanent.body["retryable"] is False
+
     def test_response_serialize(self):
         from sonder_runtime.interfaces.http.handlers import Response
         r = Response(200, {"key": "value"})
@@ -162,6 +170,15 @@ class TestMCPHandlers:
         result = h.handle({"task": "test"})
         assert result["isError"] is True
         assert result["error"] == "FORBIDDEN"
+        assert result["retryable"] is False
+
+    def test_recall_error_surfaces_retryable_for_transient_failures(self):
+        from sonder_runtime.interfaces.mcp.handlers import McpRecallHandler
+        svc = StubRecallService(error=CapacityExceeded("try later"))
+        h = McpRecallHandler(svc)
+        result = h.handle({"task": "test"})
+        assert result["error"] == "CAPACITY_EXCEEDED"
+        assert result["retryable"] is True
 
     def test_outcome(self):
         from sonder_runtime.interfaces.mcp.handlers import McpOutcomeHandler
@@ -176,6 +193,8 @@ class TestMCPHandlers:
         h = McpOutcomeHandler(svc)
         result = h.handle({"interaction_id": ""})
         assert result["isError"] is True
+        assert result["error"] == "INVALID_INPUT"
+        assert result["retryable"] is False
 
     def test_context_source_is_mcp(self):
         from sonder_runtime.interfaces.mcp.handlers import context_for_mcp_call

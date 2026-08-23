@@ -1,0 +1,18 @@
+{
+  "schema": "sonder.eval-harness.baseline/v1",
+  "suites": {
+    "smoke_python": {
+      "replay": {
+        "forbid_infra": true,
+        "min_pass_rate": 1.0,
+        "required_pass": [
+          "reverse_string",
+          "reverse_words",
+          "slugify",
+          "sum_csv_column"
+        ],
+        "suite_hash": "fa483ba8f93d2b051b50ab265af44a02a04c6d20a70a7b37ef7f7babd5d490fa"
+      }
+    }
+  }
+}

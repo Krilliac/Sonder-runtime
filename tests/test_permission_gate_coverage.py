@@ -166,6 +166,8 @@ def _maps():
 # `/selfmod` came to be graded by its most harmless sibling.
 _DISPLAY_ONLY_BRANCHES = {
     "/help": "renders command_catalog text",
+    "/why": "renders command_router.explain() evidence; dispatches nothing",
+    "/version": "prints the version literal and release stamp; no subprocess",
     "/exit": "ends the session; empty branch body",
     "/quit": "alias of /exit",
     "/q": "alias of /exit",
@@ -178,6 +180,7 @@ _DISPLAY_ONLY_BRANCHES = {
     "/new": "starts a new session id (memory_store.new_id)",
     "/clear": "terminal presentation clear only; no runtime/tool mutation",
     "/sessions": "lists past sessions (memory_store.list_sessions)",
+    "/replay": "re-renders stored turns read-only (memory_store.session_turns)",
     "/resume": "looks a session up (memory_store.find_session)",
     "/facts": "prints stored facts",
     "/lessons": "prints stored lessons",
