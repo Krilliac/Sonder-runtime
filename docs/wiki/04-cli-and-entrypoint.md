@@ -79,5 +79,19 @@ opens — the fail-closed contract from [Configuration](03-configuration.md).
 `/permissions` and `/filepolicy` (guardrails), `/run [sec]` (execute the
 last code block, guarded), `/train [N]` (grounded practice),
 `/autopilot status|resume|cancel`, `/runtime status`, `/pass` `/fail`
-(record outcomes). Plain English also triggers many of these. Dangerous
-commands over HTTP require developer/admin authorization.
+(record outcomes), `/sessions` `/replay [id|title] [N]` `/resume <id|title>`
+(list, re-render read-only, and continue past threads). Plain English also
+triggers many of these. Dangerous commands over HTTP require
+developer/admin authorization.
+
+## Scripted REPL output
+
+Piped REPL use (`sonder < script.txt`, `echo /stats | sonder`) prints plain
+text with no terminal chrome; that shape is a stable scripting contract.
+Setting `SONDER_REPL_NDJSON=1` opts a piped session into one JSON line per
+completed chat turn instead (schema `sonder.repl-turn.v1`: `answer`,
+`error`, `elapsed_ms`, `interaction_id`, `feedback_offered`, `label`).
+The flag never changes interactive terminals, and the flagless piped
+default never changes. Known failure shapes additionally get a one-line
+`hint:` under the interactive error panel only — piped output stays
+byte-stable.

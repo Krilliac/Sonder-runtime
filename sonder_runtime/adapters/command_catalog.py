@@ -299,7 +299,8 @@ _LEGACY_CATEGORY = {"inspect": "system", "learning": "memory"}
 _CATEGORY_BY_SLASH = {
     "/help": "basic", "/exit": "basic", "/new": "basic", "/clear": "basic", "/project": "basic",
     "/workspace": "filesystem", "/workspace-create": "filesystem", "/workspacecreate": "filesystem",
-    "/sessions": "basic", "/resume": "basic", "/version": "basic",
+    "/sessions": "basic", "/replay": "basic", "/resume": "basic",
+    "/version": "basic",
     "/model": "chat", "/persona": "persona", "/consult": "chat",
     "/route": "chat", "/refactor": "dev", "/scaffold": "dev",
     "/fact": "memory", "/facts": "memory", "/lessons": "memory",
@@ -554,6 +555,10 @@ _NATIVE_PARAM_SPECS = {
     # line, so a single named field documents the actual free-form grammar.
     "/game": (Param("spec", "str", True),),
     "/gamefleet": (Param("spec", "str", True),),
+    # `[id|title] [N]` -- both optional; a bare /replay shows this thread.
+    "/replay": (
+        Param("thread", "str", False, ""), Param("turns", "int", False, 20),
+    ),
 }
 
 

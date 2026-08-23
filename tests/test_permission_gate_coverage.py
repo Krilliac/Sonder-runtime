@@ -178,6 +178,7 @@ _DISPLAY_ONLY_BRANCHES = {
     "/new": "starts a new session id (memory_store.new_id)",
     "/clear": "terminal presentation clear only; no runtime/tool mutation",
     "/sessions": "lists past sessions (memory_store.list_sessions)",
+    "/replay": "re-renders stored turns read-only (memory_store.session_turns)",
     "/resume": "looks a session up (memory_store.find_session)",
     "/facts": "prints stored facts",
     "/lessons": "prints stored lessons",
