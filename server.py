@@ -1265,6 +1265,10 @@ def resolve_sonder_model(strict=False):
 _MODEL_CONTEXT_CACHE = {}
 _MODEL_CONTEXT_CACHE_LOCK = threading.Lock()
 _MODEL_CONTEXT_CACHE_TTL = 300.0
+# A failed /api/show yields no metadata and pins the conservative context
+# fallback; keep that verdict short-lived so a transient provider hiccup does
+# not undersize a large model's window for the full positive TTL.
+_MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
 
 
 def _model_context_metadata(model):
@@ -1275,8 +1279,14 @@ def _model_context_metadata(model):
     now = time.monotonic()
     with _MODEL_CONTEXT_CACHE_LOCK:
         cached = _MODEL_CONTEXT_CACHE.get(key)
-        if cached and now - cached[0] < _MODEL_CONTEXT_CACHE_TTL:
-            return cached[1], cached[2]
+        if cached:
+            ttl = (
+                _MODEL_CONTEXT_CACHE_TTL
+                if cached[1] is not None or cached[2] is not None
+                else _MODEL_CONTEXT_CACHE_NEGATIVE_TTL
+            )
+            if now - cached[0] < ttl:
+                return cached[1], cached[2]
     context_length = None
     parameter_size = None
     try:
@@ -4230,7 +4240,10 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
                 )
             return json.loads(raw.decode("utf-8"))
 
-    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
+    if not OLLAMA_POOL.enabled:
+        return send(BASE)
+    model_hint = payload.get("model") if isinstance(payload, dict) else None
+    return OLLAMA_POOL.request(send, model=model_hint)
 
 
 _PREWARM_LOCK = threading.Lock()

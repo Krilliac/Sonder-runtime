@@ -11,10 +11,28 @@ PC 1: Sonder coordinator ── HTTPS ──> PC 2: TLS proxy ── loopback �
        local Ollama is worker 1       PC 3 may be added the same way
 ```
 
-The coordinator uses least-inflight scheduling. A worker is circuit-broken
-after three transport failures, and a request fails over only before a worker
-returns a response. A model error or a completed response is never replayed on
-another PC.
+The coordinator uses least-inflight scheduling with a latency tie-break:
+when several workers are equally idle, the host with the lowest exponentially
+weighted average of past request latencies is tried first, and a worker whose
+latency has never been measured sorts ahead of all measured ones so it gets
+measured. A worker is circuit-broken after three transport failures, and a
+request fails over only before a worker returns a response. A model error or
+a completed response is never replayed on another PC.
+
+Circuit recovery is half-open: after the cooldown expires the worker admits a
+single trial request at a time. A successful trial closes the circuit and
+restores normal scheduling; a failed trial re-trips it immediately and the
+cooldown doubles on each consecutive trip, up to eight times the base cooldown
+(30 s base, 240 s cap). This keeps a permanently-down PC from absorbing a
+probe every 30 seconds while still recovering a rebooted one within a minute
+or two.
+
+The pool also carries an experimental model-affinity seam: when a worker's
+advertised model inventory has been recorded (`note_models` on the pool),
+requests naming a model that worker lacks are ordered toward workers that
+have it. Inventory only reorders scheduling — it never excludes a worker,
+because a recorded list may be stale and Ollama can pull a model on demand.
+Nothing records inventory automatically yet.
 
 ## Prepare each worker PC
 
@@ -73,11 +91,12 @@ prompts over an insecure link.
 
 ## Verify
 
-Use the normal status surface. It reports the configured worker count and how
-many workers are remote. Send several independent requests and inspect the
-activity/model telemetry to see the selected backend. A worker that goes down
-is temporarily removed from selection and returns automatically after its
-cooldown when a later request succeeds.
+Use the normal status surface. It reports the configured worker count, how
+many workers are remote, and per-worker health: in-flight requests, consecutive
+failures, circuit trips, whether the worker is in its half-open probing state,
+and the smoothed request latency in milliseconds. A worker that goes down is
+temporarily removed from selection and returns automatically through a
+successful half-open trial after its cooldown.
 
 ## Internet access
 

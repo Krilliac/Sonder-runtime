@@ -22,6 +22,11 @@ from sonder_runtime.domain import ollama_policy
 _FAILOVER_HTTP_CODES = frozenset({502, 503, 504})
 _DEFAULT_FAILURE_THRESHOLD = 3
 _DEFAULT_COOLDOWN_SECONDS = 30.0
+# Repeated circuit trips double the cooldown up to this multiple of the base,
+# so a host that stays down is probed progressively less often.
+_COOLDOWN_MAX_MULTIPLIER = 8
+# Exponential moving average weight for per-worker success latency.
+_LATENCY_EWMA_ALPHA = 0.3
 
 
 def _is_loopback(origin: str) -> bool:
@@ -79,6 +84,9 @@ class WorkerSnapshot:
     consecutive_failures: int
     last_error: str
     cooldown_until: float
+    trips: int = 0
+    probing: bool = False
+    ewma_latency_ms: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -89,6 +97,9 @@ class WorkerSnapshot:
             "consecutive_failures": self.consecutive_failures,
             "last_error": self.last_error,
             "cooldown_until": self.cooldown_until,
+            "trips": self.trips,
+            "probing": self.probing,
+            "ewma_latency_ms": self.ewma_latency_ms,
         }
 
 
@@ -99,6 +110,24 @@ class _WorkerState:
     consecutive_failures: int = 0
     last_error: str = ""
     cooldown_until: float = 0.0
+    # Circuit trips since the last success; nonzero after cooldown expiry
+    # marks the half-open state (a single trial request at a time).
+    trips: int = 0
+    # Exponential moving average of successful request latency in seconds;
+    # 0.0 means unmeasured, which deliberately sorts first so a fresh worker
+    # receives traffic and gets measured.
+    ewma_latency: float = 0.0
+    # Case-normalized model inventory advertised by this worker, or None when
+    # never recorded.  Experimental affinity seam: see ``note_models``.
+    known_models: frozenset | None = None
+
+
+def _model_key(name) -> str:
+    """Case-normalized model comparison key; ``:latest`` is implicit."""
+    text = str(name or "").strip().casefold()
+    if text.endswith(":latest"):
+        text = text[: -len(":latest")]
+    return text
 
 
 def _worker_id(origin: str) -> str:
@@ -119,6 +148,7 @@ class OllamaWorkerPool:
         allow_remote: bool = False,
         failure_threshold: int = _DEFAULT_FAILURE_THRESHOLD,
         cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS,
+        time_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         if failure_threshold < 1:
             raise ValueError("failure threshold must be >= 1")
@@ -138,6 +168,8 @@ class OllamaWorkerPool:
         self._states = states
         self._failure_threshold = int(failure_threshold)
         self._cooldown_seconds = float(cooldown_seconds)
+        self._cooldown_max_seconds = float(cooldown_seconds) * _COOLDOWN_MAX_MULTIPLIER
+        self._time = time_fn
         self._cursor = 0
         self._lock = threading.RLock()
 
@@ -153,19 +185,35 @@ class OllamaWorkerPool:
     def origins(self) -> tuple[str, ...]:
         return tuple(state.endpoint.origin for state in self._states)
 
-    def _ordered(self) -> list[_WorkerState]:
-        now = time.monotonic()
+    def _ordered(self, model: str | None = None) -> list[_WorkerState]:
+        wanted = _model_key(model)
+        now = self._time()
         with self._lock:
-            ready = [
-                state for state in self._states
-                if state.cooldown_until <= now
-            ]
+            ready = []
+            for state in self._states:
+                if state.cooldown_until > now:
+                    continue
+                if state.trips and state.inflight > 0:
+                    # Half-open: an expired cooldown admits one trial request
+                    # at a time until a success closes the circuit again.
+                    continue
+                ready.append(state)
             if not ready:
                 ready = [min(self._states, key=lambda item: item.cooldown_until)]
             start = self._cursor % len(ready)
             self._cursor += 1
             rotated = ready[start:] + ready[:start]
-            return sorted(rotated, key=lambda item: item.inflight)
+
+            def rank(item: _WorkerState):
+                lacks_model = (
+                    1
+                    if wanted and item.known_models is not None
+                    and wanted not in item.known_models
+                    else 0
+                )
+                return (lacks_model, item.inflight, item.ewma_latency)
+
+            return sorted(rotated, key=rank)
 
     @staticmethod
     def _retryable(error: BaseException) -> bool:
@@ -177,24 +225,67 @@ class OllamaWorkerPool:
         with self._lock:
             state.inflight += 1
 
-    def _finish(self, state: _WorkerState, error: BaseException | None) -> None:
+    def _finish(
+        self,
+        state: _WorkerState,
+        error: BaseException | None,
+        elapsed: float | None = None,
+    ) -> None:
         with self._lock:
             state.inflight = max(0, state.inflight - 1)
             if error is None:
                 state.consecutive_failures = 0
+                state.trips = 0
                 state.last_error = ""
                 state.cooldown_until = 0.0
+                if elapsed is not None and elapsed >= 0:
+                    if state.ewma_latency <= 0:
+                        state.ewma_latency = float(elapsed)
+                    else:
+                        state.ewma_latency += _LATENCY_EWMA_ALPHA * (
+                            float(elapsed) - state.ewma_latency
+                        )
                 return
             state.consecutive_failures += 1
             state.last_error = "%s: %s" % (type(error).__name__, str(error)[:240])
             if state.consecutive_failures >= self._failure_threshold:
-                state.cooldown_until = time.monotonic() + self._cooldown_seconds
+                state.trips += 1
+                backoff = min(
+                    self._cooldown_seconds * (2 ** (state.trips - 1)),
+                    self._cooldown_max_seconds,
+                )
+                state.cooldown_until = self._time() + backoff
 
-    def request(self, sender: Callable[[str], object]):
-        """Send once per selected worker, failing over only before a response."""
+    def note_models(self, origin_or_id: str, model_names) -> bool:
+        """Record a worker's advertised model inventory (experimental seam).
+
+        Inventory only *orders* selection — a worker whose recorded inventory
+        lacks the requested model sorts last but is never excluded, because a
+        recorded list may be stale and a worker can pull a model on demand.
+        Returns whether a matching worker was found.
+        """
+        target = str(origin_or_id or "").strip().rstrip("/")
+        names = frozenset(
+            key for key in (_model_key(name) for name in (model_names or ())) if key
+        )
+        with self._lock:
+            for state in self._states:
+                if target in (state.endpoint.origin, state.endpoint.worker_id):
+                    state.known_models = names
+                    return True
+        return False
+
+    def request(self, sender: Callable[[str], object], *, model: str | None = None):
+        """Send once per selected worker, failing over only before a response.
+
+        ``model`` is an optional scheduling hint: workers whose recorded
+        inventory (see ``note_models``) lacks it are tried last. It never
+        changes the payload the sender transmits.
+        """
         last_error = None
-        for state in self._ordered():
+        for state in self._ordered(model):
             self._start(state)
+            started = self._time()
             try:
                 result = sender(state.endpoint.origin)
             except Exception as error:
@@ -203,14 +294,14 @@ class OllamaWorkerPool:
                     raise
                 last_error = error
                 continue
-            self._finish(state, None)
+            self._finish(state, None, self._time() - started)
             return result
         if last_error is not None:
             raise last_error
         raise RuntimeError("no Ollama worker is available")
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
-        now = time.monotonic()
+        now = self._time()
         with self._lock:
             return tuple(
                 WorkerSnapshot(
@@ -221,6 +312,9 @@ class OllamaWorkerPool:
                     consecutive_failures=state.consecutive_failures,
                     last_error=state.last_error,
                     cooldown_until=state.cooldown_until,
+                    trips=state.trips,
+                    probing=bool(state.trips) and state.cooldown_until <= now,
+                    ewma_latency_ms=round(state.ewma_latency * 1000.0, 3),
                 )
                 for state in self._states
             )
