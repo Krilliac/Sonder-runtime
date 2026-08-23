@@ -44,6 +44,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hours", type=float, default=4.0)
     parser.add_argument("--test-timeout", type=int, default=1800)
+    parser.add_argument(
+        "--max-barren", type=int, default=6,
+        help="stop after this many non-committing passes; 0 disables the limit",
+    )
+    parser.add_argument(
+        "--num-ctx", type=int, default=16384,
+        help="local generation context window for selfmod prompts",
+    )
     parser.add_argument("--model", default="qwen2.5-coder:14b",
                         help="model behind the code tier for this run")
     args = parser.parse_args()
@@ -56,17 +64,16 @@ def main() -> int:
     # of the original file. A 14B fits the host's 6 GB of VRAM with the
     # remainder in system RAM and converted 6 of 12 bodies the 7B could not
     # in a separate measurement.
-    if args.model:
-        server.TIERS['code'] = args.model
-
     def log(message):
         print("%s %s" % (time.strftime("%H:%M:%S"), message), flush=True)
 
     deadline = time.time() + args.hours * 3600.0
     committed, barren, passes = [], 0, 0
 
-    log("=== selfmod continuous start: %.1fh, mode=%s, model=%s, branch-commit ==="
-        % (args.hours, selfmod.settings().get("mode"), args.model))
+    log("=== selfmod continuous start: %.1fh, mode=%s, model=%s, ctx=%s, max-barren=%s, branch-commit ==="
+        % (args.hours, selfmod.settings().get("mode"), args.model,
+           args.num_ctx,
+           "unlimited" if args.max_barren <= 0 else args.max_barren))
 
     # Every run of this loop so far has ended by being killed mid-pass, which
     # leaves an ownerless active-phase run and its worktree behind that no
@@ -74,12 +81,16 @@ def main() -> int:
     # a time, so any active run with no owner is a corpse.
     nightly_selfmod.reclaim_orphans(log)
 
-    while time.time() < deadline and barren < MAX_BARREN:
+    while (
+        time.time() < deadline
+        and (args.max_barren <= 0 or barren < args.max_barren)
+    ):
         passes += 1
         log("--- pass %d (%.1fh left) ---" % (passes, (deadline - time.time()) / 3600.0))
         try:
             result = nightly_selfmod.run(
-                server, log, test_timeout=args.test_timeout, branch=True)
+                server, log, test_timeout=args.test_timeout, branch=True,
+                model=args.model, num_ctx=args.num_ctx)
         except Exception as exc:
             result = "pass failed: %s" % str(exc)[:200]
         log(result)
@@ -97,7 +108,7 @@ def main() -> int:
     log("=== done: %d pass(es), %d commit(s) ===" % (passes, len(committed)))
     for line in committed:
         log("  " + line)
-    if barren >= MAX_BARREN:
+    if args.max_barren > 0 and barren >= args.max_barren:
         log("stopped early: %d consecutive passes produced no commit" % barren)
     if committed:
         log("review with: git log --oneline --all --grep='^selfmod:'")

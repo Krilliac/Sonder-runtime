@@ -361,6 +361,29 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
     }
 
 
+def test_make_generate_auto_sizes_context_from_selected_model(monkeypatch):
+    seen = {}
+    # The expected 16k native window is the quantised-KV policy branch.  Make
+    # the test independent of the runner's ambient Ollama setting.
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q4_0")
+
+    def fake_post(path, payload, **_kwargs):
+        if path == "/api/show":
+            return {
+                "details": {"parameter_size": "30.5B"},
+                "model_info": {"qwen3moe.context_length": 262144},
+            }
+        seen["options"] = payload["options"]
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setattr(server, "_post", fake_post)
+    server._MODEL_CONTEXT_CACHE.clear()
+
+    gen = server._make_generate("large-local", "", 0.2, 32, 0)
+    assert gen("hello") == "ok"
+    assert seen["options"]["num_ctx"] == 16384
+
+
 def test_make_generate_marks_partial_provider_usage_as_mixed(monkeypatch):
     def fake_post(_path, _payload):
         return {"message": {"content": "ok"}, "eval_count": 2}
