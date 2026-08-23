@@ -24,6 +24,7 @@ import json
 import os
 import sys
 
+from sonder_runtime.adapters.persistence.migrations import STORE_NAMES
 from sonder_runtime.platform import config as sonder_config
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
@@ -135,6 +136,7 @@ def cmd_doctor(args) -> int:
         config, throughput=args.storage_probe
     ))
     replacements["schemas"] = sonder_doctor.schema_check(config)
+    replacements["backup"] = sonder_doctor.backup_check(config)
     checks = [
         (
             name,
@@ -905,7 +907,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("migrate", help="apply pending schema migrations")
     common(p)
-    p.add_argument("--store", choices=("memory", "autopilot", "fleet", "operations"))
+    p.add_argument("--store", choices=STORE_NAMES)
     p.add_argument(
         "--adopt-epoch2", action="store_true",
         help="run the explicit crash-safe SPEC-5 epoch-2 bridge adoption",

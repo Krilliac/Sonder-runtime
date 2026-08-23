@@ -679,3 +679,18 @@ def test_backup_and_restore_via_cli(isolated_home, tmp_path, capsys):
     )
     assert rc == 0
     assert (dest / "operations.db").exists()
+
+
+@pytest.mark.parametrize("store", sorted(sonder_migrations.STORE_NAMES))
+def test_migrate_store_accepts_every_registered_store(isolated_home, store):
+    """``--store`` choices were a hand-maintained tuple that fell out of sync
+    with the registry: queued_actions/updates/jobs gained migration
+    directories but were never added, so this CLI could not target them."""
+    assert main(["migrate", "--store", store]) == 0
+
+
+def test_migrate_store_rejects_unknown_store(isolated_home, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["migrate", "--store", "not-a-real-store"])
+    assert exc_info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

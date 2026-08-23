@@ -257,6 +257,18 @@ def test_all_registered_stores_report_status():
         assert not store_status.checksum_mismatches
 
 
+def test_store_names_matches_the_path_registry():
+    """STORE_NAMES is the literal callers (the CLI, the update bundler/guard)
+    use instead of calling store_db_paths(), which touches disk. A name added
+    to one and not the other silently drops a store from those surfaces."""
+    assert set(sonder_migrations.STORE_NAMES) == set(
+        sonder_migrations.store_db_paths()
+    )
+    assert len(sonder_migrations.STORE_NAMES) == len(
+        set(sonder_migrations.STORE_NAMES)
+    )
+
+
 def test_failed_migration_rolls_back(tmp_path, monkeypatch):
     db = str(tmp_path / "operations.db")
 
