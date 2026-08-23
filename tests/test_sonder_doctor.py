@@ -233,6 +233,8 @@ def test_default_checks_registry_is_read_only_pairs_and_stable():
         "memory_quality",
         "runtime_policy",
         "ollama",
+        "ollama_workers",
+        "ollama_residency",
     ]
     assert all(callable(fn) for _, fn in first)
     first.append(("extra", lambda: "ok"))

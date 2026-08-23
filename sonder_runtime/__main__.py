@@ -145,7 +145,10 @@ def cmd_doctor(args) -> int:
         for name, check in checks
     ]
     if args.skip_ollama:
-        checks = [(name, check) for name, check in checks if name != "ollama"]
+        skipped_names = {"ollama", "ollama_workers", "ollama_residency"}
+        checks = [
+            (name, check) for name, check in checks if name not in skipped_names
+        ]
     report = sonder_doctor.run_doctor(checks)
     if args.json:
         _emit(report, as_json=True)

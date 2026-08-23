@@ -60,8 +60,10 @@ from sonder_runtime.bootstrap.config_loading import (
     load_config_or_none as _load_config_or_none_impl,
 )
 from sonder_runtime.bootstrap.doctor_checks import (
+    bounded_join as _bounded_join,
     summarize_memory_quality as _summarize_memory_quality,
     summarize_self_heal as _summarize_self_heal,
+    summarize_worker_probe as _summarize_worker_probe,
 )
 
 # A check spec is anything ``_iter_specs`` can turn into a ``(name, callable)``
@@ -290,6 +292,121 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
         return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, exc)}
 
 
+def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
+    """Probe every configured multi-PC Ollama worker independently.
+
+    ``_check_ollama`` only verifies the primary endpoint. A remote worker
+    (``[ollama].workers`` / ``SONDER_OLLAMA_WORKERS``, see
+    ``docs/runbooks/multi-pc-ollama.md``) is otherwise invisible in ``sonder
+    doctor`` until a live request happens to fail over onto it -- an operator
+    would not learn PC 2 or PC 3 is down until traffic actually needed it.
+    """
+    config = _load_config_or_none()
+    if config is None:
+        return _skip("config unavailable for Ollama worker endpoints")
+    workers = tuple(getattr(getattr(config, "ollama", None), "workers", ()) or ())
+    if not workers:
+        return _skip("no worker endpoints configured (single-endpoint deployment)")
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+        from urllib.parse import urlsplit
+    except Exception as exc:  # pragma: no cover - stdlib import guard
+        return _skip("urllib unavailable (%s)" % exc)
+
+    up: list[str] = []
+    down: list[str] = []
+    for origin in workers:
+        host = urlsplit(origin).hostname or origin
+        tags_url = origin.rstrip("/") + "/api/tags"
+        try:
+            request = urllib.request.Request(tags_url, method="GET")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if response.status != 200:
+                    down.append("%s (HTTP %s)" % (host, response.status))
+                    continue
+                payload = json.loads(response.read(1_048_576).decode("utf-8"))
+                models = len(payload.get("models") or [])
+                up.append("%s: %d models" % (host, models))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            down.append("%s (%s)" % (host, exc))
+
+    return _summarize_worker_probe(up, down, len(workers))
+
+
+def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
+    """Detect Ollama models that outlived their ``keep_alive`` expiry.
+
+    ``/api/ps`` reports each resident model's ``expires_at``. Ollama is
+    supposed to unload a model once that deadline passes; one still listed
+    well after expiry usually means the eviction stalled -- a model wedged in
+    VRAM (often from a killed/hung generation) rather than one legitimately
+    still in use. This is a read-only observation, not a repair: it never
+    unloads anything itself.
+    """
+    config = _load_config_or_none()
+    if config is None:
+        return _skip("config unavailable for Ollama residency check")
+    url = getattr(getattr(config, "ollama", None), "url", None)
+    if not url:
+        return _skip("no Ollama url configured")
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+        from datetime import datetime, timezone
+        from urllib.parse import urlsplit
+    except Exception as exc:  # pragma: no cover - stdlib import guard
+        return _skip("urllib unavailable (%s)" % exc)
+
+    host = urlsplit(url).hostname or ""
+    ps_url = url.rstrip("/") + "/api/ps"
+    try:
+        request = urllib.request.Request(ps_url, method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                return _skip("%s: /api/ps returned HTTP %s" % (host, response.status))
+            payload = json.loads(response.read(1_048_576).decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return _skip("%s: /api/ps unreachable (%s)" % (host, exc))
+
+    models = payload.get("models") or []
+    if not models:
+        return {"status": STATUS_OK, "detail": "%s: no models resident" % host}
+
+    now = datetime.now(timezone.utc)
+    stale: list[str] = []
+    for model in models:
+        name = model.get("name") or model.get("model") or "?"
+        expires_at = model.get("expires_at")
+        if not expires_at:
+            continue
+        try:
+            expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if expiry <= now:
+            stale.append(str(name))
+
+    if stale:
+        return {
+            "status": STATUS_WARN,
+            "detail": (
+                "%s: %d/%d resident model(s) past keep_alive expiry "
+                "(stuck in VRAM?): %s"
+            ) % (host, len(stale), len(models), _bounded_join(stale)),
+        }
+    return {
+        "status": STATUS_OK,
+        "detail": "%s: %d model(s) resident, all within keep_alive" % (
+            host, len(models)
+        ),
+    }
+
+
 def storage_checks(config=None, *, throughput: bool = False):
     """Build storage checks for a validated config without running them yet."""
     def loaded_config():
@@ -354,6 +471,8 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("memory_quality", _check_memory_quality),
         ("runtime_policy", _check_runtime_policy),
         ("ollama", _check_ollama),
+        ("ollama_workers", _check_ollama_workers),
+        ("ollama_residency", _check_ollama_residency),
     ]
 
 
