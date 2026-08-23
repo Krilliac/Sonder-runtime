@@ -36,8 +36,11 @@ WHY THE TEST COMMAND IS THE WHOLE SUITE
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -101,7 +104,6 @@ CANDIDATE_FILES = (
     "ooxml_assets.py",
     "qlora_train.py",
     "retriever.py",
-    "safe_update.py",
     "self_heal.py",
     "solver.py",
     "sonder_doctor.py",
@@ -129,6 +131,61 @@ def _test_python() -> str:
     # that launched this worker is the correct fallback because the runner's
     # dependencies were already importable from it.
     return sys.executable
+
+
+def _ruff_command(py: str) -> list[str] | None:
+    """Return a usable Ruff command, or None when Ruff is not installed.
+
+    The worker is intentionally runnable from a source checkout without its
+    ignored virtualenv. Treating an optional formatter/linter as mandatory
+    made every otherwise-valid candidate fail with ``No module named ruff``.
+    Python compilation remains the required syntax gate; Ruff is an additional
+    gate whenever the worker environment provides it.
+    """
+    interpreter = Path(py)
+    candidates = [
+        interpreter.with_name("ruff.exe"),
+        interpreter.parent / "Scripts" / "ruff.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return [str(candidate)]
+    executable = shutil.which("ruff")
+    if executable:
+        return [executable]
+    probe = subprocess.run(
+        [py, "-m", "ruff", "--version"],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+    return [py, "-m", "ruff"] if probe.returncode == 0 else None
+
+
+_NON_EXECUTABLE_OBJECTIVE = re.compile(
+    r"\b(?:add|improve|fix|clarify|update|document)\b[^\n]{0,40}\b"
+    r"(?:docstring|comment|comments|formatting|style|whitespace)\b|"
+    r"\b(?:docstring|comments?|formatting|whitespace)\s+(?:only|change|update|improvement)\b",
+    re.I,
+)
+
+
+def _objective_is_actionable(objective: str) -> bool:
+    """Reject proposals that cannot change executable behavior."""
+    text = str(objective or "").strip()
+    if not text or _NON_EXECUTABLE_OBJECTIVE.search(text):
+        return False
+    return not text.lower().startswith(("add a docstring", "update the docstring", "fix the comment"))
+
+
+def _eligible_candidate_files() -> tuple[str, ...]:
+    """Return existing, ordinary-scope candidate modules only."""
+    return tuple(
+        name for name in CANDIDATE_FILES
+        if (REPO / name).is_file() and not selfmod.is_protected_path(name)
+    )
 
 
 def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
@@ -164,44 +221,71 @@ def _splice_function(original: str, reply: str):
     the file does not have is an invention, and inserting it would add code
     nobody asked for rather than change the code that was targeted.
 
-    Indentation-based rather than AST-based on purpose: the reply frequently
-    does not parse on its own (a method body arrives dedented, a decorator is
-    dropped), and this only needs to find where the old block ends.
+    AST validation is deliberate: a malformed function should be rejected
+    before it creates a candidate workspace and spends the full-suite budget.
+    The AST also gives us exact source spans, so a multiline signature or an
+    ``async def`` cannot leave half of the old function behind.
     """
-    match = re.search(r"^(\s*)def\s+(\w+)\s*\(", reply, re.M)
-    if not match:
+    cleaned = _FENCE.sub("", str(reply or "")).strip()
+    try:
+        candidate_tree = ast.parse(cleaned)
+        original_tree = ast.parse(original)
+    except SyntaxError:
         return None
-    name = match.group(2)
-    body = reply[match.start():].rstrip() + "\n"
+
+    functions = [
+        node for node in candidate_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if len(candidate_tree.body) != 1 or len(functions) != 1:
+        return None
+    candidate = functions[0]
+    originals = {
+        node.name: node for node in original_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    original_function = originals.get(candidate.name)
+    if original_function is None:
+        return None
+
+    # The worker may add a guard, but it must not silently alter the callable
+    # contract or decorators used by the rest of the repository.
+    def dump_node(node):
+        if node is None:
+            return None
+        if isinstance(node, list):
+            return [ast.dump(item, include_attributes=False) for item in node]
+        return ast.dump(node, include_attributes=False)
+
+    def signature(node):
+        return (
+            isinstance(node, ast.AsyncFunctionDef),
+            dump_node(node.args),
+            dump_node(node.returns),
+            dump_node(node.decorator_list),
+        )
+
+    if signature(candidate) != signature(original_function):
+        return None
+    candidate_lines = cleaned.splitlines(keepends=True)
+    candidate_first = min(
+        [candidate.lineno]
+        + [decorator.lineno for decorator in candidate.decorator_list]
+    )
+    candidate_last = candidate.end_lineno
+    if candidate_last is None or candidate_first < 1 or candidate_last > len(candidate_lines):
+        return None
+    body = "".join(candidate_lines[candidate_first - 1:candidate_last])
 
     lines = original.splitlines(keepends=True)
-    first = None
-    for index, line in enumerate(lines):
-        if re.match(r"^def\s+%s\s*\(" % re.escape(name), line):
-            first = index
-            break
-    if first is None:
+    first = min(
+        [original_function.lineno]
+        + [decorator.lineno for decorator in original_function.decorator_list]
+    ) - 1
+    last = original_function.end_lineno
+    if last is None or first < 0 or last > len(lines):
         return None
-
-    # Consume the signature before looking for the end of the block. A
-    # multi-line signature closes with `):` at COLUMN 0, so a naive "first
-    # later line at column 0" scan stops on the signature's own closing paren
-    # and leaves half a def behind -- which then does not parse. Balance the
-    # parentheses first, then look for the next top-level line.
-    depth, index = 0, first
-    while index < len(lines):
-        depth += lines[index].count("(") - lines[index].count(")")
-        index += 1
-        if depth <= 0:
-            break
-
-    last = len(lines)
-    for probe in range(index, len(lines)):
-        line = lines[probe]
-        if line.strip() and not line[:1].isspace():
-            last = probe
-            break
-    return "".join(lines[:first]) + body + "\n" + "".join(lines[last:])
+    return "".join(lines[:first]) + body.rstrip() + "\n" + "".join(lines[last:])
 
 
 def _diff_objection(original: str, edited: str):
@@ -473,10 +557,9 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
 
     seen_before = _recent_objectives()
 
-    for name in random.sample(CANDIDATE_FILES, k=len(CANDIDATE_FILES)):
+    candidates = _eligible_candidate_files()
+    for name in random.sample(candidates, k=len(candidates)):
         path = REPO / name
-        if not path.is_file():
-            continue
         source = path.read_text(encoding="utf-8", errors="replace")
         if len(source) > 60_000:
             continue
@@ -485,7 +568,8 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
             "Find ONE small, concrete defect or clear improvement in it. Good\n"
             "candidates: a guard that silently swallows a failure, a count that\n"
             "is reported as a total when it is really a bounded window, a\n"
-            "docstring that contradicts the code, a missing edge case.\n\n"
+            "a missing edge case. Do not propose docstrings, comments, formatting,\n"
+            "imports, or style-only changes; the proposal must alter executable behavior.\n\n"
             "Reply with exactly two lines and nothing else:\n"
             "OBJECTIVE: <one sentence, imperative>\n"
             "WHY: <one sentence naming the concrete wrong behaviour>\n\n"
@@ -502,6 +586,9 @@ def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | Non
             elif line.upper().startswith("WHY:"):
                 why = line.split(":", 1)[1].strip()
         if objective:
+            if not _objective_is_actionable(objective):
+                log("  %s: non-executable objective, skipping" % name)
+                continue
             if _too_similar(objective, seen_before):
                 log("  %s: objective restates a previous run, skipping" % name)
                 continue
@@ -555,7 +642,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
             % target,
         ],
         files=[target],
-        criteria=["the full test suite passes", "ruff is clean"],
+        criteria=["the full test suite passes", "Python syntax compiles"],
         risk="low",
         expected_benefit="nightly autonomous improvement",
         rollback_plan="selfmod rollback restores the immutable backup",
@@ -624,22 +711,21 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     selfmod.begin_testing(run_id)
     py = _test_python()
     results = []
-    # The kind NAMES matter: review() checks recorded kinds against a required
-    # set ("reproducer_before", "syntax", "targeted", "regression", "smoke"),
-    # so recording a passing test under an unrecognised name leaves the
-    # requirement unmet and review fails on a candidate that did everything
-    # asked of it. "lint"/"unit" did exactly that -- the loop could not have
-    # produced a commit even from a perfect candidate.
-    for kind, command in (
-        ("syntax", [py, "-m", "ruff", "check", target]),
-        ("regression", [py, "-m", "pytest", "-q"]),
-    ):
-        # cwd is deliberately NOT passed. record_test computes
-        # `(workspace / _rel(workspace, cwd)).parent` for an explicit cwd,
-        # which for the workspace itself resolves to its PARENT -- so every
-        # command ran one directory above the checkout and ruff reported
-        # E902 file-not-found, which read as a lint failure of the
-        # candidate. The default already is the workspace.
+    # The required kinds are "syntax" and "regression" for this unattended
+    # lane. An optional lint result is recorded separately, so a missing Ruff
+    # install cannot masquerade as a syntax failure.
+    checks = [("syntax", [py, "-m", "py_compile", target])]
+    ruff = _ruff_command(py)
+    if ruff:
+        checks.append(("lint", [*ruff, "check", target]))
+        log("  lint: Ruff available")
+    else:
+        log("  lint: Ruff unavailable; Python compilation is the syntax gate")
+    checks.append(("regression", [py, "-m", "pytest", "-q"]))
+    for kind, command in checks:
+        # cwd is deliberately NOT passed: the default is the candidate
+        # workspace, which keeps imports and pytest collection grounded in
+        # the isolated checkout.
         outcome = selfmod.record_test(
             run_id, kind, command, timeout=test_timeout)
         passed = bool(outcome.get("passed")) if isinstance(outcome, dict) else bool(outcome)

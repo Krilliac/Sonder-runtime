@@ -208,6 +208,11 @@ def protected_paths():
     return {"prefixes": list(SENSITIVE_PREFIXES), "contains": list(SENSITIVE_PARTS)}
 
 
+def is_protected_path(path: str) -> bool:
+    """Return whether a repository-relative path is outside ordinary selfmod scope."""
+    return _protected(str(path or ""))
+
+
 def _run(command, cwd, timeout=30):
     started = time.monotonic()
     try:
