@@ -90,7 +90,8 @@ Piped REPL use (`sonder < script.txt`, `echo /stats | sonder`) prints plain
 text with no terminal chrome; that shape is a stable scripting contract.
 Setting `SONDER_REPL_NDJSON=1` opts a piped session into one JSON line per
 completed chat turn instead (schema `sonder.repl-turn.v1`: `answer`,
-`error`, `elapsed_ms`, `interaction_id`, `feedback_offered`, `label`).
+`error`, `elapsed_ms`, `interaction_id`, `feedback_offered`, `label`, and
+`hint` — the known-failure next step, `""` when none applies).
 The flag never changes interactive terminals, and the flagless piped
 default never changes. Known failure shapes additionally get a one-line
 `hint:` under the interactive error panel only — piped output stays

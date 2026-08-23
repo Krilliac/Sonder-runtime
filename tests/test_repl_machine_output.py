@@ -32,6 +32,7 @@ def test_payload_is_versioned_and_complete():
         "elapsed_ms": 1234,
         "interaction_id": "abc123",
         "feedback_offered": True,
+        "hint": "",
     }
 
 
@@ -96,6 +97,37 @@ def test_piped_error_turn_is_marked_in_the_json_line(monkeypatch, capsys):
     row = json.loads(capsys.readouterr().out)
     assert row["error"] is True
     assert row["answer"] == "ERROR: refused"
+    assert row["hint"] == ""
+
+
+def test_piped_error_turn_carries_the_same_hint_the_panel_shows(
+        monkeypatch, capsys):
+    monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    sonder_repl._print_chat_result(
+        "ERROR contacting local Ollama at x after 1 attempt(s): boom",
+        0.0, error=True,
+    )
+
+    row = json.loads(capsys.readouterr().out)
+    assert row["error"] is True
+    assert "make sure it is running" in row["hint"]
+
+
+def test_successful_turns_never_carry_a_hint(monkeypatch, capsys):
+    monkeypatch.setenv("SONDER_REPL_NDJSON", "1")
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+
+    # Even answer text that resembles a known failure gets no hint on a
+    # non-error turn: the flag, not the prose, is the classification.
+    sonder_repl._print_chat_result(
+        "ERROR contacting local Ollama is a string I am explaining", 0.0,
+    )
+
+    assert json.loads(capsys.readouterr().out)["hint"] == ""
 
 
 def test_default_piped_output_is_untouched_without_the_flag(

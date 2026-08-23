@@ -36,8 +36,14 @@ def enabled(environ) -> bool:
 
 
 def turn_payload(answer, *, elapsed_ms, error=False, interaction_id=None,
-                 feedback_offered=False, label="Sonder") -> dict:
-    """Build the stable ``sonder.repl-turn.v1`` mapping for one turn."""
+                 feedback_offered=False, label="Sonder", hint="") -> dict:
+    """Build the stable ``sonder.repl-turn.v1`` mapping for one turn.
+
+    ``hint`` carries the same known-failure next step the interactive error
+    panel shows (``error_hint_formatting``), so a structured consumer is not
+    worse off than a human at the terminal.  It is ``""`` whenever the panel
+    would have shown nothing.
+    """
     try:
         elapsed = max(0, int(elapsed_ms or 0))
     except (TypeError, ValueError, OverflowError):
@@ -51,6 +57,7 @@ def turn_payload(answer, *, elapsed_ms, error=False, interaction_id=None,
         "elapsed_ms": elapsed,
         "interaction_id": identifier,
         "feedback_offered": bool(feedback_offered),
+        "hint": str(hint or ""),
     }
 
 
