@@ -22,7 +22,10 @@ as `<UTC timestamp>-<version>-<backup id>/` with `manifest.json` and
 python -m sonder_runtime backup verify /var/backups/sonder/<backup-dir>
 ```
 
-Verifies every manifest entry's presence, size, and SHA-256.
+Verifies every manifest entry's presence, size, and SHA-256; rejects unlisted
+state entries; parses the runtime policy; and opens each database read-only for
+`PRAGMA quick_check`, foreign-key checks, and migration-ledger checksum/schema
+comparison. Findings contain store names and error classes, never row content.
 
 ## List and prune
 
@@ -32,6 +35,19 @@ python -m sonder_runtime backup prune --keep 7
 ```
 
 Prune never removes the newest verified backup, regardless of `--keep`.
+
+## Monitoring backup health
+
+```bash
+python -m sonder_runtime doctor --json --skip-ollama
+```
+
+The `backup` check reads the most recent `backup_run` record in
+operations.db (read-only; it never creates or migrates the database) and
+reports `warn` when no backup has ever completed or the newest verified one
+is older than 48 hours, and `fail` when the most recent run did not verify.
+It reports `ok` without reading anything further when `[backup].enabled` is
+`false`.
 
 ## Restore
 
@@ -46,6 +62,9 @@ SONDER_HOME.
    sudo -u sonder /opt/sonder/current/venv/bin/python -m sonder_runtime restore apply \
        <backup-dir> /var/lib/sonder-restore --confirm restore
    ```
+   Restore copies into a sibling staging directory, re-hashes and fsyncs every
+   file, fsyncs staging, and only then atomically publishes it. A copy or rename
+   failure removes staging and leaves (or recreates) the original empty target.
 4. Smoke-test the staged state:
    ```bash
    SONDER_HOME=/var/lib/sonder-restore \

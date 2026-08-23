@@ -81,3 +81,69 @@ def test_auto_context_scales_with_model_size_and_advertised_limit(monkeypatch):
 
     monkeypatch.setenv("SONDER_CONTEXT_SIZE", "6k")
     assert context_policy.auto_context(262144, "30.5B") == 6000
+
+
+def test_auto_context_adds_a_70b_class_band(monkeypatch):
+    """A 70B-class model spends far more KV bytes per token than a 30B; the
+    auto window must shrink again instead of sharing the 24B band."""
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+
+    assert context_policy.auto_context(131072, "70.6B") == 8192
+    assert context_policy.auto_context(131072, "72B") == 8192
+    # The band below is unchanged.
+    assert context_policy.auto_context(131072, "32B") == 16384
+
+
+def test_auto_context_ignores_unknown_or_malformed_metadata(monkeypatch):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+
+    assert context_policy.auto_context(None, None) == 32768
+    assert context_policy.auto_context("garbage", "unknown") == 32768
+    # Sub-billion models never hit a band.
+    assert context_policy.auto_context(None, "780M") == 32768
+
+
+def test_explicit_operator_context_overrides_the_parameter_band(monkeypatch):
+    """SONDER_CONTEXT_SIZE is an informed override of the KV budget ladder,
+    matching the documented contract; the model's advertised maximum and the
+    native ceiling remain physical limits."""
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "32k")
+
+    assert context_policy.auto_context(262144, "30.5B") == 32000
+    assert context_policy.auto_context(16384, "30.5B") == 16384
+
+    monkeypatch.setenv("SONDER_NATIVE_CONTEXT_MAX", "24k")
+    assert context_policy.auto_context(262144, "30.5B") == 24000
+
+
+def test_auto_context_plan_records_clamp_provenance(monkeypatch):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+
+    plan = context_policy.auto_context_plan(262144, "30.5B")
+    assert plan["context"] == 16384
+    assert plan["base"] == 32768
+    assert plan["source"] == "kv-quantised-default"
+    assert plan["parameter_billions"] == 30.5
+    assert plan["advertised"] == 262144
+    assert plan["clamps"] == ("parameters>=24B",)
+
+    plan = context_policy.auto_context_plan(8192, "7.6B")
+    assert plan["context"] == 8192
+    assert plan["clamps"] == ("advertised-maximum",)
+
+    plan = context_policy.auto_context_plan(100, None)
+    assert plan["context"] == context_policy.MIN_CONTEXT
+    assert plan["clamps"] == ("advertised-maximum", "minimum-window")
+
+    monkeypatch.setenv("SONDER_CONTEXT_SIZE", "6k")
+    plan = context_policy.auto_context_plan(262144, "30.5B")
+    assert plan["context"] == 6000
+    assert plan["source"] == "environment"
+    assert plan["clamps"] == ()

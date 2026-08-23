@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
 from dataclasses import dataclass  # noqa: F401 - legacy star-import surface
@@ -99,21 +100,62 @@ def _check_runtime_policy() -> CheckResult:
         return CheckResult("runtime_policy", False, True, str(exc))
 
 
-def _check_ollama(config: SonderConfig, *, timeout: float = 5.0) -> CheckResult:
-    url = config.ollama.url.rstrip("/") + "/api/tags"
-    host = urlsplit(config.ollama.url).hostname or ""
+def _check_ollama_origin(
+    origin: str,
+    *,
+    name: str,
+    required: bool,
+    timeout: float,
+) -> CheckResult:
+    url = origin.rstrip("/") + "/api/tags"
+    host = urlsplit(origin).hostname or ""
     try:
         request = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(request, timeout=timeout) as response:
             if response.status != 200:
                 return CheckResult(
-                    "ollama", False, True, f"{host}: HTTP {response.status}"
+                    name, False, required, f"{host}: HTTP {response.status}"
                 )
-            payload = json.loads(response.read(1_048_576).decode("utf-8"))
+            raw = response.read(1_048_577)
+            if len(raw) > 1_048_576:
+                raise ValueError("capability response exceeded 1 MiB")
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("capability response must be an object")
             models = len(payload.get("models") or [])
-            return CheckResult("ollama", True, True, f"{host}: {models} models")
+            return CheckResult(name, True, required, f"{host}: {models} models")
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return CheckResult("ollama", False, True, f"{host}: {exc}")
+        return CheckResult(name, False, required, f"{host}: {exc}")
+
+
+def _check_ollama(config: SonderConfig, *, timeout: float = 5.0) -> CheckResult:
+    return _check_ollama_origin(
+        config.ollama.url,
+        name="ollama",
+        required=True,
+        timeout=timeout,
+    )
+
+
+def _check_ollama_workers(
+    config: SonderConfig, *, timeout: float = 5.0,
+) -> list[CheckResult]:
+    """Probe optional workers independently so one outage stays degraded."""
+    entries = list(enumerate(config.ollama.workers, start=1))
+    if not entries:
+        return []
+
+    def check(entry) -> CheckResult:
+        index, origin = entry
+        return _check_ollama_origin(
+            origin,
+            name="ollama_worker_%d" % index,
+            required=False,
+            timeout=timeout,
+        )
+
+    with ThreadPoolExecutor(max_workers=min(4, len(entries))) as executor:
+        return list(executor.map(check, entries))
 
 
 def run_preflight(
@@ -129,4 +171,5 @@ def run_preflight(
     checks.append(_check_runtime_policy())
     if check_ollama:
         checks.append(_check_ollama(config, timeout=ollama_timeout))
+        checks.extend(_check_ollama_workers(config, timeout=ollama_timeout))
     return PreflightReport(checks=tuple(checks))

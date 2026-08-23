@@ -303,8 +303,10 @@ def test_a_fabricated_value_whose_span_is_absent_is_rejected_naming_the_field(mo
     )
     assert out.startswith("ERROR:")
     assert "birth_year" in out
-    # rejected, not repaired, and not re-asked: no partial object comes back
-    assert len(seen["payloads"]) == 1
+    # rejected, not repaired, and not re-asked: no partial object comes back.
+    # Count generation calls, not raw _post payloads -- the auto-context
+    # /api/show probe is order-dependent (300s cache) and is not a re-ask.
+    assert len([p for p in seen["payloads"] if "messages" in p]) == 1
     assert not out.startswith("{")
 
 

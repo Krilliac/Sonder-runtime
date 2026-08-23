@@ -24,6 +24,7 @@ import json
 import os
 import sys
 
+from sonder_runtime.adapters.persistence.migrations import STORE_NAMES
 from sonder_runtime.platform import config as sonder_config
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.platform import version as sonder_version
@@ -135,6 +136,7 @@ def cmd_doctor(args) -> int:
         config, throughput=args.storage_probe
     ))
     replacements["schemas"] = sonder_doctor.schema_check(config)
+    replacements["backup"] = sonder_doctor.backup_check(config)
     checks = [
         (
             name,
@@ -145,7 +147,10 @@ def cmd_doctor(args) -> int:
         for name, check in checks
     ]
     if args.skip_ollama:
-        checks = [(name, check) for name, check in checks if name != "ollama"]
+        skipped_names = {"ollama", "ollama_workers", "ollama_residency"}
+        checks = [
+            (name, check) for name, check in checks if name not in skipped_names
+        ]
     report = sonder_doctor.run_doctor(checks)
     if args.json:
         _emit(report, as_json=True)
@@ -208,6 +213,8 @@ def cmd_diagnostics(args) -> int:
                 "applied": list(status.applied),
                 "pending": list(status.pending),
                 "unknown": list(status.unknown),
+                "checksum_mismatches": list(status.checksum_mismatches),
+                "healthy": status.healthy,
             }
             for store, status in sonder_migrations.status_all().items()
         }
@@ -532,6 +539,27 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # endpoint directly.
     if include_typed_runtime:
         os.environ["OLLAMA_HOST"] = config.ollama.url
+        os.environ["SONDER_OLLAMA_WORKER_MAX_INFLIGHT"] = str(
+            config.ollama.worker_max_inflight
+        )
+        os.environ["SONDER_OLLAMA_WORKER_QUEUE_DEPTH"] = str(
+            config.ollama.worker_queue_depth
+        )
+        os.environ["SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS"] = str(
+            config.ollama.worker_admission_timeout_ms
+        )
+        os.environ["SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD"] = str(
+            config.ollama.worker_failure_threshold
+        )
+        os.environ["SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS"] = str(
+            config.ollama.worker_cooldown_seconds
+        )
+        os.environ["SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS"] = str(
+            config.ollama.worker_capability_ttl_seconds
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS"] = str(
+            config.ollama.worker_probe_timeout_ms
+        )
     os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
     os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
         "1" if config.ollama.allow_remote else "0"
@@ -588,6 +616,10 @@ def cmd_serve(args) -> int:
     _configure_typed_home(config)
     from sonder_runtime.adapters.inference import ollama_endpoint
     ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+    from sonder_runtime.adapters.inference import ollama_pool
+    ollama_pool.configure_typed_workers(
+        config.ollama.workers, allow_remote=config.ollama.allow_remote,
+    )
     from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
         require_epoch_2,
     )
@@ -880,7 +912,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("migrate", help="apply pending schema migrations")
     common(p)
-    p.add_argument("--store", choices=("memory", "autopilot", "fleet", "operations"))
+    p.add_argument("--store", choices=STORE_NAMES)
     p.add_argument(
         "--adopt-epoch2", action="store_true",
         help="run the explicit crash-safe SPEC-5 epoch-2 bridge adoption",

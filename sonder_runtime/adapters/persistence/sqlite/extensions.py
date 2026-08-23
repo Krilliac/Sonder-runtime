@@ -9,10 +9,7 @@ from typing import Any, Sequence
 from ....application.extensions.quarantine import QuarantineDecision
 from ....application.extensions.provenance_inventory import ExtensionHealthState
 from ....application.extensions.registry import ExtensionInstallRecord, ExtensionScope
-from ....domain.extensions.manifest import (
-    CleanupPolicy, ExtensionDependency, ExtensionHealth, ExtensionIdentity,
-    ExtensionManifest, ExtensionResources, HealthMode,
-)
+from ....domain.extensions.manifest import ExtensionManifest
 from ....domain.extensions.artifact import ExtensionArtifactReceipt
 
 
@@ -21,20 +18,7 @@ _DDL = """CREATE TABLE IF NOT EXISTS extension_registry_state (
 )"""
 
 
-def _manifest(value: dict[str, Any]) -> ExtensionManifest:
-    return ExtensionManifest(
-        ExtensionIdentity(value["identity"]["name"], value["identity"]["publisher"]),
-        value["version"], value["protocol"],
-        tuple(ExtensionDependency(x["name"], x["version"], x["required"]) for x in value["dependencies"]),
-        tuple(value["permissions"]),
-        ExtensionHealth(HealthMode(value["health"]["mode"]), value["health"]["crash_limit"], value["health"]["probe_timeout_ms"]),
-        CleanupPolicy(value["cleanup"]["on_quarantine"], value["cleanup"]["retain_state"]),
-        ExtensionResources(value.get("resources", {}).get("memory_limit_bytes")),
-    )
-
-
 def _record(record: ExtensionInstallRecord) -> dict[str, Any]:
-    manifest = record.manifest
     return {
         "extension_id": record.extension_id, "scope": record.scope.value, "project_id": record.project_id,
         "version": record.version, "manifest_digest": record.manifest_digest, "enabled": record.enabled,
@@ -46,13 +30,7 @@ def _record(record: ExtensionInstallRecord) -> dict[str, Any]:
             "byte_count": record.artifact.byte_count,
             "source": record.artifact.source,
         },
-        "manifest": {"identity": {"name": manifest.identity.name, "publisher": manifest.identity.publisher},
-                     "version": manifest.version, "protocol": manifest.protocol,
-                     "dependencies": [{"name": x.name, "version": x.version, "required": x.required} for x in manifest.dependencies],
-                     "permissions": list(manifest.permissions),
-                     "health": {"mode": manifest.health.mode.value, "crash_limit": manifest.health.crash_limit, "probe_timeout_ms": manifest.health.probe_timeout_ms},
-                     "cleanup": {"on_quarantine": manifest.cleanup.on_quarantine, "retain_state": manifest.cleanup.retain_state},
-                     "resources": {"memory_limit_bytes": manifest.resources.memory_limit_bytes}},
+        "manifest": record.manifest.to_dict(),
         "quarantine": None if record.quarantine is None else {
             "extension_id": record.quarantine.extension_id, "quarantined": record.quarantine.quarantined,
             "reasons": list(record.quarantine.reasons), "cleanup_action": record.quarantine.cleanup_action,
@@ -68,7 +46,7 @@ def _decode(value: str) -> ExtensionInstallRecord:
         quarantine["extension_id"], quarantine["quarantined"], tuple(quarantine["reasons"]),
         quarantine["cleanup_action"], quarantine["retain_state"],
     )
-    manifest = _manifest(data["manifest"])
+    manifest = ExtensionManifest.from_dict(data["manifest"])
     artifact_data = data.get("artifact")
     artifact = None if artifact_data is None else ExtensionArtifactReceipt(
         artifact_data["path"], artifact_data["artifact_digest"],

@@ -58,6 +58,14 @@ allow_remote = false                # remote-Ollama consent gate
 # Optional multi-PC inference pool. Keep model tags installed on every host.
 # The environment form is preferred for deployment secrets and overrides:
 # SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434,https://192.168.1.21:11434
+workers = []
+worker_max_inflight = 1             # coordinator cap per host
+worker_queue_depth = 32             # bounded waiters across the pool
+worker_admission_timeout_ms = 1000
+worker_failure_threshold = 3
+worker_cooldown_seconds = 30
+worker_capability_ttl_seconds = 300
+worker_probe_timeout_ms = 2000
 
 [features]
 cloud = false                       # hosted-model consent gate
@@ -132,8 +140,11 @@ SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434;https://192.168.1.21:11434
 ```
 
 The coordinator keeps its normal `[ollama].url` endpoint as the first worker,
-then schedules requests by least in-flight count. A worker is temporarily
-circuit-broken after three transport failures and requests fail over only
+then schedules requests by least in-flight count, breaking idle ties toward
+the host with the lowest observed request latency. A worker is temporarily
+circuit-broken after three transport failures; repeated trips double the
+cooldown up to 8x, and a worker returning from cooldown receives one trial
+request at a time until a success closes the circuit. Requests fail over only
 before any response is received. Every host must have the selected model tag
 installed; Sonder does not copy model weights between PCs. Remote origins must
 use HTTPS and must not put credentials in the URL. For a private Ethernet or
@@ -155,10 +166,54 @@ alone still refuses.
 
 Models/tiers: `SONDER_FAST`, `SONDER_CODE`, `SONDER_GENERAL`,
 `SONDER_REASONING`, `SONDER_VISION`, `SONDER_BASE_MODEL`,
-`SONDER_EMBED_MODEL`, `SONDER_CONTEXT_SIZE`, `SONDER_LEARN_TIERS`.
+`SONDER_EMBED_MODEL`, `SONDER_CONTEXT_SIZE`, `SONDER_SESSION_NUM_CTX`,
+`SONDER_NATIVE_CONTEXT_MAX`, `SONDER_VIRTUAL_CONTEXT_MAX`, `SONDER_LEARN_TIERS`
+(see [Context sizing](#context-sizing) below; `OLLAMA_KV_CACHE_TYPE` also
+affects the default).
 `SONDER_REASONING` / `SONDER_VISION` also accept `none` (or `off`) to leave
 that specialist tier unbound, in which case reasoning/vision work falls back
 to a base tier.
+
+### Context sizing
+
+Sonder distinguishes the **requested** (virtual) context you ask for from the
+**native** `num_ctx` it actually hands Ollama. Values above native are covered
+by summaries, retrieval, and facts standing in for turns that no longer fit in
+the raw prompt (see the `/context` note at the end of this section for that
+live, per-session budget — a related but different thing from the sizing
+policy below).
+
+The baseline, before any per-model adjustment, is `default_context()`:
+`32768` if `OLLAMA_KV_CACHE_TYPE` names a quantized KV cache (`q8_0`, `q4_0`,
+`q4_1`, `q5_0`, `q5_1`), else `8192` for full-precision (fp16) KV. Set
+`SONDER_CONTEXT_SIZE` or `SONDER_SESSION_NUM_CTX` (equivalent; the first wins
+if both are set) to override that baseline explicitly — either accepts a bare
+integer or a `k`/`m` suffix (`8192`, `32k`, `1m`).
+
+For any request that does not pin its own `num_ctx`, that baseline (default or
+env-overridden) is then auto-sized per loaded model
+(`context_policy.auto_context`): 24B+ parameter local models are capped to at
+most `16384`, 12B–24B to at most `24576` — tighter than the KV-cache default
+regardless of `SONDER_CONTEXT_SIZE` — and the result never exceeds the
+model's own advertised context window either way. Smaller models are
+unaffected by this cap. A request that *does* pin an explicit `num_ctx` (the
+REPL's `/contextsize <size>` / `/ctxsize <size>`, or the `set_context_size`
+tool) bypasses auto-sizing entirely and is used as given, subject only to the
+ceilings below. That pin is a process-wide default, not scoped to one
+conversation — it applies to every session on this running server until
+changed again or reset with `/contextsize` with no argument.
+
+Two independent ceilings bound every value above: `SONDER_NATIVE_CONTEXT_MAX`
+(default `262144`) caps what is ever sent to Ollama as `num_ctx`, and
+`SONDER_VIRTUAL_CONTEXT_MAX` (default `1000000`) caps the requested/virtual
+size before it is clamped to native. A requested size below the `512`-token
+floor is rejected rather than silently raised.
+
+`/contextsize` (no argument) or the `context_policy_status` tool report the
+requested size, the actual native `num_ctx`, both ceilings, and whether the
+session is in `native` or `virtual` mode — distinct from `/context`, which
+reports the *live* per-session budget (turns, summaries, memory) rather than
+this sizing policy.
 
 ### Hardware-aware 30B planning
 

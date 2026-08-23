@@ -60,8 +60,10 @@ from sonder_runtime.bootstrap.config_loading import (
     load_config_or_none as _load_config_or_none_impl,
 )
 from sonder_runtime.bootstrap.doctor_checks import (
+    bounded_join as _bounded_join,
     summarize_memory_quality as _summarize_memory_quality,
     summarize_self_heal as _summarize_self_heal,
+    summarize_worker_probe as _summarize_worker_probe,
 )
 
 # A check spec is anything ``_iter_specs`` can turn into a ``(name, callable)``
@@ -242,6 +244,87 @@ def schema_check(config=None):
     return check
 
 
+def backup_check(config=None, *, max_age_hours: float = 48.0):
+    """Bind a non-mutating check reporting the most recent backup outcome.
+
+    Reads ``operations.db`` directly in ``mode=ro`` rather than opening an
+    :class:`OperationsStore`, whose constructor auto-migrates the database on
+    open -- a write side effect this read-only surface must not have.
+    """
+    def check():
+        cfg = config if config is not None else _load_config_or_none()
+        if cfg is None:
+            return _skip("config unavailable for backup inspection")
+        if not cfg.backup.enabled:
+            return {"status": STATUS_OK, "detail": "backups disabled by configuration"}
+        try:
+            import sqlite3
+            from pathlib import Path
+
+            db_path = Path(cfg.state.home).expanduser() / "operations.db"
+            if not db_path.is_file():
+                row = None
+            else:
+                uri = db_path.resolve(strict=True).as_uri() + "?mode=ro"
+                conn = sqlite3.connect(uri, uri=True)
+                try:
+                    has_table = conn.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='backup_run'"
+                    ).fetchone()
+                    row = (
+                        conn.execute(
+                            "SELECT backup_id, completed_at_utc, status, error_code"
+                            " FROM backup_run ORDER BY started_at_utc DESC LIMIT 1"
+                        ).fetchone()
+                        if has_table
+                        else None
+                    )
+                finally:
+                    conn.close()
+        except Exception as exc:
+            return _skip("backup history unavailable (%s)" % exc.__class__.__name__)
+
+        if row is None:
+            return {"status": STATUS_WARN, "detail": "no backups have been created yet"}
+        backup_id, completed_at_utc, run_status, error_code = row
+        if run_status == "running":
+            return {
+                "status": STATUS_WARN,
+                "detail": "backup %s has not finished (status=running)" % backup_id,
+            }
+        if run_status != "verified":
+            detail = "latest backup %s: %s" % (backup_id, run_status)
+            if error_code:
+                detail += " (%s)" % error_code
+            return {"status": STATUS_FAIL, "detail": detail}
+        try:
+            import calendar
+            import time
+
+            completed_epoch = calendar.timegm(
+                time.strptime(completed_at_utc, "%Y-%m-%dT%H:%M:%SZ")
+            )
+            age_hours = (time.time() - completed_epoch) / 3600.0
+        except (TypeError, ValueError):
+            return {
+                "status": STATUS_OK,
+                "detail": "latest backup %s verified" % backup_id,
+            }
+        if age_hours > max_age_hours:
+            return {
+                "status": STATUS_WARN,
+                "detail": "latest verified backup is %.1fh old (limit %.0fh)"
+                % (age_hours, max_age_hours),
+            }
+        return {
+            "status": STATUS_OK,
+            "detail": "latest backup verified %.1fh ago" % age_hours,
+        }
+
+    return check
+
+
 def _check_ollama(*, timeout: float = 5.0) -> dict:
     """Probe Ollama reachability read-only via GET /api/tags."""
     config = _load_config_or_none()
@@ -288,6 +371,121 @@ def _check_ollama(*, timeout: float = 5.0) -> dict:
             }
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, exc)}
+
+
+def _check_ollama_workers(*, timeout: float = 5.0) -> dict:
+    """Probe every configured multi-PC Ollama worker independently.
+
+    ``_check_ollama`` only verifies the primary endpoint. A remote worker
+    (``[ollama].workers`` / ``SONDER_OLLAMA_WORKERS``, see
+    ``docs/runbooks/multi-pc-ollama.md``) is otherwise invisible in ``sonder
+    doctor`` until a live request happens to fail over onto it -- an operator
+    would not learn PC 2 or PC 3 is down until traffic actually needed it.
+    """
+    config = _load_config_or_none()
+    if config is None:
+        return _skip("config unavailable for Ollama worker endpoints")
+    workers = tuple(getattr(getattr(config, "ollama", None), "workers", ()) or ())
+    if not workers:
+        return _skip("no worker endpoints configured (single-endpoint deployment)")
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+        from urllib.parse import urlsplit
+    except Exception as exc:  # pragma: no cover - stdlib import guard
+        return _skip("urllib unavailable (%s)" % exc)
+
+    up: list[str] = []
+    down: list[str] = []
+    for origin in workers:
+        host = urlsplit(origin).hostname or origin
+        tags_url = origin.rstrip("/") + "/api/tags"
+        try:
+            request = urllib.request.Request(tags_url, method="GET")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if response.status != 200:
+                    down.append("%s (HTTP %s)" % (host, response.status))
+                    continue
+                payload = json.loads(response.read(1_048_576).decode("utf-8"))
+                models = len(payload.get("models") or [])
+                up.append("%s: %d models" % (host, models))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            down.append("%s (%s)" % (host, exc))
+
+    return _summarize_worker_probe(up, down, len(workers))
+
+
+def _check_ollama_residency(*, timeout: float = 5.0) -> dict:
+    """Detect Ollama models that outlived their ``keep_alive`` expiry.
+
+    ``/api/ps`` reports each resident model's ``expires_at``. Ollama is
+    supposed to unload a model once that deadline passes; one still listed
+    well after expiry usually means the eviction stalled -- a model wedged in
+    VRAM (often from a killed/hung generation) rather than one legitimately
+    still in use. This is a read-only observation, not a repair: it never
+    unloads anything itself.
+    """
+    config = _load_config_or_none()
+    if config is None:
+        return _skip("config unavailable for Ollama residency check")
+    url = getattr(getattr(config, "ollama", None), "url", None)
+    if not url:
+        return _skip("no Ollama url configured")
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+        from datetime import datetime, timezone
+        from urllib.parse import urlsplit
+    except Exception as exc:  # pragma: no cover - stdlib import guard
+        return _skip("urllib unavailable (%s)" % exc)
+
+    host = urlsplit(url).hostname or ""
+    ps_url = url.rstrip("/") + "/api/ps"
+    try:
+        request = urllib.request.Request(ps_url, method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                return _skip("%s: /api/ps returned HTTP %s" % (host, response.status))
+            payload = json.loads(response.read(1_048_576).decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return _skip("%s: /api/ps unreachable (%s)" % (host, exc))
+
+    models = payload.get("models") or []
+    if not models:
+        return {"status": STATUS_OK, "detail": "%s: no models resident" % host}
+
+    now = datetime.now(timezone.utc)
+    stale: list[str] = []
+    for model in models:
+        name = model.get("name") or model.get("model") or "?"
+        expires_at = model.get("expires_at")
+        if not expires_at:
+            continue
+        try:
+            expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if expiry <= now:
+            stale.append(str(name))
+
+    if stale:
+        return {
+            "status": STATUS_WARN,
+            "detail": (
+                "%s: %d/%d resident model(s) past keep_alive expiry "
+                "(stuck in VRAM?): %s"
+            ) % (host, len(stale), len(models), _bounded_join(stale)),
+        }
+    return {
+        "status": STATUS_OK,
+        "detail": "%s: %d model(s) resident, all within keep_alive" % (
+            host, len(models)
+        ),
+    }
 
 
 def storage_checks(config=None, *, throughput: bool = False):
@@ -350,10 +548,13 @@ def default_checks() -> list[tuple[str, CheckCallable]]:
         ("config", _check_config),
         *storage_checks(),
         ("schemas", schema_check()),
+        ("backup", backup_check()),
         ("self_heal", _check_self_heal),
         ("memory_quality", _check_memory_quality),
         ("runtime_policy", _check_runtime_policy),
         ("ollama", _check_ollama),
+        ("ollama_workers", _check_ollama_workers),
+        ("ollama_residency", _check_ollama_residency),
     ]
 
 

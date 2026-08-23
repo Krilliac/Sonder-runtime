@@ -77,8 +77,55 @@ def _cleanup_test_state() -> None:
 atexit.register(_cleanup_test_state)
 
 
+# --- Opt-in per-test timing capture -----------------------------------------
+# SONDER_TEST_TIMINGS=<path> appends one JSON line per test so slow tests can
+# be ranked and compared across runs (scripts/slow_tests.py). Off by default:
+# with the variable unset the hook body is two dict lookups per report.
+#
+# Under pytest-xdist each worker process writes to <path>.<workerid> -- a
+# shared append handle across processes interleaves partial lines on Windows.
+# The reader globs the suffixed files back together.
+_timing_records: list[dict] = []
+
+
+def _timings_path() -> str:
+    base = os.environ.get("SONDER_TEST_TIMINGS", "").strip()
+    if not base:
+        return ""
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "").strip()
+    return "%s.%s" % (base, worker) if worker else base
+
+
+def pytest_runtest_logreport(report) -> None:
+    if not os.environ.get("SONDER_TEST_TIMINGS", "").strip():
+        return
+    # One record per phase; the reader sums setup+call+teardown per test and
+    # keeps the worst outcome. Recording phases separately preserves the
+    # difference between a slow test body and a slow fixture.
+    _timing_records.append(
+        {
+            "nodeid": report.nodeid,
+            "phase": report.when,
+            "outcome": report.outcome,
+            "duration": round(report.duration, 6),
+        }
+    )
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:
     del session, exitstatus
+    path = _timings_path()
+    if path and _timing_records:
+        import json
+
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                for record in _timing_records:
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError as error:
+            # Visible, not fatal: losing the timing file must not fail a run,
+            # but a silent loss would read as "no slow tests".
+            print("SONDER_TEST_TIMINGS write failed: %s" % error, file=sys.stderr)
     _cleanup_test_state()
 
 

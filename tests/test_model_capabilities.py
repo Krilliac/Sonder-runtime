@@ -1,6 +1,13 @@
 import server
 
-from sonder_runtime.domain.model_capabilities import fanout_capabilities
+from sonder_runtime.domain.model_capabilities import (
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+    GATEWAY_CAPABILITY_TIERED_ROUTING,
+    KNOWN_GATEWAY_CAPABILITIES,
+    fanout_capabilities,
+)
 
 
 def test_capabilities_normalize_scalar_and_casefold_values():
@@ -21,3 +28,15 @@ def test_capabilities_ignore_malformed_records_and_values():
 
 def test_server_keeps_identity_preserving_compatibility_alias():
     assert server._fanout_capabilities is fanout_capabilities
+
+
+def test_known_gateway_capabilities_cover_the_declared_constants():
+    assert KNOWN_GATEWAY_CAPABILITIES == {
+        GATEWAY_CAPABILITY_CHAT,
+        GATEWAY_CAPABILITY_EMBEDDINGS,
+        GATEWAY_CAPABILITY_TIERED_ROUTING,
+        GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+    }
+    # tiered-routing and fixed-endpoint describe mutually exclusive ways a
+    # gateway resolves model identity; no adapter should ever declare both.
+    assert GATEWAY_CAPABILITY_TIERED_ROUTING != GATEWAY_CAPABILITY_FIXED_ENDPOINT

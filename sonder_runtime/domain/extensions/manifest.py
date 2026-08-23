@@ -11,6 +11,14 @@ import re
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_.-]{1,127}$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
+# The wire/persistence shape produced by ``ExtensionManifest.to_dict`` and
+# accepted by ``from_dict``. Bumped only when that shape changes in a way a
+# reader must branch on; ``digest()`` deliberately excludes it so evolving the
+# wire representation never invalidates a provenance record signed against the
+# manifest's content. A dict missing this key is schema "1" by definition --
+# every manifest persisted before this field existed.
+MANIFEST_SCHEMA_VERSION = "1"
+
 
 class HealthMode(StrEnum):
     PASSIVE = "passive"
@@ -168,4 +176,70 @@ class ExtensionManifest:
             protocol="plugin-lite",
             dependencies=tuple(ExtensionDependency(name=item) for item in plugin.dependencies),  # type: ignore[attr-defined]
             permissions=tuple(plugin.permissions),  # type: ignore[attr-defined]
+        )
+
+    def to_dict(self) -> dict:
+        """Return the canonical, versioned wire/persistence representation.
+
+        This is the one public serialization of ``ExtensionManifest``; adapters
+        (persistence, MCP/HTTP capability discovery) must use it rather than
+        hand-rolling the field shape, so every surface stays in lockstep when
+        the manifest gains a field.
+        """
+        return {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "identity": {"name": self.identity.name, "publisher": self.identity.publisher},
+            "version": self.version,
+            "protocol": self.protocol,
+            "dependencies": [
+                {"name": item.name, "version": item.version, "required": item.required}
+                for item in self.dependencies
+            ],
+            "permissions": list(self.permissions),
+            "health": {
+                "mode": self.health.mode.value,
+                "crash_limit": self.health.crash_limit,
+                "probe_timeout_ms": self.health.probe_timeout_ms,
+            },
+            "cleanup": {
+                "on_quarantine": self.cleanup.on_quarantine,
+                "retain_state": self.cleanup.retain_state,
+            },
+            "resources": {"memory_limit_bytes": self.resources.memory_limit_bytes},
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "ExtensionManifest":
+        """Rehydrate a manifest from :meth:`to_dict`'s shape.
+
+        Unknown extra keys (a newer schema_version's additions) are ignored
+        rather than rejected, so an older reader can still load a manifest
+        written by a newer one; missing required keys raise ``KeyError``/
+        ``TypeError`` at this boundary rather than deeper inside the dataclass.
+        """
+        if not isinstance(value, dict):
+            raise TypeError("manifest dict must be an object")
+        identity = value["identity"]
+        health = value.get("health", {})
+        cleanup = value.get("cleanup", {})
+        resources = value.get("resources", {})
+        return cls(
+            identity=ExtensionIdentity(identity["name"], identity["publisher"]),
+            version=value["version"],
+            protocol=value["protocol"],
+            dependencies=tuple(
+                ExtensionDependency(item["name"], item.get("version", "*"), item.get("required", True))
+                for item in value.get("dependencies", ())
+            ),
+            permissions=tuple(value.get("permissions", ())),
+            health=ExtensionHealth(
+                mode=HealthMode(health["mode"]) if "mode" in health else HealthMode.PROBE,
+                crash_limit=health.get("crash_limit", 3),
+                probe_timeout_ms=health.get("probe_timeout_ms", 1000),
+            ),
+            cleanup=CleanupPolicy(
+                on_quarantine=cleanup.get("on_quarantine", "disable"),
+                retain_state=cleanup.get("retain_state", True),
+            ),
+            resources=ExtensionResources(resources.get("memory_limit_bytes")),
         )

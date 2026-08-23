@@ -19,10 +19,17 @@ from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.bootstrap import app as bootstrap_app
 from sonder_runtime.domain.common.errors import (
+    CapacityExceeded,
     DeadlineExceeded,
     DependencyUnavailable,
     Forbidden,
     InvalidInput,
+)
+from sonder_runtime.domain.model_capabilities import (
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+    KNOWN_GATEWAY_CAPABILITIES,
 )
 
 
@@ -172,12 +179,31 @@ def test_non_loopback_endpoint_refused_without_cloud_consent():
     assert gw.generate(ModelRequest(prompt="hi", tier="code"), _ctx(cloud=True)).text == "ok"
 
 
+def test_capabilities_are_typed_and_advertise_a_fixed_endpoint():
+    capabilities = OpenAICompatibleGateway(_local_cfg()).capabilities
+    assert capabilities == {
+        GATEWAY_CAPABILITY_CHAT,
+        GATEWAY_CAPABILITY_EMBEDDINGS,
+        GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+    }
+    assert capabilities <= KNOWN_GATEWAY_CAPABILITIES
+
+
 def test_http_auth_error_maps_to_forbidden():
     def transport(url, payload, headers, timeout):
         raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
 
     gw = OpenAICompatibleGateway(_local_cfg(), transport=transport)
     with pytest.raises(Forbidden):
+        gw.generate(ModelRequest(prompt="hi", tier="code"), _ctx())
+
+
+def test_http_rate_limit_maps_to_capacity_exceeded():
+    def transport(url, payload, headers, timeout):
+        raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+
+    gw = OpenAICompatibleGateway(_local_cfg(), transport=transport)
+    with pytest.raises(CapacityExceeded):
         gw.generate(ModelRequest(prompt="hi", tier="code"), _ctx())
 
 

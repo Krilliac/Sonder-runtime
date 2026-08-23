@@ -62,7 +62,7 @@ ERROR_STATUS = {
 
 def error_response(err: SonderError) -> Response:
     status = ERROR_STATUS.get(err.code, 500)
-    return Response(status, {"error": err.code, "message": str(err)})
+    return Response(status, {"error": err.code, "message": str(err), "retryable": err.retryable})
 
 
 def context_from_request(

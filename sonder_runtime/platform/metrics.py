@@ -8,6 +8,7 @@ bounded by construction.
 """
 from __future__ import annotations
 
+import re
 import threading
 
 try:  # optional, pinned in the production lock file when enabled
@@ -24,6 +25,14 @@ try:  # optional, pinned in the production lock file when enabled
 except ImportError:  # pragma: no cover - exercised on minimal installs
     PROMETHEUS_AVAILABLE = False
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+
+# Ollama worker-pool label values are assigned by ``ollama_pool.py`` from a
+# bounded ordinal slot ("w0".."w15") or the fixed "overflow" bucket -- never
+# from a raw hostname -- so cardinality stays bounded by construction even
+# though the underlying worker list is operator-configured. This pattern is
+# re-validated here as defense in depth against a future caller passing free
+# text.
+_WORKER_LABEL = re.compile(r"^w[0-9]{1,3}$")
 
 
 class _NoopMetric:
@@ -74,6 +83,31 @@ class MetricsRegistry:
             self.active_requests = Gauge(
                 "sonder_active_requests", "In-flight HTTP requests",
                 registry=self._registry,
+            )
+            self.admission_capacity = Gauge(
+                "sonder_admission_capacity",
+                "Configured HTTP admission capacity by kind",
+                ["kind"], registry=self._registry,
+            )
+            self.admission_queue_depth = Gauge(
+                "sonder_admission_queue_depth",
+                "Requests currently waiting for an execution slot",
+                registry=self._registry,
+            )
+            self.admission_queue_high_watermark = Gauge(
+                "sonder_admission_queue_high_watermark",
+                "Highest observed admission queue depth since process start",
+                registry=self._registry,
+            )
+            self.admission_queue_wait_seconds = Histogram(
+                "sonder_admission_queue_wait_seconds",
+                "Time from admission enqueue to slot acquisition or timeout",
+                registry=self._registry,
+            )
+            self.admission_rejections_total = Counter(
+                "sonder_admission_rejections_total",
+                "Admission rejections by bounded reason code",
+                ["reason"], registry=self._registry,
             )
             self.request_cache_total = Counter(
                 "sonder_request_cache_total",
@@ -139,17 +173,38 @@ class MetricsRegistry:
                 "Authentication failures by reason", ["reason"],
                 registry=self._registry,
             )
+            self.ollama_worker_requests_total = Counter(
+                "sonder_ollama_worker_requests_total",
+                "Multi-PC Ollama pool requests by bounded worker slot and result",
+                ["worker", "result"], registry=self._registry,
+            )
+            self.ollama_worker_duration_seconds = Histogram(
+                "sonder_ollama_worker_duration_seconds",
+                "Multi-PC Ollama pool request duration by bounded worker slot",
+                ["worker"], registry=self._registry,
+            )
+            self.ollama_worker_circuit_state_total = Counter(
+                "sonder_ollama_worker_circuit_state_total",
+                "Ollama worker circuit breaker transitions by bounded worker "
+                "slot and state",
+                ["worker", "state"], registry=self._registry,
+            )
         else:
             noop = _NoopMetric()
             for name in (
                 "build_info", "process_state", "requests_total",
                 "request_duration_seconds", "active_requests", "request_cache_total",
+                "admission_capacity", "admission_queue_depth",
+                "admission_queue_high_watermark", "admission_queue_wait_seconds",
+                "admission_rejections_total",
                 "model_calls_total", "model_call_duration_seconds",
                 "model_backend_phase_duration_seconds",
                 "model_token_throughput_per_second", "model_load_states_total",
                 "sqlite_lock_wait_seconds", "task_states", "autopilot_runs_total",
                 "backup_age_seconds", "backup_runs_total", "disk_free_bytes",
                 "redaction_failures_total", "auth_failures_total",
+                "ollama_worker_requests_total", "ollama_worker_duration_seconds",
+                "ollama_worker_circuit_state_total",
             ):
                 setattr(self, name, noop)
 
@@ -201,6 +256,34 @@ class MetricsRegistry:
         """Record a deterministic-cache consultation with a closed label set."""
         outcome = result if result in {"hit", "miss"} else "other"
         self.request_cache_total.labels(result=outcome).inc()
+
+    def _ollama_worker_label(self, worker: str) -> str:
+        if worker == "overflow" or (type(worker) is str and _WORKER_LABEL.match(worker)):
+            return worker
+        return "unknown"
+
+    def observe_ollama_worker_request(
+        self, *, worker: str, result: str, elapsed_seconds: float
+    ) -> None:
+        """Record one multi-PC pool attempt with a closed, bounded label set."""
+        label = self._ollama_worker_label(worker)
+        outcome = result if result in {"ok", "error"} else "error"
+        try:
+            elapsed = float(elapsed_seconds)
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        if elapsed < 0 or elapsed > 86_400:
+            elapsed = 0.0
+        self.ollama_worker_requests_total.labels(worker=label, result=outcome).inc()
+        self.ollama_worker_duration_seconds.labels(worker=label).observe(elapsed)
+
+    def observe_ollama_worker_circuit(self, *, worker: str, state: str) -> None:
+        """Record a circuit-breaker transition with a closed label set."""
+        label = self._ollama_worker_label(worker)
+        transition = state if state in {"open", "closed"} else "open"
+        self.ollama_worker_circuit_state_total.labels(
+            worker=label, state=transition
+        ).inc()
 
     def set_build_info(self, version: str, commit: str) -> None:
         self.build_info.labels(version=version, commit=commit).set(1)

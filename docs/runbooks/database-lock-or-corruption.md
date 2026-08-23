@@ -3,7 +3,8 @@
 ## Lock storms (SQLITE_BUSY)
 
 Symptoms: slow requests, `sonder_sqlite_lock_wait_seconds` climbing,
-"database is locked" in logs.
+"database is locked" in logs, or a durable-job operation returning the stable
+`CONCURRENCY_CONFLICT` code.
 
 1. Identify the store from log context (memory/autopilot/fleet/operations).
 2. Look for a stuck process holding a long transaction:
@@ -13,10 +14,15 @@ Symptoms: slow requests, `sonder_sqlite_lock_wait_seconds` climbing,
 4. Persistent contention is a bug — capture `/health`, the journal, and
    file an issue; do not raise busy_timeout past 30s as a fix.
 
+For an offline reproduction that does not touch the live store, use the
+statement-level fixture documented in
+[fault-injection-testing.md](fault-injection-testing.md).
+
 ## Corruption
 
 Symptoms: "database disk image is malformed", integrity errors in
-diagnostics, restore-smoke failures.
+diagnostics, restore-smoke failures, or `INTEGRITY_FAILURE` from the durable
+job store.
 
 1. Stop the service: `systemctl stop sonder`
 2. Confirm:

@@ -20,6 +20,18 @@ if not defined SONDER_PYTHON (
   endlocal & exit /b 3
 )
 
+rem `python -m sonder_runtime --version` is a top-level flag; the `repl`
+rem subcommand this launcher forwards into does not accept it. Answer it here,
+rem before any Ollama/engine bootstrap, so `sonder --version` works even on a
+rem machine where Ollama is not installed or running yet.
+if /I "%~1"=="--version" set "SONDER_VERSION_REQUEST=1"
+if /I "%~1"=="-V" set "SONDER_VERSION_REQUEST=1"
+if defined SONDER_VERSION_REQUEST (
+  "%SONDER_PYTHON%" -m sonder_runtime --version
+  set "EXIT_CODE=%ERRORLEVEL%"
+  endlocal & exit /b %EXIT_CODE%
+)
+
 rem Bootstrap is quiet on success and loud on failure. Both steps below print
 rem the same "ollama reachable / alias ready" pair, so the old unconditional
 rem echo showed every launch the same eight lines twice, above a status block

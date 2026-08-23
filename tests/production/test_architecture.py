@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -27,12 +28,35 @@ def _architecture_module():
 
 def test_architecture_check_passes():
     result = subprocess.run(
-        [sys.executable, str(_REPO_ROOT / "scripts" / "check_architecture.py")],
+        [
+            sys.executable,
+            str(_REPO_ROOT / "scripts" / "check_architecture.py"),
+            "--stats",
+        ],
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    stats = json.loads(result.stderr)
+    assert stats["compatibility_rules"] >= 1
+    assert stats["parsed_files"] >= stats["tracked_files"]
+    assert stats["parsed_files"] >= stats["package_files"]
+    assert stats["violations"] == 0
+
+
+def test_absolute_import_index_preserves_compatibility_rule_semantics():
+    module = _architecture_module()
+    tree = ast.parse(
+        "import memory_store\n"
+        "import memory_store.child\n"
+        "from fleet_store import connect\n"
+        "from . import queued_actions\n"
+    )
+
+    assert module.absolute_imports(tree) == frozenset({
+        "memory_store", "memory_store.child", "fleet_store",
+    })
 
 
 def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
@@ -371,64 +395,70 @@ def test_checker_detects_a_violation(tmp_path):
     assert "domain may not import" in result.stdout
 
 
-@pytest.mark.parametrize(
-    "root_module", [
-        "context_overflow.py",
-        "mmr_rerank.py",
-        "reward.py",
-        "execution_status.py",
-        "process_liveness.py",
-        "eval_history.py",
-        "sonder_backup.py",
-        "sonder_preflight.py",
-        "workflow_store.py",
-        "sonder_storage.py",
-        "model_transport.py",
-        "runtime_policy.py",
-        "ollama_endpoint.py",
-        "embed_cache.py",
-        "embeddings.py",
-        "npu_contract.py",
-        "npu_manifest.py",
-        "npu_providers.py",
-        "npu_broker.py",
-        "npu_worker.py",
-        "npu_service.py",
-        "activity_tracker.py",
-        "sonder_operations_store.py",
-        "file_ops.py",
-        "workbench.py",
-        "sonder_secrets.py",
-        "sonder_updates.py",
-        "sonder_update_engine.py",
-        "sonder_lifecycle.py",
-        "sonder_serve.py",
-        "sonder_repl.py",
-        "sonder_migrations.py",
-        "sonder_metrics.py",
-        "archive_tools.py",
-        "content_digest.py",
-        "data_query.py",
-        "dependency_inventory.py",
-        "log_inspect.py",
-        "project_detect.py",
-        "workspace_compare.py",
-        "sonder_runtime\\adapters\\strangler_services.py",
-        "sonder_runtime\\adapters\\legacy_model_gateway.py",
-        "sonder_runtime\\adapters\\ollama\\gateway.py",
-        "sonder_runtime\\adapters\\openai_compat\\gateway.py",
-        "sonder_runtime\\adapters\\ollama\\endpoint.py",
-    ],
-)
-def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
-    """A completed root migration is a permanent shrink-only boundary."""
+# Every reviewed migration boundary the ratchet must keep closed.  One
+# behavior, one list: each entry is asserted individually against a single
+# checker run below.  This used to be a 45-way parametrize that rebuilt the
+# copied tree and re-ran the checker per module -- ~18 minutes of suite time
+# for the same 45 assertions the batched run proves in seconds.
+_RETIRED_ROOT_MODULES = [
+    "context_overflow.py",
+    "mmr_rerank.py",
+    "reward.py",
+    "execution_status.py",
+    "process_liveness.py",
+    "eval_history.py",
+    "sonder_backup.py",
+    "sonder_preflight.py",
+    "workflow_store.py",
+    "sonder_storage.py",
+    "model_transport.py",
+    "runtime_policy.py",
+    "ollama_endpoint.py",
+    "embed_cache.py",
+    "embeddings.py",
+    "npu_contract.py",
+    "npu_manifest.py",
+    "npu_providers.py",
+    "npu_broker.py",
+    "npu_worker.py",
+    "npu_service.py",
+    "activity_tracker.py",
+    "sonder_operations_store.py",
+    "file_ops.py",
+    "workbench.py",
+    "sonder_secrets.py",
+    "sonder_updates.py",
+    "sonder_update_engine.py",
+    "sonder_lifecycle.py",
+    "sonder_serve.py",
+    "sonder_repl.py",
+    "sonder_migrations.py",
+    "sonder_metrics.py",
+    "archive_tools.py",
+    "content_digest.py",
+    "data_query.py",
+    "dependency_inventory.py",
+    "log_inspect.py",
+    "project_detect.py",
+    "workspace_compare.py",
+    "sonder_runtime\\adapters\\strangler_services.py",
+    "sonder_runtime\\adapters\\legacy_model_gateway.py",
+    "sonder_runtime\\adapters\\ollama\\gateway.py",
+    "sonder_runtime\\adapters\\openai_compat\\gateway.py",
+    "sonder_runtime\\adapters\\ollama\\endpoint.py",
+]
+
+
+def _staged_checker_copy(tmp_path, retired_modules):
+    """Copy the tree, plant the given retired modules, stage, return checker."""
     shutil.copytree(_REPO_ROOT / "sonder_runtime", tmp_path / "sonder_runtime")
     (tmp_path / "scripts").mkdir()
     checker = tmp_path / "scripts" / "check_architecture.py"
     shutil.copy2(_REPO_ROOT / "scripts" / "check_architecture.py", checker)
 
-    retired = tmp_path / root_module
-    retired.write_text("# retired migration boundary\n", encoding="utf-8")
+    for root_module in retired_modules:
+        retired = tmp_path / root_module
+        retired.write_text("# retired migration boundary\n", encoding="utf-8")
     for command in (["git", "init", "-q"], ["git", "add", "-A"]):
         staged = subprocess.run(
             command, cwd=tmp_path, capture_output=True, text=True, timeout=120,
@@ -438,13 +468,44 @@ def test_checker_rejects_reintroduced_migrated_root(tmp_path, root_module):
                 "git is required to stage the isolated copy: %s"
                 % (staged.stderr.strip() or staged.stdout.strip())
             )
+    return checker
 
+
+def test_checker_rejects_every_reintroduced_migrated_root(tmp_path):
+    """A completed root migration is a permanent shrink-only boundary."""
+    checker = _staged_checker_copy(tmp_path, _RETIRED_ROOT_MODULES)
+    result = subprocess.run(
+        [sys.executable, str(checker)],
+        capture_output=True, text=True, timeout=300,
+    )
+    assert result.returncode == 1
+    missed = [
+        root_module for root_module in _RETIRED_ROOT_MODULES
+        if f"{root_module}: retired root module was reintroduced"
+        not in result.stdout
+    ]
+    assert missed == [], (
+        "checker did not flag reintroduced retired module(s):\n" + result.stdout
+    )
+
+
+def test_checker_rejects_a_reintroduced_migrated_root_on_its_own(tmp_path):
+    """One planted module must trip the ratchet without help from the others.
+
+    The batched test above proves coverage of the list; this proves a single
+    reintroduction is caught in an otherwise-clean tree, so flagging cannot
+    secretly depend on other violations being present.
+    """
+    checker = _staged_checker_copy(tmp_path, ["process_liveness.py"])
     result = subprocess.run(
         [sys.executable, str(checker)],
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 1
-    assert f"{root_module}: retired root module was reintroduced" in result.stdout
+    assert "process_liveness.py: retired root module was reintroduced" in result.stdout
+
+
+
 
 
 def test_inspection_adapter_has_an_exact_read_only_legacy_dependency_set():
@@ -599,3 +660,4 @@ def test_production_inventory_ignores_generated_tree_but_catches_tracked_offende
     assert module.compatibility_import_offenders(
         "memory_store", Path("memory_store.py"), repo
     ) == (Path("real_offender.py"),)
+

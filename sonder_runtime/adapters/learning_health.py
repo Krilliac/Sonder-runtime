@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import calibration
 import sonder_runtime.adapters.embeddings as embeddings
+import grounded_outcomes
 import memory_quality
 import sonder_runtime.adapters.memory_store as memory_store
 import retriever
@@ -833,6 +834,29 @@ def build_report(conn) -> dict:
         "interaction_task_embeddings": interaction_embedding_state,
         "ambiguous_legacy_project_turns": ambiguous_legacy_project_turns,
         "unscoped_session_turns": unscoped_session_turns,
+        # Evidence-level lesson findings from the same audit, read-only and
+        # deliberately absent from _status: they are new diagnostics whose
+        # thresholds have not earned the right to change the health verdict.
+        "conflicting_lesson_pairs": int(audit.get("conflicting_lesson_pairs", 0)),
+        "stale_lessons": int(audit.get("stale_lessons", 0)),
+        "duplicate_fact_groups": int(audit.get("duplicate_fact_groups", 0)),
+        "duplicate_fact_rows": int(audit.get("duplicate_fact_rows", 0)),
+        # The attribution lane's own counters (grounded_outcomes). Everything
+        # else in this report is read from the store; these live in the
+        # process, so a fresh server legitimately reports zeros while the
+        # store above still shows every attributed outcome ever written.
+        "outcome_attribution": {
+            **grounded_outcomes.stats(),
+            "pending": grounded_outcomes.pending_count(),
+        },
+        "outcome_attribution_note": (
+            "Counters for this process only, not the store: how many "
+            "generations were noted for later judgement, how many "
+            "verifications attributed a signal, how many were refused "
+            "(self_blocked: a tool may not grade its own generation; "
+            "unmeasured: the verifier produced no verdict; unlinked: nothing "
+            "was waiting), and how many attributed writes failed."
+        ),
         # The same caller-judged population the agent loop gates completion
         # claims on, measured by the module that owns that decision rather
         # than re-derived here. Carrying it means the health report and the
@@ -841,6 +865,31 @@ def build_report(conn) -> dict:
     }
     report["status"] = _status(report)
     return report
+
+
+def _outcome_attribution_lines(report: dict) -> list[str]:
+    """Render the attribution lane's session counters, or nothing for an older
+    report snapshot that predates them (a zero row would read as an idle lane
+    when the truth is the report never measured one)."""
+    counters = report.get("outcome_attribution")
+    if not isinstance(counters, dict):
+        return []
+    return [
+        "  outcome attribution (this process, not the store): noted=%s | "
+        "attributed=%s | recorded=%s | self-blocked=%s | unmeasured=%s | "
+        "unlinked=%s | expired=%s | write-failed=%s | pending=%s"
+        % (
+            counters.get("noted", 0),
+            counters.get("attributed", 0),
+            counters.get("recorded", 0),
+            counters.get("self_blocked", 0),
+            counters.get("unmeasured", 0),
+            counters.get("unlinked", 0),
+            counters.get("expired", 0),
+            counters.get("write_failed", 0),
+            counters.get("pending", 0),
+        ),
+    ]
 
 
 def format_report(report: dict) -> str:
@@ -932,6 +981,14 @@ def format_report(report: dict) -> str:
             report.get("quarantine_distinct_failed_interactions", 0),
         ),
         "    %s" % report.get("loss_attribution_note", ""),
+        "  lesson evidence findings: conflicting pairs=%s | stale=%s "
+        "(experimental, diagnostics only) | duplicate fact rows=%s"
+        % (
+            report.get("conflicting_lesson_pairs", 0),
+            report.get("stale_lessons", 0),
+            report.get("duplicate_fact_rows", 0),
+        ),
+        *_outcome_attribution_lines(report),
         "  distillation yield: %s grounded lesson(s) per positive interaction"
         % ("n/a" if yield_value is None else yield_value),
         *_distillation_reason_lines(report),

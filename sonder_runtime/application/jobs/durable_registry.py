@@ -29,7 +29,9 @@ from ..operations.startup_reconciliation import (
     StartupObservation,
     build_drain_plan,
 )
-from ..ports.jobs import JobIdentity, JobRecord, JobStatus, TERMINAL_JOB_STATUSES
+from ..ports.jobs import (
+    JobIdentity, JobRecord, JobStatus, MAX_JOB_ATTEMPTS, TERMINAL_JOB_STATUSES,
+)
 
 
 def _now() -> str:
@@ -73,6 +75,10 @@ class ProcessTreeCleanupReceipt:
             raise ValueError("cleanup counts cannot be negative")
         if self.descendants_terminated > self.descendants_seen:
             raise ValueError("terminated descendants cannot exceed seen descendants")
+        if self.complete and not self.requested:
+            raise ValueError("complete cleanup requires a requested cleanup")
+        if self.complete and self.descendants_terminated != self.descendants_seen:
+            raise ValueError("complete cleanup requires every seen descendant terminated")
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +136,7 @@ class DurableJobRegistry:
         parent_job_id: str | None = None,
         process_id: int | None = None,
         process_group_id: int | None = None,
+        max_attempts: int = 3,
     ) -> JobRecord:
         """Create one pending job and validate its parent before publication."""
         if not isinstance(identity, JobIdentity):
@@ -146,10 +153,16 @@ class DurableJobRegistry:
                 raise ValueError("process_id must be positive")
             if process_group_id is not None and process_group_id <= 0:
                 raise ValueError("process_group_id must be positive")
+            if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
+                    or not 1 <= max_attempts <= MAX_JOB_ATTEMPTS):
+                raise ValueError(f"max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}")
             if parent != identity.parent_job_id:
                 identity = replace(identity, parent_job_id=parent)
             now = self._clock()
-            record = JobRecord(identity, JobStatus.PENDING, 0, now, now)
+            record = JobRecord(
+                identity, JobStatus.PENDING, 0, now, now,
+                attempt=0, max_attempts=max_attempts,
+            )
             self._records[identity.job_id] = record
             self._children.setdefault(identity.job_id, [])
             if parent is not None:
@@ -239,15 +252,31 @@ class DurableJobRegistry:
                 return current
             if status is JobStatus.SUCCEEDED and error:
                 raise ValueError("successful jobs cannot carry an error")
+            attempt = current.attempt
+            if status is JobStatus.RUNNING and current.status is not JobStatus.RUNNING:
+                if attempt >= current.max_attempts:
+                    raise ValueError("job retry budget is exhausted")
+                attempt += 1
             now = self._clock()
-            updated = replace(current, status=status, revision=current.revision + 1, updated_at=now, result=result, error=error)
+            updated = replace(
+                current, status=status, revision=current.revision + 1,
+                updated_at=now, result=result, error=error, attempt=attempt,
+            )
             self._records[job_id] = updated
             return updated
 
-    def cancel(self, job_id: str, *, reason: str = "cancelled") -> tuple[JobRecord, ...]:
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        reason: str = "cancelled",
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
         """Cancel a job and all descendants, returning stable changed records."""
         if not reason.strip():
             raise ValueError("cancellation reason is required")
+        if isinstance(max_descendants, bool) or max_descendants < 0:
+            raise ValueError("max_descendants must be a non-negative integer")
         with self._lock:
             self.poll(job_id)
             ids: list[str] = []
@@ -255,6 +284,8 @@ class DurableJobRegistry:
             while queue:
                 current_id = queue.pop(0)
                 ids.append(current_id)
+                if len(ids) - 1 > max_descendants:
+                    raise ValueError("job cancellation exceeds max_descendants")
                 queue.extend(self._children.get(current_id, ()))
             changed: list[JobRecord] = []
             for current_id in ids:
@@ -264,6 +295,23 @@ class DurableJobRegistry:
                     continue
                 changed.append(self.transition(current_id, JobStatus.CANCELLED, error=reason))
             return tuple(changed)
+
+    def retry(self, job_id: str, *, expected_revision: int | None = None) -> JobRecord | None:
+        """Explicitly requeue failed or interrupted work within its retry budget."""
+        with self._lock:
+            current = self.poll(job_id)
+            if expected_revision is not None and current.revision != expected_revision:
+                return None
+            if current.status not in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+                raise ValueError("only failed or interrupted jobs can be retried")
+            if current.attempt >= current.max_attempts:
+                raise ValueError("job retry budget is exhausted")
+            updated = replace(
+                current, status=JobStatus.PENDING, revision=current.revision + 1,
+                updated_at=self._clock(), result=None, error="",
+            )
+            self._records[job_id] = updated
+            return updated
 
     def collect(self, job_id: str) -> JobRecord:
         record = self.poll(job_id)

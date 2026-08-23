@@ -297,3 +297,26 @@ def test_trace_projection_reads_only_sanitized_retained_events():
     assert body["schema"] == "sonder.trace-span.v1"
     assert body["spans"][0]["attributes"]["gen_ai.operation.name"] == "execute_tool"
     assert "do not project" not in str(body)
+
+
+def test_trace_projection_filters_by_correlation_id_for_one_request_or_run():
+    sink = LocalObservabilitySink(clock=lambda: 3.0)
+    sink.emit("MODEL_CALL", summary="a", correlation_id="req-a", detail={"category": "inference"})
+    sink.emit("TOOL_CALL", summary="b", correlation_id="req-b", detail={"category": "tool"})
+
+    body = sink.trace_projection(correlation_id="req-b").to_dict()
+
+    assert body["span_count"] == 1
+    assert body["spans"][0]["attributes"]["sonder.event_code"] == "TOOL_CALL"
+
+
+def test_trace_projection_filters_by_category_and_severity():
+    sink = LocalObservabilitySink(clock=lambda: 3.0)
+    sink.emit("WORK_OK", summary="a", severity="INFO", detail={"category": "worker"})
+    sink.emit("WORK_FAIL", summary="b", severity="ERROR", detail={"category": "worker"})
+    sink.emit("OTHER", summary="c", severity="ERROR", detail={"category": "agent"})
+
+    body = sink.trace_projection(category="worker", severity="ERROR").to_dict()
+
+    assert body["span_count"] == 1
+    assert body["spans"][0]["attributes"]["sonder.event_code"] == "WORK_FAIL"

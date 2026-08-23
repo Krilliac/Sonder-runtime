@@ -122,6 +122,38 @@ def test_owner_accounting_is_released_on_admission_timeout():
     assert lifecycle._owner_inflight == {}
 
 
+def test_admission_telemetry_reports_capacity_waits_and_rejections_without_owner_data():
+    lifecycle = _lifecycle(
+        max_concurrent_requests=1,
+        queue_depth=2,
+        admission_timeout_seconds=0.02,
+    )
+
+    with lifecycle.acquire_request_slot(mutating=False, owner="private-owner"):
+        active = lifecycle.admission_telemetry_snapshot()
+        assert active["active_requests"] == 1
+        assert active["available_slots"] == 0
+        assert active["active_limit"] == 1
+        try:
+            with lifecycle.acquire_request_slot(
+                mutating=False, owner="another-private-owner"
+            ):
+                raise AssertionError("the second request unexpectedly acquired")
+        except AdmissionRejected as exc:
+            assert exc.code == "ADMISSION_TIMEOUT"
+
+    snapshot = lifecycle.admission_telemetry_snapshot()
+    assert snapshot["active_requests"] == 0
+    assert snapshot["queued_requests"] == 0
+    assert snapshot["queue_limit"] == 2
+    assert snapshot["queue_high_watermark"] >= 1
+    assert snapshot["queue_wait_samples"] == 2
+    assert snapshot["queue_wait_seconds_total"] >= 0.02
+    assert snapshot["queue_wait_seconds_max"] >= 0.02
+    assert snapshot["rejections"]["ADMISSION_TIMEOUT"] == 1
+    assert "private-owner" not in repr(snapshot)
+
+
 def test_default_owner_cap_leaves_room_for_other_owners():
     """One owner must never be able to occupy every slot and queue position."""
     lifecycle = RuntimeLifecycle(max_concurrent_requests=4, queue_depth=32)

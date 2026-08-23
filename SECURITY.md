@@ -94,7 +94,12 @@ Mitigations that are already in place and worth knowing about:
   excluded from agents, repository read-only sessions, loops, and autopilot
   because arbitrary loopback response bodies can contain host-local secrets.
 - Cloud tiers are **opt-in**. Local tiers run against loopback Ollama, and a
-  remote `OLLAMA_HOST` must be explicitly enabled.
+  remote `OLLAMA_HOST` must be explicitly enabled. A separate opt-in,
+  `SONDER_ALLOW_REMOTE_OLLAMA=1` with `SONDER_OLLAMA_WORKERS`, lets ordinary
+  local-tier requests be pooled across multiple Ollama hosts (see
+  `docs/runbooks/multi-pc-ollama.md`); vision analysis and fanout synthesis
+  carry a stricter never-leaves-this-machine contract and are pinned to the
+  primary endpoint regardless of pool configuration.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
   paths, emails, credentials, private keys, and tokens are not distilled into
   memory.

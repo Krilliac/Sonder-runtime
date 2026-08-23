@@ -86,6 +86,24 @@ def _clusterable_lesson(lesson):
     )
 
 
+def embedded_lessons_by_space(conn):
+    """Lessons with usable stored embeddings, grouped by comparable space.
+
+    The grouping rule is the one cluster_near_duplicates applies internally:
+    vectors are only ever comparable within one exact normalized
+    (model, revision, dimension) embedding space. Public so read-only
+    diagnostics (memory_quality's contradiction audit) reuse this module's
+    loading and comparability rules instead of teaching a second copy that
+    could drift. Each lesson dict carries id/text/ts plus a decoded ``vector``.
+    """
+    by_space = {}
+    for lesson in _load_lessons(conn):
+        if not _clusterable_lesson(lesson):
+            continue
+        by_space.setdefault(_normalized_embedding_space(lesson), []).append(lesson)
+    return by_space
+
+
 class _UnionFind:
     """Minimal disjoint-set for single-linkage clustering by id."""
 

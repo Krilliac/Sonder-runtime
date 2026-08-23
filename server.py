@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import importlib
 import http.client
+import inspect
 import json
 import math
 import os
@@ -312,6 +313,25 @@ RUNNING_SOURCE_COMMIT = _running_source_commit_at_import()
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 OLLAMA_POOL = ollama_pool.from_environment(BASE)
+
+
+def _ollama_endpoint_is_local(base: str | None = None) -> bool:
+    """Whether every endpoint an ordinary pooled request could reach is local.
+
+    A loopback primary alone no longer proves a request stays on this
+    machine: the least-inflight worker pool can route it to any configured
+    ``SONDER_OLLAMA_WORKERS`` member, including a remote one. Callers that
+    display, cache, or gate on locality must check both, not just ``BASE``.
+
+    `base` defaults to the live module global rather than binding it at
+    definition time, so tests (and any future caller) that monkeypatch
+    ``server.BASE`` after import are respected here too.
+    """
+    if base is None:
+        base = BASE
+    return ollama_endpoint.is_loopback(base) and not OLLAMA_POOL.has_remote_workers
+
+
 # Bind-all Ollama server addresses are canonicalized to a numeric loopback
 # destination for this client without mutating the server process environment.
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
@@ -1222,7 +1242,7 @@ def _direct_fanout_access(run_id: str, token: str, started, tool_name: str):
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -1265,6 +1285,10 @@ def resolve_sonder_model(strict=False):
 _MODEL_CONTEXT_CACHE = {}
 _MODEL_CONTEXT_CACHE_LOCK = threading.Lock()
 _MODEL_CONTEXT_CACHE_TTL = 300.0
+# A failed /api/show yields no metadata and pins the conservative context
+# fallback; keep that verdict short-lived so a transient provider hiccup does
+# not undersize a large model's window for the full positive TTL.
+_MODEL_CONTEXT_CACHE_NEGATIVE_TTL = 30.0
 
 
 def _model_context_metadata(model):
@@ -1275,8 +1299,14 @@ def _model_context_metadata(model):
     now = time.monotonic()
     with _MODEL_CONTEXT_CACHE_LOCK:
         cached = _MODEL_CONTEXT_CACHE.get(key)
-        if cached and now - cached[0] < _MODEL_CONTEXT_CACHE_TTL:
-            return cached[1], cached[2]
+        if cached:
+            ttl = (
+                _MODEL_CONTEXT_CACHE_TTL
+                if cached[1] is not None or cached[2] is not None
+                else _MODEL_CONTEXT_CACHE_NEGATIVE_TTL
+            )
+            if now - cached[0] < ttl:
+                return cached[1], cached[2]
     context_length = None
     parameter_size = None
     try:
@@ -1536,7 +1566,7 @@ def _gateway_generate_text(prompt, tier="fast", system="", temperature=0.2,
         correlation_id="offload-%s" % os.urandom(4).hex(),
         source="system",
         cloud_allowed=_cloud_allowed_policy(os.environ),
-        remote_ollama_allowed=not ollama_endpoint.is_loopback(BASE),
+        remote_ollama_allowed=not _ollama_endpoint_is_local(),
         timeout_seconds=float(timeout) if timeout else None,
     )
     try:
@@ -3820,6 +3850,7 @@ def _post_model(
     timeout: int | None = None,
     cancel_check=None,
     idempotent: bool = False,
+    local_only: bool = False,
 ) -> tuple[dict, int]:
     """POST one logical model request with a narrow loopback-only retry policy.
 
@@ -3835,8 +3866,18 @@ def _post_model(
     `idempotent` is the caller's declaration that repeating a hosted/remote
     request is safe; it is required (on top of an operator opt-in) before such
     a route will take even the overflow retry.
+
+    `local_only` is a caller-declared contract (image bytes, vault-derived
+    fanout receipts) that this specific request must never leave the primary
+    loopback endpoint. It is not the ordinary local/remote distinction below:
+    it forces this one call past the worker pool entirely -- the pool's
+    least-inflight scheduler is otherwise free to route any ordinary local
+    request to a configured remote worker, and a caller with a stricter
+    promise cannot rely on the pool honoring it implicitly.
     """
     cloud = bool(cloud or _is_cloud_model_name(model))
+    if local_only and cloud:
+        raise ValueError("local_only and cloud are mutually exclusive")
     if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
@@ -3845,11 +3886,19 @@ def _post_model(
             cloud=True,
         )
     _require_ollama_endpoint(cloud=cloud)
+    if local_only and not ollama_endpoint.is_loopback(BASE):
+        raise ModelCallError(
+            "configuration",
+            "this request requires a loopback Ollama endpoint",
+            attempts=0,
+            cloud=False,
+        )
     # A pool is treated as a remote route for retry policy even when its
     # primary endpoint is loopback. The pool itself may fail over only before
     # a response, so a completed request is never duplicated on another PC.
     remote_endpoint = (
-        not ollama_endpoint.is_loopback(BASE) or OLLAMA_POOL.enabled
+        not local_only
+        and (not ollama_endpoint.is_loopback(BASE) or OLLAMA_POOL.enabled)
     )
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
@@ -3883,12 +3932,23 @@ def _post_model(
         attempt_index = attempt
         failure = None
         embedded_detail = ""
+        # Passed only when set: callers/tests that replace `_post` with a
+        # narrower double keep working unless they specifically opt into the
+        # local_only contract this call is making.
+        post_kwargs = {}
+        if local_only:
+            post_kwargs["local_only"] = True
+        if idempotent and _callable_accepts_keyword(_post, "idempotent"):
+            # Preserve compatibility with narrow test doubles and legacy
+            # callers while forwarding the explicit replay-safety contract to
+            # the typed worker pool when it is actually declared.
+            post_kwargs["idempotent"] = True
         try:
             if timeout is None and attempt == 1:
-                result = _post(path, payload)
+                result = _post(path, payload, **post_kwargs)
             else:
                 call_timeout = request_timeout if attempt == 1 else max(1, int(remaining))
-                result = _post(path, payload, timeout=call_timeout)
+                result = _post(path, payload, timeout=call_timeout, **post_kwargs)
             # Ollama can report a refusal in-band on a 200. That is the same
             # failure surface as an HTTP error body, so it gets classified too
             # rather than being handed upward as an opaque success.
@@ -4061,6 +4121,7 @@ def _chat_request(
     cancel_check=None,
     accept_native_tool_calls: bool = False,
     idempotent: bool = False,
+    local_only: bool = False,
     _budget_retried: bool = False,
 ) -> tuple[dict, str]:
     if not cloud and _known_thinking_model(model):
@@ -4086,6 +4147,7 @@ def _chat_request(
         timeout=timeout,
         cancel_check=cancel_check,
         idempotent=idempotent,
+        local_only=local_only,
     )
     if not isinstance(out, dict):
         raise ModelCallError(
@@ -4130,6 +4192,7 @@ def _chat_request(
                 cancel_check=cancel_check,
                 accept_native_tool_calls=accept_native_tool_calls,
                 idempotent=idempotent,
+                local_only=local_only,
                 _budget_retried=True,
             )
         raise ModelCallError(
@@ -4211,7 +4274,27 @@ def _format_model_call_error(error: ModelCallError) -> str:
     )
 
 
-def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
+def _callable_accepts_keyword(callable_obj, name: str) -> bool:
+    """Keep narrow test/extension doubles compatible with new optional seams."""
+    try:
+        parameters = inspect.signature(callable_obj).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.name == name
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _post(
+    path: str,
+    payload: dict,
+    timeout: int | None = None,
+    *,
+    local_only: bool = False,
+    idempotent: bool = False,
+) -> dict:
     _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
@@ -4234,7 +4317,10 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
                 )
             return json.loads(raw.decode("utf-8"))
 
-    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
+    if local_only or not OLLAMA_POOL.enabled:
+        return send(BASE)
+    model_hint = payload.get("model") if isinstance(payload, dict) else None
+    return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent)
 
 
 _PREWARM_LOCK = threading.Lock()
@@ -4311,7 +4397,10 @@ def _get(path: str) -> dict:
                 )
             return json.loads(raw.decode("utf-8"))
 
-    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
+    return (
+        OLLAMA_POOL.request(send, idempotent=True)
+        if OLLAMA_POOL.enabled else send(BASE)
+    )
 
 
 def _parse_schema_arg(schema):
@@ -4777,7 +4866,7 @@ def offload(
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -4930,7 +5019,7 @@ def extract_grounded(
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -5170,7 +5259,7 @@ def _sonder_impl_serialized(
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
     except urllib.error.URLError as e:
@@ -5319,7 +5408,7 @@ def sonder(
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -5499,14 +5588,15 @@ def _answer_with_history_impl(
             response = None
             request_cache_key = None
             request_cache_status = ""
+            endpoint_is_local = _ollama_endpoint_is_local()
             model_revision = (
                 _cache_model_revision(model)
-                if not cloud and ollama_endpoint.is_loopback(BASE) else ""
+                if not cloud and endpoint_is_local else ""
             )
             if model_revision and request_cache.eligible(
                 scope=cache_scope, cloud=cloud, temperature=temperature,
                 learning=False, augmented=False,
-                remote_endpoint=not ollama_endpoint.is_loopback(BASE),
+                remote_endpoint=not endpoint_is_local,
             ):
                 request_cache_key = request_cache.identity_key(
                     scope=cache_scope, model=model, model_revision=model_revision,
@@ -5548,7 +5638,7 @@ def _answer_with_history_impl(
             raise
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
     except urllib.error.URLError as e:
@@ -8805,7 +8895,29 @@ def master_retry(agent_id: str, tier: str = "") -> str:
                 break
     if retry_project:
         retry_kwargs["project"] = retry_project
-    result = master_orchestrate(**retry_kwargs)
+    # Idempotency fence: two concurrent (or rapidly repeated) retries of the
+    # same persisted master must not both replay a full fleet.  The pending
+    # lease bridges only this dispatch; once the retry master row is durable it
+    # carries the fence itself, so the lease is always released afterwards.
+    retry_lease = None
+    if master_orchestrator.retry_fence_available() and master_orchestrator.fleet_store.get_agent(
+        candidate["id"], role="master",
+    ):
+        retry_lease = master_orchestrator.acquire_retry_lease(candidate["id"])
+        if retry_lease is None:
+            return (
+                "ERROR: master %s already has a retry in flight, was already "
+                "retried, or was just claimed by another caller; check "
+                "master_status() and retry after the active attempt finishes."
+                % candidate["id"]
+            )
+    try:
+        result = master_orchestrate(**retry_kwargs)
+    finally:
+        if retry_lease:
+            master_orchestrator.release_retry_lease(
+                candidate["id"], retry_lease["token"],
+            )
     return "\n".join([
         "persisted master retry",
         "  source: %s [%s] | mode: %s | agents: %d" % (
@@ -12407,6 +12519,7 @@ def _vision_analyze_impl(
     }
     _out, content = _chat_request(
         payload, model=model, cloud=False, timeout=timeout, idempotent=True,
+        local_only=True,
     )
     return content.strip()
 
@@ -12435,7 +12548,7 @@ def vision_analyze(
     except ModelCallError as exc:
         rendered = _format_runtime_model_call_error_policy(
             exc,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
         _record_direct_tool("vision_analyze", args, ok=False, started=started, summary=exc.kind)
@@ -12495,6 +12608,20 @@ def sonder_remember_fact(text: str, project: str = "") -> str:
     # MemoryRepository; passing _DB_PATH keeps the tool on the server's
     # database (tests repoint it), with the same connection semantics.
     with _application().unit_of_work(db_path=_DB_PATH) as uow:
+        # Facts are injected into EVERY project-scoped prompt, so storing the
+        # same assertion twice spends prompt budget on a repeat forever. The
+        # match is scoped to this one project: a fact another project already
+        # knows must still be stored here, never referenced across the scope.
+        duplicate = memory_store.find_duplicate_fact_in(
+            uow.memory.facts_for_project(project_id), text,
+        )
+        if duplicate is not None:
+            n = uow.memory.count_facts(project_id)
+            return (
+                "Already known for project '%s' (%d total): fact %s stores the "
+                "same statement. Use sonder_forget_fact first if it should be "
+                "replaced." % (project_id, n, duplicate.get("id"))
+            )
         uow.memory.add_fact(fact_id, project_id, text, blob)
         n = uow.memory.count_facts(project_id)
     return "Remembered fact for project '%s' (%d total). id=%s" % (project_id, n, fact_id)
@@ -16487,7 +16614,7 @@ def _agent_negative_claim_review(
                 "decision": "error",
                 "reason": _format_runtime_model_call_error_policy(
                     error,
-                    endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+                    endpoint_loopback=_ollama_endpoint_is_local(),
                     display=_ollama_display(),
                 ),
                 "tool": "",
@@ -19463,7 +19590,7 @@ def _agent_turn(
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -22296,17 +22423,23 @@ def status() -> str:
     Use this to check whether the GPU is busy before offloading, or to confirm models pulled.
     """
     _maybe_live_reload()
+    if OLLAMA_POOL.enabled:
+        OLLAMA_POOL.refresh_capabilities()
     try:
         tags = _inventory_rows_policy(_get("/api/tags"), "/api/tags")
         ps = _inventory_rows_policy(_get("/api/ps"), "/api/ps")
     except ModelCallError as error:
-        return _format_runtime_model_call_error_policy(
+        message = _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
+        return "\n".join((message, *OLLAMA_POOL.operator_status_lines()))
     except urllib.error.URLError as e:
-        return f"ERROR contacting Ollama at {_ollama_display()}: {e}"
+        return "\n".join((
+            f"ERROR contacting Ollama at {_ollama_display()}: {e}",
+            *OLLAMA_POOL.operator_status_lines(),
+        ))
 
     installed = _inventory_model_names(tags)
     loaded = [line for line in map(_residency_display, ps) if line]
@@ -22316,17 +22449,53 @@ def status() -> str:
             include_disabled=_cloud_allowed_policy(os.environ)
         ).items()
     ]
-    if not ollama_endpoint.is_loopback(BASE):
+    if not _ollama_endpoint_is_local():
         tier_lines = [
             line.replace("  [local Ollama]", "  [REMOTE OLLAMA - leaves machine]")
             for line in tier_lines
         ]
+    worker_lines = []
+    if OLLAMA_POOL.enabled:
+        def _fetch_worker_tags(origin):
+            req = urllib.request.Request(f"{origin}/api/tags")
+            with ollama_endpoint.open_url(req, timeout=5) as resp:
+                raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+                if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+                    raise ModelCallError(
+                        "protocol",
+                        "Ollama response exceeded the 16 MiB safety limit",
+                    )
+                return json.loads(raw.decode("utf-8"))
+
+        # Best-effort per-worker inventory refresh: it feeds the pool's
+        # model-affinity ordering and the operator's health readout, and a
+        # worker that cannot answer keeps its previous inventory record.
+        inventory = OLLAMA_POOL.refresh_inventory(_fetch_worker_tags)
+        for snapshot in OLLAMA_POOL.snapshots():
+            health = (
+                "probing" if snapshot.probing
+                else "ok" if snapshot.healthy
+                else "cooling down"
+            )
+            worker_lines.append(
+                "  worker %s: %s, inflight=%d, failures=%d, trips=%d, "
+                "latency=%.0fms, models=%s" % (
+                    snapshot.worker_id, health, snapshot.inflight,
+                    snapshot.consecutive_failures, snapshot.trips,
+                    snapshot.ewma_latency_ms,
+                    inventory.get(snapshot.worker_id, "?"),
+                )
+            )
     lines = [
         "Unsafe lab mode: %s" % unsafe_lab.status_line(),
         f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
-        "Ollama workers: %d configured (%d remote; least-inflight with transport failover)" % (
+        "Ollama workers: %d configured (%d remote; least-inflight, model POSTs never fail over)" % (
             len(OLLAMA_POOL.origins),
             sum(1 for origin in OLLAMA_POOL.origins if not ollama_endpoint.is_loopback(origin)),
+        ),
+        *worker_lines,
+        "Ollama worker TLS: %s; idempotent control reads may fail over" % (
+            OLLAMA_POOL.status()["tls_verification"],
         ),
         "Tiers:",
         *tier_lines,
@@ -23654,6 +23823,7 @@ def _fanout_synthesis_generate(model, source_bundle):
     out, _attempts = _post_model(
         "/api/chat", payload, model=model, cloud=False,
         timeout=FANOUT_SYNTHESIS_TIMEOUT_SECONDS, idempotent=True,
+        local_only=True,
     )
     if not isinstance(out, dict):
         raise ModelCallError("protocol", "local synthesis model returned a non-JSON response")
@@ -23962,7 +24132,7 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -24041,7 +24211,7 @@ def model_fanout_status(run_id: str, token: str = "") -> str:
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -24069,7 +24239,7 @@ def model_fanout_recent(limit: StrictInt = 20, include_finished: StrictBool = Tr
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -24100,7 +24270,7 @@ def model_fanout_cancel(run_id: str, token: str = "") -> str:
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -24128,7 +24298,7 @@ def model_fanout_resume(run_id: str, include_failed: StrictBool = False,
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -24175,7 +24345,7 @@ def model_fanout_synthesize(run_id: str, synth_model: StrictStr = "", token: str
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -24407,7 +24577,7 @@ def ensemble_answer(
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
             error,
-            endpoint_loopback=ollama_endpoint.is_loopback(BASE),
+            endpoint_loopback=_ollama_endpoint_is_local(),
             display=_ollama_display(),
         )
 
@@ -25322,7 +25492,12 @@ def run_mcp(*, safety_checked: bool = False) -> None:
     """Run the MCP adapter only after the process-level lab gate succeeds."""
     if not safety_checked:
         require_mcp_startup_safety()
-    mcp.run()
+    try:
+        mcp.run()
+    finally:
+        # Stop distributed admission before the adapter exits and give active
+        # transports a bounded chance to release their worker slots.
+        OLLAMA_POOL.drain(timeout_seconds=5.0)
 
 
 if __name__ == "__main__" and not globals().get("_MCP_HOT_RELOAD_EXEC"):

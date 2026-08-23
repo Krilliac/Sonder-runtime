@@ -23,6 +23,17 @@ from sonder_runtime.adapters.observability.repl_formatting import (
     response_footer as _response_footer,
     response_status_label as _response_status_label,
 )
+from sonder_runtime.adapters.observability import repl_machine_output as _machine_output
+from sonder_runtime.adapters.observability.error_hint_formatting import (
+    error_hint as _error_hint,
+)
+from sonder_runtime.adapters.observability.session_list_formatting import (
+    format_sessions as _format_sessions,
+)
+from sonder_runtime.adapters.observability.session_replay_formatting import (
+    REPLAY_DEFAULT_TURNS as _REPLAY_DEFAULT_TURNS,
+    format_session_replay as _format_session_replay,
+)
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.content_services import intents, training_tasks
@@ -473,6 +484,49 @@ def _run_catalogued(line, cmd):
     return "unknown command %s\n\n%s" % (
         cmd, command_catalog.format_matches(cmd),
     )
+
+
+def _format_route_explanation(report):
+    """Render ``command_router.explain()`` for the console, one fact per line.
+
+    The report is evidence from the resolver itself, so this only formats --
+    it never re-derives or second-guesses what would resolve.
+    """
+    lines = ["turn:      %s" % report["input"]]
+    detail = report.get("detail") or {}
+    if report["resolved"]:
+        lines.append("resolved:  %s" % report["resolved"])
+    else:
+        lines.append(
+            "resolved:  nothing -- the turn goes to ordinary chat/work handling"
+        )
+    source = report["source"]
+    if source == "rule":
+        lines.append("stage:     hand-written rule %s" % detail.get("index"))
+    elif source == "tier":
+        lines.append("stage:     tier intent (/%s)" % detail.get("command"))
+    elif source == "structured":
+        lines.append("stage:     explicit \"use the <name> tool\" form")
+    elif source == "catalog":
+        lines.append(
+            "stage:     generic catalog match (%s)" % detail.get("command", "")
+        )
+    elif source == "slash":
+        lines.append("stage:     already a slash line; the router never sees these")
+    elif source == "empty":
+        lines.append("stage:     empty turn")
+    else:
+        lines.append(
+            "stage:     no match (%s)"
+            % detail.get("reason", "no stage claimed the turn")
+        )
+        if detail.get("candidates"):
+            lines.append("tied:      %s" % ", ".join(detail["candidates"]))
+        if detail.get("leftover"):
+            lines.append("leftover:  %s" % ", ".join(detail["leftover"]))
+        if detail.get("command"):
+            lines.append("nearest:   %s" % detail["command"])
+    return "\n".join(lines)
 
 
 def _normalize_input_line(line):
@@ -1061,6 +1115,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
+  /why [text]        explain how the previous plain-language turn (or [text]) routed
+  /version           show the runtime version and release stamp
   /activity [watch]  show once, or poll projected new events until Ctrl+C
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
@@ -1135,6 +1191,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /new               start a fresh conversation thread (forget this chat's history)
   /clear             clear terminal scrollback; keep chat/session state
   /sessions          list past conversation threads
+  /replay [id|title] [N]  re-render the last N stored turns of a thread (default: this one)
   /resume <id|title> continue a past thread by id or title prefix
   terminal editing   Up/Down history; Ctrl+R search; Left/Right/Home/End; Ctrl+W word; Ctrl+K suffix; Ctrl+L clear
   /project [name]    show/set the active project (scopes facts)
@@ -1309,18 +1366,33 @@ def _begin_chat_turn(label="Sonder"):
 
 
 def _print_chat_result(text, started_at, *, offer_feedback=False,
-                       label="Sonder", error=False, indicator=None):
+                       label="Sonder", error=False, indicator=None,
+                       interaction_id=None):
     """Present one completed turn with lightweight terminal chrome.
 
     The result itself is printed verbatim: the bars are separate lines, never
     a width cap, pager, or content transform.  Piped/scripted uses retain the
     historical plain output so shells and callers do not receive decoration.
+    SONDER_REPL_NDJSON=1 lets a piped caller opt into one structured JSON
+    line per turn instead of scraping that plain text; interactive terminals
+    keep their chrome regardless, and the flagless default never changes.
     """
     if indicator is not None:
         indicator.stop()
     answer = str(text or "")
     timing = _completion_timing(started_at)
     if not (_console_has_operator() and _stdout_is_interactive()):
+        if _machine_output.enabled(os.environ):
+            elapsed_ms = max(
+                0, int((time.monotonic() - float(started_at)) * 1000),
+            )
+            print(_machine_output.ndjson_line(_machine_output.turn_payload(
+                answer, elapsed_ms=elapsed_ms, error=error,
+                interaction_id=interaction_id,
+                feedback_offered=offer_feedback, label=label,
+                hint=_error_hint(answer) if error else "",
+            )))
+            return
         print(answer)
         print(_paint("[%s]" % timing, _Ansi.muted))
         if offer_feedback:
@@ -1336,6 +1408,12 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
     print(answer)
     footer = _response_footer(box, timing, offer_feedback=offer_feedback)
     print(_paint(footer, _Ansi.muted))
+    if error:
+        # Garnish, not classification: a known failure shape earns one muted
+        # next-step line under the panel; anything unrecognized adds nothing.
+        hint = _error_hint(answer)
+        if hint:
+            print(_paint("  hint: %s" % hint, _Ansi.muted))
 
 
 def _format_fanout_summaries(payload):
@@ -1480,12 +1558,7 @@ def _print_sessions():
         sessions = memory_store.list_sessions(conn, 20)
     finally:
         conn.close()
-    if not sessions:
-        print("(no past sessions)")
-        return
-    for s in sessions:
-        print("  %s  [%d turns]  %s" % (
-            s["session_id"], s["turn_count"], s.get("title") or "(untitled)"))
+    print(_format_sessions(sessions))
 
 
 def _print_facts(project):
@@ -1530,6 +1603,10 @@ def main():
     # private repository context, so terminal convenience must not create a
     # durable prompt log.
     input_history = []
+    # The most recent plain-language turn, kept so a bare /why can answer
+    # "why did (or didn't) that route" about the thing just typed. Session
+    # state only; never persisted.
+    last_natural_turn = ""
     model_argument_completer = _ModelArgumentCompleter()
 
     def _workspace_create_path(raw):
@@ -1900,6 +1977,40 @@ def main():
         else:
             print(_paint("discarded", _Ansi.muted))
 
+    def do_replay(raw):
+        """Re-render a stored thread read-only; never switches the session.
+
+        ``/replay`` shows what a thread contains, ``/resume`` continues it --
+        keeping those separate means looking at history can never move where
+        the next typed turn lands.
+        """
+        text = (raw or "").strip()
+        count = _REPLAY_DEFAULT_TURNS
+        bits = text.split()
+        if bits and bits[-1].isdigit():
+            count = int(bits[-1])
+            bits = bits[:-1]
+        target = " ".join(bits)
+        replay_session = session_id
+        if target:
+            conn = server._open_db()
+            try:
+                found = memory_store.find_session(conn, target)
+            finally:
+                conn.close()
+            if not found:
+                print("no session matching '%s'  (/sessions lists them)" % target)
+                return
+            replay_session = found
+        conn = server._open_db()
+        try:
+            turns = memory_store.session_turns(conn, replay_session)
+        finally:
+            conn.close()
+        print(_format_session_replay(
+            turns, session_id=replay_session, limit=count,
+        ))
+
     print(_startup_banner(strict, persona, project, active_tier))
 
     while True:
@@ -1950,6 +2061,7 @@ def main():
         # the slash form stays the precise way to invoke it. Unmatched turns
         # fall through untouched to feedback/intent/work/chat handling.
         if not line.startswith("/"):
+            last_natural_turn = line
             resolved = command_router.resolve(line)
             if resolved:
                 print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
@@ -1966,6 +2078,11 @@ def main():
             may_run, refusal = _named_command_gate(cmd)
             if not may_run:
                 print(refusal)
+                # Terminal-only garnish; piped refusal text stays byte-stable.
+                if _stdout_is_interactive():
+                    hint = _error_hint(refusal)
+                    if hint:
+                        print(_paint("  hint: %s" % hint, _Ansi.muted))
                 continue
 
             if cmd == "/":
@@ -1973,6 +2090,36 @@ def main():
                 print(command_catalog.format_matches(""))
             elif cmd == "/help":
                 print(command_catalog.help_text(arg.strip()))
+            elif cmd == "/why":
+                # A diagnostic read over the resolver's own trace: which stage
+                # claimed (or refused) a plain-language turn, and on what
+                # evidence. Never dispatches anything.
+                target = arg.strip() or last_natural_turn
+                if not target:
+                    print(
+                        "usage: /why [text]  explain how a plain-language turn"
+                        " routes; the bare form uses your previous non-slash"
+                        " turn"
+                    )
+                else:
+                    print(_format_route_explanation(
+                        command_router.explain(target)
+                    ))
+            elif cmd == "/version":
+                # Display only: the version literal plus the release stamp
+                # when the install has one. Deliberately no git probe here --
+                # starting a process would break the display-only claim the
+                # permission-gate coverage floor checks this branch against.
+                from sonder_runtime.platform import version as build_identity
+
+                stamped = build_identity.stamped_build_info()
+                if stamped is not None:
+                    print("sonder %s (commit %s, stamped release)" % (
+                        stamped.version, stamped.commit_sha[:12],
+                    ))
+                else:
+                    print("sonder %s (source checkout)"
+                          % build_identity.VERSION)
             elif cmd == "/clear":
                 _clear_terminal_scrollback()
             elif cmd == "/trace":
@@ -2374,6 +2521,8 @@ def main():
                 print("started a new thread (%s)" % session_id)
             elif cmd == "/sessions":
                 _print_sessions()
+            elif cmd == "/replay":
+                do_replay(arg)
             elif cmd == "/resume":
                 target = (arg or "").strip()
                 if not target:
@@ -2521,7 +2670,7 @@ def main():
         last_run_source = _answer_only(out)
         cleaned = _strip_footer(out)
         _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid),
-                           indicator=indicator)
+                           indicator=indicator, interaction_id=last_iid)
 
 
 if __name__ == "__main__":

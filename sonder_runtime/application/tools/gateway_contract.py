@@ -212,6 +212,12 @@ class ToolGateway:
         started = time.monotonic()
         self._check_control(request)
         self._schema.validate(request.tool_name, request.arguments)
+        unscoped_effects = request.permission.effects - request.scope.allowed_effects
+        if unscoped_effects:
+            raise Forbidden(
+                "tool permission exceeds the request scope: %s"
+                % ", ".join(sorted(unscoped_effects))
+            )
         self._permissions.authorize(request.tool_name, request.scope, request.permission)
         if request.permission.approval is ApprovalMode.REQUIRED:
             if not request.approval_token or not self._approvals.approve(request):

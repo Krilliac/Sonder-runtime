@@ -2,20 +2,26 @@
 
 The rehearsal copies an operator-selected home into disposable directories and
 invokes the existing bridge migration there.  It never changes the supplied
-home.  The failed run is stopped at an explicit migration boundary, then its
-pre-migration backup is independently restored and hashed.  A second copy is
-allowed to complete and is checked by the application-owned epoch gate.
+home.  The failed run is stopped at an explicit migration boundary, then two
+independent recovery paths are proven against it: its pre-migration backup
+can be restored, and the interrupted copy itself can simply be resumed in
+place (an operator retrying a failed ``sonder migrate --adopt-epoch2`` does
+the latter, not a restore). A third, uninterrupted copy is allowed to
+complete and is checked by the application-owned epoch gate.
 """
 from __future__ import annotations
 
 import hashlib
 import shutil
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+    EPOCH,
+    EPOCH2_DATABASES,
     check_epoch,
     run_bridge_migration,
 )
@@ -45,6 +51,7 @@ class RehearsalReport:
     backup_verified: bool
     restore_verified: bool
     crash_recovery_verified: bool
+    resume_verified: bool
     epoch2_verified: bool
     cleanup: Epoch2CleanupReport
 
@@ -74,6 +81,26 @@ def _original_digests(home: Path) -> dict[str, str]:
         for name in BRIDGE_DATABASES
         if (home / name).is_file()
     }
+
+
+def _epoch_row_count(db_path: Path) -> int:
+    """Count ledger rows for ``EPOCH``; a resumed migration must add at most one."""
+    if not db_path.is_file():
+        return 0
+    conn = sqlite3.connect(str(db_path))
+    try:
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "schema_epoch" not in tables:
+            return 0
+        return conn.execute(
+            "SELECT count(*) FROM schema_epoch WHERE epoch = ?", (EPOCH,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
 
 
 def _backup_dirs(home: Path) -> tuple[Path, ...]:
@@ -167,6 +194,27 @@ def rehearse_bridge_migration(
         if not crash_recovery_verified:
             raise RehearsalError("crash recovery restore proof failed")
 
+        # An operator retrying a failed `sonder migrate --adopt-epoch2` does
+        # not restore from backup -- they just run it again against the
+        # interrupted home. Prove that path directly: some domains may
+        # already be stamped at EPOCH from before the injected crash, and
+        # resuming must not append a second ledger row to them.
+        pre_resume_rows = {
+            name: _epoch_row_count(failed / name) for name in EPOCH2_DATABASES
+        }
+        run_bridge_migration(failed, version=f"{version}-resumed")
+        resume_verified = all(
+            check_epoch(failed / name) == EPOCH for name in EPOCH2_DATABASES
+        ) and all(
+            _epoch_row_count(failed / name) == 1 for name in EPOCH2_DATABASES
+        )
+        if not resume_verified:
+            raise RehearsalError(
+                "resuming the interrupted migration in place did not reach a "
+                "clean epoch-2 state (pre-resume ledger rows: "
+                f"{pre_resume_rows})"
+            )
+
         run_bridge_migration(successful, version=version)
         cleanup = check_epoch2_cleanup(successful)
         if not cleanup.allowed:
@@ -180,7 +228,7 @@ def rehearse_bridge_migration(
 
         return RehearsalReport(
             str(source), failure_boundary, backup_verified, True,
-            crash_recovery_verified, epoch2_verified, cleanup,
+            crash_recovery_verified, resume_verified, epoch2_verified, cleanup,
         )
 
 

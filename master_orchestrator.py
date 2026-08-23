@@ -1033,6 +1033,73 @@ def active_model_call_count() -> int:
         return 1
 
 
+# Worker failure classification uses the same closed, content-free vocabulary
+# as the fanout receipt store (fanout_store.FAILURE_CLASSES) so an operator
+# reading either ledger sees one taxonomy.  Only these classes are considered
+# plausibly transient and therefore eligible for a bounded in-run retry.
+TRANSIENT_FAILURE_CLASSES = frozenset((
+    "timeout", "unavailable", "throttled", "transport",
+))
+_THROTTLED_MESSAGE = re.compile(
+    r"(?i)\b(?:429|too\s+many\s+requests|rate[- ]limit)",
+)
+_TIMEOUT_MESSAGE = re.compile(r"(?i)\btime[d]?\s*[- ]?out\b|\btimeout\b")
+_UNAVAILABLE_MESSAGE = re.compile(
+    r"(?i)connection\s+(?:refused|reset|aborted)|actively\s+refused|"
+    r"\bunreachable\b|name\s+or\s+service\s+not\s+known|"
+    r"temporarily\s+unavailable|service\s+unavailable|\b50[234]\b|"
+    r"getaddrinfo\s+failed|remote\s+end\s+closed",
+)
+
+
+def classify_worker_error(exc) -> str:
+    """Map one worker exception onto the shared fanout failure vocabulary.
+
+    Classification is deliberately conservative: anything not clearly a
+    transport/availability fault is ``unknown`` (treated as permanent), so a
+    deterministic model or validation failure is never silently re-run.
+    """
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+        return "timeout"
+    if isinstance(exc, ConnectionError):
+        return "unavailable"
+    code = getattr(exc, "code", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        if code == 429:
+            return "throttled"
+        if 500 <= code <= 599:
+            return "unavailable"
+        if 400 <= code <= 499:
+            return "request_rejected"
+    message = str(exc or "")
+    if _THROTTLED_MESSAGE.search(message):
+        return "throttled"
+    if _TIMEOUT_MESSAGE.search(message):
+        return "timeout"
+    if _UNAVAILABLE_MESSAGE.search(message):
+        return "unavailable"
+    if isinstance(exc, OSError):
+        return "transport"
+    return "unknown"
+
+
+def worker_transient_retries() -> int:
+    """Bounded extra model-call attempts for transient delegated failures.
+
+    Applies only to delegated workers, never the interactive inline lane, and
+    each extra attempt re-checks cooperative cancellation first.  Default one
+    extra attempt; ``SONDER_FLEET_TRANSIENT_RETRIES`` clamps to 0..3.
+    """
+    raw = os.environ.get("SONDER_FLEET_TRANSIENT_RETRIES", "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        return 1
+    return max(0, min(value, 3))
+
+
 @contextlib.contextmanager
 def _bind_worker_agent(agent_id: str):
     previous_agent_id = getattr(_WORKER_LOCAL, "agent_id", None)
@@ -1112,17 +1179,40 @@ def _run_worker(
         in_model_call=True,
     ):
         return "CANCELLED"
+    attempts_allowed = 1 + worker_transient_retries()
     with _bind_worker_agent(agent_id):
-        try:
-            output = (
-                worker_fn(prompt, project_scope)
-                if project_scope else worker_fn(prompt)
-            )
-            if project_scope:
-                output = _validate_repository_result(output, project_scope)
-        except Exception as exc:  # defensive boundary for worker threads
-            final = _finish(agent_id, error=str(exc))
-            return final if final in ABORT_MARKERS else _WORKER_FAILED
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                output = (
+                    worker_fn(prompt, project_scope)
+                    if project_scope else worker_fn(prompt)
+                )
+                if project_scope:
+                    output = _validate_repository_result(output, project_scope)
+                break
+            except Exception as exc:  # defensive boundary for worker threads
+                failure_class = classify_worker_error(exc)
+                if (
+                    attempt < attempts_allowed
+                    and failure_class in TRANSIENT_FAILURE_CLASSES
+                    and not cancel_requested(agent_id)
+                ):
+                    # A transient transport/availability fault earns one more
+                    # bounded attempt.  Cancellation is re-checked first so a
+                    # cancel arriving during the failed call is honored instead
+                    # of starting another model request.
+                    _event(
+                        agent_id,
+                        "transient %s failure; retrying model call (attempt %d/%d)"
+                        % (failure_class, attempt + 1, attempts_allowed),
+                    )
+                    continue
+                final = _finish(
+                    agent_id, error="[%s] %s" % (failure_class, exc),
+                )
+                return final if final in ABORT_MARKERS else _WORKER_FAILED
     stored_output = (
         _render_repository_result(output)
         if isinstance(output, RepositoryWorkerResult) else str(output or "")
@@ -1423,22 +1513,45 @@ def run_delegated(
         project=project_scope,
         objective_assignments=assignments,
     )
-    child_ids = [
-        _new_agent(
-            "agent",
-            prompt,
-            parent_id=master_id,
-            metadata={
-                "project": project_scope,
-                "master_task_digest": master_digest,
-                "delegated_task_digest": fleet_provenance.task_digest(prompt),
-                "objective_ids": [
-                    objective.objective_id for objective in assigned
-                ],
-            },
+    child_ids = []
+    try:
+        for prompt, assigned in zip(prompts, assignments or [()] * len(prompts)):
+            child_ids.append(_new_agent(
+                "agent",
+                prompt,
+                parent_id=master_id,
+                metadata={
+                    "project": project_scope,
+                    "master_task_digest": master_digest,
+                    "delegated_task_digest": fleet_provenance.task_digest(prompt),
+                    "objective_ids": [
+                        objective.objective_id for objective in assigned
+                    ],
+                },
+            ))
+    except Exception as exc:
+        # Partial fanout containment: a store failure on child N must not
+        # strand children 1..N-1 as durable queued rows that no worker will
+        # ever run.  Cancel what was queued, fail the master, and report the
+        # startup result so a background caller's ready-wait cannot hang.
+        error = "fleet startup failed after queueing %d of %d delegated agents: %s" % (
+            len(child_ids), agents, exc,
         )
-        for prompt, assigned in zip(prompts, assignments or [()] * len(prompts))
-    ]
+        for queued_id in child_ids:
+            with contextlib.suppress(Exception):
+                request_cancel(queued_id)
+        final = _finish(master_id, error=error)
+        result = {
+            "mode": "delegated",
+            "master_id": master_id,
+            "agents": list(child_ids),
+            "worker_slots": worker_slots,
+            "outputs": [],
+            "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
+        }
+        if _on_started is not None:
+            _on_started(dict(result))
+        return result
     if _on_started is not None:
         _on_started({
             "mode": "delegated",
@@ -1703,12 +1816,22 @@ def start_delegated(
     function returns.
     """
     ready = threading.Event()
+    abandoned = threading.Event()
     started_result: dict = {}
     startup_error: list[BaseException] = []
 
     def on_started(result: dict) -> None:
         started_result.update(result)
         ready.set()
+        if abandoned.is_set():
+            # The initiating caller already timed out and reported failure; a
+            # fleet that starts anyway would be an orphan the caller cannot
+            # name, and a caller retry would then duplicate the work.  Cancel
+            # it cooperatively as soon as its durable identity is known.
+            master_id = result.get("master_id")
+            if master_id:
+                with contextlib.suppress(Exception):
+                    request_cancel(master_id)
 
     def run() -> None:
         try:
@@ -1738,7 +1861,19 @@ def start_delegated(
     )
     thread.start()
     if not ready.wait(max(0.1, float(startup_timeout))):
-        raise RuntimeError("background fleet did not initialize its durable ledger")
+        abandoned.set()
+        # Cover the race where startup completed between the wait timing out
+        # and the abandon flag being visible: cancel by the identity that
+        # on_started already published.  Exactly one of these two paths sees
+        # both the flag and the master id.
+        master_id = started_result.get("master_id")
+        if master_id:
+            with contextlib.suppress(Exception):
+                request_cancel(master_id)
+        raise RuntimeError(
+            "background fleet did not initialize its durable ledger; "
+            "any late startup will be cancelled instead of running as an orphan"
+        )
     if startup_error:
         raise RuntimeError("background fleet failed to start: %s" % startup_error[0])
     result = dict(started_result)
@@ -1803,6 +1938,33 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
 def recovery_candidate(selector: str) -> dict | None:
     """Resolve one persisted master by exact ID or unambiguous prefix."""
     return fleet_store.get_agent(selector, role="master")
+
+
+def retry_fence_available() -> bool:
+    """Whether the process-stable store carries the retry idempotency fence.
+
+    ``fleet_store`` is deliberately not hot-reloaded, so a reloaded
+    orchestrator may briefly coexist with an older store.  Callers degrade to
+    the historical unfenced behavior in that window instead of failing retries.
+    """
+    return all(
+        callable(getattr(fleet_store, name, None))
+        for name in ("acquire_retry_lease", "release_retry_lease")
+    )
+
+
+def acquire_retry_lease(agent_id: str) -> dict | None:
+    """Claim one retry dispatch slot for a persisted master, or ``None``."""
+    if not retry_fence_available():
+        return None
+    return fleet_store.acquire_retry_lease(agent_id)
+
+
+def release_retry_lease(agent_id: str, token: str) -> bool:
+    """Release a pending retry dispatch claim after dispatch or on error."""
+    if not retry_fence_available():
+        return False
+    return fleet_store.release_retry_lease(agent_id, token)
 
 
 def discover_retained_agents(
@@ -1992,6 +2154,20 @@ def format_snapshot(data: dict) -> str:
             lines.append("      schedule: %s agents / %s worker slots" % (
                 row.get("requested_agents", 0), row.get("worker_slots", 0),
             ))
+        # Recovery lineage: make an interrupted->retried chain visible so an
+        # operator can tell a fresh failure from one already being replayed.
+        if row.get("retry_of"):
+            lines.append("      retry of: %s" % row["retry_of"])
+        retried_by = str(row.get("retried_by") or "")
+        if retried_by:
+            pending_prefix = getattr(
+                fleet_store, "RETRY_LEASE_PREFIX", "retry-pending:",
+            )
+            lines.append(
+                "      retry claimed: dispatch in progress"
+                if retried_by.startswith(pending_prefix)
+                else "      retried by: %s" % retried_by
+            )
         lines.append("      task: %s" % (row.get("task") or "")[:180])
         if row.get("project"):
             lines.append("      project: %s" % row["project"])

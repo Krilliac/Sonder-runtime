@@ -404,6 +404,9 @@ def test_doctor_schema_check_uses_exact_cli_home(
     sonder_migrations.migrate_store("operations", str(db))
     conn = sqlite3.connect(db)
     try:
+        # Simulate offline corruption that bypassed the normal append-only
+        # guards; ordinary UPDATE/DELETE attempts are rejected by SQLite.
+        conn.execute("DROP TRIGGER schema_migrations_no_update")
         conn.execute(
             "UPDATE schema_migrations SET checksum_sha256 = 'tampered' "
             "WHERE migration_id = '0001_baseline'"
@@ -461,6 +464,12 @@ def test_diagnostics_redacts_all_known_secrets(isolated_home, capsys, monkeypatc
     assert main(["diagnostics", "--skip-ollama"]) == 0
     out = capsys.readouterr().out
     assert secret not in out
+    payload = json.loads(out)
+    assert payload["schemas"]
+    assert all(
+        "checksum_mismatches" in status and "healthy" in status
+        for status in payload["schemas"].values()
+    )
 
 
 def test_module_executes_as_subprocess(isolated_home):
@@ -670,3 +679,18 @@ def test_backup_and_restore_via_cli(isolated_home, tmp_path, capsys):
     )
     assert rc == 0
     assert (dest / "operations.db").exists()
+
+
+@pytest.mark.parametrize("store", sorted(sonder_migrations.STORE_NAMES))
+def test_migrate_store_accepts_every_registered_store(isolated_home, store):
+    """``--store`` choices were a hand-maintained tuple that fell out of sync
+    with the registry: queued_actions/updates/jobs gained migration
+    directories but were never added, so this CLI could not target them."""
+    assert main(["migrate", "--store", store]) == 0
+
+
+def test_migrate_store_rejects_unknown_store(isolated_home, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["migrate", "--store", "not-a-real-store"])
+    assert exc_info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

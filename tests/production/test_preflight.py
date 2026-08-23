@@ -1,6 +1,9 @@
 """SPEC-2 section 4/WP3: preflight gates and degraded reporting."""
 from __future__ import annotations
 
+import json
+from urllib.error import URLError
+
 import pytest
 
 import sonder_config
@@ -75,3 +78,42 @@ def test_insufficient_disk_fails(tmp_path, monkeypatch):
     disk = next(c for c in report.checks if c.name == "disk_space")
     assert not disk.ok and disk.required
     assert not report.ok
+
+
+def test_optional_worker_outage_is_reported_as_degraded_not_failed(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv(
+        "SONDER_RUNTIME_POLICY", str(tmp_path / "home" / "runtime_policy.json")
+    )
+    config = _config(
+        tmp_path,
+        SONDER_ALLOW_REMOTE_OLLAMA="1",
+        SONDER_OLLAMA_WORKERS="https://worker.example:443",
+    )
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps({"models": [{"name": "local:latest"}]}).encode()
+
+    def open_url(request, timeout):
+        del timeout
+        if "worker.example" in request.full_url:
+            raise URLError("worker offline")
+        return Response()
+
+    monkeypatch.setattr(sonder_preflight.urllib.request, "urlopen", open_url)
+    report = sonder_preflight.run_preflight(config, ollama_timeout=0.1)
+
+    worker = next(row for row in report.checks if row.name == "ollama_worker_1")
+    assert report.ok
+    assert report.degraded
+    assert not worker.ok and not worker.required

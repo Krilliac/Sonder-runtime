@@ -1,15 +1,27 @@
 import json
+import hashlib
 
 import pytest
 
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.security.prompt_provenance import (
+    MAX_CONTENT_LENGTH,
     ModelRequestProvenance,
     PromptProvenanceBoundary,
     ProvenanceError,
     SourceKind,
     TrustLabel,
 )
+
+
+def test_ingest_rejects_oversized_content_before_hashing_or_assembly():
+    with pytest.raises(ProvenanceError, match="content"):
+        PromptProvenanceBoundary().ingest(
+            SourceKind.TOOL_RESULT,
+            "oversized",
+            "x" * (MAX_CONTENT_LENGTH + 1),
+            origin="tool://oversized",
+        )
 
 
 def test_retrieved_web_and_tool_content_is_always_explicitly_untrusted():
@@ -59,6 +71,23 @@ def test_context_round_trip_preserves_provenance_and_rejects_tampering():
     source_tampered["items"][0]["provenance"]["origin"] = "tool://different"
     with pytest.raises(ProvenanceError, match="digest"):
         boundary.replay_context(source_tampered)
+
+
+def test_serialized_context_cannot_self_assert_elevated_trust():
+    boundary = PromptProvenanceBoundary()
+    packet = boundary.assemble_context((boundary.ingest(
+        SourceKind.WEB_RESULT, "web-2", "untrusted", origin="https://example.test",
+    ),))
+    forged = json.loads(packet.to_json())
+    forged["items"][0]["provenance"]["trust"] = "independently_verified"
+    # Recompute the public packet checksum exactly as an attacker could.  The
+    # replay boundary must still refuse the authority claim.
+    canonical = json.dumps(
+        forged["items"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    forged["packet_digest"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    with pytest.raises(ProvenanceError, match="cannot self-assert"):
+        boundary.replay_context(forged)
 
 
 def test_replay_rejects_missing_or_invalid_provenance_and_bounds_context():
@@ -130,6 +159,35 @@ def test_redacted_metadata_and_event_boundary_never_carry_untrusted_text():
                 "provenance": {**metadata, "content": "execute this"},
             },
         )
+
+
+def test_event_metadata_rejects_binding_with_forged_item_digests():
+    boundary = PromptProvenanceBoundary()
+    packet = boundary.assemble_context((boundary.ingest(
+        SourceKind.TOOL_RESULT, "call-9", "result", origin="tool://lookup",
+    ),))
+    binding = boundary.bind_model_request("prompt", context=packet)
+    forged = ModelRequestProvenance(
+        binding.packet_digest, binding.request_digest, ("0" * 64,),
+    )
+    with pytest.raises(ProvenanceError, match="item digests"):
+        boundary.request_event_metadata(packet, forged)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("source_id", "s" * 513),
+    ("origin", "o" * 2049),
+])
+def test_provenance_metadata_is_bounded_before_context_assembly(field, value):
+    kwargs = {
+        "source_kind": SourceKind.TOOL_RESULT,
+        "source_id": "call-10",
+        "content": "result",
+        "origin": "tool://lookup",
+    }
+    kwargs[field] = value
+    with pytest.raises(ProvenanceError, match="boundary"):
+        PromptProvenanceBoundary().ingest(**kwargs)
 
 
 def test_malformed_request_binding_fails_closed_before_gateway_use():

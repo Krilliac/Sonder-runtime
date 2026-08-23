@@ -284,7 +284,7 @@ def _quiet_retries(monkeypatch):
 def _recording_post(monkeypatch, responder):
     seen = []
 
-    def fake_post(path, payload, timeout=None):
+    def fake_post(path, payload, timeout=None, **_kwargs):
         seen.append({
             "messages": list(payload.get("messages") or []),
             "options": dict(payload.get("options") or {}),

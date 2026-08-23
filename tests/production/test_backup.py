@@ -1,6 +1,7 @@
 """SPEC-2 section 13: consistent, verified, atomically-published backups."""
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -8,6 +9,27 @@ import pytest
 from sonder_runtime.adapters import backup as sonder_backup
 
 pytestmark = pytest.mark.unit
+
+
+def _refresh_backup_hashes(backup_path):
+    """Make file hashes self-consistent after deliberate test corruption."""
+    manifest_path = backup_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in manifest["files"]:
+        member = backup_path / entry["path"]
+        entry["size"] = member.stat().st_size
+        entry["sha256"] = sonder_backup._sha256_file(member)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (backup_path / "checksums.sha256").write_text(
+        "".join(
+            f"{entry['sha256']}  {entry['path']}\n"
+            for entry in manifest["files"]
+        )
+        + f"{sonder_backup._sha256_file(manifest_path)}  manifest.json\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture()
@@ -93,6 +115,50 @@ def test_tampered_backup_fails_verification(isolated_state):
     assert any("memory.db" in p for p in problems)
 
 
+def test_hash_valid_but_corrupt_database_fails_verification(isolated_state):
+    result = sonder_backup.create_backup(isolated_state / "backups")
+    victim = result.path / "state" / "memory.db"
+    data = bytearray(victim.read_bytes())
+    data[:16] = b"not-a-sqlite-db!"
+    victim.write_bytes(data)
+    _refresh_backup_hashes(result.path)
+
+    problems = sonder_backup.verify_backup(result.path)
+
+    assert any("memory.db: SQLite unreadable" in problem for problem in problems)
+    assert not any("checksum mismatch" in problem for problem in problems)
+
+
+def test_backup_refuses_live_foreign_key_corruption(isolated_state):
+    state = isolated_state / "state"
+    conn = sqlite3.connect(str(state / "memory.db"))
+    try:
+        conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE child (parent_id INTEGER REFERENCES parent(id))"
+        )
+        conn.execute("INSERT INTO child VALUES (999)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    target = isolated_state / "backups"
+    with pytest.raises(sonder_backup.BackupError, match="foreign key"):
+        sonder_backup.create_backup(target)
+    assert not [
+        path for path in target.iterdir() if not path.name.startswith(".staging-")
+    ]
+
+
+def test_unlisted_state_file_fails_verification(isolated_state):
+    result = sonder_backup.create_backup(isolated_state / "backups")
+    (result.path / "state" / "untracked.db").write_bytes(b"hidden")
+
+    problems = sonder_backup.verify_backup(result.path)
+
+    assert "state directory contains 1 unlisted entry" in problems
+
+
 def test_backup_run_recorded_in_operations(isolated_state):
     from sonder_runtime.adapters.persistence.operations_store import OperationsStore
 
@@ -118,6 +184,48 @@ def test_restore_to_empty_and_refuse_nonempty(isolated_state):
     assert count == 2
     with pytest.raises(sonder_backup.BackupError, match="not empty"):
         sonder_backup.restore_to_empty(result.path, dest)
+
+
+def test_restore_copy_failure_leaves_empty_destination_and_no_staging(
+    isolated_state, monkeypatch
+):
+    result = sonder_backup.create_backup(isolated_state / "backups")
+    dest = isolated_state / "restore-failure"
+    dest.mkdir()
+    real_copy = sonder_backup.shutil.copy2
+    calls = 0
+
+    def fail_second_copy(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected copy failure")
+        return real_copy(source, target)
+
+    monkeypatch.setattr(sonder_backup.shutil, "copy2", fail_second_copy)
+    with pytest.raises(OSError, match="injected"):
+        sonder_backup.restore_to_empty(result.path, dest)
+
+    assert dest.is_dir() and not list(dest.iterdir())
+    assert not list(dest.parent.glob(f".{dest.name}.restore-*"))
+
+
+def test_restore_publish_failure_recreates_original_empty_destination(
+    isolated_state, monkeypatch
+):
+    result = sonder_backup.create_backup(isolated_state / "backups")
+    dest = isolated_state / "restore-rename-failure"
+    dest.mkdir()
+
+    def fail_rename(_source, _target):
+        raise OSError("injected rename failure")
+
+    monkeypatch.setattr(sonder_backup.os, "rename", fail_rename)
+    with pytest.raises(OSError, match="injected"):
+        sonder_backup.restore_to_empty(result.path, dest)
+
+    assert dest.is_dir() and not list(dest.iterdir())
+    assert not list(dest.parent.glob(f".{dest.name}.restore-*"))
 
 
 def test_prune_never_removes_newest_verified(isolated_state):

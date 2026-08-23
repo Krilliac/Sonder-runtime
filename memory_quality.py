@@ -1,12 +1,24 @@
 """Read-only memory quality audits plus conservative duplicate cleanup."""
 import collections
 import re
+from datetime import datetime, timezone
 
 import contribute
+import lesson_decay
+import lesson_pruner
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.domain.memory import rules as memory_rules
 
 LONG_LESSON_CHARS = 220
+
+# A stale finding claims a lesson's POSITIVE evidence has aged out, so both
+# gates are about the evidence, not the text: the newest scored outcome must be
+# at least two half-lives old, and the age-decayed effective score must have
+# fallen below this floor. Diagnostics only -- nothing reads these to change
+# retrieval -- and experimental until the thresholds have been measured against
+# the live corpus the way retriever's quarantine bands were.
+STALE_MIN_AGE_DAYS = 2 * lesson_decay.DEFAULT_HALF_LIFE_DAYS
+STALE_EFFECTIVE_FLOOR = 0.2
 
 _VAGUE_MARKERS = re.compile(
     r"\b(use appropriate|be careful|handle errors|write clean|ensure proper|"
@@ -135,6 +147,213 @@ def apply_exact_duplicate_plan(conn, plan, delete_fn=memory_store.delete_lesson)
     return deleted
 
 
+def _evidence_polarity_score(stats):
+    """(mean_reward, population) from scored outcomes, caller-judged first.
+
+    The deciding population is the caller's wherever a caller has judged the
+    lesson; the runtime's own execution grades only speak when nobody reviewed
+    it -- the same doctrine retriever._usage_boost and
+    memory_rules.retention_rank already apply, restated here rather than
+    re-invented. Returns ``(None, "")`` when the lesson has no scored evidence
+    at all: no provenance, no claim.
+    """
+    if not stats:
+        return None, ""
+    mean = stats.get("avg_reward_caller")
+    if mean is not None and int(stats.get("scored_caller") or 0) > 0:
+        return float(mean), "caller"
+    mean = stats.get("avg_reward_execution")
+    if mean is not None and int(stats.get("scored_execution") or 0) > 0:
+        return float(mean), "execution"
+    return None, ""
+
+
+def contradiction_findings(conn, sim_threshold=None, limit=20):
+    """Similar lessons whose grounded outcomes disagree. Read-only.
+
+    Wires ``lesson_decay.detect_contradictions`` (pure logic that previously
+    had no production caller) to the store: similarity comes from stored
+    embeddings compared only within one exact (model, revision, dimension)
+    space, and polarity comes from scored outcome evidence via
+    ``_evidence_polarity_score``. Everything a claim rests on is evidence the
+    store actually holds -- a lesson with no usable embedding, or no graded
+    outcome, is excluded rather than guessed about, so a directive that merely
+    SOUNDS negative can never be flagged against one that sounds positive.
+    """
+    limit = max(1, min(int(limit or 20), 100))
+    threshold = float(
+        lesson_decay.DEFAULT_SIM_THRESHOLD if sim_threshold is None else sim_threshold
+    )
+    stats = _usage_stats(conn)
+    findings = []
+    for space_lessons in lesson_pruner.embedded_lessons_by_space(conn).values():
+        candidates = []
+        unit_by_text = {}
+        seen_texts = set()
+        for lesson in space_lessons:
+            mean, population = _evidence_polarity_score(stats.get(lesson["id"]))
+            if mean is None or mean == 0.0:
+                continue  # neutral or unmeasured: polarity cannot be claimed
+            text = lesson.get("text") or ""
+            # detect_contradictions keys its similarity callback by text, so
+            # exact-duplicate texts would collide in unit_by_text. They are
+            # the exact-duplicate audit's finding, not a contradiction -- one
+            # statement cannot disagree with itself -- so keep the first copy.
+            normalized = normalize_lesson_text(text)
+            if normalized in seen_texts:
+                continue
+            seen_texts.add(normalized)
+            candidates.append({
+                "id": lesson["id"], "text": text, "score": mean,
+                "population": population, "ts": lesson.get("ts"),
+            })
+            # Normalize once so pairwise similarity is a plain dot product.
+            # Cosine is scale-invariant, so this changes nothing but the cost:
+            # the pair loop below is O(opposite pairs) similarity calls, and
+            # recomputing both norms inside every call is what would make this
+            # audit expensive on the live corpus. _load_lessons has already
+            # excluded zero-norm vectors, so the division is safe.
+            vector = lesson["vector"]
+            norm = sum(x * x for x in vector) ** 0.5
+            unit_by_text[text] = [x / norm for x in vector]
+        if len(candidates) < 2:
+            continue
+        conflicts = lesson_decay.detect_contradictions(
+            candidates,
+            lambda a, b: sum(
+                x * y for x, y in zip(unit_by_text[a], unit_by_text[b])
+            ),
+            sim_threshold=threshold,
+        )
+        for conflict in conflicts:
+            a, b = conflict["a"], conflict["b"]
+            findings.append({
+                "a_id": a["id"],
+                "b_id": b["id"],
+                "similarity": round(float(conflict["similarity"]), 4),
+                "a_evidence": {
+                    "mean_reward": round(a["score"], 3),
+                    "population": a["population"],
+                },
+                "b_evidence": {
+                    "mean_reward": round(b["score"], 3),
+                    "population": b["population"],
+                },
+                "a_preview": _truncate(a["text"]),
+                "b_preview": _truncate(b["text"]),
+            })
+    findings.sort(key=lambda f: (-f["similarity"], f["a_id"], f["b_id"]))
+    return findings[:limit]
+
+
+def _parse_evidence_ts(value):
+    """Aware UTC datetime from a stored timestamp, or None when unreadable."""
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def stale_lesson_findings(
+    conn, now=None, half_life_days=lesson_decay.DEFAULT_HALF_LIFE_DAYS, limit=20,
+):
+    """Lessons whose positive evidence has aged out. Read-only, experimental.
+
+    Wires ``lesson_decay.effective_score`` to the store as a diagnostic: a
+    lesson whose evidence mean is positive, whose newest scored outcome is at
+    least ``STALE_MIN_AGE_DAYS`` old, and whose age-decayed effective score has
+    fallen below ``STALE_EFFECTIVE_FLOOR`` is reported as stale. Nothing here
+    changes retrieval -- quarantine handles measured harm, and unvalidated
+    lessons are already counted by the audit; this names the third population,
+    lessons whose proof of usefulness has simply gone old. Fails closed the
+    same way the contradiction audit does: no scored evidence, or an
+    unreadable evidence timestamp, and no claim is made. ``now`` is injectable
+    so callers and tests are deterministic.
+    """
+    limit = max(1, min(int(limit or 20), 100))
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    history = memory_store.lesson_usage_history(conn)
+    stats = memory_store.lesson_usage_stats(conn, history=history)
+    last_evidence = {}
+    for row in history:
+        # History is ordered by lesson then evidence time, so the last row
+        # seen per lesson is its newest scored outcome.
+        last_evidence[row["lesson_id"]] = row["evidence_ts"]
+    texts = {row["id"]: row.get("text") or "" for row in _all_lessons(conn)}
+    findings = []
+    for lesson_id, lesson_stats in stats.items():
+        if lesson_id not in texts:
+            continue  # usage rows can outlive a deleted lesson
+        mean, population = _evidence_polarity_score(lesson_stats)
+        if mean is None or mean <= 0.0:
+            continue  # harm is quarantine's question, absence is unvalidated's
+        newest = _parse_evidence_ts(last_evidence.get(lesson_id))
+        if newest is None:
+            continue
+        age_days = max(0.0, (current - newest).total_seconds() / 86400.0)
+        if age_days < STALE_MIN_AGE_DAYS:
+            continue
+        wins = int(lesson_stats.get("wins") or 0)
+        scored = wins + int(lesson_stats.get("losses") or 0)
+        effective = lesson_decay.effective_score(
+            mean, age_days, uses=scored, hits=wins, half_life_days=half_life_days,
+        )
+        if effective >= STALE_EFFECTIVE_FLOOR:
+            continue
+        findings.append({
+            "id": lesson_id,
+            "preview": _truncate(texts[lesson_id]),
+            "age_days": round(age_days, 1),
+            "effective_score": round(effective, 4),
+            "mean_reward": round(mean, 3),
+            "population": population,
+            "last_evidence_ts": last_evidence.get(lesson_id),
+        })
+    findings.sort(key=lambda f: (-f["age_days"], f["id"]))
+    return findings[:limit]
+
+
+def duplicate_fact_findings(conn):
+    """Exact-duplicate facts within each project scope. Read-only.
+
+    Facts are asserted context injected into every project-scoped prompt, so a
+    duplicate spends prompt budget on a repeat forever. Grouping is by
+    (project, normalized text): the same statement asserted in two different
+    projects is NOT a duplicate -- project scope is a privacy boundary, and a
+    cross-scope match would reveal one project's facts while auditing another.
+    No repair path is offered here on purpose: facts are directly asserted, so
+    removal stays with sonder_forget_fact's explicit per-id confirmation.
+    """
+    rows = conn.execute(
+        "SELECT id, project, text, ts FROM facts ORDER BY ts ASC, rowid ASC"
+    ).fetchall()
+    groups = collections.defaultdict(list)
+    for raw in rows:
+        row = dict(raw)
+        key = memory_store.normalize_fact_text(row.get("text"))
+        if key:
+            groups[(row.get("project"), key)].append(row)
+    findings = []
+    for (project, _key), members in groups.items():
+        if len(members) < 2:
+            continue
+        keeper = members[0]  # the oldest assertion is the original
+        findings.append({
+            "project": project,
+            "keeper_id": keeper["id"],
+            "duplicate_ids": [m["id"] for m in members[1:]],
+            "preview": _truncate(keeper.get("text") or ""),
+            "cluster_size": len(members),
+        })
+    findings.sort(key=lambda f: (-len(f["duplicate_ids"]), str(f["project"] or "")))
+    return findings
+
+
 def audit(conn):
     """Return structured quality counters and small samples."""
     lessons = _all_lessons(conn)
@@ -202,6 +421,13 @@ def audit(conn):
     synthetic = [r for r in lessons if not r.get("grounded")]
     unvalidated = [r for r in lessons if r["id"] not in graded_ids]
     synthetic_unvalidated = [r for r in synthetic if r["id"] not in graded_ids]
+    # Evidence-level findings: same-topic lessons whose grounded outcomes
+    # disagree, positive evidence that has aged out, and repeated fact
+    # assertions. All three are read-only and fail closed on missing
+    # provenance (no embedding or no scored outcome means no claim).
+    conflicts = contradiction_findings(conn)
+    stale = stale_lesson_findings(conn)
+    fact_duplicates = duplicate_fact_findings(conn)
     return {
         "total_lessons": len(lessons),
         "grounded_lessons": len(grounded),
@@ -219,6 +445,12 @@ def audit(conn):
         "missing_fts": len(missing_fts),
         "orphan_fts": orphan_fts_total,
         "orphan_fts_sampled": len(orphan_fts),
+        "conflicting_lesson_pairs": len(conflicts),
+        "stale_lessons": len(stale),
+        "duplicate_fact_groups": len(fact_duplicates),
+        "duplicate_fact_rows": sum(
+            len(f["duplicate_ids"]) for f in fact_duplicates
+        ),
         "samples": {
             "duplicates": exact_plan[:5],
             "long": long_rows[:5],
@@ -226,6 +458,9 @@ def audit(conn):
             "path_or_secret": path_or_secret[:5],
             "missing_fts": missing_fts[:5],
             "orphan_fts": orphan_fts[:5],
+            "conflicts": conflicts[:5],
+            "stale": stale[:5],
+            "duplicate_facts": fact_duplicates[:5],
         },
     }
 
@@ -255,7 +490,34 @@ def format_audit(report, sample_limit=5):
         "  path/secret-like: %(path_or_secret_like)s" % report,
         "  source missing: %(missing_source_interaction)s" % report,
         "  fts issues: missing=%(missing_fts)s orphan=%(orphan_fts)s" % report,
+        "  conflicting lesson pairs (similar text, opposite grounded "
+        "outcomes): %s" % report.get("conflicting_lesson_pairs", 0),
+        "  stale lessons (positive evidence aged out; experimental): %s"
+        % report.get("stale_lessons", 0),
+        "  duplicate facts: %s group(s), %s redundant row(s) "
+        "(remove via sonder_forget_fact, never automatically)"
+        % (
+            report.get("duplicate_fact_groups", 0),
+            report.get("duplicate_fact_rows", 0),
+        ),
     ]
+    conflict_rows = report.get("samples", {}).get("conflicts", [])[:sample_limit]
+    if conflict_rows:
+        lines.append("  conflict samples:")
+        for row in conflict_rows:
+            lines.append(
+                "    %s (%+.2f %s) vs %s (%+.2f %s) sim=%.3f: %s"
+                % (
+                    row["a_id"],
+                    row["a_evidence"]["mean_reward"],
+                    row["a_evidence"]["population"],
+                    row["b_id"],
+                    row["b_evidence"]["mean_reward"],
+                    row["b_evidence"]["population"],
+                    row["similarity"],
+                    row["a_preview"],
+                )
+            )
     dups = report.get("samples", {}).get("duplicates", [])[:sample_limit]
     if dups:
         lines.append("  duplicate samples:")

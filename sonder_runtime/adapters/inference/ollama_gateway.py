@@ -19,6 +19,7 @@ from __future__ import annotations
 import ipaddress
 import importlib
 import math
+import os
 import time
 import urllib.parse
 from typing import Sequence
@@ -46,6 +47,9 @@ from ..model_transport import ModelCallError
 ollama_endpoint = importlib.import_module(
     "sonder_runtime.adapters.inference.ollama_endpoint"
 )
+ollama_pool = importlib.import_module(
+    "sonder_runtime.adapters.inference.ollama_pool"
+)
 from ...domain.common.errors import (
     Cancelled,
     DeadlineExceeded,
@@ -54,15 +58,33 @@ from ...domain.common.errors import (
     InternalFailure,
     InvalidInput,
 )
+from ...domain.model_capabilities import (
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_TIERED_ROUTING,
+)
 
 
-def _check_liveness(context: OperationContext) -> float | None:
+# Static, provider-shape facts — never a live probe result.  Ollama resolves
+# its model identity per request (a tier may select a different local or
+# hosted model each call), so it advertises tiered routing rather than one
+# fixed endpoint/model.
+CAPABILITIES = frozenset({
+    GATEWAY_CAPABILITY_CHAT,
+    GATEWAY_CAPABILITY_EMBEDDINGS,
+    GATEWAY_CAPABILITY_TIERED_ROUTING,
+})
+
+
+def _check_liveness(
+    context: OperationContext, *, phase: str = "before model call"
+) -> float | None:
     if context.expired:
         # Zero remaining time previously became timeout=None, turning an expired
         # request into an unbounded model call.
-        raise DeadlineExceeded("operation deadline exceeded before model call")
+        raise DeadlineExceeded(f"operation deadline exceeded {phase}")
     if context.cancellation is not None and context.cancellation.cancelled:
-        raise Cancelled("operation cancelled before model call")
+        raise Cancelled(f"operation cancelled {phase}")
     return context.remaining_seconds
 
 
@@ -87,12 +109,28 @@ def _is_loopback(value: str) -> bool:
         return False
 
 
+def _configured_remote_worker() -> bool:
+    """Whether typed or legacy worker configuration names a remote worker.
+
+    Re-derived from the environment rather than a shared pool instance: the
+    architecture forbids this adapters-layer module depending on the
+    server-owned pool singleton, and a fresh read keeps this consent check
+    correct regardless of which composition root built the actual pool.
+    """
+    return ollama_pool.has_configured_remote_workers()
+
+
 def _enforce_local_endpoint(base: str, context: OperationContext) -> None:
-    if not _is_loopback(base) and not context.remote_ollama_allowed:
+    # A loopback primary is not sufficient: a configured worker pool can route
+    # this same request to a remote machine (SONDER_OLLAMA_WORKERS) even while
+    # the primary endpoint stays local, so both must be local for consent to
+    # be unnecessary.
+    remote_capable = not _is_loopback(base) or _configured_remote_worker()
+    if remote_capable and not context.remote_ollama_allowed:
         # The adapter used to enforce hosted-tier consent but silently sent local-
-        # tier prompts to a remotely configured Ollama endpoint without consent.
+        # tier prompts to a remotely configured endpoint or worker without consent.
         raise Forbidden(
-            "Ollama endpoint is non-loopback but this operation context does "
+            "Ollama route may leave this machine but this operation context does "
             "not allow remote Ollama"
         )
 
@@ -147,6 +185,11 @@ class OllamaGateway:
             context_policy.default_requested()
             if session_num_ctx is None else int(session_num_ctx)
         )
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        """Typed capability metadata; shape matches ``ProviderHealth.capabilities``."""
+        return CAPABILITIES
 
     def generate(
         self, request: ModelRequest, context: OperationContext
@@ -207,6 +250,10 @@ class OllamaGateway:
             text = gen(request.prompt, list(request.history) or None)
         except ModelCallError as exc:
             raise _map_model_error(exc) from exc
+        # The transport cooperates with cancellation where possible, but the
+        # token may flip between its final check and returning the response.
+        # Never publish that raced response or account it as completed work.
+        _check_liveness(context, phase="during model call")
         usage = getattr(gen, "last_usage", None)
         if usage is None:
             usage = {}
@@ -250,12 +297,14 @@ class OllamaGateway:
                 EmbeddingRequest(tuple(texts), getattr(provider, "EMBED_MODEL", "")),
                 context,
             )
+            _check_liveness(context, phase="during embedding call")
             return tuple(item for result in (typed,) for item in result.embeddings)
         results = []
         for text in texts:
             _check_liveness(context)
             embed = getattr(provider, "embed", provider)
             vector = embed(text)
+            _check_liveness(context, phase="during embedding call")
             results.append(
                 Embedding(
                     vector=require_embedding_vector(vector),

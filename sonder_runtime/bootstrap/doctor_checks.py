@@ -7,8 +7,22 @@ root-module dependency.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
+
+
+def bounded_join(items: Sequence[str], *, limit: int = 8) -> str:
+    """Join ``items`` with a bound on how many are rendered.
+
+    A doctor detail line must stay legible even when a deployment configures
+    many worker endpoints or has many resident models. Beyond ``limit`` this
+    appends a ``+N more`` marker instead of growing the line unboundedly.
+    """
+    values = list(items)
+    if len(values) <= limit:
+        return ", ".join(values)
+    shown = ", ".join(values[:limit])
+    return "%s, +%d more" % (shown, len(values) - limit)
 
 
 def summarize_self_heal(
@@ -35,6 +49,38 @@ def summarize_self_heal(
     return {
         "status": status,
         "detail": "%d issue(s), %d repairable" % (len(issues), repairable),
+    }
+
+
+def summarize_worker_probe(
+    up: Sequence[str],
+    down: Sequence[str],
+    total: int,
+) -> dict[str, str]:
+    """Roll up per-worker Ollama probe results into one doctor status.
+
+    ``up`` and ``down`` hold ``"host: detail"`` strings for the workers that
+    answered and the ones that did not; ``total`` is the configured worker
+    count (``len(up) + len(down)`` may be less than ``total`` only if a caller
+    mis-tallies, so callers must account for every worker in one bucket).
+    """
+    if not up:
+        return {
+            "status": "fail",
+            "detail": "%d/%d worker(s) unreachable: %s" % (
+                len(down), total, bounded_join(down)
+            ),
+        }
+    if down:
+        return {
+            "status": "warn",
+            "detail": "%d/%d worker(s) unreachable: %s | reachable: %s" % (
+                len(down), total, bounded_join(down), bounded_join(up)
+            ),
+        }
+    return {
+        "status": "ok",
+        "detail": "%d worker(s) reachable: %s" % (total, bounded_join(up)),
     }
 
 
@@ -89,4 +135,9 @@ def summarize_memory_quality(
     return {"status": "ok", "detail": "%d lessons clean" % total}
 
 
-__all__ = ["summarize_memory_quality", "summarize_self_heal"]
+__all__ = [
+    "bounded_join",
+    "summarize_memory_quality",
+    "summarize_self_heal",
+    "summarize_worker_probe",
+]

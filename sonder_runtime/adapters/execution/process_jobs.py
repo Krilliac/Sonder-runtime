@@ -52,6 +52,8 @@ class SubprocessJobProvider:
         self._processes: dict[str, Any] = {}
         self._limits: dict[str, int] = {}
         self._output_threads: dict[str, tuple[threading.Thread, ...]] = {}
+        self._output_failures: dict[str, str] = {}
+        self._output_failure_lock = threading.Lock()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
         if not isinstance(request, ProcessJobRequest):
@@ -109,18 +111,31 @@ class SubprocessJobProvider:
                 exit_code = getattr(process, "returncode", None)
                 if exit_code is None:
                     exit_code = process.wait(timeout=0)
-                self._record_output(job_id, OutputStream.STDOUT, stdout)
-                self._record_output(job_id, OutputStream.STDERR, stderr)
+                try:
+                    self._record_output(job_id, OutputStream.STDOUT, stdout)
+                    self._record_output(job_id, OutputStream.STDERR, stderr)
+                except Exception as exc:
+                    self._remember_output_failure(job_id, exc)
             else:
                 exit_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return ProcessJobWait(self._registry.poll(job_id), None, timed_out=True)
-        status = JobStatus.SUCCEEDED if exit_code == 0 else JobStatus.FAILED
+        output_failure = self._take_output_failure(job_id)
+        status = (
+            JobStatus.SUCCEEDED
+            if exit_code == 0 and output_failure is None
+            else JobStatus.FAILED
+        )
+        error = ""
+        if output_failure is not None:
+            error = f"process output persistence failed ({output_failure})"
+        elif status is JobStatus.FAILED:
+            error = "process exited with a non-zero status"
         record = self._registry.transition(
             job_id,
             status,
             result={"exit_code": exit_code} if status is JobStatus.SUCCEEDED else None,
-            error="process exited with a non-zero status" if status is JobStatus.FAILED else "",
+            error=error,
         )
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record(record)
@@ -181,6 +196,11 @@ class SubprocessJobProvider:
             # The durable job status and already-published watermark remain
             # authoritative; do not turn a normal close into a false failure.
             return
+        except Exception as exc:
+            # Thread exceptions otherwise disappear after a traceback while
+            # wait() reports a successful job.  Keep only the exception type:
+            # storage messages can contain paths or operator data.
+            self._remember_output_failure(job_id, exc)
 
     def _record_output(self, job_id: str, stream: OutputStream, data: str | None) -> None:
         if not data:
@@ -199,6 +219,14 @@ class SubprocessJobProvider:
             if page.events:
                 record = self._registry.poll(job_id)
                 self._jobs._lifecycle.record_output(record, page.events[-1])
+
+    def _take_output_failure(self, job_id: str) -> str | None:
+        with self._output_failure_lock:
+            return self._output_failures.pop(job_id, None)
+
+    def _remember_output_failure(self, job_id: str, exc: Exception) -> None:
+        with self._output_failure_lock:
+            self._output_failures.setdefault(job_id, type(exc).__name__)
 
     def _process(self, job_id: str) -> Any:
         try:

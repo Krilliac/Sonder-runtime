@@ -299,7 +299,8 @@ _LEGACY_CATEGORY = {"inspect": "system", "learning": "memory"}
 _CATEGORY_BY_SLASH = {
     "/help": "basic", "/exit": "basic", "/new": "basic", "/clear": "basic", "/project": "basic",
     "/workspace": "filesystem", "/workspace-create": "filesystem", "/workspacecreate": "filesystem",
-    "/sessions": "basic", "/resume": "basic", "/version": "basic",
+    "/sessions": "basic", "/replay": "basic", "/resume": "basic",
+    "/version": "basic",
     "/model": "chat", "/persona": "persona", "/consult": "chat",
     "/route": "chat", "/refactor": "dev", "/scaffold": "dev",
     "/fact": "memory", "/facts": "memory", "/lessons": "memory",
@@ -554,6 +555,10 @@ _NATIVE_PARAM_SPECS = {
     # line, so a single named field documents the actual free-form grammar.
     "/game": (Param("spec", "str", True),),
     "/gamefleet": (Param("spec", "str", True),),
+    # `[id|title] [N]` -- both optional; a bare /replay shows this thread.
+    "/replay": (
+        Param("thread", "str", False, ""), Param("turns", "int", False, 20),
+    ),
 }
 
 
@@ -1747,6 +1752,29 @@ def format_matches(prefix: str, limit: int = 12) -> str:
 
 # --- invocation -----------------------------------------------------------
 
+
+class InvocationError(ValueError):
+    """A structured account of a malformed ``/tool key=value`` line.
+
+    Subclasses ``ValueError`` so every existing ``except ValueError`` display
+    path keeps working unchanged; the attributes exist so programmatic
+    surfaces (HTTP, MCP, tests) can act on *what* failed without parsing the
+    message text.
+
+    ``problem`` is one of ``"unknown-parameter"``, ``"conflicting-duplicate"``,
+    or ``"invalid-value"``; ``command`` is the catalogued slash name; and
+    ``details`` carries the problem-specific evidence (the unknown keys, the
+    duplicated key and both raw values, or the key/raw-value/expected-type
+    triple).
+    """
+
+    def __init__(self, message, *, command="", problem="", details=None):
+        super().__init__(message)
+        self.command = command
+        self.problem = problem
+        self.details = dict(details or {})
+
+
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
 
@@ -1792,9 +1820,23 @@ def parse_invocation(line: str):
     in declaration order, so both ``/file_read path=x`` and ``/file_read x``
     work. Returns None when the line is not a catalogued tool command.
 
-    Raises ValueError for a ``key=value`` whose key the tool does not accept.
-    Dropping it silently is worse than failing: ``/file_read path=x limit=5``
-    would run against the whole file while looking like it had been bounded.
+    Raises ``InvocationError`` (a ``ValueError``) for a malformed line rather
+    than repairing it silently, because each silent repair ran something other
+    than what was typed while looking bounded and deliberate:
+
+    * a ``key=value`` whose key the tool does not accept -- ``/file_read
+      path=x limit=5`` would run against the whole file;
+    * the same key given twice with different values -- last-wins made
+      ``/file_read path=a path=b`` read ``b`` while the line still showed
+      ``a``;
+    * a named value that cannot be its parameter's declared int/num/bool --
+      coercion used to fall back to the raw string, so ``dry_run=nope``
+      reached the tool as a *truthy* string and a typo'd flag silently meant
+      the opposite of what it said.
+
+    Positional words keep the historical lenient coercion: they carry no
+    stated key=type intent, and free-text parameters legitimately absorb
+    arbitrary words.
     """
     text = str(line or "").strip()
     if not text.startswith("/"):
@@ -1806,13 +1848,23 @@ def parse_invocation(line: str):
     by_param = {p.name: p for p in command.params}
     kwargs: dict = {}
     unknown: list[str] = []
+    raw_named: dict = {}
+    conflicts: dict = {}
+    mistyped: dict = {}
 
     def _take(match):
         key, value = match.group(1), match.group(2)
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         if key in by_param:
-            kwargs[key] = _coerce(value, by_param[key].type)
+            if key in raw_named and raw_named[key] != value:
+                conflicts[key] = (raw_named[key], value)
+            raw_named[key] = value
+            kind = by_param[key].type
+            coerced = _coerce(value, kind)
+            if kind in ("int", "num", "bool") and isinstance(coerced, str):
+                mistyped[key] = (value, kind)
+            kwargs[key] = coerced
         else:
             unknown.append(key)
         return " "
@@ -1821,12 +1873,37 @@ def parse_invocation(line: str):
     # the quotes that JSON-valued parameters (steps, items_json) depend on.
     leftover = _KV_TOKEN.sub(_take, rest).strip()
     if unknown:
-        raise ValueError(
+        raise InvocationError(
             "%s does not take %s. parameters: %s" % (
                 command.name,
                 ", ".join(sorted(set(unknown))),
                 ", ".join(p.name for p in command.params) or "(none)",
-            )
+            ),
+            command=command.name,
+            problem="unknown-parameter",
+            details={
+                "unknown": sorted(set(unknown)),
+                "parameters": [p.name for p in command.params],
+            },
+        )
+    if conflicts:
+        key = sorted(conflicts)[0]
+        first, second = conflicts[key]
+        raise InvocationError(
+            "%s was given %s twice with different values (%r, then %r). "
+            "state it once." % (command.name, key, first, second),
+            command=command.name,
+            problem="conflicting-duplicate",
+            details={"key": key, "values": [first, second]},
+        )
+    if mistyped:
+        key = sorted(mistyped)[0]
+        value, kind = mistyped[key]
+        raise InvocationError(
+            "%s: %s expects %s, got %r." % (command.name, key, kind, value),
+            command=command.name,
+            problem="invalid-value",
+            details={"key": key, "value": value, "expected": kind},
         )
 
     if leftover:
