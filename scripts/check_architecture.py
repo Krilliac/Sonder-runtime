@@ -308,6 +308,40 @@ def tracked_production_python_files(
     return tuple(sorted(paths, key=lambda path: path.as_posix()))
 
 
+# Parsing every tracked production file is the checker's dominant cost, and
+# the compatibility scan needs it once per compatibility module.  Index each
+# repo root once: for every file, the set of absolute module names it imports
+# anywhere (ast.walk, so function-local imports count exactly as before).
+# The cache key is the repo root; every entry in this process describes the
+# same instant, which is all a single checker run or test assertion reads.
+_IMPORT_INDEX_CACHE: dict[Path, tuple[tuple[Path, frozenset[str]], ...]] = {}
+
+
+def _production_import_index(
+    repo_root: Path = REPO_ROOT,
+) -> tuple[tuple[Path, frozenset[str]], ...]:
+    cached = _IMPORT_INDEX_CACHE.get(repo_root)
+    if cached is not None:
+        return cached
+    entries: list[tuple[Path, frozenset[str]]] = []
+    for path in tracked_production_python_files(repo_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module
+            ):
+                imported.add(node.module)
+        entries.append((path.relative_to(repo_root), frozenset(imported)))
+    result = tuple(entries)
+    _IMPORT_INDEX_CACHE[repo_root] = result
+    return result
+
+
 def compatibility_import_offenders(
     module: str,
     compatibility_path: Path,
