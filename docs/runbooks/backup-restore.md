@@ -22,7 +22,10 @@ as `<UTC timestamp>-<version>-<backup id>/` with `manifest.json` and
 python -m sonder_runtime backup verify /var/backups/sonder/<backup-dir>
 ```
 
-Verifies every manifest entry's presence, size, and SHA-256.
+Verifies every manifest entry's presence, size, and SHA-256; rejects unlisted
+state entries; parses the runtime policy; and opens each database read-only for
+`PRAGMA quick_check`, foreign-key checks, and migration-ledger checksum/schema
+comparison. Findings contain store names and error classes, never row content.
 
 ## List and prune
 
@@ -46,6 +49,9 @@ SONDER_HOME.
    sudo -u sonder /opt/sonder/current/venv/bin/python -m sonder_runtime restore apply \
        <backup-dir> /var/lib/sonder-restore --confirm restore
    ```
+   Restore copies into a sibling staging directory, re-hashes and fsyncs every
+   file, fsyncs staging, and only then atomically publishes it. A copy or rename
+   failure removes staging and leaves (or recreates) the original empty target.
 4. Smoke-test the staged state:
    ```bash
    SONDER_HOME=/var/lib/sonder-restore \

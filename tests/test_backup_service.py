@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -111,13 +112,30 @@ def test_update_engine_routes_backup_through_application_service():
     assert "sonder_backup.create_backup" not in source
 
 
-def _write_fixture_backup(root, *, rel="state/memory.db", content=b"safe"):
+def _write_fixture_backup(root, *, rel="state/memory.db"):
     member = root / rel
     member.parent.mkdir(parents=True, exist_ok=True)
-    member.write_bytes(content)
+    member.unlink(missing_ok=True)
+    conn = sqlite3.connect(member)
+    try:
+        conn.execute("CREATE TABLE facts (id INTEGER PRIMARY KEY, body TEXT)")
+        conn.execute("INSERT INTO facts (body) VALUES ('safe')")
+        conn.commit()
+    finally:
+        conn.close()
+    content = member.read_bytes()
     digest = hashlib.sha256(content).hexdigest()
+    status = backup_adapter.sonder_migrations.status_read_only(
+        "memory", str(member)
+    )
     manifest = {
         "format_version": backup_adapter.MANIFEST_FORMAT_VERSION,
+        "schema_versions": {
+            "memory": {
+                "applied": list(status.applied),
+                "pending": list(status.pending),
+            }
+        },
         "files": [{"path": rel, "size": len(content), "sha256": digest}],
     }
     manifest_path = root / "manifest.json"
@@ -149,7 +167,7 @@ def test_verify_rejects_symlinked_member_and_restore_destination(tmp_path):
     )
 
     member.unlink()
-    member.write_bytes(b"safe")
+    _write_fixture_backup(backup)
     real_destination = tmp_path / "real-destination"
     real_destination.mkdir()
     destination_link = tmp_path / "destination-link"
@@ -244,7 +262,11 @@ def test_restore_relative_dot_publishes_and_restores_cwd(tmp_path, monkeypatch):
     restored = backup_adapter.restore_to_empty(backup, ".")
 
     assert Path.cwd().resolve() == destination.resolve()
-    assert (destination / "memory.db").read_bytes() == b"safe"
+    conn = sqlite3.connect(destination / "memory.db")
+    try:
+        assert conn.execute("SELECT body FROM facts").fetchone() == ("safe",)
+    finally:
+        conn.close()
     assert restored == [str(destination.resolve() / "memory.db")]
     assert not list(tmp_path.glob(".empty-destination.restore-*"))
 

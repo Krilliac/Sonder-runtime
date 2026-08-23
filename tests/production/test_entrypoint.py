@@ -404,6 +404,9 @@ def test_doctor_schema_check_uses_exact_cli_home(
     sonder_migrations.migrate_store("operations", str(db))
     conn = sqlite3.connect(db)
     try:
+        # Simulate offline corruption that bypassed the normal append-only
+        # guards; ordinary UPDATE/DELETE attempts are rejected by SQLite.
+        conn.execute("DROP TRIGGER schema_migrations_no_update")
         conn.execute(
             "UPDATE schema_migrations SET checksum_sha256 = 'tampered' "
             "WHERE migration_id = '0001_baseline'"
@@ -461,6 +464,12 @@ def test_diagnostics_redacts_all_known_secrets(isolated_home, capsys, monkeypatc
     assert main(["diagnostics", "--skip-ollama"]) == 0
     out = capsys.readouterr().out
     assert secret not in out
+    payload = json.loads(out)
+    assert payload["schemas"]
+    assert all(
+        "checksum_mismatches" in status and "healthy" in status
+        for status in payload["schemas"].values()
+    )
 
 
 def test_module_executes_as_subprocess(isolated_home):

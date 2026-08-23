@@ -105,20 +105,44 @@ def _contained_member(root: Path, relative: Path) -> Path | None:
 
 def _online_backup_sqlite(source: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    src = sqlite3.connect(source)
     try:
+        source_path = Path(source).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise BackupError(
+            f"authoritative database became unavailable: {type(exc).__name__}"
+        ) from exc
+    # Opening read-only prevents a source-disappearance race from silently
+    # creating and then backing up a new empty database.
+    src = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
+    try:
+        src.execute("PRAGMA query_only=ON")
+        src.execute("PRAGMA busy_timeout=5000")
         dst = sqlite3.connect(str(destination))
         try:
             src.backup(dst)
+            dst.commit()
+            # A copied WAL-mode header can make a later read-only open create
+            # -wal/-shm sidecars in the backup directory.  The online backup is
+            # already a standalone image, so publish it in rollback-journal
+            # mode with no unmanifested companions.
+            dst.execute("PRAGMA journal_mode=DELETE")
         finally:
             dst.close()
     finally:
         src.close()
 
 
-def _schema_versions() -> dict:
+def _schema_versions(state_dir: Path) -> dict:
+    """Describe the copied images without touching live or missing stores."""
     versions: dict[str, dict] = {}
-    for store, status in sonder_migrations.status_all().items():
+    known = sonder_migrations.store_db_paths()
+    for db_file in sorted(state_dir.glob("*.db")):
+        store = db_file.stem
+        if store not in known:
+            continue
+        status = sonder_migrations.status_read_only(
+            store, str(db_file), immutable=True
+        )
         versions[store] = {
             "applied": list(status.applied),
             "pending": list(status.pending),
@@ -197,7 +221,7 @@ def create_backup(
             + f".{int((now % 1) * 1_000_000):06d}Z",
             "application_version": build.version,
             "commit_sha": build.commit_sha,
-            "schema_versions": _schema_versions(),
+            "schema_versions": _schema_versions(state_dir),
             "files": files,
         }
         manifest_path = staging / "manifest.json"
@@ -353,6 +377,65 @@ def _verify_directory(backup_dir: Path) -> list[str]:
             problems.append(f"checksum mismatch for {rel}")
             continue
         expected_checksums.append(f"{expected_hash}  {rel}\n")
+        if rel_path.suffix == ".db":
+            problems.extend(_sqlite_backup_problems(member, rel_path.name))
+            store = rel_path.stem
+            if store in sonder_migrations.store_db_paths():
+                try:
+                    status = sonder_migrations.status_read_only(
+                        store, str(member), immutable=True
+                    )
+                except (OSError, sqlite3.DatabaseError) as exc:
+                    problems.append(
+                        f"{rel_path.name}: migration ledger unreadable "
+                        f"({type(exc).__name__})"
+                    )
+                else:
+                    if status.unknown:
+                        problems.append(
+                            f"{rel_path.name}: schema newer than this build"
+                        )
+                    if status.checksum_mismatches:
+                        problems.append(
+                            f"{rel_path.name}: migration history modified"
+                        )
+                    schema_versions = manifest.get("schema_versions")
+                    recorded_schema = (
+                        schema_versions.get(store)
+                        if isinstance(schema_versions, dict)
+                        else None
+                    )
+                    actual_schema = {
+                        "applied": list(status.applied),
+                        "pending": list(status.pending),
+                    }
+                    if recorded_schema != actual_schema:
+                        problems.append(
+                            f"{rel_path.name}: manifest schema version mismatch"
+                        )
+        elif rel_path.name == "runtime_policy.json":
+            try:
+                policy = json.loads(member.read_text(encoding="utf-8"))
+                if not isinstance(policy, dict):
+                    problems.append("runtime_policy.json root must be an object")
+            except (OSError, UnicodeError, ValueError) as exc:
+                problems.append(
+                    "runtime_policy.json unreadable: " + type(exc).__name__
+                )
+    try:
+        unlisted = sorted(
+            child.name
+            for child in state_dir.iterdir()
+            if child.name not in restored_names
+        )
+    except OSError as exc:
+        problems.append(f"state directory unreadable: {type(exc).__name__}")
+    else:
+        if unlisted:
+            problems.append(
+                f"state directory contains {len(unlisted)} unlisted entr"
+                + ("y" if len(unlisted) == 1 else "ies")
+            )
     checksums_path = backup_dir / "checksums.sha256"
     if checksums_path.is_symlink() or not checksums_path.is_file():
         problems.append("checksums.sha256 is missing or not a regular file")
@@ -370,6 +453,28 @@ def _verify_directory(backup_dir: Path) -> list[str]:
                     problems.append("checksums.sha256 does not match manifest")
         except (OSError, UnicodeError):
             problems.append("checksums.sha256 is unreadable")
+    return problems
+
+
+def _sqlite_backup_problems(path: Path, label: str) -> list[str]:
+    """Return content-free SQLite corruption findings for one copied image."""
+    problems: list[str] = []
+    try:
+        uri = path.resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+            if rows != [("ok",)]:
+                problems.append(
+                    f"{label}: quick_check reported {len(rows) or 1} problem(s)"
+                )
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                problems.append(f"{label}: foreign key violations")
+        finally:
+            conn.close()
+    except (OSError, sqlite3.DatabaseError) as exc:
+        problems.append(f"{label}: SQLite unreadable ({type(exc).__name__})")
     return problems
 
 
@@ -545,11 +650,8 @@ def restore_smoke(backup_dir: str | os.PathLike) -> list[str]:
                     problems.append(
                         f"{db_file.name}: integrity_check {row[0] if row else 'empty'}"
                     )
-                fk_rows = conn.execute("PRAGMA foreign_key_check").fetchall()
-                if fk_rows:
-                    problems.append(
-                        f"{db_file.name}: {len(fk_rows)} foreign key violations"
-                    )
+                if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    problems.append(f"{db_file.name}: foreign key violations")
             finally:
                 conn.close()
             store = db_file.stem
@@ -637,7 +739,9 @@ def restore_to_empty(
             shutil.copy2(source_member, target_path)
             if _sha256_file(target_path) != entry["sha256"]:
                 raise BackupError(f"restored file corrupt: {rel.name}")
+            _fsync_path(target_path)
             restored.append(str(dest / rel.name))
+        _fsync_path(staging)
         try:
             cwd_was_destination = Path.cwd().resolve() == dest
         except OSError:
@@ -653,6 +757,7 @@ def restore_to_empty(
                 dest.rmdir()
                 removed_existing = True
             os.rename(staging, dest)
+            _fsync_path(dest.parent)
         finally:
             if cwd_was_destination and dest.is_dir():
                 os.chdir(dest)

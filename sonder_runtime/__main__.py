@@ -211,6 +211,8 @@ def cmd_diagnostics(args) -> int:
                 "applied": list(status.applied),
                 "pending": list(status.pending),
                 "unknown": list(status.unknown),
+                "checksum_mismatches": list(status.checksum_mismatches),
+                "healthy": status.healthy,
             }
             for store, status in sonder_migrations.status_all().items()
         }
