@@ -101,6 +101,7 @@ class StateConfig:
 class OllamaConfig:
     url: str = "http://127.0.0.1:11434"
     allow_remote: bool = False
+    workers: tuple[str, ...] = ()
     startup_timeout_seconds: int = 60
     request_timeout_seconds: int = 300
 
@@ -384,6 +385,15 @@ def _apply_environment(
         raw = env["OLLAMA_HOST"].strip()
         url = raw if "://" in raw else f"http://{raw}"
         ollama = replace(ollama, url=url)
+    if env.get("SONDER_OLLAMA_WORKERS", "").strip():
+        ollama = replace(
+            ollama,
+            workers=tuple(
+                value.strip() if "://" in value else "http://" + value.strip()
+                for value in env["SONDER_OLLAMA_WORKERS"].replace(";", ",").split(",")
+                if value.strip()
+            ),
+        )
     if "SONDER_ALLOW_REMOTE_OLLAMA" in env:
         ollama = replace(
             ollama, allow_remote=_env_bool(env["SONDER_ALLOW_REMOTE_OLLAMA"])
@@ -524,6 +534,27 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             "[ollama].url remote Ollama must use https so prompts and "
             "embeddings are protected in transit"
         )
+
+    for worker in config.ollama.workers:
+        worker_parts = urlsplit(worker)
+        if (
+            worker_parts.username is not None
+            or worker_parts.password is not None
+        ):
+            errors.append("[ollama].workers entries must not contain inline credentials")
+            continue
+        if not worker_parts.hostname or worker_parts.port is None:
+            errors.append(
+                f"[ollama].workers entry {worker!r} must include a host and explicit port"
+            )
+            continue
+        if not _is_loopback_host(worker_parts.hostname):
+            if not config.ollama.allow_remote:
+                errors.append(
+                    "[ollama].workers remote entries require the remote-Ollama consent gate"
+                )
+            elif worker_parts.scheme != "https":
+                errors.append("[ollama].workers remote entries must use https")
 
     for name in ("model_generations", "http_requests", "tool_processes",
                  "fleet_workers", "autopilot_runs", "training_jobs",
