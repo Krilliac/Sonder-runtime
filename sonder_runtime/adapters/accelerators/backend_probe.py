@@ -40,8 +40,7 @@ def probe_cuda_runtime() -> bool:
     try:
         if importlib.util.find_spec("torch") is None:
             return False
-        import torch  # type: ignore
-
+        torch = importlib.import_module("torch")
         return bool(torch.cuda.is_available())
     except Exception:
         return False
