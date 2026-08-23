@@ -3406,6 +3406,40 @@ def good_interactions_with_embeddings(
 
 # --- project facts ---------------------------------------------------------
 
+def normalize_fact_text(text):
+    """Canonical fact text for exact duplicate detection.
+
+    Whitespace collapse plus casefold (the stricter cousin of the lowercase
+    fold memory_quality applies to lessons); owned here because the write path
+    (sonder_remember_fact) must apply it before a row exists for any audit to
+    see.
+    """
+    return re.sub(r"\s+", " ", (text or "").strip().casefold())
+
+
+def find_duplicate_fact_in(rows, text):
+    """Return the first fact row whose normalized text matches, else None.
+
+    Takes already-loaded rows so callers holding a repository (which exposes
+    ``facts_for_project`` but not the connection) can ask the same question the
+    connection-level helper below answers. Callers must pass rows from ONE
+    project only: matching across projects would let a fact leak between
+    scopes, and scoping is a privacy boundary, not a convenience filter.
+    """
+    wanted = normalize_fact_text(text)
+    if not wanted:
+        return None
+    for row in rows or []:
+        if normalize_fact_text(row.get("text")) == wanted:
+            return row
+    return None
+
+
+def find_duplicate_fact(conn, project, text):
+    """Existing fact in ``project`` with the same normalized text, else None."""
+    return find_duplicate_fact_in(facts_for_project(conn, project), text)
+
+
 def add_fact(conn, fact_id, project, text, embedding=None):
     conn.execute(
         "INSERT INTO facts(id, project, text, embedding) VALUES(?, ?, ?, ?)",
