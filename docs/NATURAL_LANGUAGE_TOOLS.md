@@ -138,6 +138,42 @@ through. Commands never auto-chain — "do X and then Y" is handed to the
 agent as a normal request, not split into dispatches. Nothing here grants
 autonomous cross-tool sequences beyond the explicitly requested lanes above.
 
+## Malformed lines fail loudly, and structurally
+
+`parse_invocation` refuses a malformed `/tool key=value` line instead of
+repairing it into something that was not typed. Three shapes are rejected,
+each raising `command_catalog.InvocationError` — a `ValueError` subclass
+carrying `command`, `problem`, and `details` so programmatic surfaces can act
+on *what* failed without parsing message text:
+
+| Line | Problem | Why silence was worse |
+|---|---|---|
+| `/file_read path=x limit=5` | `unknown-parameter` | dropping `limit` reads the whole file while looking bounded |
+| `/file_read path=a path=b` | `conflicting-duplicate` | last-wins read `b` while the line showed `a` |
+| `/file_delete path=x dry_run=nope` | `invalid-value` | the raw string `"nope"` is *truthy*, so a typo'd flag meant the opposite of what it said |
+
+An identical repeated key (`path=a path=a`) still binds — a retry-pasted
+duplicate states one intent. Positional words keep lenient coercion: they
+carry no stated `key=type` intent, and free-text parameters legitimately
+absorb arbitrary words.
+
+## Why didn't that resolve? — `command_router.explain`
+
+`command_router.explain(text)` (diagnostic seam; no dispatch) runs the same
+pipeline as `resolve` and reports which stage claimed or refused the turn:
+`{"input", "resolved", "source", "detail"}` where `source` is one of
+`empty | slash | tier | structured | rule | catalog | none`, and `detail`
+carries the evidence — the winning rule's pattern, the tied `candidates` of
+an ambiguous turn (`show the update status` → `['/status', '/update']`), the
+`leftover` words that proved a turn asked for more than a command does, or
+the named command a `risky-not-named` / `read-verb-on-mutation` gate
+refused. It is guaranteed to agree with `resolve` (both run one shared
+pipeline) and exists for tests, tracing, and "why didn't that run" answers.
+
+At the console, `/why` renders that report: bare `/why` explains your
+previous plain-language turn, `/why <text>` explains any turn without
+dispatching it.
+
 ## Direct forms — the exact contracts
 
 - **Console slash:** `/commands` lists the surface; `/help <name>` shows one

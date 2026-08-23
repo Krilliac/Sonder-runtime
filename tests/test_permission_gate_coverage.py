@@ -166,6 +166,7 @@ def _maps():
 # `/selfmod` came to be graded by its most harmless sibling.
 _DISPLAY_ONLY_BRANCHES = {
     "/help": "renders command_catalog text",
+    "/why": "renders command_router.explain() evidence; dispatches nothing",
     "/exit": "ends the session; empty branch body",
     "/quit": "alias of /exit",
     "/q": "alias of /exit",

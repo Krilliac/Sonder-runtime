@@ -486,6 +486,49 @@ def _run_catalogued(line, cmd):
     )
 
 
+def _format_route_explanation(report):
+    """Render ``command_router.explain()`` for the console, one fact per line.
+
+    The report is evidence from the resolver itself, so this only formats --
+    it never re-derives or second-guesses what would resolve.
+    """
+    lines = ["turn:      %s" % report["input"]]
+    detail = report.get("detail") or {}
+    if report["resolved"]:
+        lines.append("resolved:  %s" % report["resolved"])
+    else:
+        lines.append(
+            "resolved:  nothing -- the turn goes to ordinary chat/work handling"
+        )
+    source = report["source"]
+    if source == "rule":
+        lines.append("stage:     hand-written rule %s" % detail.get("index"))
+    elif source == "tier":
+        lines.append("stage:     tier intent (/%s)" % detail.get("command"))
+    elif source == "structured":
+        lines.append("stage:     explicit \"use the <name> tool\" form")
+    elif source == "catalog":
+        lines.append(
+            "stage:     generic catalog match (%s)" % detail.get("command", "")
+        )
+    elif source == "slash":
+        lines.append("stage:     already a slash line; the router never sees these")
+    elif source == "empty":
+        lines.append("stage:     empty turn")
+    else:
+        lines.append(
+            "stage:     no match (%s)"
+            % detail.get("reason", "no stage claimed the turn")
+        )
+        if detail.get("candidates"):
+            lines.append("tied:      %s" % ", ".join(detail["candidates"]))
+        if detail.get("leftover"):
+            lines.append("leftover:  %s" % ", ".join(detail["leftover"]))
+        if detail.get("command"):
+            lines.append("nearest:   %s" % detail["command"])
+    return "\n".join(lines)
+
+
 def _normalize_input_line(line):
     """Strip console framing, including a BOM from piped PowerShell input."""
     value = str(line or "")
@@ -1072,6 +1115,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /contextsize [N]   show/set requested context (8k..1m; native num_ctx is clamped)
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
+  /why [text]        explain how the previous plain-language turn (or [text]) routed
   /activity [watch]  show once, or poll projected new events until Ctrl+C
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
@@ -1558,6 +1602,10 @@ def main():
     # private repository context, so terminal convenience must not create a
     # durable prompt log.
     input_history = []
+    # The most recent plain-language turn, kept so a bare /why can answer
+    # "why did (or didn't) that route" about the thing just typed. Session
+    # state only; never persisted.
+    last_natural_turn = ""
     model_argument_completer = _ModelArgumentCompleter()
 
     def _workspace_create_path(raw):
@@ -2012,6 +2060,7 @@ def main():
         # the slash form stays the precise way to invoke it. Unmatched turns
         # fall through untouched to feedback/intent/work/chat handling.
         if not line.startswith("/"):
+            last_natural_turn = line
             resolved = command_router.resolve(line)
             if resolved:
                 print(_paint("(interpreted as: %s)" % resolved, _Ansi.muted))
@@ -2040,6 +2089,21 @@ def main():
                 print(command_catalog.format_matches(""))
             elif cmd == "/help":
                 print(command_catalog.help_text(arg.strip()))
+            elif cmd == "/why":
+                # A diagnostic read over the resolver's own trace: which stage
+                # claimed (or refused) a plain-language turn, and on what
+                # evidence. Never dispatches anything.
+                target = arg.strip() or last_natural_turn
+                if not target:
+                    print(
+                        "usage: /why [text]  explain how a plain-language turn"
+                        " routes; the bare form uses your previous non-slash"
+                        " turn"
+                    )
+                else:
+                    print(_format_route_explanation(
+                        command_router.explain(target)
+                    ))
             elif cmd == "/clear":
                 _clear_terminal_scrollback()
             elif cmd == "/trace":

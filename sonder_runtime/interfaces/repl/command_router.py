@@ -31,6 +31,11 @@ An explicit structured form ("use the file_read tool with path=README.md")
 provides a natural-language bridge for every canonical catalog name without
 inventing a synonym or weakening the generic matcher's refusal behavior.
 
+``explain`` is the diagnostic twin of ``resolve``: the same pipeline, but it
+reports *which* stage claimed or refused the turn (and, for a catalog refusal,
+why -- including the tied candidates an ambiguous turn produced). ``resolve``
+stays the only dispatch entry point; ``explain`` never dispatches anything.
+
 Stdlib only.
 """
 import importlib
@@ -821,25 +826,39 @@ def _single_word_argument(value, matched):
     return None
 
 
-def _catalog_match(value):
+def _note(trace, reason, **extra):
+    """Record why the catalog stage stopped, when a trace dict was passed."""
+    if trace is not None:
+        trace["reason"] = reason
+        trace.update(extra)
+
+
+def _catalog_match(value, trace=None):
     """Resolve `value` against the whole command catalog, or return None.
 
     Conservative by construction: see the gate list at the top of this
     section. Returning None is always the safe answer -- the caller falls
     through to normal chat, which can still run the command itself.
+
+    ``trace``, when given, is a dict this function fills with the refusal
+    reason (or the match) for ``explain``. It never changes what resolves.
     """
     entries = _index()
     if not entries:
+        _note(trace, "catalog-unavailable")
         return None
     tokens = _tokenize(value)
     if not tokens:
+        _note(trace, "no-words")
         return None
     lead, body = _opening(tokens)
     if lead is None and not _names_a_command(tokens, entries):
+        _note(trace, "no-imperative-opening")
         return None
 
     content = [t for t in body if t not in _STOPWORDS]
     if not content:
+        _note(trace, "no-content")
         return None
     present = set(body)
     content_set = set(content)
@@ -850,6 +869,7 @@ def _catalog_match(value):
         if scored:
             ranked.append((scored[0], scored[1], entry, scored[2]))
     if not ranked:
+        _note(trace, "no-candidate")
         return None
 
     # If the first content word is itself a required one-word command, treat
@@ -882,6 +902,10 @@ def _catalog_match(value):
         if len(canonical) != 1:
             # A tie means the turn does not pick a command out; guessing here
             # is exactly the failure this fallback must not have.
+            _note(
+                trace, "ambiguous",
+                candidates=sorted(rank[2]["command"].name for rank in finalists),
+            )
             return None
         finalists = canonical
     stage, _strength, entry, matched = finalists[0]
@@ -894,22 +918,28 @@ def _catalog_match(value):
     if stage == 2 and len(matched) == 1:
         if (lead not in _READ_VERBS or lead == "check"
                 or not _single_word_readable(command)):
+            _note(trace, "single-word-name-refused", command=command.name)
             return None
         required = [p for p in command.params if p.required]
         if required:
             if len(required) != 1:
+                _note(trace, "single-word-name-refused", command=command.name)
                 return None
             argument = _single_word_argument(value, matched)
             if argument is None:
+                _note(trace, "single-word-name-refused", command=command.name)
                 return None
+            _note(trace, "matched", command=command.name)
             return "%s %s" % (command.name, argument)
 
     if command.risk in _RISKY and (stage != 2 or not _adjacent(tokens, matched)):
         # Destructive and file-changing commands are never inferred from a
         # loose match; the turn has to name them.
+        _note(trace, "risky-not-named", command=command.name)
         return None
     if command.risk in _RISKY and lead in _READ_VERBS:
         # Asked to be shown something, but the named command would change it.
+        _note(trace, "read-verb-on-mutation", command=command.name)
         return None
 
     explained = set(entry["summary"])
@@ -923,6 +953,7 @@ def _catalog_match(value):
         explained.add(lead)
     leftover = [t for t in content if t not in explained]
     if not leftover:
+        _note(trace, "matched", command=command.name)
         return command.name
     required = any(p.required for p in command.params)
     if (len(leftover) == 1 and len(matched) >= 2 and required
@@ -933,8 +964,68 @@ def _catalog_match(value):
         # is asking for more than the command does.
         words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.\-]*", str(value))
         if words and _norm_token(words[-1].lower()) == leftover[0]:
+            _note(trace, "matched", command=command.name)
             return "%s %s" % (command.name, words[-1])
+    _note(trace, "unexplained-words", command=command.name, leftover=leftover)
     return None
+
+
+def _resolve_value(value, trace):
+    """The shared pipeline behind ``resolve`` and ``explain``.
+
+    ``value`` is already whitespace-normalized, non-empty, and not a slash
+    line. ``trace`` is None on the dispatch path (no bookkeeping) or a dict
+    ``explain`` fills; it never changes what resolves.
+    """
+    # The tier-aware trio owns its argument extraction; reuse it so there is one
+    # source of truth for "second opinion on X" / "which model for Y" / "improve
+    # fn in file". Its arg is already in the slash form's shape.
+    tier = intents.classify_command(value)
+    if tier and tier.get("command") in _TIER_COMMANDS:
+        if trace is not None:
+            trace["source"] = "tier"
+            trace["detail"] = {"command": tier["command"]}
+        return ("/%s %s" % (tier["command"], tier["arg"])).strip()
+
+    structured = _structured_catalog_match(value)
+    if structured:
+        if trace is not None:
+            trace["source"] = "structured"
+            trace["detail"] = {"command": structured.split()[0]}
+        return structured.strip()
+
+    for index, (pattern, action) in enumerate(_RULES):
+        # A natural-language command must consume the whole turn. Prefix
+        # matches turned prose such as "reset the session token when it
+        # expires" into destructive lifecycle commands and silently discarded
+        # everything after a file path.
+        match = pattern.fullmatch(value)
+        if match:
+            result = action(match)
+            if result:
+                if trace is not None:
+                    trace["source"] = "rule"
+                    trace["detail"] = {
+                        "index": index, "pattern": pattern.pattern,
+                    }
+                return result.strip()
+            if trace is not None:
+                # A rule claimed the shape but its action declined (a follow-on
+                # clause, an unknown scaffold kind). resolve() keeps scanning,
+                # so record it without stopping.
+                trace.setdefault("declined_rules", []).append(index)
+
+    # Nothing hand-written claimed the turn: fall back to the catalog so the
+    # commands nobody wrote a pattern for are still reachable in plain
+    # language. This runs last so the rules above keep their argument
+    # extraction and their precedence.
+    catalog_trace = {} if trace is not None else None
+    generic = _catalog_match(value, catalog_trace)
+    if trace is not None:
+        if generic:
+            trace["source"] = "catalog"
+        trace["detail"] = catalog_trace
+    return generic.strip() if generic else None
 
 
 def resolve(text):
@@ -947,32 +1038,43 @@ def resolve(text):
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     if not value or value.startswith("/"):
         return None
+    return _resolve_value(value, None)
 
-    # The tier-aware trio owns its argument extraction; reuse it so there is one
-    # source of truth for "second opinion on X" / "which model for Y" / "improve
-    # fn in file". Its arg is already in the slash form's shape.
-    tier = intents.classify_command(value)
-    if tier and tier.get("command") in _TIER_COMMANDS:
-        return ("/%s %s" % (tier["command"], tier["arg"])).strip()
 
-    structured = _structured_catalog_match(value)
-    if structured:
-        return structured.strip()
+def explain(text):
+    """Report how ``resolve`` would treat ``text``, without dispatching it.
 
-    for pattern, action in _RULES:
-        # A natural-language command must consume the whole turn. Prefix
-        # matches turned prose such as "reset the session token when it
-        # expires" into destructive lifecycle commands and silently discarded
-        # everything after a file path.
-        match = pattern.fullmatch(value)
-        if match:
-            result = action(match)
-            if result:
-                return result.strip()
+    Returns a dict::
 
-    # Nothing hand-written claimed the turn: fall back to the catalog so the
-    # commands nobody wrote a pattern for are still reachable in plain
-    # language. This runs last so the rules above keep their argument
-    # extraction and their precedence.
-    generic = _catalog_match(value)
-    return generic.strip() if generic else None
+        {"input": <normalized turn>,
+         "resolved": <the slash line resolve() returns, or None>,
+         "source": "empty" | "slash" | "tier" | "structured" | "rule"
+                   | "catalog" | "none",
+         "detail": {...}}
+
+    ``detail`` carries the stage-specific evidence: the winning rule's index
+    and pattern, or the catalog stage's refusal ``reason`` -- including the
+    tied ``candidates`` for an ambiguous turn, and the ``leftover`` words that
+    proved a turn was asking for more than a command does. ``declined_rules``
+    lists hand-written rules that matched the shape but declined the turn.
+
+    This is a diagnostic seam for tests, tracing, and "why didn't that run"
+    answers. It is guaranteed to agree with ``resolve`` because both run
+    ``_resolve_value``; only the bookkeeping differs.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    report = {"input": value, "resolved": None, "source": "none", "detail": {}}
+    if not value:
+        report["source"] = "empty"
+        return report
+    if value.startswith("/"):
+        report["source"] = "slash"
+        return report
+    trace = {}
+    report["resolved"] = _resolve_value(value, trace)
+    report["source"] = trace.get("source", "none")
+    report["detail"] = trace.get("detail", {})
+    if "declined_rules" in trace:
+        report["detail"] = dict(report["detail"])
+        report["detail"]["declined_rules"] = trace["declined_rules"]
+    return report
