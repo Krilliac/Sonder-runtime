@@ -258,3 +258,56 @@ def test_degraded_load_logs_once_not_once_per_check(tmp_path, caplog):
         permission_rules.check(tmp_path, "file_delete")
 
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+# --- durable saves ---------------------------------------------------------
+#
+# permissions.json is a security artifact: a torn write degrades every later
+# load to the built-in defaults, silently discarding the operator's deny
+# rules. Saves are therefore atomic (serialize, temp file, fsync, replace),
+# refuse symlinked policy paths, and add_rule preserves the original bytes of
+# a degraded policy in a sidecar before rewriting them.
+
+
+def test_save_failure_cannot_destroy_existing_policy(tmp_path):
+    permission_rules.save(tmp_path, [{"pattern": "x", "action": "deny", "note": ""}])
+    before = (tmp_path / "permissions.json").read_bytes()
+    with pytest.raises(TypeError):
+        permission_rules.save(tmp_path, [{"pattern": {1, 2}}])  # unserializable
+    assert (tmp_path / "permissions.json").read_bytes() == before
+
+
+def test_save_leaves_no_temp_files_behind(tmp_path):
+    permission_rules.save(tmp_path, [{"pattern": "x", "action": "deny", "note": ""}])
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "permissions.json"]
+    assert leftovers == []
+
+
+def test_save_refuses_symlinked_policy_path(tmp_path):
+    target = tmp_path / "elsewhere.json"
+    target.write_text("[]", encoding="utf-8")
+    link = tmp_path / "permissions.json"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform/privilege level")
+    with pytest.raises(OSError):
+        permission_rules.save(tmp_path, [{"pattern": "x", "action": "deny", "note": ""}])
+    assert target.read_text(encoding="utf-8") == "[]"
+
+
+def test_add_rule_preserves_degraded_policy_bytes(tmp_path):
+    original = '{"not": "a list"'  # invalid JSON: hand-edit gone wrong
+    _write(tmp_path, original)
+    permission_rules.add_rule(tmp_path, "file_delete", "ask", "recovered")
+    sidecar = tmp_path / "permissions.json.invalid"
+    assert sidecar.read_text(encoding="utf-8") == original
+    # The rewritten policy is healthy and carries the new rule.
+    rule = permission_rules.check(tmp_path, "file_delete")
+    assert rule["action"] == "ask"
+
+
+def test_add_rule_on_healthy_policy_writes_no_sidecar(tmp_path):
+    permission_rules.add_rule(tmp_path, "file_delete", "ask", "fine")
+    permission_rules.add_rule(tmp_path, "web_search", "allow", "fine")
+    assert not (tmp_path / "permissions.json.invalid").exists()
