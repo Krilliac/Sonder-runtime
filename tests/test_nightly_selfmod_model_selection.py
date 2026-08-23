@@ -9,13 +9,15 @@ class _FakeServer:
     def __init__(self):
         self.calls = []
 
-    def ensemble_answer(self, prompt, *, tiers, num_predict, mode):
-        self.calls.append({
+    def ensemble_answer(self, prompt, *, tiers, num_predict, mode, **kwargs):
+        call = {
             "prompt": prompt,
             "tiers": tiers,
             "num_predict": num_predict,
             "mode": mode,
-        })
+        }
+        call.update(kwargs)
+        self.calls.append(call)
         return "def sample():\n    return 1\n"
 
 
@@ -44,6 +46,15 @@ def test_selfmod_without_model_pin_keeps_using_code_tier():
     nightly_selfmod._ask(server, "inspect", num_predict=32)
 
     assert server.calls[0]["tiers"] == "code"
+
+
+def test_selfmod_forwards_explicit_context_without_changing_default_calls():
+    server = _FakeServer()
+
+    nightly_selfmod._ask(server, "inspect", num_predict=32, num_ctx=16384)
+
+    assert server.calls[0]["tiers"] == "code"
+    assert server.calls[0]["num_ctx"] == 16384
 
 
 def test_selfmod_uses_worker_interpreter_when_worktree_has_no_venv(tmp_path, monkeypatch):

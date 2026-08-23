@@ -26,6 +26,7 @@ param(
   [double] $Hours = 4.0,
   [string] $Model = 'qwen2.5-coder:14b',
   [int] $MaxBarren = 6,
+  [int] $NumCtx = 16384,
   [string] $Python = '',
   [switch] $Stop,
   [switch] $Status
@@ -94,10 +95,10 @@ if ($dirty) {
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
 $proc = Start-Process -FilePath $py -ArgumentList @(
     '-u', 'scripts/selfmod_forever.py', '--hours', "$Hours",
-    '--model', $Model, '--max-barren', "$MaxBarren"
+    '--model', $Model, '--max-barren', "$MaxBarren", '--num-ctx', "$NumCtx"
   ) -WorkingDirectory $repo -RedirectStandardOutput $log `
     -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
 
-"started pid $($proc.Id) for $Hours h on $Model (max-barren $MaxBarren; 0=unlimited)"
+"started pid $($proc.Id) for $Hours h on $Model (ctx $NumCtx; max-barren $MaxBarren; 0=unlimited)"
 "log: $log"
 "stop with: powershell -NoProfile -File scripts\start-selfmod.ps1 -Stop"

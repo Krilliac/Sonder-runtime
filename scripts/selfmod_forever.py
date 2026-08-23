@@ -48,6 +48,10 @@ def main() -> int:
         "--max-barren", type=int, default=6,
         help="stop after this many non-committing passes; 0 disables the limit",
     )
+    parser.add_argument(
+        "--num-ctx", type=int, default=16384,
+        help="local generation context window for selfmod prompts",
+    )
     parser.add_argument("--model", default="qwen2.5-coder:14b",
                         help="model behind the code tier for this run")
     args = parser.parse_args()
@@ -66,8 +70,9 @@ def main() -> int:
     deadline = time.time() + args.hours * 3600.0
     committed, barren, passes = [], 0, 0
 
-    log("=== selfmod continuous start: %.1fh, mode=%s, model=%s, max-barren=%s, branch-commit ==="
+    log("=== selfmod continuous start: %.1fh, mode=%s, model=%s, ctx=%s, max-barren=%s, branch-commit ==="
         % (args.hours, selfmod.settings().get("mode"), args.model,
+           args.num_ctx,
            "unlimited" if args.max_barren <= 0 else args.max_barren))
 
     # Every run of this loop so far has ended by being killed mid-pass, which
@@ -85,7 +90,7 @@ def main() -> int:
         try:
             result = nightly_selfmod.run(
                 server, log, test_timeout=args.test_timeout, branch=True,
-                model=args.model)
+                model=args.model, num_ctx=args.num_ctx)
         except Exception as exc:
             result = "pass failed: %s" % str(exc)[:200]
         log(result)
