@@ -40,6 +40,71 @@ def _parameter_billions(value):
     return amount if amount > 0 else None
 
 
+# KV-cache reservation bands by total parameter count (billions).  Larger
+# models spend more bytes of KV per token (more layers and wider heads), so
+# the auto-selected window shrinks as the weights grow.  The ladder is a
+# planning envelope, not a measured residency report.
+_PARAMETER_CONTEXT_BANDS = (
+    (48.0, 8_192, "parameters>=48B"),
+    (24.0, 16_384, "parameters>=24B"),
+    (12.0, 24_576, "parameters>=12B"),
+)
+
+
+def auto_context_plan(model_context=None, parameter_size=None) -> dict:
+    """Explain a model-aware native context choice with clamp provenance.
+
+    Returns a dict with the selected ``context`` plus the intermediate facts
+    that produced it: the starting ``base`` and its ``source``, the parsed
+    ``parameter_billions`` and ``advertised`` maximum, and the ordered list of
+    ``clamps`` that actually reduced (or raised) the value.  The physical
+    limits — the model's advertised maximum, the native ceiling, and the
+    minimum window — always apply.  The parameter-band ladder applies only
+    when the operator has *not* pinned a size: an explicit
+    ``SONDER_CONTEXT_SIZE``/``SONDER_SESSION_NUM_CTX`` is an informed override
+    of the conservative KV budget, matching this module's documented contract.
+    """
+    has_explicit_environment = bool(
+        str(os.environ.get("SONDER_CONTEXT_SIZE") or "").strip()
+        or str(os.environ.get("SONDER_SESSION_NUM_CTX") or "").strip()
+    )
+    if has_explicit_environment:
+        base = default_requested()
+        source = "environment"
+    else:
+        base = default_context()
+        source = "kv-quantised-default" if _kv_cache_is_quantised() else "fp16-default"
+    clamps = []
+    chosen = base
+    parameters = _parameter_billions(parameter_size)
+    if parameters is not None and not has_explicit_environment:
+        for floor, ceiling, reason in _PARAMETER_CONTEXT_BANDS:
+            if parameters >= floor:
+                if ceiling < chosen:
+                    chosen = ceiling
+                    clamps.append(reason)
+                break
+    advertised = parse_strict(model_context)
+    if advertised is not None and advertised < chosen:
+        chosen = advertised
+        clamps.append("advertised-maximum")
+    ceiling = native_max()
+    if chosen > ceiling:
+        chosen = ceiling
+        clamps.append("native-maximum")
+    if chosen < MIN_CONTEXT:
+        chosen = MIN_CONTEXT
+        clamps.append("minimum-window")
+    return {
+        "context": chosen,
+        "base": base,
+        "source": source,
+        "parameter_billions": parameters,
+        "advertised": advertised,
+        "clamps": tuple(clamps),
+    }
+
+
 def auto_context(model_context=None, parameter_size=None) -> int:
     """Choose a model-aware native context when the caller did not pin one.
 
@@ -49,21 +114,7 @@ def auto_context(model_context=None, parameter_size=None) -> int:
     the selected model's advertised maximum. Operators can still override the
     result with ``SONDER_CONTEXT_SIZE`` or an explicit request value.
     """
-    has_explicit_environment = bool(
-        str(os.environ.get("SONDER_CONTEXT_SIZE") or "").strip()
-        or str(os.environ.get("SONDER_SESSION_NUM_CTX") or "").strip()
-    )
-    base = default_requested() if has_explicit_environment else default_context()
-    parameters = _parameter_billions(parameter_size)
-    if parameters is not None:
-        if parameters >= 24:
-            base = min(base, 16_384)
-        elif parameters >= 12:
-            base = min(base, 24_576)
-    advertised = parse_strict(model_context)
-    if advertised is not None:
-        base = min(base, advertised)
-    return max(MIN_CONTEXT, min(base, native_max()))
+    return auto_context_plan(model_context, parameter_size)["context"]
 
 
 def parse_strict(value):
