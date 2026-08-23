@@ -1,12 +1,14 @@
 """SQLite-backed durable job registry (JOB-002/003/004)."""
 from __future__ import annotations
 
+from contextlib import closing, contextmanager
+from datetime import datetime, timedelta, timezone
+import errno
 import json
 from pathlib import Path
 import sqlite3
 from threading import Lock
-from typing import Any, Callable
-from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Iterator
 
 from sonder_runtime.application.execution.world_control import (
     BoundedOutputBuffer, OutputPage, OutputStream, OutputWatermark, SpillReference,
@@ -20,6 +22,13 @@ from sonder_runtime.application.operations.startup_reconciliation import (
 )
 from sonder_runtime.application.ports.jobs import (
     JobClaim, JobIdentity, JobRecord, JobStatus, TERMINAL_JOB_STATUSES,
+)
+from sonder_runtime.domain.common.errors import (
+    CapacityExceeded,
+    ConcurrencyConflict,
+    DependencyUnavailable,
+    IntegrityFailure,
+    SonderError,
 )
 
 
@@ -53,6 +62,38 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _storage_failure(exc: BaseException) -> SonderError:
+    """Map SQLite/OS failures without leaking paths or driver vocabulary."""
+    message = str(exc).casefold()
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        code &= 0xFF  # extended result codes retain the primary code here
+
+    if code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or any(
+        marker in message
+        for marker in (
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+        )
+    ):
+        return ConcurrencyConflict("durable job storage is busy; retry the operation")
+    if code == sqlite3.SQLITE_FULL or any(
+        marker in message for marker in ("database or disk is full", "disk full", "no space left")
+    ):
+        return CapacityExceeded("durable job storage has no free capacity")
+    if code in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB} or any(
+        marker in message for marker in ("malformed", "not a database", "corrupt")
+    ):
+        return IntegrityFailure("durable job storage failed integrity validation")
+    if isinstance(exc, OSError) and exc.errno in {
+        errno.ENOSPC,
+        getattr(errno, "EDQUOT", errno.ENOSPC),
+    }:
+        return CapacityExceeded("durable job storage has no free capacity")
+    return DependencyUnavailable("durable job storage is unavailable")
+
+
 class SQLiteDurableJobRegistry:
     """Durable implementation of the parent-linked job lifecycle.
 
@@ -62,22 +103,41 @@ class SQLiteDurableJobRegistry:
     """
 
     def __init__(self, db_path: str | Path, *, clock: Callable[[], str] = _now,
-                 output_bounds: tuple[int, int] = (256, 64 * 1024)) -> None:
+                 output_bounds: tuple[int, int] = (256, 64 * 1024),
+                 connect_factory: Callable[..., sqlite3.Connection] | None = None) -> None:
         max_events, max_bytes = output_bounds
         if max_events < 1 or max_bytes < 1:
             raise ValueError("output bounds must be positive")
         self._path = Path(db_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise _storage_failure(exc) from exc
         self._clock, self._max_events, self._max_bytes = clock, max_events, max_bytes
+        if connect_factory is not None and not callable(connect_factory):
+            raise TypeError("connect_factory must be callable")
+        self._connect_factory = connect_factory or sqlite3.connect
         self._lock = Lock()
         with self._connect() as connection:
             initialize_schema(connection)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self._path), timeout=5.0)
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open one bounded transaction and always release its file handle.
+
+        The injected factory is deliberately narrow: production keeps stdlib
+        SQLite while reliability tests can fail a specific statement without
+        sleeps, filesystem quotas, or touching an operator database.
+        """
+        try:
+            connection = self._connect_factory(str(self._path), timeout=5.0)
+            with closing(connection):
+                connection.execute("PRAGMA busy_timeout=5000")
+                connection.execute("PRAGMA foreign_keys=ON")
+                with connection:
+                    yield connection
+        except (sqlite3.Error, OSError) as exc:
+            raise _storage_failure(exc) from exc
 
     @staticmethod
     def _record(row: tuple[Any, ...] | None) -> JobRecord | None:
@@ -437,6 +497,8 @@ class SQLiteDurableJobRegistry:
             receipt = supervisor.cleanup(request)
             if not isinstance(receipt, ProcessTreeCleanupReceipt):
                 raise TypeError("process supervisor returned an invalid receipt")
+            if receipt.job_id != intent.record_id:
+                raise ValueError("process supervisor returned a receipt for the wrong job")
             receipts.append(receipt)
             if receipt.complete:
                 record = self.poll(intent.record_id)
