@@ -11,6 +11,9 @@ from enum import Enum
 from typing import Any, Protocol
 
 
+MAX_JOB_ATTEMPTS = 100
+
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     CLAIMED = "claimed"
@@ -54,6 +57,17 @@ class JobRecord:
     updated_at: str = ""
     result: Any = None
     error: str = ""
+    attempt: int = 0
+    max_attempts: int = 3
+
+    def __post_init__(self) -> None:
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 0:
+            raise ValueError("job attempt cannot be negative")
+        if (isinstance(self.max_attempts, bool) or not isinstance(self.max_attempts, int)
+                or not 1 <= self.max_attempts <= MAX_JOB_ATTEMPTS):
+            raise ValueError(f"job max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}")
+        if self.attempt > self.max_attempts:
+            raise ValueError("job attempt cannot exceed max_attempts")
 
     @property
     def is_terminal(self) -> bool:
@@ -66,6 +80,63 @@ class JobClaim:
     worker_id: str
     lease_until: str
     revision: int
+    claim_token: str = ""
+    attempt: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.job_id.strip() or not self.worker_id.strip():
+            raise ValueError("claim job_id and worker_id must be non-empty")
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 0:
+            raise ValueError("claim attempt cannot be negative")
+
+
+@dataclass(frozen=True)
+class JobCompletionReceipt:
+    """Exactly-once commitment proof for one durable job attempt."""
+
+    job_id: str
+    attempt: int
+    receipt_key: str
+    status: JobStatus
+    payload_digest: str
+    committed_at: str
+    revision: int
+
+    def __post_init__(self) -> None:
+        if not self.job_id.strip() or not self.receipt_key.strip():
+            raise ValueError("receipt job_id and receipt_key must be non-empty")
+        if self.attempt < 1:
+            raise ValueError("receipt attempt must be positive")
+        if self.status not in TERMINAL_JOB_STATUSES:
+            raise ValueError("completion receipt status must be terminal")
+        if (len(self.payload_digest) != 64
+                or any(character not in "0123456789abcdef" for character in self.payload_digest)):
+            raise ValueError("completion receipt payload_digest must be sha256")
+        if not self.committed_at:
+            raise ValueError("completion receipt committed_at must be non-empty")
+        if self.revision < 1:
+            raise ValueError("completion receipt revision must be positive")
+
+
+@dataclass(frozen=True)
+class JobReconciliationReport:
+    """Bounded stale-lease reconciliation diagnostics."""
+
+    scanned: int
+    interrupted_job_ids: tuple[str, ...]
+    truncated: bool = False
+
+    def __post_init__(self) -> None:
+        if isinstance(self.scanned, bool) or self.scanned < 0:
+            raise ValueError("reconciliation scanned count cannot be negative")
+        if len(self.interrupted_job_ids) > self.scanned:
+            raise ValueError("interrupted jobs cannot exceed scanned jobs")
+        if len(set(self.interrupted_job_ids)) != len(self.interrupted_job_ids):
+            raise ValueError("interrupted job IDs must be unique")
+
+    @property
+    def interrupted(self) -> int:
+        return len(self.interrupted_job_ids)
 
 
 @dataclass(frozen=True)
@@ -110,6 +181,7 @@ class WorkflowCheckpoint:
 class WorkflowResume:
     job: JobRecord
     checkpoint: WorkflowCheckpoint
+    claim: JobClaim | None = None
 
 
 class JobRegistry(Protocol):
@@ -119,11 +191,15 @@ class JobRegistry(Protocol):
     def get(self, job_id: str) -> JobRecord | None: ...
     def list(self, *, parent_job_id: str | None = None, include_terminal: bool = True,
              limit: int = 100) -> tuple[JobRecord, ...]: ...
-    def cancel(self, job_id: str, *, reason: str = "cancelled") -> tuple[JobRecord, ...]: ...
+    def cancel(self, job_id: str, *, reason: str = "cancelled",
+               max_descendants: int = 256) -> tuple[JobRecord, ...]: ...
     def claim(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> JobClaim | None: ...
-    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> bool: ...
-    def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None, error: str = "") -> JobRecord | None: ...
-    def reconcile(self, *, now: str | None = None) -> int: ...
+    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: int = 300,
+                  claim_token: str | None = None) -> bool: ...
+    def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None,
+               error: str = "", claim_token: str | None = None) -> JobRecord | None: ...
+    def retry(self, job_id: str, *, expected_revision: int | None = None) -> JobRecord | None: ...
+    def reconcile(self, *, now: str | None = None, max_records: int = 100) -> int: ...
 
 
 class WorkflowRepository(Protocol):
@@ -138,12 +214,15 @@ class WorkflowEngine(Protocol):
 
     def start(self, identity: JobIdentity, definition: WorkflowDefinition) -> JobRecord: ...
     def resume(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> WorkflowResume | None: ...
-    def checkpoint(self, job_id: str, worker_id: str, *, next_step: int, state: dict[str, Any], completed_step_id: str | None = None) -> WorkflowCheckpoint: ...
-    def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None, error: str = "") -> JobRecord | None: ...
+    def checkpoint(self, job_id: str, worker_id: str, *, next_step: int, state: dict[str, Any], completed_step_id: str | None = None,
+                   claim_token: str | None = None) -> WorkflowCheckpoint: ...
+    def finish(self, job_id: str, worker_id: str, status: JobStatus, *, result: Any = None,
+               error: str = "", claim_token: str | None = None) -> JobRecord | None: ...
 
 
 __all__ = [
-    "JobClaim", "JobIdentity", "JobRecord", "JobRegistry", "JobStatus",
-    "TERMINAL_JOB_STATUSES", "WorkflowCheckpoint", "WorkflowDefinition",
+    "JobClaim", "JobCompletionReceipt", "JobIdentity", "JobReconciliationReport",
+    "JobRecord", "JobRegistry", "JobStatus",
+    "MAX_JOB_ATTEMPTS", "TERMINAL_JOB_STATUSES", "WorkflowCheckpoint", "WorkflowDefinition",
     "WorkflowEngine", "WorkflowRepository", "WorkflowResume", "WorkflowStep",
 ]
