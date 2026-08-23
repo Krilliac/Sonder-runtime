@@ -1116,6 +1116,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /compact           preview context compaction/rollover recommendations
   /commands [filter] list available commands by category, name, or risk
   /why [text]        explain how the previous plain-language turn (or [text]) routed
+  /version           show the runtime version and release stamp
   /activity [watch]  show once, or poll projected new events until Ctrl+C
   /work <task>       execute a guarded tool-using workflow with checklist/report
   /autopilot ...     persistent plan/run/status/resume/pause/cancel autonomy
@@ -2104,6 +2105,21 @@ def main():
                     print(_format_route_explanation(
                         command_router.explain(target)
                     ))
+            elif cmd == "/version":
+                # Display only: the version literal plus the release stamp
+                # when the install has one. Deliberately no git probe here --
+                # starting a process would break the display-only claim the
+                # permission-gate coverage floor checks this branch against.
+                from sonder_runtime.platform import version as build_identity
+
+                stamped = build_identity.stamped_build_info()
+                if stamped is not None:
+                    print("sonder %s (commit %s, stamped release)" % (
+                        stamped.version, stamped.commit_sha[:12],
+                    ))
+                else:
+                    print("sonder %s (source checkout)"
+                          % build_identity.VERSION)
             elif cmd == "/clear":
                 _clear_terminal_scrollback()
             elif cmd == "/trace":

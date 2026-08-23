@@ -60,6 +60,8 @@ These complete turns each map to a single safe, read-only command:
 | `what tools ran` | `/activity` | recent tool activity |
 | `show permissions` | `/permissions` | active policy |
 | `what can you do` | `/help` | command help |
+| `what version are you` / `sonder version` | `/version` | runtime version and release stamp |
+| `help with the todo command` / `what does /compact do` | `/help <name>` | one command's contract |
 
 Catalog reach without a curated pattern: `scan for secrets` →
 `/secret_scan`, `list processes` → `/process_list`, `what's my task

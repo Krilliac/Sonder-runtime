@@ -297,3 +297,82 @@ def test_model_and_context_arguments_extract_exactly(turn, expected):
 )
 def test_model_and_context_turns_without_a_real_argument_fall_through(turn):
     assert cr.resolve(turn) is None
+
+
+# --- 7. discoverability: version and per-command help ----------------------
+
+@pytest.mark.parametrize(
+    "turn,expected",
+    [
+        # the runtime's own identity claims its forms before the generic
+        # tool-version probe can read "sonder" as a discovered tool name
+        ("what version are you", "/version"),
+        ("what version are you running?", "/version"),
+        ("what is your version", "/version"),
+        ("what version is sonder", "/version"),
+        ("show the sonder version", "/version"),
+        ("sonder version", "/version"),
+        ("version", "/version"),
+        # ...while a named tool still reaches the version probe
+        ("what version is cargo?", "/toolstatus cargo"),
+        ("version of python", "/toolstatus python"),
+        # per-command help, with and without the explicit slash
+        ("help for model", "/help model"),
+        ("show help for /read", "/help /read"),
+        ("help with the todo command", "/help todo"),
+        ("help about permissions", "/help permissions"),
+        ("what does /compact do", "/help /compact"),
+        ("explain the /delete command", "/help /delete"),
+        ("how do i use /model", "/help /model"),
+    ],
+)
+def test_version_and_help_discoverability(turn, expected):
+    assert cr.resolve(turn) == expected
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        # a help preposition plus prose is not one command token
+        "help me with my homework",
+        "help with files and then summarize them",
+        # explain/usage forms require the explicit slash
+        "explain the parser",
+        "what does the function do",
+        "explain how the task progress bar is computed",
+        "how do i use git rebase",
+        # a version question about something else entirely
+        "what version of the api should we target",
+    ],
+)
+def test_version_and_help_shapes_do_not_hijack_prose(turn):
+    assert cr.resolve(turn) is None
+
+
+def test_version_is_a_catalogued_display_only_command():
+    command = command_catalog.by_name("/version")
+    assert command is not None
+    assert command.native
+    assert command.risk == "safe"
+    assert command.tool == ""
+
+
+def test_stamped_build_info_never_starts_a_subprocess():
+    """The /version branch's read must stay display-only.
+
+    ``build_info()`` falls back to ``git rev-parse`` -- a subprocess -- on an
+    unstamped checkout, which the permission-gate coverage floor's
+    display-only bar excludes. ``stamped_build_info`` is the seam that
+    branch calls instead: stamp file or None, never a process.
+    """
+    import subprocess
+    from unittest import mock
+
+    from sonder_runtime.platform import version as build_identity
+
+    with mock.patch.object(
+        subprocess, "run",
+        side_effect=AssertionError("stamped_build_info started a subprocess"),
+    ):
+        stamped = build_identity.stamped_build_info()
+    assert stamped is None or stamped.stamped
