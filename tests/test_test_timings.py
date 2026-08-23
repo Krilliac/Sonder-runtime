@@ -22,6 +22,10 @@ def _clean_records(monkeypatch):
     # for real here would delete the live session's SONDER_HOME out from under
     # every later test.
     monkeypatch.setattr(root_conftest, "_cleanup_test_state", lambda: None)
+    # When the surrounding pytest run itself captures timings, the live hook
+    # records this test's own phases into the shared list and the counts below
+    # go wrong. Neutralize the ambient capture; each test sets its own.
+    monkeypatch.delenv("SONDER_TEST_TIMINGS", raising=False)
     saved = list(root_conftest._timing_records)
     root_conftest._timing_records.clear()
     yield root_conftest._timing_records
