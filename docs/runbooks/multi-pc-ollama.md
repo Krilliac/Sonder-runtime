@@ -28,11 +28,12 @@ probe every 30 seconds while still recovering a rebooted one within a minute
 or two.
 
 The pool also carries an experimental model-affinity seam: when a worker's
-advertised model inventory has been recorded (`note_models` on the pool),
-requests naming a model that worker lacks are ordered toward workers that
-have it. Inventory only reorders scheduling — it never excludes a worker,
-because a recorded list may be stale and Ollama can pull a model on demand.
-Nothing records inventory automatically yet.
+advertised model inventory has been recorded, requests naming a model that
+worker lacks are ordered toward workers that have it. Inventory only reorders
+scheduling — it never excludes a worker, because a recorded list may be stale
+and Ollama can pull a model on demand. Running the `status` tool refreshes
+each worker's inventory (best-effort, per-worker `/api/tags` probes) and a
+worker that cannot answer keeps its previous record.
 
 ## Prepare each worker PC
 
