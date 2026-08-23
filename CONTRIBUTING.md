@@ -72,6 +72,25 @@ or renaming it changes the reported context name and silently strands every
 PR that can never satisfy the now-vanished required check — fix that in the
 repo's branch protection settings first if it's ever genuinely needed, not by
 editing the workflow alone.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs five
+additional gates before the test suite, none of which `pytest` alone
+exercises. Run them locally if your change touches `sonder_runtime/`, error
+strings, Git history, or the operator docs — a change that only fails one of
+these can otherwise look green all the way to the PR:
+
+```bash
+venv/Scripts/python scripts/check_architecture.py         # layer/import boundaries inside sonder_runtime/
+venv/Scripts/python scripts/check_requirement_evidence.py # master-spec requirement IDs vs the evidence ledger
+venv/Scripts/python scripts/check_error_signals.py         # shrink-only ratchet on legacy "ERROR:"-prefixed returns
+venv/Scripts/python scripts/check_history_privacy.py --json # no new sensitive Git-history debt
+venv/Scripts/python scripts/check_doc_links.py              # relative links in README/wiki/runbooks resolve
+```
+
+Each is silent and exits `0` on success; a nonzero exit lists exactly what it
+found. `check_architecture.py` is the one most contributors hit first — it
+rejects, for example, a new `sqlite3.connect` or `subprocess` call outside
+`sonder_runtime/adapters/`, or a domain module importing anything outside
+`sonder_runtime/domain/` plus the standard library.
 
 ## What tends to get merged
 

@@ -20,6 +20,7 @@ proxy for remote access) unless it says otherwise.
 - [fault-injection-testing.md](fault-injection-testing.md) — deterministic offline reliability fixtures and contracts
 - [autopilot-interruption.md](autopilot-interruption.md)
 - [fleet-retry-recovery.md](fleet-retry-recovery.md) — replaying interrupted masters, transient worker retries
+- [selfmod-continuous-loop.md](selfmod-continuous-loop.md) — unattended nightly self-improvement loop
 - [merged-branch-cleanup.md](merged-branch-cleanup.md) — dry-run-first merged worktree cleanup
 - [disk-exhaustion.md](disk-exhaustion.md)
 - [training-failure.md](training-failure.md)

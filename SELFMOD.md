@@ -170,6 +170,84 @@ rewrites Git history. A clean Git checkout receives a separate descriptive
 selfmod commit. A checkout that was already dirty is deployed without making a
 commit so unrelated staged/unstaged user work is untouched.
 
+## Continuous unattended loop
+
+The commands above are the interactive lifecycle, driven one run at a time by
+a human or the hosted chat API. `scripts/selfmod_forever.py` drives that same
+`selfmod` lifecycle unattended, for a bounded number of hours, and is what a
+nightly/background job should call.
+
+It is deliberately more conservative than the interactive lifecycle: every
+pass proposes one change, isolates it in a **Git worktree**, runs Ruff (if
+installed) and the **whole** test suite there, and on a green result commits
+the result to its own `selfmod/<run-id>` branch instead of deploying it. The
+main working tree is never written and no commit lands on the branch you have
+checked out, so a live session keeps its checkout and its uncommitted work
+exactly as it was. Review or discard a result like any other branch:
+
+```bash
+git log --oneline --all --grep='^selfmod:'
+git log -p selfmod/<run-id>
+git branch -D selfmod/<run-id>   # discard a candidate you don't want
+```
+
+It refuses to start a pass at all when:
+
+- the repository working tree is dirty (a run started here could never be
+  committed, so starting one would only mutate source with nothing to
+  review — the loop reports `working tree dirty` and stops);
+- `selfmod` is disabled, or its mode is `observe` (proposals only, no
+  candidate);
+- the model proposes nothing new — objectives that repeat a recent run
+  (by fuzzy match, not exact text) or that only touch docstrings, comments,
+  or formatting are rejected before a candidate workspace is even created.
+
+Each candidate is also judged on its diff, not its stated objective: a
+comment-only change, a rewritten `return`/`raise`, an added `print()`, or a
+newly strict lookup that used to have a default are all rejected regardless
+of what tests say, because tests alone did not catch these in practice. The
+eligible file list is `nightly_selfmod.CANDIDATE_FILES` — a fixed set of
+smaller, well-tested modules; `server.py` and every protected-policy path
+(`selfmod.protected_paths()`) are permanently excluded from unattended edits.
+
+### Running it
+
+Start it detached so it survives the launching session (a child of an agent
+session gets reaped long before an hours-long loop finishes):
+
+```powershell
+powershell -NoProfile -File scripts\start-selfmod.ps1 -Hours 4
+powershell -NoProfile -File scripts\start-selfmod.ps1 -Hours 4 -MaxBarren 0
+powershell -NoProfile -File scripts\start-selfmod.ps1 -Status
+powershell -NoProfile -File scripts\start-selfmod.ps1 -Stop
+```
+
+`start-selfmod.ps1` refuses to start a second instance and refuses to start on
+a dirty tree, checked before launch rather than left for the child process to
+discover. Flags and defaults:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-Hours` | `4.0` | Wall-clock budget; checked before each pass, never mid-pass. |
+| `-Model` | `qwen2.5-coder:14b` | Installed Ollama tag passed as an explicit catalog selector, not a tier override. |
+| `-MaxBarren` | `6` | Stop early after this many consecutive non-committing passes (`0` disables the limit). |
+| `-NumCtx` | `16384` | Local generation context window for selfmod prompts. |
+| `-Python` | *(auto)* | Interpreter to launch with; falls back to `$env:SONDER_PYTHON`, then `venv\Scripts\python.exe`, then `python` on `PATH`. |
+
+Output goes to `%LOCALAPPDATA%\sonder\selfmod-continuous.log` (and `.err`
+for stderr) rather than a pipe, since a pipe dies with its reader once the
+launching session exits. Calling `scripts/selfmod_forever.py` directly
+(for a non-Windows host, or from an already-detached process) takes the same
+budget as `--hours`/`--model`/`--max-barren`/`--num-ctx`/`--test-timeout`
+long-form flags.
+
+At the start of every run the loop reclaims orphaned runs: a pass that was
+killed mid-flight (the common failure mode before this existed) leaves an
+`editing`/`testing` run with no owner and an ~100 MB worktree that no other
+cleanup path reclaims. Anything in that state with no owner predates the
+current loop and is cancelled and discarded, since only one loop runs at a
+time.
+
 ## Emergency recovery
 
 If Sonder Runtime cannot import or start, use the standalone stdlib-only
