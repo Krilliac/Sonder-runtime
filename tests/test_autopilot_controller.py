@@ -520,3 +520,61 @@ def test_snapshot_never_drops_account_owner_for_stale_adapter(monkeypatch):
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'request_owner'"):
         autopilot_controller.snapshot(request_owner="account-a")
+
+
+def test_cancel_racing_the_task_start_persist_prevents_the_model_call(monkeypatch):
+    """A cancel that wins the task-start write must suppress the work call."""
+    run = autopilot_store.create_run("Inspect and validate")
+    calls = []
+    original_get_run = autopilot_store.get_run
+    state = {"armed": False}
+
+    def cancel_after_flag_check(selector="", request_owner=None):
+        # The loop re-reads the run between its flag checkpoint and the
+        # task-start persist; injecting the cancel here lands it exactly in
+        # that race window.
+        if not state["armed"]:
+            state["armed"] = True
+            autopilot_store.request_cancel(run["id"])
+        return original_get_run(selector, request_owner)
+
+    monkeypatch.setattr(autopilot_store, "get_run", cancel_after_flag_check)
+
+    result = autopilot_controller.execute_run(
+        run["id"], "owner", owner_pid=os.getpid(),
+        plan_fn=lambda _run: _plan(),
+        work_fn=lambda _run, task, _prior: calls.append(task["id"]) or _task_evidence(task),
+        review_fn=_complete,
+        max_cycles=2,
+    )
+
+    assert calls == [], "cancel arriving before task start must suppress the model call"
+    assert result["status"] == "cancelled"
+
+
+def test_ownership_theft_at_task_start_raises_instead_of_calling_model(monkeypatch):
+    run = autopilot_store.create_run("Inspect and validate")
+    calls = []
+    original_get_run = autopilot_store.get_run
+    state = {"armed": False}
+
+    def interrupt_after_flag_check(selector="", request_owner=None):
+        if not state["armed"]:
+            state["armed"] = True
+            import time as _time
+            autopilot_store.reconcile_stale_runs(now=_time.time() + 7200)
+        return original_get_run(selector, request_owner)
+
+    monkeypatch.setattr(autopilot_store, "get_run", interrupt_after_flag_check)
+
+    with pytest.raises(autopilot_controller.AutopilotError):
+        autopilot_controller.execute_run(
+            run["id"], "owner", owner_pid=os.getpid(),
+            plan_fn=lambda _run: _plan(),
+            work_fn=lambda _run, task, _prior: calls.append(task["id"]) or _task_evidence(task),
+            review_fn=_complete,
+            max_cycles=2,
+        )
+
+    assert calls == [], "lost ownership must suppress the model call"
+    assert original_get_run(run["id"])["status"] == "interrupted"
