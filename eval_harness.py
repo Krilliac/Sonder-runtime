@@ -213,6 +213,39 @@ def load_suite(path):
     return suite
 
 
+def select_scenarios(suite, only=None, start=0, count=None):
+    """Return a (possibly) narrowed copy of `suite` for chunked or focused runs.
+
+    Follows eval_retrieval's [start] [count] chunk-resume convention so live
+    runs fit bounded foreground slices. A narrowed suite recomputes its
+    suite_hash over the subset and records the selection: a partial run can
+    therefore never satisfy a full-suite baseline pin or blend into the full
+    suite's history identity — it is honestly a different (smaller) suite.
+    """
+    scenarios = suite["scenarios"]
+    if only:
+        wanted = set(only)
+        unknown = wanted - {scenario["id"] for scenario in scenarios}
+        if unknown:
+            raise HarnessError("unknown scenario id(s): %s"
+                               % ", ".join(sorted(unknown)))
+        scenarios = [s for s in scenarios if s["id"] in wanted]
+    if type(start) is not int or start < 0:
+        raise HarnessError("start must be a non-negative int")
+    if count is not None and (type(count) is not int or count < 1):
+        raise HarnessError("count must be a positive int")
+    scenarios = scenarios[start:start + count if count is not None else None]
+    if not scenarios:
+        raise HarnessError("selection matches zero scenarios")
+    if len(scenarios) == len(suite["scenarios"]):
+        return suite
+    narrowed = dict(suite, scenarios=scenarios,
+                    selection={"only": sorted(only) if only else None,
+                               "start": start, "count": count})
+    narrowed["suite_hash"] = suite_hash(narrowed)
+    return narrowed
+
+
 def suite_hash(suite):
     """Canonical digest over everything that defines what the suite measures."""
     return _digest_of({
@@ -640,6 +673,7 @@ def run_suite(suite, provider, out_dir=None, ts=None, case_timeout=None,
         "suite": suite["suite"],
         "suite_version": suite["version"],
         "suite_hash": suite["suite_hash"],
+        "selection": suite.get("selection"),
         "provider": {
             "name": provider.name,
             "kind": provider.kind,
@@ -978,6 +1012,8 @@ def _cmd_list(args):
 
 def _cmd_run(args):
     suite = resolve_suite(args.suite, args.scenario_dir)
+    suite = select_scenarios(suite, only=args.only, start=args.start,
+                             count=args.count)
     ts = time.time()
     out_dir = args.out or os.path.join(
         DEFAULT_OUT_DIR, "%s-%d" % (suite["suite"], int(ts)))
@@ -1101,6 +1137,12 @@ def main(argv=None):
     run_parser.add_argument("--provider", action="append",
                             help="repeatable: replay | ollama:<model>")
     run_parser.add_argument("--cassette", default=None)
+    run_parser.add_argument("--only", action="append", metavar="SCENARIO_ID",
+                            help="repeatable: run only these scenarios")
+    run_parser.add_argument("--start", type=int, default=0,
+                            help="chunk-resume offset (eval_retrieval style)")
+    run_parser.add_argument("--count", type=int, default=None,
+                            help="chunk size from --start")
     run_parser.add_argument("--out", default=None)
     run_parser.add_argument("--live", action="store_true",
                             help="allow providers that contact the local "

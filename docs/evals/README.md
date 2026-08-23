@@ -22,6 +22,12 @@ python eval_harness.py verify-replay --suite smoke_python
 python eval_harness.py run --suite smoke_python \
     --provider replay --provider ollama:qwen2.5-coder:7b --live
 
+# focus or chunk-resume (eval_retrieval style) — the narrowed run recomputes
+# its suite_hash, so a partial run can never satisfy a full-suite baseline
+# pin or blend into the full suite's history identity
+python eval_harness.py run --suite smoke_python --only slugify
+python eval_harness.py run --suite smoke_python --start 2 --count 2
+
 # record a fresh cassette from a live model (explicit, never automatic)
 python eval_harness.py record --suite smoke_python \
     --model qwen2.5-coder:7b --live

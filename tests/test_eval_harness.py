@@ -124,6 +124,46 @@ def test_discover_suites_skips_baseline_and_rejects_duplicates(tmp_path):
         eh.discover_suites(str(tmp_path))
 
 
+# --- chunked / focused selection ---------------------------------------------
+
+def _multi_suite(tmp_path):
+    return eh.load_suite(_suite_file(tmp_path, scenarios=[
+        {"id": name, "prompt": "p " + name, "check": "assert True"}
+        for name in ("a", "b", "c", "d")]))
+
+
+def test_select_scenarios_full_selection_is_identity(tmp_path):
+    suite = _multi_suite(tmp_path)
+    assert eh.select_scenarios(suite) is suite
+    assert eh.select_scenarios(suite, start=0, count=4) is suite
+
+
+def test_select_scenarios_chunk_recomputes_hash(tmp_path):
+    suite = _multi_suite(tmp_path)
+    chunk = eh.select_scenarios(suite, start=1, count=2)
+    assert [s["id"] for s in chunk["scenarios"]] == ["b", "c"]
+    assert chunk["suite_hash"] != suite["suite_hash"]
+    assert chunk["selection"] == {"only": None, "start": 1, "count": 2}
+
+
+def test_select_scenarios_only_filter(tmp_path):
+    suite = _multi_suite(tmp_path)
+    narrowed = eh.select_scenarios(suite, only=["d", "a"])
+    assert [s["id"] for s in narrowed["scenarios"]] == ["a", "d"]
+    assert narrowed["selection"]["only"] == ["a", "d"]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"only": ["nope"]},
+    {"start": -1},
+    {"count": 0},
+    {"start": 99},
+])
+def test_select_scenarios_rejects_bad_selection(tmp_path, kwargs):
+    with pytest.raises(eh.HarnessError):
+        eh.select_scenarios(_multi_suite(tmp_path), **kwargs)
+
+
 # --- replay provider ---------------------------------------------------------
 
 def _cassette(entries):
