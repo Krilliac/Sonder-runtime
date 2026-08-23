@@ -18424,10 +18424,16 @@ def _agent_dispatch_observed(
     dispatched = False
     args = _project_scope_args(tool_name, args, project)
     dispatch_args = args
-    if project and tool_name in {"archive_create", "sqlite_mutate"}:
+    if project and not read_only and tool_name in (
+        _PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS
+    ):
         # Project scope is selected by the host. Grant only that exact root
         # through the unforgeable in-process approval sentinel, while keeping
         # credentials out of the activity record and model-visible arguments.
+        # This applies to ordinary workbench reads too: without the sentinel,
+        # a project-bound (mutable) agent rebased README.md into the selected
+        # repository but file_ops still rejected the same repository because
+        # extra_roots are honored only after trusted host authorization.
         dispatch_args = dict(args)
         dispatch_args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
     try:
