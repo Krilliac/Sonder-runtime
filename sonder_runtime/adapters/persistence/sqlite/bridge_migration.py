@@ -184,6 +184,16 @@ def _stamp_epoch(conn: sqlite3.Connection, version: str) -> None:
             source_version  TEXT NOT NULL
         )
     """)
+    # A retried or resumed bridge migration re-visits databases a prior
+    # attempt already stamped (see run_bridge_migration's checkpoint
+    # boundaries). Without this guard every retry appends another epoch
+    # row, so the ledger no longer records a single adoption event and
+    # grows without bound across restarts.
+    already_stamped = conn.execute(
+        "SELECT 1 FROM schema_epoch WHERE epoch = ? LIMIT 1", (EPOCH,)
+    ).fetchone()
+    if already_stamped:
+        return
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT INTO schema_epoch (epoch, completed_at, source_version) "

@@ -59,6 +59,16 @@ def _create_legacy_memory_db(sonder_home: Path) -> None:
     conn.close()
 
 
+def _epoch_row_count(db_path: Path) -> int:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return conn.execute(
+            "SELECT count(*) FROM schema_epoch WHERE epoch = ?", (EPOCH,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
 class TestEpochCheck:
     def test_no_db_returns_none(self, sonder_home):
         assert check_epoch(sonder_home / "nonexistent.db") is None
@@ -199,6 +209,20 @@ class TestBridgeMigration:
         # Running again should not fail or duplicate
         receipt2 = run_bridge_migration(sonder_home, version="spec5-bridge-retry")
         assert receipt2.epoch == EPOCH
+        for name in ["memory.db", "automation.db", "operations.db",
+                      "selfmod.db", "training.db"]:
+            assert _epoch_row_count(sonder_home / name) == 1, (
+                f"{name} recorded more than one epoch-{EPOCH} ledger row after retry"
+            )
+
+    def test_repeated_retries_do_not_grow_the_epoch_ledger(self, sonder_home):
+        _create_legacy_memory_db(sonder_home)
+        run_bridge_migration(sonder_home)
+        for attempt in range(3):
+            run_bridge_migration(sonder_home, version=f"spec5-bridge-retry-{attempt}")
+        for name in ["memory.db", "automation.db", "operations.db",
+                      "selfmod.db", "training.db"]:
+            assert _epoch_row_count(sonder_home / name) == 1
 
 
 class TestCrashRecovery:
@@ -220,3 +244,57 @@ class TestCrashRecovery:
         count = conn.execute("SELECT count(*) FROM interactions").fetchone()[0]
         assert count == 1
         conn.close()
+
+    def test_resume_after_crash_reaches_epoch_2_without_duplicating_ledger(
+        self, sonder_home
+    ):
+        """Replay: a process killed mid-migration must resume cleanly.
+
+        The first attempt is stopped right after task/data adoption --
+        memory.db is already stamped at epoch 2 by that point, while
+        automation.db/operations.db/selfmod.db/training.db are not.
+        Restarting the migration (as an operator retrying a failed
+        ``sonder migrate --adopt-epoch2`` would) must finish adopting the
+        remaining databases and must not append a second ledger row to the
+        ones the first attempt already stamped.
+        """
+        _create_legacy_memory_db(sonder_home)
+
+        class InjectedCrash(RuntimeError):
+            pass
+
+        def crash_after_data_adoption(boundary: str) -> None:
+            if boundary == "after_data_adoption":
+                raise InjectedCrash(boundary)
+
+        with pytest.raises(InjectedCrash):
+            run_bridge_migration(
+                sonder_home, version="crashed", step_hook=crash_after_data_adoption
+            )
+
+        assert check_epoch(sonder_home / "memory.db") == EPOCH
+        assert check_epoch(sonder_home / "automation.db") != EPOCH
+
+        receipt = run_bridge_migration(sonder_home, version="resumed")
+
+        assert receipt.epoch == EPOCH
+        # The crashed attempt already committed the task migration into
+        # automation.db before the injected crash (only the epoch stamp was
+        # left pending), so the resumed run's own _migrate_tasks call is a
+        # no-op via its IntegrityError handling -- the tasks are still there.
+        assert receipt.tasks_migrated == 0
+        automation = sqlite3.connect(str(sonder_home / "automation.db"))
+        try:
+            run_count = automation.execute(
+                "SELECT count(*) FROM automation_runs"
+            ).fetchone()[0]
+        finally:
+            automation.close()
+        assert run_count == 2
+        for name in ["memory.db", "automation.db", "operations.db",
+                      "selfmod.db", "training.db"]:
+            assert check_epoch(sonder_home / name) == EPOCH
+            assert _epoch_row_count(sonder_home / name) == 1, (
+                f"{name} should carry exactly one epoch-{EPOCH} ledger row "
+                "after a crash and resume"
+            )
