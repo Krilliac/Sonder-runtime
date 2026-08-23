@@ -7,8 +7,14 @@ on:
   workflow_dispatch:
 
 jobs:
+  # "tests" is a required branch-protection status check (see repo settings)
+  # -- keep this job's id and name exactly "tests". Splitting it into a matrix
+  # or renaming it changes the reported context and silently strands PRs that
+  # can never satisfy the required check. Same constraint build-apps.yml
+  # documents for its own job names.
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -17,6 +23,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-runtime.txt
       - name: Install deps (stdlib core + mcp for server import)
         run: python -m pip install -r requirements-dev.txt
       - name: Verify MCP compatibility API
@@ -32,4 +42,18 @@ jobs:
       - name: Prevent new Git-history privacy debt
         run: python scripts/check_history_privacy.py --json
       - name: Run test suite
-        run: python -m pytest -q -n 2 --dist load --durations=20
+        # network/model-marked tests are skipped unless --run-network /
+        # --run-model is passed (see conftest.py); CI intentionally does not
+        # opt in, since those require a live Ollama/hosted model or network
+        # access this runner doesn't have.
+        run: >-
+          python -m pytest -q -n auto --dist load --durations=25
+          --junitxml=pytest-report.xml
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pytest-report
+          path: pytest-report.xml
+          if-no-files-found: error
+          retention-days: 14
