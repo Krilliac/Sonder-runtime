@@ -294,6 +294,34 @@ def test_remote_ollama_requires_https_even_with_consent():
     assert any("must use https" in error for error in excinfo.value.errors)
 
 
+def test_remote_ollama_workers_require_consent_and_parse_lists():
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env={"SONDER_OLLAMA_WORKERS": "192.168.1.20:11434"})
+    assert any("workers remote entries require" in e for e in excinfo.value.errors)
+    config = load_config(
+        env={
+            "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+            "SONDER_OLLAMA_WORKERS": (
+                "https://192.168.1.20:11434;https://192.168.1.21:11434"
+            ),
+        }
+    )
+    assert config.ollama.workers == (
+        "https://192.168.1.20:11434", "https://192.168.1.21:11434",
+    )
+
+
+def test_remote_ollama_workers_require_https_with_consent():
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            env={
+                "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+                "SONDER_OLLAMA_WORKERS": "http://192.168.1.20:11434",
+            }
+        )
+    assert any("workers remote entries must use https" in e for e in excinfo.value.errors)
+
+
 def test_redacted_dump_never_contains_secret_values():
     secret = "extremely-secret-api-key-value-123"
     config = load_config(env={"SONDER_API_KEY": secret,

@@ -256,7 +256,7 @@ from sonder_runtime.adapters.model_error_formatting import (
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature,
 )
-from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
@@ -311,6 +311,7 @@ RUNNING_SOURCE_COMMIT = _running_source_commit_at_import()
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
+OLLAMA_POOL = ollama_pool.from_environment(BASE)
 # Bind-all Ollama server addresses are canonicalized to a numeric loopback
 # destination for this client without mutating the server process environment.
 # How long a model stays in VRAM after its last call. Short = frees GPU quickly.
@@ -3844,7 +3845,12 @@ def _post_model(
             cloud=True,
         )
     _require_ollama_endpoint(cloud=cloud)
-    remote_endpoint = not ollama_endpoint.is_loopback(BASE)
+    # A pool is treated as a remote route for retry policy even when its
+    # primary endpoint is loopback. The pool itself may fail over only before
+    # a response, so a completed request is never duplicated on another PC.
+    remote_endpoint = (
+        not ollama_endpoint.is_loopback(BASE) or OLLAMA_POOL.enabled
+    )
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
     max_attempts = (
@@ -4208,18 +4214,23 @@ def _format_model_call_error(error: ModelCallError) -> str:
 def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{BASE}{path}", data=data, headers={"Content-Type": "application/json"}
-    )
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
-    with ollama_endpoint.open_url(req, timeout=request_timeout) as resp:
-        raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-        if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-            raise ModelCallError(
-                "protocol",
-                "Ollama response exceeded the 16 MiB safety limit",
-            )
-        return json.loads(raw.decode("utf-8"))
+
+    def send(origin):
+        req = urllib.request.Request(
+            f"{origin}{path}", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with ollama_endpoint.open_url(req, timeout=request_timeout) as resp:
+            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+                raise ModelCallError(
+                    "protocol",
+                    "Ollama response exceeded the 16 MiB safety limit",
+                )
+            return json.loads(raw.decode("utf-8"))
+
+    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
 
 
 _PREWARM_LOCK = threading.Lock()
@@ -4284,15 +4295,19 @@ def _get(path: str) -> dict:
     selection or prewarm has a chance to fail safely.
     """
     _require_ollama_endpoint()
-    req = urllib.request.Request(f"{BASE}{path}")
-    with ollama_endpoint.open_url(req, timeout=15) as resp:
-        raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-        if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-            raise ModelCallError(
-                "protocol",
-                "Ollama response exceeded the 16 MiB safety limit",
-            )
-        return json.loads(raw.decode("utf-8"))
+
+    def send(origin):
+        req = urllib.request.Request(f"{origin}{path}")
+        with ollama_endpoint.open_url(req, timeout=15) as resp:
+            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+                raise ModelCallError(
+                    "protocol",
+                    "Ollama response exceeded the 16 MiB safety limit",
+                )
+            return json.loads(raw.decode("utf-8"))
+
+    return OLLAMA_POOL.request(send) if OLLAMA_POOL.enabled else send(BASE)
 
 
 def _parse_schema_arg(schema):
@@ -22305,6 +22320,10 @@ def status() -> str:
     lines = [
         "Unsafe lab mode: %s" % unsafe_lab.status_line(),
         f"Ollama @ {_ollama_display()} ({ollama_endpoint.locality(BASE)})",
+        "Ollama workers: %d configured (%d remote; least-inflight with transport failover)" % (
+            len(OLLAMA_POOL.origins),
+            sum(1 for origin in OLLAMA_POOL.origins if not ollama_endpoint.is_loopback(origin)),
+        ),
         "Tiers:",
         *tier_lines,
         f"Learning tiers: {', '.join(sorted(LEARN_TIERS)) if LEARN_TIERS else '(none)'}",
