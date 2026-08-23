@@ -24286,6 +24286,7 @@ def ensemble_answer(
     mode: str = "prose",
     project: str = "",
     require_all_tiers: bool = False,
+    num_ctx: int = 0,
 ) -> str:
     """Ask several local models the same question, then compound one answer.
 
@@ -24316,6 +24317,9 @@ def ensemble_answer(
         require_all_tiers: refuse rather than degrade to a single answer when
             an explicitly named multi-tier ensemble cannot supply two distinct
             available models. Natural code-and-reasoning routing enables this.
+        num_ctx: local context window for each generation. Zero preserves the
+            historical 4096-token poll window; a positive value lets bounded
+            local workers provide enough room for large source files.
     """
     def render_model_error(error):
         return _format_runtime_model_call_error_policy(
@@ -24346,11 +24350,19 @@ def ensemble_answer(
             ),
         ))
 
+    try:
+        requested_ctx = int(num_ctx)
+    except (TypeError, ValueError):
+        requested_ctx = 0
+    poll_num_ctx = max(1024, requested_ctx) if requested_ctx > 0 else 4096
+
     answers, failures = [], []
     for tier, model in targets:
         started = time.monotonic()
         try:
-            gen = _make_generate(model, "", 0.2, max(64, int(num_predict)), 4096)
+            gen = _make_generate(
+                model, "", 0.2, max(64, int(num_predict)), poll_num_ctx,
+            )
             text = (gen(question) or "").strip()
         except ModelCallError as error:
             if error.kind == "cancelled":
@@ -24419,7 +24431,10 @@ def ensemble_answer(
         _ensemble_code_synthesis_prompt if code_mode else _ensemble_synthesis_prompt
     )
     try:
-        gen = _make_generate(synth_model, "", 0.2, max(256, int(num_predict)), 8192)
+        gen = _make_generate(
+            synth_model, "", 0.2, max(256, int(num_predict)),
+            max(8192, poll_num_ctx),
+        )
         merged = (gen(build_prompt(question, answers)) or "").strip()
     except Exception as exc:
         # Synthesis is the only step that can fail after real work is done, so

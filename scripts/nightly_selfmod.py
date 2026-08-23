@@ -131,7 +131,7 @@ def _test_python() -> str:
     return sys.executable
 
 
-def _ask(server, prompt, num_predict=1200, model=""):
+def _ask(server, prompt, num_predict=1200, model="", num_ctx=0):
     # An explicit model is a catalog selector, not a temporary tier mutation.
     # The server refreshes its persisted runtime policy at every request, so
     # changing ``server.TIERS['code']`` in a caller is overwritten before the
@@ -139,8 +139,14 @@ def _ask(server, prompt, num_predict=1200, model=""):
     # normal ensemble surface keeps this worker isolated from the live REPL's
     # policy and makes --model effective.
     selected = str(model or "").strip()
-    reply = server.ensemble_answer(
-        prompt, tiers=selected or "code", num_predict=num_predict, mode="code")
+    kwargs = {
+        "tiers": selected or "code",
+        "num_predict": num_predict,
+        "mode": "code",
+    }
+    if int(num_ctx or 0) > 0:
+        kwargs["num_ctx"] = int(num_ctx)
+    reply = server.ensemble_answer(prompt, **kwargs)
     text = (reply or "").strip()
     # ensemble_answer reports failure by RETURNING prose rather than raising.
     # Splicing that into a source file is how a dead backend becomes a code
@@ -454,7 +460,7 @@ def _discard_workspace(run_id) -> None:
         pass
 
 
-def propose_objective(server, log, model="") -> tuple[str, str] | None:
+def propose_objective(server, log, model="", num_ctx=0) -> tuple[str, str] | None:
     """Ask the local model for ONE small, concrete improvement.
 
     Grounded in a real file's real contents, never from memory: asked to
@@ -485,7 +491,7 @@ def propose_objective(server, log, model="") -> tuple[str, str] | None:
             "WHY: <one sentence naming the concrete wrong behaviour>\n\n"
             "If the module has no such defect, reply exactly: NONE\n\n"
             "=== %s ===\n%s" % (name, source[:60_000])
-        ), num_predict=300, model=model)
+        ), num_predict=300, model=model, num_ctx=num_ctx)
         if answer.strip().upper().startswith("NONE"):
             log("  %s: model reports no defect" % name)
             continue
@@ -503,7 +509,7 @@ def propose_objective(server, log, model="") -> tuple[str, str] | None:
     return None
 
 
-def run(server, log, *, test_timeout=1800, branch=True, model=""):
+def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0):
     """Drive one selfmod lifecycle.
 
     branch=True commits a verified candidate to its own selfmod/<run-id>
@@ -529,7 +535,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model=""):
         return ("working tree dirty (%d path(s)); a run started here could not "
                 "be committed, so none was started" % len(status.splitlines()))
 
-    proposed = propose_objective(server, log, model=model)
+    proposed = propose_objective(server, log, model=model, num_ctx=num_ctx)
     if not proposed:
         return "no objective proposed"
     target, objective = proposed
@@ -574,7 +580,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model=""):
         "- Keep its name, signature and indentation exactly as they are.\n"
         "- Add a brief comment where you changed something, saying WHY.\n\n"
         "=== %s ===\n%s" % (objective, target, original)
-    ), num_predict=2000, model=model)
+    ), num_predict=2000, model=model, num_ctx=num_ctx)
 
     # Splice one function back rather than accepting a whole-file rewrite.
     #
