@@ -525,11 +525,13 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # adapter before lazy legacy providers are composed.  Keep exporting the
     # variable for compatibility subcommands, but do not recreate the mutable
     # environment bridge on the canonical path.
-    # Ollama is still constructed by the legacy server boundary after the
-    # typed serve configuration is bound.  These two compatibility variables
-    # therefore must cross the canonical serve path as well; otherwise TOML
-    # workers are validated and then silently discarded before server import.
-    os.environ["OLLAMA_HOST"] = config.ollama.url
+    # The worker list and consent flag must cross the canonical serve path so
+    # TOML workers are not silently discarded before the lazy pool is built.
+    # OLLAMA_HOST remains a legacy compatibility override and is exported only
+    # for compatibility subcommands; canonical typed serve uses its bound
+    # endpoint directly.
+    if include_typed_runtime:
+        os.environ["OLLAMA_HOST"] = config.ollama.url
     os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
     os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
         "1" if config.ollama.allow_remote else "0"
