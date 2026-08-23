@@ -4215,13 +4215,17 @@ def _post(path: str, payload: dict, timeout: int | None = None) -> dict:
     _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
+    deadline = time.monotonic() + request_timeout
 
     def send(origin):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Ollama worker pool request timeout expired")
         req = urllib.request.Request(
             f"{origin}{path}", data=data,
             headers={"Content-Type": "application/json"},
         )
-        with ollama_endpoint.open_url(req, timeout=request_timeout) as resp:
+        with ollama_endpoint.open_url(req, timeout=remaining) as resp:
             raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
             if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
                 raise ModelCallError(
