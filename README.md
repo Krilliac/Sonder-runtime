@@ -207,6 +207,10 @@ python -m venv venv
 .\venv\Scripts\python.exe -m sonder_runtime repl
 ```
 
+`packaging\install_workstation_local.ps1` automates the venv/install/preflight
+steps above in one idempotent command; see
+[install-workstation-local](docs/runbooks/install-workstation-local.md).
+
 For a Linux loopback service install that provisions Ollama, its local model,
 and systemd in one step, run `bash deploy_sonder.sh --serve` as root from a
 source checkout. Use the production installer and TLS runbook for non-loopback
