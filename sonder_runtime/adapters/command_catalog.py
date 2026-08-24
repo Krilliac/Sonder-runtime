@@ -221,6 +221,7 @@ _CATEGORY_BY_TOOL = {
     "environment_status": "system",
     "toolchain_status": "system",
     "npu_status": "system",
+    "cloud_opt_in": "security",
     "system_profile_text": "persona",
     "update_system_profile": "persona",
     "system_improvement_report": "system",
@@ -336,7 +337,7 @@ _DANGEROUS = frozenset({
     # must not flow unprompted in acceptEdits/auto. Elevation is the same
     # shape of decision -- it widens what every later privileged call is
     # allowed to do -- so it gets the same treatment.
-    "runtime_policy_update", "permission_rule_set", "elevate",
+    "runtime_policy_update", "permission_rule_set", "elevate", "cloud_opt_in",
     # Fast-forwarding the source tree changes the bytes enforcing every later
     # request.  The paired status tool is separately marked read-only below.
     "runtime_source_update",

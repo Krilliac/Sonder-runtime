@@ -413,6 +413,36 @@ def available_tiers(include_disabled=False):
     return {k: v for k, v in TIERS.items() if k not in CLOUD_TIERS}
 
 
+def _cloud_opt_in_impl(action: str = "status") -> str:
+    """Show or change hosted/cloud consent for this running Sonder process.
+
+    ``on`` is explicit consent for later ``cloud-*`` calls to send their prompts
+    off this machine and incur provider usage. ``off`` revokes that consent
+    immediately. The change is process-local and intentionally does not persist
+    across a Sonder restart; use host configuration for durable consent.
+    """
+    normalized = str(action or "status").strip().lower()
+    if normalized in ("status", "show", ""):
+        state = _cloud_allowed_policy(os.environ)
+    elif normalized in ("on", "enable", "enabled", "1", "true", "yes"):
+        os.environ["SONDER_ALLOW_CLOUD"] = "1"
+        _refresh_live_cloud_tiers()
+        state = True
+    elif normalized in ("off", "disable", "disabled", "0", "false", "no"):
+        os.environ["SONDER_ALLOW_CLOUD"] = "0"
+        _refresh_live_cloud_tiers()
+        state = False
+    else:
+        return "usage: cloud_opt_in action=status|on|off"
+
+    if state:
+        return (
+            "hosted/cloud tiers: ENABLED for this running process; prompts sent "
+            "to cloud-* tiers leave this machine and may incur provider usage"
+        )
+    return "hosted/cloud tiers: disabled for this running process (local-only default)"
+
+
 def _valid_tier_names():
     return _valid_tier_names_policy(available_tiers())
 
@@ -4791,6 +4821,17 @@ def _offload_impl(
             raise
         response = _with_schema_coverage(response, gaps)
     return with_footer(response, iid)
+
+
+@mcp.tool()
+def cloud_opt_in(action: str = "status") -> str:
+    """Show, enable, or revoke process-local hosted/cloud model consent.
+
+    Enabling is explicit consent for later ``cloud-*`` prompts to leave this
+    machine and potentially incur provider usage. The setting resets on restart.
+    """
+    _maybe_live_reload()
+    return _cloud_opt_in_impl(action)
 
 
 @mcp.tool()
@@ -15242,6 +15283,7 @@ def tool_manifest() -> str:
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
         "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
+        "cloud_opt_in": "Show, explicitly enable, or immediately revoke process-local hosted/cloud consent; enabling allows later cloud-* prompts to leave the machine and does not persist across restart.",
         "runtime_source_update_status/runtime_source_update": "Check the installed Git commit and canonical origin/main update time, or safely fast-forward only a clean canonical Sonder source checkout. Updates never merge/rebase/overwrite local work and require restart.",
         "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
