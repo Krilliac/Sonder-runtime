@@ -69,6 +69,26 @@ def test_native_clear_command_uses_terminal_clear_without_a_model_turn(monkeypat
     assert calls == ["clear"]
 
 
+def test_cloud_command_changes_runtime_consent_without_a_model_turn(monkeypatch, capsys):
+    lines = iter(("/cloud on", "/cloud off", "/exit"))
+    calls = []
+    monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
+    monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
+    monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(
+        sonder_repl.server,
+        "cloud_opt_in",
+        lambda action="status": calls.append(action) or ("cloud " + action),
+    )
+    monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_a, **_k: pytest.fail("chat should not run"))
+
+    sonder_repl.main()
+
+    assert calls == ["on", "off"]
+    assert "cloud on" in capsys.readouterr().out
+
+
 def test_refactor_apply_prompt_never_reads_piped_stdin(monkeypatch):
     lines = iter(("/refactor sample.py improve", "/exit"))
     writes = []
