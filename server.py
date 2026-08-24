@@ -713,6 +713,17 @@ def _think_option_unsupported(detail) -> bool:
     return bool(_THINK_OPTION_UNSUPPORTED_RE.search(str(detail or "")))
 
 
+def _cloud_can_disable_thinking(model) -> bool:
+    """Whether the hosted model is known to accept ``think=false``.
+
+    Keep this allow-list deliberately narrow. Some hosted reasoners require
+    their thinking mode, while GLM 5.2 and Kimi K2.7 Code have both been
+    observed accepting an explicit false value through Ollama's cloud API.
+    """
+    name = str(model or "").strip().casefold()
+    return name.startswith(("glm-5.2:", "kimi-k2.7-code:"))
+
+
 def _with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT):
     """Return ``payload`` with room for a local model's thinking plus its answer.
 
@@ -4208,9 +4219,35 @@ def _chat_request(
             native_decision = _native_tool_call_decision(message)
             if native_decision is not None:
                 return out, native_decision
-        if not cloud and not _budget_retried and _thinking_exhausted_budget(
+        exhausted_thinking = _thinking_exhausted_budget(
             out, message, inline_thinking=inline_thinking,
+        )
+        if (
+            cloud
+            and not _budget_retried
+            and exhausted_thinking
+            and payload.get("think") is not False
+            and _cloud_can_disable_thinking(model)
         ):
+            # Hosted reasoning and final content share num_predict. Kimi K2.7
+            # Code has been observed spending the full 4096-token allowance in
+            # message.thinking and returning no assistant content. Preserve the
+            # quality-first initial request, then retry the same idempotent turn
+            # once with thinking disabled so the caller receives an answer.
+            fallback_payload = dict(payload)
+            fallback_payload["think"] = False
+            return _chat_request(
+                fallback_payload,
+                model=model,
+                cloud=True,
+                timeout=timeout,
+                cancel_check=cancel_check,
+                accept_native_tool_calls=accept_native_tool_calls,
+                idempotent=idempotent,
+                local_only=local_only,
+                _budget_retried=True,
+            )
+        if not cloud and not _budget_retried and exhausted_thinking:
             # The model reasoned right up to the cap and never got to an answer.
             # Now that the response has identified it, retry once with the
             # headroom it needed rather than reporting an empty response.
