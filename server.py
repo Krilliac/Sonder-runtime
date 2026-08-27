@@ -24829,7 +24829,19 @@ def consult(
     """
     _maybe_live_reload()
     chosen = [t.strip() for t in tiers.split(",") if t.strip()] or None
-    result = consult_flow.consult(prompt, chosen)
+    # Inject this module's dispatcher and effective gate.  When server.py is
+    # launched as a script, consult.py importing ``server`` would otherwise
+    # create a second module instance whose process-local cloud override is
+    # still unset.  Status would truthfully say cloud is enabled while the
+    # consult leg rejected the same tier as disabled.
+    result = consult_flow.consult(
+        prompt,
+        chosen,
+        ask_fn=lambda question, tier: ensemble_answer(
+            question, tiers=tier, mode="general"
+        ),
+        cloud_ok=cloud_allowed(),
+    )
     return consult_flow.format_result(result)
 
 
