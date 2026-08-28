@@ -675,7 +675,7 @@ def _ensure_cloud_prediction_budget(payload, minimum=4096):
     return _ensure_cloud_prediction_budget_policy(payload, minimum)
 
 
-LOCAL_THINKING_MIN_NUM_PREDICT = 2048
+LOCAL_THINKING_MIN_NUM_PREDICT = 4096
 
 
 def _remember_thinking_model(model):
