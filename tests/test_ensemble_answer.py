@@ -313,6 +313,33 @@ def test_chat_request_retries_once_with_headroom_when_thinking_ate_the_budget(
     assert budgets == [260, server.LOCAL_THINKING_MIN_NUM_PREDICT]
 
 
+def test_ensemble_code_tier_retries_with_full_thinking_headroom(monkeypatch):
+    """Consult's default code leg must retain room after native thinking."""
+    server._THINKING_CAPABILITY_CACHE.clear()
+    budgets = []
+    monkeypatch.setattr(
+        server,
+        "_serve_target",
+        lambda tier, strict: ("qwen3:30b-a3b", False, False, tier),
+    )
+    monkeypatch.setattr(server, "_post", lambda *args, **kwargs: {})
+
+    def fake_post_model(path, payload, **kwargs):
+        budget = payload["options"]["num_predict"]
+        budgets.append(budget)
+        if budget < 4096:
+            return {
+                "message": {"thinking": "long deliberation", "content": ""},
+                "done_reason": "length",
+            }, 1
+        return {"message": {"content": "the real answer"}}, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    response = server.ensemble_answer("q", tiers="code", mode="general")
+    assert "the real answer" in response
+    assert budgets == [700, 4096]
+
+
 def test_cloud_chat_retries_once_without_thinking_when_budget_is_exhausted(
     monkeypatch,
 ):
