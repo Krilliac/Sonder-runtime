@@ -1001,9 +1001,9 @@ git commit -m "docs: configure tier-aware local providers"
 ### Task 7: Prove the Live Prism/Ollama Split After Runtime Installation
 
 **Files:**
-- Read: `C:/Users/Nathan/Documents/Codex/2026-08-30/referenced-chatgpt-conversation-this-is-an/outputs/sonder-model-manifest.json`
-- Read: `C:/Users/Nathan/Documents/Codex/2026-08-30/referenced-chatgpt-conversation-this-is-an/outputs/sonder-runtime-manifest.json`
-- Write evidence: `C:/Users/Nathan/Documents/Codex/2026-08-30/referenced-chatgpt-conversation-this-is-an/outputs/sonder-mixed-provider-smoke.json`
+- Read: `<workspace>/outputs/sonder-model-manifest.json`
+- Read: `<workspace>/outputs/sonder-runtime-manifest.json`
+- Write evidence: `<workspace>/outputs/sonder-mixed-provider-smoke.json`
 
 **Interfaces:**
 - Consumes: verified Prism server executable, verified Bonsai GGUF, live local Ollama, and the implemented provider bindings.
