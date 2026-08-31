@@ -2036,6 +2036,28 @@ def test_memory_search_includes_preferences(monkeypatch, tmp_path):
     assert "User prefers MSVC" in out
 
 
+def test_preference_graph_does_not_capture_a_transient_db_opener(monkeypatch, tmp_path):
+    stale_db = tmp_path / "stale.db"
+    current_db = tmp_path / "current.db"
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+
+    with monkeypatch.context() as transient:
+        transient.setattr(
+            server,
+            "_open_db",
+            lambda: server.memory_store.connect(str(stale_db)),
+        )
+        server._application()
+
+    monkeypatch.setattr(server, "_DB_PATH", str(current_db))
+    server.learn_preference("User prefers MSVC for C++ examples.")
+
+    out = server.memory_search("MSVC")
+
+    assert "preferences (1):" in out
+    assert "User prefers MSVC" in out
+
+
 def test_improvement_report_flags_ungrounded_learning(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
     conn = server._open_db()
