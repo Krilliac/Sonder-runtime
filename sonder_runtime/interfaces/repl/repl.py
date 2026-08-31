@@ -1177,6 +1177,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /model [name|tier] list installed models and tiers; switch either one
+  /cloud [status|on|off]  change process-local hosted/cloud consent
   /consult <question> ask 2 local tiers (+cloud when enabled) and compare answers
   /route <request>   suggest the tier best suited to a request, and why
   /refactor <file> <fn> [goal]  propose a guarded improvement to one function
@@ -2211,6 +2212,8 @@ def main(*, machine_output=False):
                 do_persona(arg)
             elif cmd == "/model":
                 do_model(arg)
+            elif cmd == "/cloud":
+                print(server.cloud_opt_in(arg.strip() or "status"))
             elif cmd == "/consult":
                 do_consult(arg)
             elif cmd == "/route":
