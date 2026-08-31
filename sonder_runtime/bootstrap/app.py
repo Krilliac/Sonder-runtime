@@ -40,6 +40,7 @@ from ..adapters.workflow_repository import WorkflowRepositoryAdapter
 from ..adapters.workflow_loop_runner import LoopRunnerAdapter
 from ..adapters.local_observability import LocalObservabilitySink
 from ..adapters.model_gateway_factory import build_model_gateway
+from ..adapters.provider_bindings import ProviderBindings, provider_bindings_from_env
 from ..adapters.web_provider import LegacyWebProvider
 from ..adapters.inference.ollama_vision import OllamaVisionGateway
 from ..adapters.vision_input import FileVisionInputProvider
@@ -119,6 +120,7 @@ PROFILES = ("workstation-local", "server-private")
 class Application:
     profile: str
     runtime_policy: RuntimePolicyService
+    provider_bindings: ProviderBindings
     model_gateway: ModelGateway
     provider_registry: ScopedProviderRegistry
     provider_overrides: ProviderOverrideService
@@ -328,7 +330,14 @@ def build_application(
         update=update_adapter,
     )
 
+    try:
+        provider_bindings = provider_bindings_from_env()
+    except ValueError as exc:
+        from ..domain.common.errors import InvalidInput
+
+        raise InvalidInput(str(exc)) from exc
     gateway = build_model_gateway(
+        provider_bindings,
         target_resolver=target_resolver,
         generate_factory=generate_factory,
         embedding_provider=embedding_adapter,
@@ -768,6 +777,7 @@ def build_application(
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
+        provider_bindings=provider_bindings,
         model_gateway=gateway,
         provider_registry=provider_registry,
         provider_overrides=ProviderOverrideService(

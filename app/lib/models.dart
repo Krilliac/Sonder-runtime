@@ -1,6 +1,129 @@
 /// Core data model for a single chat turn.
 enum Role { user, assistant, system }
 
+String _boundedMetadataText(Object? value, [int limit = 256]) {
+  final text = value?.toString().trim() ?? '';
+  if (text.length <= limit) return text;
+  return '${text.substring(0, limit)}...';
+}
+
+int _metadataCount(Object? value) {
+  if (value is int) return value < 0 ? 0 : value;
+  final parsed = int.tryParse(value?.toString() ?? '') ?? 0;
+  return parsed < 0 ? 0 : parsed;
+}
+
+/// Privacy-safe response evidence returned alongside an OpenAI-compatible turn.
+///
+/// Sonder's HTTP API keeps request receipts, token counts and aggregate activity
+/// outside assistant content so replaying a chat does not feed diagnostics back
+/// to the model. The app follows the same contract: this record is persisted for
+/// local history and display, but [ChatMessage.toWire] never serializes it.
+class ChatResponseMetadata {
+  final String completionId;
+  final String requestId;
+  final String model;
+  final String tier;
+  final String finishReason;
+  final String status;
+  final String cache;
+  final int elapsedMs;
+  final int promptTokens;
+  final int completionTokens;
+  final int totalTokens;
+  final int modelCalls;
+  final int toolCalls;
+
+  const ChatResponseMetadata({
+    this.completionId = '',
+    this.requestId = '',
+    this.model = '',
+    this.tier = '',
+    this.finishReason = '',
+    this.status = '',
+    this.cache = '',
+    this.elapsedMs = 0,
+    this.promptTokens = 0,
+    this.completionTokens = 0,
+    this.totalTokens = 0,
+    this.modelCalls = 0,
+    this.toolCalls = 0,
+  });
+
+  factory ChatResponseMetadata.fromJson(Map<String, dynamic> json) =>
+      ChatResponseMetadata(
+        completionId: _boundedMetadataText(json['completion_id']),
+        requestId: _boundedMetadataText(json['request_id']),
+        model: _boundedMetadataText(json['model']),
+        tier: _boundedMetadataText(json['tier']),
+        finishReason: _boundedMetadataText(json['finish_reason'], 64),
+        status: _boundedMetadataText(json['status'], 64),
+        cache: _boundedMetadataText(json['cache'], 16),
+        elapsedMs: _metadataCount(json['elapsed_ms']),
+        promptTokens: _metadataCount(json['prompt_tokens']),
+        completionTokens: _metadataCount(json['completion_tokens']),
+        totalTokens: _metadataCount(json['total_tokens']),
+        modelCalls: _metadataCount(json['model_calls']),
+        toolCalls: _metadataCount(json['tool_calls']),
+      );
+
+  bool get isEmpty =>
+      completionId.isEmpty &&
+      requestId.isEmpty &&
+      model.isEmpty &&
+      tier.isEmpty &&
+      finishReason.isEmpty &&
+      status.isEmpty &&
+      cache.isEmpty &&
+      elapsedMs == 0 &&
+      promptTokens == 0 &&
+      completionTokens == 0 &&
+      totalTokens == 0 &&
+      modelCalls == 0 &&
+      toolCalls == 0;
+
+  Map<String, Object> toJson() => {
+        'completion_id': completionId,
+        'request_id': requestId,
+        'model': model,
+        'tier': tier,
+        'finish_reason': finishReason,
+        'status': status,
+        'cache': cache,
+        'elapsed_ms': elapsedMs,
+        'prompt_tokens': promptTokens,
+        'completion_tokens': completionTokens,
+        'total_tokens': totalTokens,
+        'model_calls': modelCalls,
+        'tool_calls': toolCalls,
+      };
+
+  /// Compact, content-free evidence suitable for a collapsed diagnostics row.
+  String get diagnosticText {
+    final lines = <String>[];
+    if (status.isNotEmpty) lines.add('status: $status');
+    if (requestId.isNotEmpty) lines.add('request: $requestId');
+    if (completionId.isNotEmpty) lines.add('completion: $completionId');
+    if (model.isNotEmpty) lines.add('model: $model');
+    if (tier.isNotEmpty) lines.add('tier: $tier');
+    if (finishReason.isNotEmpty) lines.add('finish: $finishReason');
+    if (elapsedMs > 0) lines.add('elapsed: ${elapsedMs}ms');
+    if (totalTokens > 0 || promptTokens > 0 || completionTokens > 0) {
+      lines.add(
+        'tokens: $totalTokens total ($promptTokens prompt, '
+        '$completionTokens completion)',
+      );
+    }
+    if (modelCalls > 0 || toolCalls > 0) {
+      lines.add('calls: $modelCalls model, $toolCalls tool');
+    }
+    if (cache.isNotEmpty) {
+      lines.add(cache == 'hit' ? 'cache: hit (replayed)' : 'cache: $cache');
+    }
+    return lines.join('\n');
+  }
+}
+
 class ChatMessage {
   final Role role;
   final String content;
@@ -15,12 +138,20 @@ class ChatMessage {
   /// Keeping it out of [content] keeps it out of [toWire] for free.
   final String reasoning;
 
+  /// Structured, content-free receipt/usage evidence for this assistant turn.
+  final ChatResponseMetadata? responseMetadata;
+
+  /// Client/server diagnostics kept out of assistant content and model history.
+  final String diagnostic;
+
   const ChatMessage({
     required this.role,
     required this.content,
     this.pending = false,
     this.error = false,
     this.reasoning = '',
+    this.responseMetadata,
+    this.diagnostic = '',
   });
 
   ChatMessage copyWith({
@@ -28,6 +159,8 @@ class ChatMessage {
     bool? pending,
     bool? error,
     String? reasoning,
+    ChatResponseMetadata? responseMetadata,
+    String? diagnostic,
   }) {
     return ChatMessage(
       role: role,
@@ -35,6 +168,8 @@ class ChatMessage {
       pending: pending ?? this.pending,
       error: error ?? this.error,
       reasoning: reasoning ?? this.reasoning,
+      responseMetadata: responseMetadata ?? this.responseMetadata,
+      diagnostic: diagnostic ?? this.diagnostic,
     );
   }
 
@@ -42,10 +177,7 @@ class ChatMessage {
   ///
   /// Intentionally omits [reasoning]: replaying a model's own thoughts back to
   /// it as history is not something the server asked for.
-  Map<String, String> toWire() => {
-        'role': role.name,
-        'content': content,
-      };
+  Map<String, String> toWire() => {'role': role.name, 'content': content};
 
   Map<String, Object> toJson() => {
         'role': role.name,
@@ -53,6 +185,9 @@ class ChatMessage {
         'pending': pending,
         'error': error,
         'reasoning': reasoning,
+        if (responseMetadata != null)
+          'response_metadata': responseMetadata!.toJson(),
+        'diagnostic': diagnostic,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
@@ -66,6 +201,12 @@ class ChatMessage {
       pending: json['pending'] == true,
       error: json['error'] == true,
       reasoning: json['reasoning']?.toString() ?? '',
+      responseMetadata: json['response_metadata'] is Map
+          ? ChatResponseMetadata.fromJson(
+              Map<String, dynamic>.from(json['response_metadata'] as Map),
+            )
+          : null,
+      diagnostic: json['diagnostic']?.toString() ?? '',
     );
   }
 }
@@ -161,7 +302,6 @@ extension _FirstOrNull<T> on Iterable<T> {
   }
 }
 
-
 /// Durable update state (SPEC-4 section 14) as returned by
 /// GET /v1/admin/updates/status. All fields are best-effort: the System
 /// page renders whatever the runtime reports.
@@ -256,9 +396,11 @@ class UpdateStatus {
         architecture: (json['architecture'] ?? '').toString(),
         currentTarget: json['current_target']?.toString(),
         activeRelease: UpdateRelease.fromJson(
-            json['active_release'] as Map<String, dynamic>?),
+          json['active_release'] as Map<String, dynamic>?,
+        ),
         previousRelease: UpdateRelease.fromJson(
-            json['previous_release'] as Map<String, dynamic>?),
+          json['previous_release'] as Map<String, dynamic>?,
+        ),
         plans: ((json['plans'] as List<dynamic>?) ?? [])
             .whereType<Map<String, dynamic>>()
             .map(UpdatePlan.fromJson)
@@ -299,9 +441,8 @@ class ExtensionRecord {
       enabled: json['enabled'] == true,
       healthState: json['health_state']?.toString() ?? 'unknown',
       memoryLimitBytes: memory is int ? memory : null,
-      artifactDigest: artifact is Map
-          ? artifact['artifact_digest']?.toString()
-          : null,
+      artifactDigest:
+          artifact is Map ? artifact['artifact_digest']?.toString() : null,
     );
   }
 }

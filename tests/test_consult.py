@@ -6,6 +6,7 @@ local+local+cloud default and the "a tier failed but two answered" path.
 """
 
 import consult as consult_module
+import server
 
 _LOCAL_PAIR = ["code", "reasoning"]
 
@@ -172,3 +173,34 @@ def test_contradictory_judge_is_malformed_and_unicode_overlap_survives():
     result = consult_module.consult("q", _LOCAL_PAIR, ask_fn=ask)
     assert result["agree"] is True
     assert result["confidence"] == "unknown"
+
+
+def test_server_wrapper_uses_active_process_gate_and_current_dispatcher(monkeypatch):
+    """Script launch must not consult a second ``server`` module instance.
+
+    The process-local cloud override belongs to the running MCP server.  The
+    wrapper therefore passes both that gate and its own dispatcher into the
+    otherwise standalone consultation flow.
+    """
+    seen = []
+
+    def fake_ensemble(prompt, tiers="", **_kwargs):
+        seen.append(tiers)
+        if prompt.startswith("Do these answers agree"):
+            return "YES. The answers agree."
+        return "Use a bounded queue."
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    monkeypatch.setattr(server, "ensemble_answer", fake_ensemble)
+    monkeypatch.setattr(
+        consult_module,
+        "_default_ask",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("wrapper must inject the running server dispatcher")
+        ),
+    )
+
+    output = server.consult("How should work be queued?")
+
+    assert seen[:3] == ["code", "reasoning", "cloud-general"]
+    assert "cloud-general" in output

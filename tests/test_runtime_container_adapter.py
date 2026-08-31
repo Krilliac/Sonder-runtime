@@ -4,10 +4,12 @@ from __future__ import annotations
 from sonder_runtime.adapters.runtime_capabilities import RuntimeCapabilities
 from sonder_runtime.adapters.runtime_configuration import RuntimeConfig
 from sonder_runtime.adapters.runtime_container import Runtime, build_runtime
+from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
 from sonder_runtime.bootstrap.container import (
     Runtime as CompatibilityRuntime,
     build_runtime as compatibility_build_runtime,
 )
+from sonder_runtime.bootstrap.provider_bindings import ProviderBindings
 
 
 def _config(backend: str = "ollama") -> RuntimeConfig:
@@ -33,6 +35,27 @@ def test_runtime_container_selects_openai_compatible_gateway():
     runtime = build_runtime(_config("openai-compatible"), RuntimeCapabilities())
     assert isinstance(runtime, Runtime)
     assert runtime.model_gateway.__class__.__name__ == "OpenAICompatibleGateway"
+
+
+def test_runtime_container_composes_configured_mixed_provider_bindings():
+    bindings = ProviderBindings(
+        default_generation_provider="ollama",
+        tier_providers={
+            "fast": "openai_compatible",
+            "general": "openai_compatible",
+            "code": "ollama",
+            "reasoning": "ollama",
+            "vision": "ollama",
+        },
+        embedding_provider="ollama",
+    )
+    runtime = build_runtime(
+        RuntimeConfig(profile="workstation-local", provider_bindings=bindings),
+        RuntimeCapabilities(),
+    )
+
+    assert isinstance(runtime.model_gateway, ProviderDispatchGateway)
+    assert runtime.provider_bindings is bindings
 
 
 def test_runtime_container_derives_protocol_schema_from_the_tool_catalog():

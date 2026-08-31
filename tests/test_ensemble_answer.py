@@ -313,6 +313,87 @@ def test_chat_request_retries_once_with_headroom_when_thinking_ate_the_budget(
     assert budgets == [260, server.LOCAL_THINKING_MIN_NUM_PREDICT]
 
 
+def test_ensemble_code_tier_retries_with_full_thinking_headroom(monkeypatch):
+    """Consult's default code leg must retain room after native thinking."""
+    server._THINKING_CAPABILITY_CACHE.clear()
+    budgets = []
+    monkeypatch.setattr(
+        server,
+        "_serve_target",
+        lambda tier, strict: ("qwen3:30b-a3b", False, False, tier),
+    )
+    monkeypatch.setattr(server, "_post", lambda *args, **kwargs: {})
+
+    def fake_post_model(path, payload, **kwargs):
+        budget = payload["options"]["num_predict"]
+        budgets.append(budget)
+        if budget < 4096:
+            return {
+                "message": {"thinking": "long deliberation", "content": ""},
+                "done_reason": "length",
+            }, 1
+        return {"message": {"content": "the real answer"}}, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    response = server.ensemble_answer("q", tiers="code", mode="general")
+    assert "the real answer" in response
+    assert budgets == [700, 4096]
+
+
+def test_cloud_chat_retries_once_without_thinking_when_budget_is_exhausted(
+    monkeypatch,
+):
+    thinking_modes = []
+
+    def fake_post_model(path, payload, **kwargs):
+        thinking_modes.append(payload.get("think"))
+        if len(thinking_modes) == 1:
+            return {
+                "message": {"thinking": "long deliberation", "content": ""},
+                "done_reason": "length",
+            }, 1
+        return {"message": {"content": "the real answer"}}, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    _out, content = server._chat_request(
+        {
+            "model": "kimi-k2.7-code:cloud",
+            "messages": [],
+            "think": True,
+            "options": {"num_predict": 4096},
+        },
+        model="kimi-k2.7-code:cloud",
+        cloud=True,
+        idempotent=True,
+    )
+
+    assert content == "the real answer"
+    assert thinking_modes == [True, False]
+
+
+def test_cloud_chat_does_not_disable_thinking_for_unknown_model(monkeypatch):
+    calls = []
+
+    def fake_post_model(path, payload, **kwargs):
+        calls.append(payload.get("think"))
+        return {
+            "message": {"thinking": "long deliberation", "content": ""},
+            "done_reason": "length",
+        }, 1
+
+    monkeypatch.setattr(server, "_post_model", fake_post_model)
+    with pytest.raises(server.ModelCallError) as caught:
+        server._chat_request(
+            {"model": "custom:cloud", "messages": [], "think": True},
+            model="custom:cloud",
+            cloud=True,
+            idempotent=True,
+        )
+
+    assert caught.value.kind == "empty_response"
+    assert calls == [True]
+
+
 def test_chat_request_does_not_retry_forever(monkeypatch):
     server._THINKING_CAPABILITY_CACHE.clear()
     calls = []

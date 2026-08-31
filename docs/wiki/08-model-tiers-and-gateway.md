@@ -95,6 +95,14 @@ instead of silently falling back to Ollama — a typo in the operator's
 configuration must not route requests through a different transport than
 intended.
 
+The read-only hardware profile also inventories local provider presence for
+Ollama, llama.cpp, vLLM, and TensorRT-LLM using bounded executable/package
+checks. This is intentionally separate from provider readiness: finding an
+executable never claims that its endpoint is healthy, that CUDA is usable, or
+that a model fits in VRAM. The profile reports an advisory backend selection
+for the model format and measured CUDA state; the owning gateway must still
+perform its normal health, permission, and residency checks before dispatch.
+
 Each gateway exposes a static `.capabilities` property (a `frozenset[str]`
 drawn from `domain/model_capabilities.py`'s `KNOWN_GATEWAY_CAPABILITIES`
 vocabulary — the same shape `ProviderHealth.capabilities` accepts). It is

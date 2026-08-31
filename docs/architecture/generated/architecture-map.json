@@ -43,11 +43,12 @@
       "python_files": []
     },
     {
-      "file_count": 214,
+      "file_count": 218,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
         "sonder_runtime/adapters/accelerators/__init__.py",
+        "sonder_runtime/adapters/accelerators/backend_probe.py",
         "sonder_runtime/adapters/accelerators/gpu_probe.py",
         "sonder_runtime/adapters/accelerators/inventory.py",
         "sonder_runtime/adapters/accelerators/npu/__init__.py",
@@ -213,6 +214,9 @@
         "sonder_runtime/adapters/process_probe.py",
         "sonder_runtime/adapters/process_risk.py",
         "sonder_runtime/adapters/process_termination.py",
+        "sonder_runtime/adapters/provider_bindings.py",
+        "sonder_runtime/adapters/provider_dispatch/__init__.py",
+        "sonder_runtime/adapters/provider_dispatch/gateway.py",
         "sonder_runtime/adapters/recall.py",
         "sonder_runtime/adapters/recall_gateway.py",
         "sonder_runtime/adapters/repl_services.py",
@@ -529,7 +533,7 @@
       ]
     },
     {
-      "file_count": 14,
+      "file_count": 16,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -544,7 +548,9 @@
         "sonder_runtime/bootstrap/legacy_model.py",
         "sonder_runtime/bootstrap/legacy_root.py",
         "sonder_runtime/bootstrap/main.py",
+        "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
+        "sonder_runtime/bootstrap/provider_bindings.py",
         "sonder_runtime/bootstrap/subprocess_mcp.py"
       ]
     },

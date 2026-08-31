@@ -7,7 +7,11 @@ import pytest
 from sonder_runtime.adapters.model_gateway_factory import build_model_gateway
 from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
+from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
 from sonder_runtime.bootstrap import app as bootstrap_app
+from sonder_runtime.bootstrap.provider_bindings import ProviderBindings
+from sonder_runtime.application.context import local_owner_context
+from sonder_runtime.application.ports.model_gateway import ModelRequest, ModelResponse
 from sonder_runtime.domain.common.errors import InvalidInput
 
 
@@ -52,5 +56,100 @@ def test_application_graph_uses_packaged_selector(monkeypatch, tmp_path):
             bootstrap_app.build_application().model_gateway,
             OpenAICompatibleGateway,
         )
+    finally:
+        bootstrap_app.reset_for_tests()
+
+class MarkerGateway:
+    def __init__(self, name="marker"):
+        self.name = name
+        self.generated = []
+
+    def generate(self, request, context):
+        self.generated.append((request, context))
+        return ModelResponse(text=self.name, model=self.name, tier=request.tier)
+
+
+def test_uniform_binding_returns_direct_gateway_and_builds_only_one_provider():
+    calls = []
+    ollama = MarkerGateway()
+    gateway = build_model_gateway(
+        ProviderBindings.uniform("ollama"),
+        {
+            "ollama": lambda: calls.append("ollama") or ollama,
+            "openai_compatible": lambda: calls.append("openai_compatible")
+            or MarkerGateway(),
+        },
+    )
+    assert gateway is ollama
+    assert calls == ["ollama"]
+
+
+def test_mixed_binding_builds_dispatcher_and_only_referenced_providers():
+    bindings = ProviderBindings(
+        default_generation_provider="ollama",
+        tier_providers={
+            "fast": "openai_compatible",
+            "general": "openai_compatible",
+            "code": "ollama",
+            "reasoning": "ollama",
+            "vision": "ollama",
+        },
+        embedding_provider="ollama",
+    )
+    calls = []
+    gateway = build_model_gateway(
+        bindings,
+        {
+            "ollama": lambda: calls.append("ollama") or MarkerGateway(),
+            "openai_compatible": lambda: calls.append("openai_compatible")
+            or MarkerGateway(),
+            "unused": lambda: calls.append("unused") or MarkerGateway(),
+        },
+    )
+    assert isinstance(gateway, ProviderDispatchGateway)
+    assert calls == ["ollama", "openai_compatible"]
+
+
+def test_mixed_binding_constructs_and_routes_an_unreferenced_default_provider():
+    bindings = ProviderBindings(
+        default_generation_provider="ollama",
+        tier_providers={
+            "fast": "openai_compatible",
+            "general": "openai_compatible",
+            "code": "openai_compatible",
+            "reasoning": "openai_compatible",
+            "vision": "openai_compatible",
+        },
+        embedding_provider="openai_compatible",
+    )
+    ollama = MarkerGateway("ollama")
+    prism = MarkerGateway("prism")
+    gateway = build_model_gateway(
+        bindings,
+        {
+            "ollama": lambda: ollama,
+            "openai_compatible": lambda: prism,
+        },
+    )
+    request = ModelRequest(prompt="hello", tier="sonder")
+    context = local_owner_context(correlation_id="default-provider-test")
+
+    response = gateway.generate(request, context)
+
+    assert response.model == "ollama"
+    assert ollama.generated == [(request, context)]
+    assert prism.generated == []
+
+
+def test_application_graph_composes_mixed_provider_bindings(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "ollama")
+    monkeypatch.setenv("SONDER_FAST_PROVIDER", "llamacpp")
+    bootstrap_app.reset_for_tests()
+    try:
+        application = bootstrap_app.build_application()
+        assert isinstance(application.model_gateway, ProviderDispatchGateway)
+        assert application.provider_bindings.tier_providers["fast"] == "openai_compatible"
+        assert application.provider_bindings.tier_providers["code"] == "ollama"
     finally:
         bootstrap_app.reset_for_tests()
