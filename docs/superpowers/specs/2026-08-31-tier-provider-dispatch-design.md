@@ -1,6 +1,6 @@
 # Tier-Aware Local Provider Dispatch Design
 
-**Status:** Approved in chat on 2026-08-31; written-spec review pending
+**Status:** Approved in chat and reviewed on 2026-08-31
 **Scope:** Sonder Runtime model-gateway composition for simultaneous local Ollama and Prism/llama.cpp inference
 
 ## Objective
@@ -47,7 +47,7 @@ Optional tier overrides use these environment variables:
 - `SONDER_REASONING_PROVIDER`
 - `SONDER_VISION_PROVIDER`
 
-`SONDER_EMBEDDING_PROVIDER` selects the embedding provider and defaults to `ollama` independently of `SONDER_MODEL_BACKEND`.
+`SONDER_EMBEDDING_PROVIDER` selects the embedding provider. When it is unset or blank, it inherits the normalized `SONDER_MODEL_BACKEND` so existing single-provider OpenAI-compatible installations remain direct and unchanged. The production mixed Sonder profile explicitly sets `SONDER_EMBEDDING_PROVIDER=ollama`.
 
 An unset or blank tier override inherits the normalized `SONDER_MODEL_BACKEND`. Any nonblank unknown provider value is a startup configuration error. The composition root creates only providers referenced by a generation or embedding binding. OpenAI-compatible endpoint and model configuration continue to use `SONDER_OPENAI_BASE_URL`, `SONDER_OPENAI_MODEL`, `SONDER_OPENAI_API_KEY`, and `SONDER_OPENAI_EMBED_MODEL`.
 
@@ -126,7 +126,7 @@ The composition layer exposes a bounded, content-free provider projection contai
 Use strict red-green TDD with behavior-level tests:
 
 1. Dispatcher tests prove fast/general and code/reasoning reach different real fake gateways, embeddings use the independent embedding binding, requests/contexts are forwarded unchanged, and provider failures never invoke a second gateway.
-2. Configuration tests prove alias normalization, inheritance from `SONDER_MODEL_BACKEND`, independent Ollama embedding default, and rejection of unknown nonblank values.
+2. Configuration tests prove alias normalization, tier and embedding inheritance from `SONDER_MODEL_BACKEND`, the explicit Ollama embedding override used by the mixed profile, and rejection of unknown nonblank values.
 3. Route-planner tests prove `ModelRoute.provider` follows the selected tier rather than one global provider.
 4. Composition tests prove the default graph remains direct Ollama, the legacy global OpenAI-compatible mode remains direct, and a mixed binding builds the dispatcher with the expected content-free projection.
 5. Existing gateway conformance, consent, runtime-policy, telemetry, architecture, and full unit suites remain green.
