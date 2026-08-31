@@ -127,6 +127,7 @@ REQUIRED_FILES = {
     "sonder_runtime/adapters/runtime_policy.py",
     "sonder_runtime/adapters/inference/ollama_endpoint.py",
     "sonder_runtime/adapters/embedding_cache.py",
+    "sonder_runtime/adapters/accelerators/backend_probe.py",
     "sonder_runtime/adapters/accelerators/npu/contract.py",
     "sonder_runtime/adapters/accelerators/npu/manifest.py",
     "sonder_runtime/adapters/accelerators/npu/providers.py",
