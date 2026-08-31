@@ -17,6 +17,7 @@ from ..application.execution.facade import ExecutionApplicationFacade
 from ..application.ports.tool_registry import InMemoryToolRegistry
 from ..application.tools.facade import ToolApplicationFacade
 from ..application.protocol.facade import ProtocolApplicationFacade
+from .provider_bindings import ProviderBindings
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class Runtime:
     config: RuntimeConfig
     capabilities: RuntimeCapabilities
     model_gateway: ModelGateway
+    provider_bindings: ProviderBindings
     model_routes: ModelGatewayFacade
     events: EventSink
     clock: Clock
@@ -55,8 +57,8 @@ def build_runtime(
     from .local_observability import LocalObservabilitySink
 
     from .inference.model_gateway_factory import build_model_gateway
-
-    gateway: ModelGateway = build_model_gateway(backend=config.model_backend)
+    bindings = config.provider_bindings or ProviderBindings.uniform(config.model_backend)
+    gateway: ModelGateway = build_model_gateway(bindings)
     model_routes = ModelGatewayFacade(gateway)
     # This graph is intentionally inert until a host supplies provider
     # adapters.  Its policy and executor defaults remain fail-closed.
@@ -90,6 +92,7 @@ def build_runtime(
         config=config,
         capabilities=capabilities,
         model_gateway=gateway,
+        provider_bindings=bindings,
         model_routes=model_routes,
         events=LocalObservabilitySink(LoggingEventSink()),
         clock=SystemClock(),

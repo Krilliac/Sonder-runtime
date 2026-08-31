@@ -1,56 +1,74 @@
-"""Model-gateway selection for the deterministic application graph.
+"""Model-gateway composition for deterministic application graphs.
 
-Backend selection is an adapter boundary: it normalizes the operator's
-backend setting and constructs the selected transport without making the
-composition root own transport-specific policy.
+Provider selection is an adapter boundary: it normalizes operator bindings,
+constructs only the required transports, and returns a direct gateway for a
+uniform configuration or an exact tier dispatcher for a mixed configuration.
 """
 from __future__ import annotations
 
-import os
+from collections.abc import Callable, Mapping
 
 from ..application.ports.model_gateway import ModelGateway
 from ..domain.common.errors import InvalidInput
 from .inference.ollama_gateway import OllamaGateway
+from .provider_bindings import ProviderBindings, provider_bindings_from_env
+from .provider_dispatch.gateway import ProviderDispatchGateway
 
-
-_OPENAI_COMPATIBLE_BACKENDS = frozenset(
-    {"openai", "openai-compatible", "llamacpp", "vllm"}
-)
-_OLLAMA_BACKENDS = frozenset({"", "ollama"})
-_KNOWN_BACKENDS = _OLLAMA_BACKENDS | _OPENAI_COMPATIBLE_BACKENDS
-_BACKEND_NAMES_FOR_ERROR = sorted({"ollama"} | _OPENAI_COMPATIBLE_BACKENDS)
+ProviderFactory = Callable[[], ModelGateway]
 
 
 def build_model_gateway(
+    bindings: ProviderBindings | None = None,
+    provider_factories: Mapping[str, ProviderFactory] | None = None,
     *, target_resolver=None, generate_factory=None, embedding_provider=None,
     backend: str | None = None,
 ) -> ModelGateway:
-    """Construct the configured model gateway.
+    """Construct the configured direct or tier-dispatching model gateway.
 
-    Ollama remains the default.  OpenAI-compatible aliases opt into the
-    packaged OpenAI-compatible transport, whose own consent boundary remains
-    authoritative for endpoint access.  An unrecognized backend name is
-    rejected rather than silently falling back to Ollama — a typo in
-    ``SONDER_MODEL_BACKEND`` must not route requests to a different transport
-    than the operator configured.
+    Ollama remains the default. OpenAI-compatible aliases opt into the packaged
+    transport, whose own consent boundary remains authoritative. Unknown names
+    and incomplete factory maps fail closed rather than changing transport.
     """
-    selected_backend = (
-        os.environ.get("SONDER_MODEL_BACKEND", "ollama")
-        if backend is None else backend
-    ).strip().lower()
-    if selected_backend in _OPENAI_COMPATIBLE_BACKENDS:
+    if bindings is not None and backend is not None:
+        raise InvalidInput("bindings and backend cannot both be supplied")
+    try:
+        selected = (
+            bindings
+            if bindings is not None
+            else ProviderBindings.uniform(backend)
+            if backend is not None
+            else provider_bindings_from_env()
+        )
+    except ValueError as exc:
+        raise InvalidInput(str(exc)) from exc
+
+    if provider_factories is None:
         from .inference.openai_compat_gateway import OpenAICompatibleGateway
 
-        return OpenAICompatibleGateway()
-    if selected_backend not in _KNOWN_BACKENDS:
-        raise InvalidInput(
-            "unknown SONDER_MODEL_BACKEND %r (expected one of: %s)"
-            % (selected_backend, ", ".join(_BACKEND_NAMES_FOR_ERROR))
-        )
-    return OllamaGateway(
-        target_resolver=target_resolver,
-        generate_factory=generate_factory,
-        embedding_provider=embedding_provider,
+        factories: dict[str, ProviderFactory] = {
+            "ollama": lambda: OllamaGateway(
+                target_resolver=target_resolver,
+                generate_factory=generate_factory,
+                embedding_provider=embedding_provider,
+            ),
+            "openai_compatible": OpenAICompatibleGateway,
+        }
+    else:
+        factories = dict(provider_factories)
+
+    missing = sorted(selected.required_providers - set(factories))
+    if missing:
+        raise InvalidInput("missing provider factories: %s" % ", ".join(missing))
+    gateways = {
+        provider: factories[provider]()
+        for provider in sorted(selected.required_providers)
+    }
+    if len(gateways) == 1:
+        return next(iter(gateways.values()))
+    return ProviderDispatchGateway(
+        providers=gateways,
+        tier_providers=selected.tier_providers,
+        embedding_provider=selected.embedding_provider,
     )
 
 

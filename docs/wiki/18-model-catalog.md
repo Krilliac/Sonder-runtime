@@ -325,3 +325,27 @@ on a real signal — a failed run, an empty/low-confidence answer, or an explici
 "think hard" — so a satisfied cheap answer never wastes a large model. See
 [Agent, Autopilot & Fleet](07-agent-autopilot-fleet.md) for how the loop consumes
 these decisions.
+
+## Tier-aware local providers
+
+Sonder can keep its standard Ollama lifecycle while routing selected generation
+tiers to a loopback OpenAI-compatible server such as Prism/llama.cpp. Unset
+provider bindings inherit `SONDER_MODEL_BACKEND`, so existing single-provider
+installations do not change.
+
+For the production Bonsai/Qwen split:
+
+```text
+SONDER_MODEL_BACKEND=ollama
+SONDER_FAST_PROVIDER=openai-compatible
+SONDER_GENERAL_PROVIDER=openai-compatible
+SONDER_CODE_PROVIDER=ollama
+SONDER_REASONING_PROVIDER=ollama
+SONDER_EMBEDDING_PROVIDER=ollama
+SONDER_OPENAI_BASE_URL=http://127.0.0.1:18080
+SONDER_OPENAI_MODEL=sonder-bonsai
+```
+
+The dispatcher makes one provider call and never falls through to another
+provider. Non-loopback OpenAI-compatible endpoints still require explicit cloud
+consent, and remote Ollama still requires explicit remote-Ollama consent.

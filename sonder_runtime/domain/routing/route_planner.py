@@ -69,6 +69,7 @@ class AvailableModels:
     """What models are available in the current runtime policy."""
     tier_models: dict[str, str] = field(default_factory=dict)
     provider: str = "ollama"
+    tier_providers: dict[str, str] = field(default_factory=dict)
     hardware: HardwareCapabilityReport | None = None
     model_profiles: dict[str, QuantizedModelProfile] = field(default_factory=dict)
 
@@ -77,6 +78,12 @@ class AvailableModels:
         return frozenset(
             t for t, m in self.tier_models.items() if m
         )
+
+    def provider_for(self, tier: str) -> str:
+        return self.tier_providers.get(tier, self.provider)
+
+    def provider_for(self, tier: str) -> str:
+        return self.tier_providers.get(tier, self.provider)
 
 
 class RoutePlanner:
@@ -147,7 +154,7 @@ class RoutePlanner:
             lane=request.lane,
             tier=tier,
             model=model,
-            provider=available.provider,
+            provider=available.provider_for(tier),
             capabilities=frozenset(capabilities),
             memory_mode=memory_mode,
             task_class=cap_route.task,
@@ -161,6 +168,7 @@ class RoutePlanner:
         policy: dict,
         provider: str = "ollama",
         *,
+        tier_providers: dict[str, str] | None = None,
         hardware: HardwareCapabilityReport | None = None,
         model_profiles: dict[str, QuantizedModelProfile] | None = None,
     ) -> AvailableModels:
@@ -169,6 +177,7 @@ class RoutePlanner:
         return AvailableModels(
             tier_models={t: models.get(t, "") for t in LOCAL_TIERS},
             provider=provider,
+            tier_providers=dict(tier_providers or {}),
             hardware=hardware,
             model_profiles=dict(model_profiles or {}),
         )
