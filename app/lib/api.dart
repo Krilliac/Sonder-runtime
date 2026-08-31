@@ -30,7 +30,20 @@ String resolveCatalogModel(Iterable<String> models, String selected) {
 /// *why* an exact model or policy request was rejected instead of reducing all
 /// failures to an unhelpful status code. A few older routes use a top-level
 /// `message` or string `error`, so accept those shapes as well.
-String _responseErrorMessage(http.Response response, String fallback) {
+String _boundedResponseMetadata(Object? value, [int limit = 256]) {
+  final text = value?.toString().trim() ?? '';
+  if (text.length <= limit) return text;
+  return '${text.substring(0, limit)}...';
+}
+
+SonderException _responseException(http.Response response, String fallback) {
+  var message = fallback;
+  var type = '';
+  var code = '';
+  var correlationId = _boundedResponseMetadata(
+    response.headers['x-sonder-correlation-id'],
+  );
+  var retryable = const {408, 429, 502, 503, 504}.contains(response.statusCode);
   try {
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is Map) {
@@ -38,19 +51,45 @@ String _responseErrorMessage(http.Response response, String fallback) {
       final candidate = error is Map
           ? error['message']
           : (error is String ? error : decoded['message']);
-      final message = candidate?.toString().trim() ?? '';
-      if (message.isNotEmpty) {
+      final detail = candidate?.toString().trim() ?? '';
+      if (detail.isNotEmpty) {
         // Error responses are untrusted server input; keep a malformed proxy
         // response from turning into an unbounded chat transcript entry.
-        return message.length <= 1024
-            ? message
-            : '${message.substring(0, 1024)}…';
+        message =
+            detail.length <= 1024 ? detail : '${detail.substring(0, 1024)}...';
+      }
+      if (error is Map) {
+        type = _boundedResponseMetadata(error['type'], 64);
+        code = _boundedResponseMetadata(error['code'], 128);
+        correlationId =
+            error['correlation_id']?.toString().trim().isNotEmpty == true
+                ? _boundedResponseMetadata(error['correlation_id'])
+                : correlationId;
+        retryable =
+            error['retryable'] is bool ? error['retryable'] == true : retryable;
+      } else {
+        correlationId =
+            decoded['correlation_id']?.toString().trim().isNotEmpty == true
+                ? _boundedResponseMetadata(decoded['correlation_id'])
+                : correlationId;
+        retryable = decoded['retryable'] is bool
+            ? decoded['retryable'] == true
+            : retryable;
       }
     }
   } catch (_) {
     // A non-JSON response still gets the stable status-code fallback.
   }
-  return fallback;
+  final retryAfter = int.tryParse(response.headers['retry-after'] ?? '');
+  return SonderException(
+    message,
+    httpStatus: response.statusCode,
+    type: type,
+    code: code,
+    correlationId: correlationId,
+    retryable: retryable,
+    retryAfterSeconds: retryAfter == null || retryAfter < 0 ? null : retryAfter,
+  );
 }
 
 class LauncherOperation {
@@ -514,6 +553,15 @@ class SonderCommand {
     if (name.toLowerCase().contains(needle)) return true;
     if (summary.toLowerCase().contains(needle)) return true;
     if (category.toLowerCase().contains(needle)) return true;
+    if (tool.toLowerCase().contains(needle)) return true;
+    if (usageLine.toLowerCase().contains(needle)) return true;
+    if (params.any(
+      (param) =>
+          param.name.toLowerCase().contains(needle) ||
+          param.type.toLowerCase().contains(needle),
+    )) {
+      return true;
+    }
     for (final alias in aliases) {
       if (alias.toLowerCase().contains(needle)) return true;
     }
@@ -544,7 +592,9 @@ class CommandCatalog {
       commands: rawCommands is List
           ? rawCommands
               .whereType<Map>()
-              .map((c) => SonderCommand.fromJson(Map<String, dynamic>.from(c)))
+              .map(
+                (c) => SonderCommand.fromJson(Map<String, dynamic>.from(c)),
+              )
               .where((c) => c.name.isNotEmpty)
               .toList(growable: false)
           : const [],
@@ -675,8 +725,11 @@ class PermissionMode {
       modes: rawModes is List
           ? rawModes
               .whereType<Map>()
-              .map((m) =>
-                  PermissionModeOption.fromJson(Map<String, dynamic>.from(m)))
+              .map(
+                (m) => PermissionModeOption.fromJson(
+                  Map<String, dynamic>.from(m),
+                ),
+              )
               .where((m) => m.name.isNotEmpty)
               .toList(growable: false)
           : const [],
@@ -866,7 +919,10 @@ class SonderApi {
       throw SonderException('Cannot reach server: $e');
     }
     if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized — check the API key.');
+      throw _responseException(
+        resp,
+        'Unauthorized — check the API key.',
+      );
     }
     if (resp.statusCode != 200) {
       throw SonderException('Server returned HTTP ${resp.statusCode}.');
@@ -961,7 +1017,8 @@ class SonderApi {
       throw SonderException('Server returned HTTP ${resp.statusCode}.');
     }
     try {
-      final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      final obj =
+          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
       return ExtensionRegistryStatus.fromJson(obj);
     } catch (_) {
       throw SonderException('Could not parse extension registry status.');
@@ -1007,10 +1064,8 @@ class SonderApi {
     String q, {
     int limit = 20,
   }) async {
-    final uri = _uri('/v1/commands/complete').replace(queryParameters: {
-      'q': q,
-      'limit': '$limit',
-    });
+    final uri = _uri('/v1/commands/complete')
+        .replace(queryParameters: {'q': q, 'limit': '$limit'});
     late http.Response resp;
     try {
       resp = await http
@@ -1042,9 +1097,8 @@ class SonderApi {
 
   /// Rendered help for one command or topic (GET /v1/commands/help).
   Future<String> commandHelp(String topic) async {
-    final uri = _uri('/v1/commands/help').replace(queryParameters: {
-      'topic': topic,
-    });
+    final uri =
+        _uri('/v1/commands/help').replace(queryParameters: {'topic': topic});
     late http.Response resp;
     try {
       resp = await http
@@ -1133,14 +1187,15 @@ class SonderApi {
       try {
         final body = jsonDecode(utf8.decode(resp.bodyBytes));
         if (body is Map) {
-          detail = body['error']?.toString() ?? body['message']?.toString() ?? '';
+          detail =
+              body['error']?.toString() ?? body['message']?.toString() ?? '';
         }
       } catch (_) {
         // Non-JSON error body; fall through to the status code.
       }
-      throw SonderException(detail.isNotEmpty
-          ? detail
-          : 'Server returned HTTP ${resp.statusCode}.');
+      throw SonderException(
+        detail.isNotEmpty ? detail : 'Server returned HTTP ${resp.statusCode}.',
+      );
     }
     try {
       final obj =
@@ -1204,8 +1259,13 @@ class SonderApi {
       if (project.trim().isNotEmpty) 'project': project.trim(),
       'location_consent': allowApproximateLocation,
       if (locationHint != null) 'location_hint': locationHint,
-      'messages':
-          messages.where((m) => !m.pending).map((m) => m.toWire()).toList(),
+      'messages': messages
+          // A transport/policy failure is local UI state, not an assistant
+          // answer. Replaying it as model-visible history would make a
+          // later turn treat diagnostics as generated content.
+          .where((m) => !m.pending && !m.error)
+          .map((m) => m.toWire())
+          .toList(),
       'stream': false,
     });
 
@@ -1219,8 +1279,11 @@ class SonderApi {
       if (_canFallback) {
         try {
           resp = await http
-              .post(_uri('/v1/chat/completions', localFallbackUrl),
-                  headers: _headers(''), body: body)
+              .post(
+                _uri('/v1/chat/completions', localFallbackUrl),
+                headers: _headers(''),
+                body: body,
+              )
               .timeout(const Duration(minutes: 5));
           warning = _fallbackWarning('chat', e);
         } catch (_) {
@@ -1232,13 +1295,16 @@ class SonderApi {
     }
 
     if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized — check the API key.');
+      throw _responseException(
+        resp,
+        'Unauthorized — check the API key.',
+      );
     }
     if (resp.statusCode != 200) {
-      throw SonderException(_responseErrorMessage(
+      throw _responseException(
         resp,
         'Server returned HTTP ${resp.statusCode}.',
-      ));
+      );
     }
 
     try {
@@ -1253,9 +1319,40 @@ class SonderApi {
       final content = msg?['content']?.toString() ?? '';
       final reply = content.trimRight();
       final reasoning = obj['sonder_reasoning']?.toString().trim() ?? '';
+      final choice = choices.first as Map<String, dynamic>;
+      final receipt = obj['sonder_receipt'] is Map
+          ? Map<String, dynamic>.from(obj['sonder_receipt'] as Map)
+          : const <String, dynamic>{};
+      final usage = obj['usage'] is Map
+          ? Map<String, dynamic>.from(obj['usage'] as Map)
+          : const <String, dynamic>{};
+      final activity = obj['sonder_activity'] is Map
+          ? Map<String, dynamic>.from(obj['sonder_activity'] as Map)
+          : const <String, dynamic>{};
+      final headerElapsed = int.tryParse(
+        resp.headers['x-sonder-elapsed-ms'] ?? '',
+      );
+      final metadata = ChatResponseMetadata.fromJson({
+        'completion_id': obj['id'],
+        'request_id':
+            receipt['request_id'] ?? resp.headers['x-sonder-correlation-id'],
+        'model': receipt['model'] ?? obj['model'],
+        'tier': receipt['tier'],
+        'finish_reason': choice['finish_reason'],
+        'status': activity['status'],
+        'cache': receipt['cache'],
+        'elapsed_ms':
+            receipt['elapsed_ms'] ?? obj['sonder_elapsed_ms'] ?? headerElapsed,
+        'prompt_tokens': usage['prompt_tokens'],
+        'completion_tokens': usage['completion_tokens'],
+        'total_tokens': usage['total_tokens'],
+        'model_calls': activity['model_calls'],
+        'tool_calls': activity['tool_calls'],
+      });
       return ChatReply(
         text: warning.isEmpty ? reply : '$warning\n\n$reply',
         reasoning: reasoning,
+        metadata: metadata.isEmpty ? null : metadata,
       );
     } on SonderException {
       rethrow;
@@ -1289,7 +1386,10 @@ class SonderApi {
   }
 
   Future<String> _accountAction(
-      String path, String username, String password) async {
+    String path,
+    String username,
+    String password,
+  ) async {
     late http.Response resp;
     try {
       resp = await http
@@ -1305,7 +1405,8 @@ class SonderApi {
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
       throw SonderException(
-          obj['message']?.toString() ?? 'Account request failed.');
+        obj['message']?.toString() ?? 'Account request failed.',
+      );
     }
     return obj['message']?.toString() ?? 'OK';
   }
@@ -1318,7 +1419,39 @@ class SonderException implements Exception {
   /// chat bubble having to lead with it.
   final Object? cause;
 
-  SonderException(this.message, {this.cause});
+  /// Structured server diagnostics. These are deliberately bounded metadata,
+  /// never the raw response body, prompt, credentials or provider traceback.
+  final int? httpStatus;
+  final String type;
+  final String code;
+  final String correlationId;
+  final bool retryable;
+  final int? retryAfterSeconds;
+
+  SonderException(
+    this.message, {
+    this.cause,
+    this.httpStatus,
+    this.type = '',
+    this.code = '',
+    this.correlationId = '',
+    this.retryable = false,
+    this.retryAfterSeconds,
+  });
+
+  String get diagnosticText {
+    final lines = <String>[];
+    if (httpStatus != null) lines.add('HTTP $httpStatus');
+    if (type.isNotEmpty) lines.add('type: $type');
+    if (code.isNotEmpty) lines.add('code: $code');
+    if (correlationId.isNotEmpty) lines.add('request: $correlationId');
+    if (retryAfterSeconds != null) {
+      lines.add('retry after: ${retryAfterSeconds}s');
+    } else if (retryable) {
+      lines.add('retryable: yes');
+    }
+    return lines.join('\n');
+  }
 
   /// Turn a transport failure into something a person can act on.
   ///
@@ -1429,9 +1562,7 @@ class SystemInfo {
           ? SelfmodInfo.fromJson(json['selfmod'] as Map<String, dynamic>)
           : null,
       mcpRuntime: json['mcp_runtime'] is Map<String, dynamic>
-          ? McpRuntimeInfo.fromJson(
-              json['mcp_runtime'] as Map<String, dynamic>,
-            )
+          ? McpRuntimeInfo.fromJson(json['mcp_runtime'] as Map<String, dynamic>)
           : null,
       learningHealth: json['learning_health'] is Map<String, dynamic>
           ? LearningHealthInfo.fromJson(
@@ -1964,17 +2095,10 @@ class AutopilotRun {
   }
 
   bool get isActive => status == 'planning' || status == 'running';
-  bool get isResumable => const {
-        'ready',
-        'paused',
-        'blocked',
-        'interrupted',
-      }.contains(status);
-  bool get isTerminal => const {
-        'completed',
-        'failed',
-        'cancelled',
-      }.contains(status);
+  bool get isResumable =>
+      const {'ready', 'paused', 'blocked', 'interrupted'}.contains(status);
+  bool get isTerminal =>
+      const {'completed', 'failed', 'cancelled'}.contains(status);
 }
 
 class AutopilotTask {
@@ -2037,8 +2161,9 @@ class AutopilotEvent {
 class ChatReply {
   final String text;
   final String reasoning;
+  final ChatResponseMetadata? metadata;
 
-  const ChatReply({required this.text, this.reasoning = ''});
+  const ChatReply({required this.text, this.reasoning = '', this.metadata});
 
   bool get hasReasoning => reasoning.trim().isNotEmpty;
 }
@@ -2245,15 +2370,13 @@ class ExecutionFeed {
           : _asInt(json['active_responses']),
       truncated: json['truncated'] == true || parsed.length > eventLimit,
       redactionApplied: json['redaction_applied'] == true,
-      oldestSeq:
-          json['oldest_seq'] == null ? null : _asInt(json['oldest_seq']),
+      oldestSeq: json['oldest_seq'] == null ? null : _asInt(json['oldest_seq']),
       nextSeq: json['next_seq'] == null ? null : _asInt(json['next_seq']),
       droppedEvents: json['dropped_events'] == null
           ? null
           : _asInt(json['dropped_events']),
-      sequenceGap: json['sequence_gap'] == null
-          ? null
-          : _asInt(json['sequence_gap']),
+      sequenceGap:
+          json['sequence_gap'] == null ? null : _asInt(json['sequence_gap']),
       eventLimit: eventLimit,
       previewCharLimit: _asInt(limits['preview_chars']),
       error: json['error']?.toString() ?? '',
@@ -2349,9 +2472,14 @@ class ExecutionFeedEvent {
 
   factory ExecutionFeedEvent.fromJson(Map<String, dynamic> json) {
     return ExecutionFeedEvent(
-      responseId: _safeExecutionText(json['response_id']?.toString() ?? '', 128),
+      responseId: _safeExecutionText(
+        json['response_id']?.toString() ?? '',
+        128,
+      ),
       responseStatus: _safeExecutionText(
-          json['response_status']?.toString() ?? 'unknown', 64),
+        json['response_status']?.toString() ?? 'unknown',
+        64,
+      ),
       seq: _asInt(json['seq']),
       timestamp: _executionTimestamp(json['ts']),
       kind: _safeExecutionText(json['kind']?.toString() ?? '', 64).isNotEmpty
@@ -2374,7 +2502,9 @@ class ExecutionFeedEvent {
       bytes: _asInt(json['bytes']),
       dryRun: json['dry_run'] == true,
       previewKind: _safeExecutionText(
-          json['preview_kind']?.toString() ?? '', 80),
+        json['preview_kind']?.toString() ?? '',
+        80,
+      ),
       ok: json['ok'] is bool ? json['ok'] as bool : null,
       requestPreview: ExecutionPreview.fromJson(json['request_preview']),
       responsePreview: ExecutionPreview.fromJson(json['response_preview']),
@@ -2459,19 +2589,19 @@ class ExecutionPreview {
   factory ExecutionPreview.fromJson(dynamic value) {
     if (value is! Map<String, dynamic>) return unavailable;
     final reportedState = value['state']?.toString() ?? 'unavailable';
-    final state = const {'available', 'unavailable', 'disabled'}
-            .contains(reportedState)
-        ? reportedState
-        : 'unavailable';
+    final state =
+        const {'available', 'unavailable', 'disabled'}.contains(reportedState)
+            ? reportedState
+            : 'unavailable';
     final rawText = value['text']?.toString() ?? '';
-    final text = state == 'available'
-        ? _safeExecutionText(rawText, maxTextRunes)
-        : '';
+    final text =
+        state == 'available' ? _safeExecutionText(rawText, maxTextRunes) : '';
     return ExecutionPreview(
       state: state,
       text: text,
       chars: value['chars'] == null ? null : _asInt(value['chars']),
-      truncated: value['truncated'] == true || rawText.runes.length > maxTextRunes,
+      truncated:
+          value['truncated'] == true || rawText.runes.length > maxTextRunes,
       redacted: value['redacted'] == true,
     );
   }
@@ -2506,10 +2636,7 @@ String _safeExecutionText(String value, int maxRunes) {
     '<redacted>',
   );
   safe = safe.replaceAll(
-    RegExp(
-      r'(?:[A-Za-z]:\\Users\\|/home/)[^\\/\s]+',
-      caseSensitive: false,
-    ),
+    RegExp(r'(?:[A-Za-z]:\\Users\\|/home/)[^\\/\s]+', caseSensitive: false),
     '<user-home>',
   );
   final runes = safe.runes.toList(growable: false);
@@ -2560,9 +2687,10 @@ class ActivityEvent {
   }
 
   String get evidence {
-    final lines = <String>[command, output.isNotEmpty ? output : summary]
-        .where((value) => value.trim().isNotEmpty)
-        .toList();
+    final lines = <String>[
+      command,
+      output.isNotEmpty ? output : summary,
+    ].where((value) => value.trim().isNotEmpty).toList();
     return lines.join('\n');
   }
 }
@@ -2839,8 +2967,12 @@ double _asDouble(Object? value) {
 bool _asBool(Object? value) {
   if (value is bool) return value;
   if (value is num) return value != 0;
-  return const {'1', 'true', 'yes', 'on'}
-      .contains(value?.toString().trim().toLowerCase());
+  return const {
+    '1',
+    'true',
+    'yes',
+    'on',
+  }.contains(value?.toString().trim().toLowerCase());
 }
 
 Map<String, String> _stringMap(Object? value) {

@@ -15,6 +15,7 @@ import shutil
 import sys
 import threading
 import time
+from contextlib import redirect_stdout
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 import sonder_runtime.adapters.observability.activity_tracker as activity_tracker
@@ -64,6 +65,81 @@ slash_menu = load_optional_slash_menu()
 
 CURRENT_TOKEN = ""
 REPL_HISTORY_LIMIT = 200
+
+
+class _JsonLinesWriter:
+    """Turn stdout into a stable JSONL event stream for ``repl --json``.
+
+    The legacy REPL has many presentation call sites.  Adapting the stream at
+    the interface boundary keeps their execution and permission behavior
+    unchanged while guaranteeing that every stdout line is one parseable JSON
+    object.  Input is deliberately never echoed: prompts can contain private
+    repository context and credentials are already excluded from REPL history.
+    """
+
+    schema = "sonder.repl-output.v1"
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._buffer = ""
+        self._seq = 0
+        self.encoding = getattr(stream, "encoding", None) or "utf-8"
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+    def write(self, value):
+        text = str(value or "")
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit(line.rstrip("\r"))
+        return len(text)
+
+    def _emit(self, text):
+        self._seq += 1
+        payload = {
+            "schema": self.schema,
+            "seq": self._seq,
+            "event": "output",
+            "text": str(text),
+        }
+        self._stream.write(json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"),
+        ) + "\n")
+
+    def flush(self):
+        self._stream.flush()
+
+    def close(self):
+        if self._buffer:
+            self._emit(self._buffer.rstrip("\r"))
+            self._buffer = ""
+        self._stream.flush()
+
+
+def run_jsonl(stream=None):
+    """Run the normal REPL with machine-readable stdout and no terminal UI.
+
+    stderr remains stderr, as conventional command-line tools expect.  This
+    mode does not add retries, persist prompts, or reinterpret commands; it is
+    only a deterministic presentation adapter around the existing loop.
+    """
+    writer = _JsonLinesWriter(stream or sys.stdout)
+    ansi_was_enabled = _Ansi.enabled
+    legacy_ndjson = os.environ.pop("SONDER_REPL_NDJSON", None)
+    _Ansi.enabled = False
+    try:
+        with redirect_stdout(writer):
+            main(machine_output=True)
+    finally:
+        if legacy_ndjson is not None:
+            os.environ["SONDER_REPL_NDJSON"] = legacy_ndjson
+        writer.close()
+        _Ansi.enabled = ansi_was_enabled
 
 
 class _LegacyRuntimeProxy:
@@ -1101,6 +1177,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /model [name|tier] list installed models and tiers; switch either one
+  /cloud [status|on|off]  change process-local hosted/cloud consent
   /consult <question> ask 2 local tiers (+cloud when enabled) and compare answers
   /route <request>   suggest the tier best suited to a request, and why
   /refactor <file> <fn> [goal]  propose a guarded improvement to one function
@@ -1574,7 +1651,7 @@ def _print_facts(project):
         print("  - %s  %s" % (f["id"], f["text"]))
 
 
-def main():
+def main(*, machine_output=False):
     global CURRENT_TOKEN
     trace = False
     strict = None  # None = env default
@@ -2011,7 +2088,8 @@ def main():
             turns, session_id=replay_session, limit=count,
         ))
 
-    print(_startup_banner(strict, persona, project, active_tier))
+    if not machine_output:
+        print(_startup_banner(strict, persona, project, active_tier))
 
     while True:
         # ``/workspace`` may select/create a directory in response to a prior
@@ -2024,16 +2102,20 @@ def main():
             run_workspace_work(task)
             continue
         try:
-            line = _read_input(_composer_title(
+            prompt = "" if machine_output else _composer_title(
                 active_tier,
                 context=_composer_context(session_id, project),
                 last_turn=last_turn_metrics,
                 width=_composer_frame_width(),
                 model_override=active_model,
                 permission=_permission_mode_snapshot(),
-            ),
-                               history=input_history, composer=True,
-                               argument_completer=model_argument_completer)
+            )
+            line = _read_input(
+                prompt,
+                history=input_history,
+                composer=not machine_output,
+                argument_completer=model_argument_completer,
+            )
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -2130,6 +2212,8 @@ def main():
                 do_persona(arg)
             elif cmd == "/model":
                 do_model(arg)
+            elif cmd == "/cloud":
+                print(server.cloud_opt_in(arg.strip() or "status"))
             elif cmd == "/consult":
                 do_consult(arg)
             elif cmd == "/route":

@@ -5,6 +5,12 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .provider_bindings import (
+    TIER_PROVIDER_ENV,
+    ProviderBindings,
+    provider_bindings_from_env,
+)
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -13,6 +19,7 @@ class RuntimeConfig:
     profile: str = "workstation-local"
     model_backend: str = "ollama"
     sonder_home: str = ""
+    provider_bindings: ProviderBindings | None = None
 
 
 def build_config_from_env(
@@ -26,10 +33,20 @@ def build_config_from_env(
     """
 
     source = os.environ if env is None else env
+    binding_keys = (*TIER_PROVIDER_ENV.values(), "SONDER_EMBEDDING_PROVIDER")
+    has_provider_overrides = any(
+        str(source.get(key, "") or "").strip() for key in binding_keys
+    )
     return RuntimeConfig(
         profile=profile,
-        model_backend=source.get("SONDER_MODEL_BACKEND", "ollama").strip().lower(),
+        model_backend=(
+            str(source.get("SONDER_MODEL_BACKEND", "") or "").strip().lower()
+            or "ollama"
+        ),
         sonder_home=source.get("SONDER_HOME", ""),
+        provider_bindings=(
+            provider_bindings_from_env(source) if has_provider_overrides else None
+        ),
     )
 
 

@@ -413,6 +413,36 @@ def available_tiers(include_disabled=False):
     return {k: v for k, v in TIERS.items() if k not in CLOUD_TIERS}
 
 
+def _cloud_opt_in_impl(action: str = "status") -> str:
+    """Show or change hosted/cloud consent for this running Sonder process.
+
+    ``on`` is explicit consent for later ``cloud-*`` calls to send their prompts
+    off this machine and incur provider usage. ``off`` revokes that consent
+    immediately. The change is process-local and intentionally does not persist
+    across a Sonder restart; use host configuration for durable consent.
+    """
+    normalized = str(action or "status").strip().lower()
+    if normalized in ("status", "show", ""):
+        state = _cloud_allowed_policy(os.environ)
+    elif normalized in ("on", "enable", "enabled", "1", "true", "yes"):
+        os.environ["SONDER_ALLOW_CLOUD"] = "1"
+        _refresh_live_cloud_tiers()
+        state = True
+    elif normalized in ("off", "disable", "disabled", "0", "false", "no"):
+        os.environ["SONDER_ALLOW_CLOUD"] = "0"
+        _refresh_live_cloud_tiers()
+        state = False
+    else:
+        return "usage: cloud_opt_in action=status|on|off"
+
+    if state:
+        return (
+            "hosted/cloud tiers: ENABLED for this running process; prompts sent "
+            "to cloud-* tiers leave this machine and may incur provider usage"
+        )
+    return "hosted/cloud tiers: disabled for this running process (local-only default)"
+
+
 def _valid_tier_names():
     return _valid_tier_names_policy(available_tiers())
 
@@ -645,7 +675,7 @@ def _ensure_cloud_prediction_budget(payload, minimum=4096):
     return _ensure_cloud_prediction_budget_policy(payload, minimum)
 
 
-LOCAL_THINKING_MIN_NUM_PREDICT = 2048
+LOCAL_THINKING_MIN_NUM_PREDICT = 4096
 
 
 def _remember_thinking_model(model):
@@ -681,6 +711,17 @@ def _remember_unsupported_think_option(model) -> None:
 def _think_option_unsupported(detail) -> bool:
     """Whether Ollama explicitly refused only the optional ``think`` control."""
     return bool(_THINK_OPTION_UNSUPPORTED_RE.search(str(detail or "")))
+
+
+def _cloud_can_disable_thinking(model) -> bool:
+    """Whether the hosted model is known to accept ``think=false``.
+
+    Keep this allow-list deliberately narrow. Some hosted reasoners require
+    their thinking mode, while GLM 5.2 and Kimi K2.7 Code have both been
+    observed accepting an explicit false value through Ollama's cloud API.
+    """
+    name = str(model or "").strip().casefold()
+    return name.startswith(("glm-5.2:", "kimi-k2.7-code:"))
 
 
 def _with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT):
@@ -1508,7 +1549,7 @@ def _application():
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
             _APP_GRAPH = _bootstrap_app.build_application(
-                preference_connection_factory=_open_db,
+                preference_connection_factory=lambda: _open_db(),
                 preference_module_provider=lambda: preference_learning,
             )
         return _APP_GRAPH
@@ -4178,9 +4219,35 @@ def _chat_request(
             native_decision = _native_tool_call_decision(message)
             if native_decision is not None:
                 return out, native_decision
-        if not cloud and not _budget_retried and _thinking_exhausted_budget(
+        exhausted_thinking = _thinking_exhausted_budget(
             out, message, inline_thinking=inline_thinking,
+        )
+        if (
+            cloud
+            and not _budget_retried
+            and exhausted_thinking
+            and payload.get("think") is not False
+            and _cloud_can_disable_thinking(model)
         ):
+            # Hosted reasoning and final content share num_predict. Kimi K2.7
+            # Code has been observed spending the full 4096-token allowance in
+            # message.thinking and returning no assistant content. Preserve the
+            # quality-first initial request, then retry the same idempotent turn
+            # once with thinking disabled so the caller receives an answer.
+            fallback_payload = dict(payload)
+            fallback_payload["think"] = False
+            return _chat_request(
+                fallback_payload,
+                model=model,
+                cloud=True,
+                timeout=timeout,
+                cancel_check=cancel_check,
+                accept_native_tool_calls=accept_native_tool_calls,
+                idempotent=idempotent,
+                local_only=local_only,
+                _budget_retried=True,
+            )
+        if not cloud and not _budget_retried and exhausted_thinking:
             # The model reasoned right up to the cap and never got to an answer.
             # Now that the response has identified it, retry once with the
             # headroom it needed rather than reporting an empty response.
@@ -4791,6 +4858,17 @@ def _offload_impl(
             raise
         response = _with_schema_coverage(response, gaps)
     return with_footer(response, iid)
+
+
+@mcp.tool()
+def cloud_opt_in(action: str = "status") -> str:
+    """Show, enable, or revoke process-local hosted/cloud model consent.
+
+    Enabling is explicit consent for later ``cloud-*`` prompts to leave this
+    machine and potentially incur provider usage. The setting resets on restart.
+    """
+    _maybe_live_reload()
+    return _cloud_opt_in_impl(action)
 
 
 @mcp.tool()
@@ -15242,6 +15320,7 @@ def tool_manifest() -> str:
         "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
         "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
         "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
+        "cloud_opt_in": "Show, explicitly enable, or immediately revoke process-local hosted/cloud consent; enabling allows later cloud-* prompts to leave the machine and does not persist across restart.",
         "runtime_source_update_status/runtime_source_update": "Check the installed Git commit and canonical origin/main update time, or safely fast-forward only a clean canonical Sonder source checkout. Updates never merge/rebase/overwrite local work and require restart.",
         "mcp_runtime_status/live_reload_status": "Audit atomic MCP source/tool convergence, refresh history, list-change signaling, and fail-closed reload errors.",
         "master_orchestrate/master_status/master_capacity/master_cancel/master_retry": "Run restart-safe hardware-scheduled orchestration, inspect capacity/activity, cancel fleets, and explicitly retry interrupted work.",
@@ -18382,10 +18461,16 @@ def _agent_dispatch_observed(
     dispatched = False
     args = _project_scope_args(tool_name, args, project)
     dispatch_args = args
-    if project and tool_name in {"archive_create", "sqlite_mutate"}:
+    if project and not read_only and tool_name in (
+        _PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS
+    ):
         # Project scope is selected by the host. Grant only that exact root
         # through the unforgeable in-process approval sentinel, while keeping
         # credentials out of the activity record and model-visible arguments.
+        # This applies to ordinary workbench reads too: without the sentinel,
+        # a project-bound (mutable) agent rebased README.md into the selected
+        # repository but file_ops still rejected the same repository because
+        # extra_roots are honored only after trusted host authorization.
         dispatch_args = dict(args)
         dispatch_args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
     try:
@@ -24744,7 +24829,19 @@ def consult(
     """
     _maybe_live_reload()
     chosen = [t.strip() for t in tiers.split(",") if t.strip()] or None
-    result = consult_flow.consult(prompt, chosen)
+    # Inject this module's dispatcher and effective gate.  When server.py is
+    # launched as a script, consult.py importing ``server`` would otherwise
+    # create a second module instance whose process-local cloud override is
+    # still unset.  Status would truthfully say cloud is enabled while the
+    # consult leg rejected the same tier as disabled.
+    result = consult_flow.consult(
+        prompt,
+        chosen,
+        ask_fn=lambda question, tier: ensemble_answer(
+            question, tiers=tier, mode="general"
+        ),
+        cloud_ok=cloud_allowed(),
+    )
     return consult_flow.format_result(result)
 
 

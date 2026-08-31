@@ -16,9 +16,11 @@ void main() {
   });
 
   test('ChatThread derives a useful display title', () {
-    final thread = ChatThread.fresh().copyWith(messages: const [
-      ChatMessage(role: Role.user, content: 'build a dashboard for agents'),
-    ]);
+    final thread = ChatThread.fresh().copyWith(
+      messages: const [
+        ChatMessage(role: Role.user, content: 'build a dashboard for agents'),
+      ],
+    );
 
     expect(thread.displayTitle, 'build a dashboard for agents');
   });
@@ -78,8 +80,10 @@ void main() {
     final available = status.plans.where((p) => p.isAvailable).toList();
     expect(available.length, 1);
     expect(available.single.confirmNonce, '8c5fc2c3');
-    expect(status.plans.firstWhere((p) => p.status == 'committed').isTerminal,
-        isTrue);
+    expect(
+      status.plans.firstWhere((p) => p.status == 'committed').isTerminal,
+      isTrue,
+    );
   });
 
   test('UpdateStatus without a previous release cannot roll back', () {
@@ -158,5 +162,49 @@ void main() {
     );
     expect(m.copyWith(content: 'b').reasoning, 'thought');
     expect(m.copyWith(reasoning: '').reasoning, '');
+  });
+
+  test('response metadata persists locally but never rides model history', () {
+    const metadata = ChatResponseMetadata(
+      completionId: 'chatcmpl-abc',
+      requestId: 'req_123',
+      model: 'qwen:latest',
+      tier: 'code',
+      finishReason: 'stop',
+      status: 'complete',
+      cache: 'hit',
+      elapsedMs: 1250,
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+      modelCalls: 1,
+      toolCalls: 2,
+    );
+    const message = ChatMessage(
+      role: Role.assistant,
+      content: 'answer',
+      responseMetadata: metadata,
+      diagnostic: 'HTTP 503',
+    );
+
+    final restored = ChatMessage.fromJson(message.toJson());
+    expect(restored.responseMetadata?.requestId, 'req_123');
+    expect(restored.responseMetadata?.diagnosticText, contains('replayed'));
+    expect(restored.diagnostic, 'HTTP 503');
+    expect(message.toWire(), {'role': 'assistant', 'content': 'answer'});
+    expect(message.toWire().toString(), isNot(contains('req_123')));
+    expect(message.toWire().toString(), isNot(contains('HTTP 503')));
+  });
+
+  test('response metadata bounds strings and clamps invalid counts', () {
+    final metadata = ChatResponseMetadata.fromJson({
+      'request_id': List.filled(400, 'x').join(),
+      'elapsed_ms': -5,
+      'total_tokens': 'not-a-number',
+    });
+
+    expect(metadata.requestId.length, lessThanOrEqualTo(259));
+    expect(metadata.elapsedMs, 0);
+    expect(metadata.totalTokens, 0);
   });
 }

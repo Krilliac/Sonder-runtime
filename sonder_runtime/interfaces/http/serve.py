@@ -255,11 +255,39 @@ def _local_server_log_tail():
 
 
 _LOCAL_LOG_PAGE = """<!doctype html>
-<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>Sonder local server</title>
-<style>body{margin:0;background:#07121f;color:#d9efff;font:14px ui-monospace,Consolas,monospace}header{padding:16px 22px;background:#0b2b4a;color:#75cfff;font-weight:700}main{padding:16px 22px}small{color:#9cb4c8}pre{white-space:pre-wrap;word-break:break-word;background:#050b12;border:1px solid #16466e;padding:14px;min-height:60vh}</style>
-<header>Sonder local server <small id=\"state\">connecting</small></header><main><p>Live, read-only server-log tail. This page is available only from loopback.</p><pre id=\"log\">Loading…</pre></main>
-<script>const log=document.getElementById('log'),state=document.getElementById('state');async function refresh(){try{const r=await fetch('/v1/local/server-log',{cache:'no-store'});const j=await r.json();log.textContent=j.log||'';state.textContent='updated '+new Date().toLocaleTimeString()}catch(e){state.textContent='feed unavailable'}}refresh();setInterval(refresh,1000)</script>"""
+<style>
+:root{color-scheme:dark}body{margin:0;background:#07121f;color:#d9efff;font:14px ui-monospace,Consolas,monospace}header{padding:16px 22px;background:#0b2b4a;color:#75cfff;font-weight:700;display:flex;gap:12px;align-items:center;flex-wrap:wrap}main{padding:16px 22px}small{color:#b7cad8;font-weight:400}.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0}button{background:#123e62;color:#e8f6ff;border:1px solid #2f739f;border-radius:5px;padding:8px 12px;font:inherit;cursor:pointer}button:hover,button:focus-visible{background:#19547e;outline:2px solid #75cfff;outline-offset:2px}label{padding:8px 4px}pre{white-space:pre-wrap;word-break:break-word;background:#050b12;border:1px solid #27658f;padding:14px;min-height:60vh;max-height:72vh;overflow:auto;line-height:1.45}pre:focus-visible{outline:2px solid #75cfff;outline-offset:2px}.offline{color:#ffca80}
+</style></head><body>
+<header><span>Sonder local server</span><small id=\"state\" role=\"status\" aria-live=\"polite\">Connecting</small></header>
+<main><p>Live, read-only server-log tail. This page is available only from loopback.</p>
+<div class=\"controls\" aria-label=\"Log controls\"><button id=\"pause\" type=\"button\" aria-pressed=\"false\">Pause updates</button><button id=\"refresh\" type=\"button\">Refresh now</button><button id=\"copy\" type=\"button\">Copy visible log</button><label><input id=\"follow\" type=\"checkbox\" checked> Follow latest output</label></div>
+<pre id=\"log\" tabindex=\"0\" aria-label=\"Redacted server log\" aria-busy=\"true\">Loading...</pre></main>
+<script>
+const log=document.getElementById('log'),state=document.getElementById('state'),pause=document.getElementById('pause'),refreshNow=document.getElementById('refresh'),copy=document.getElementById('copy'),follow=document.getElementById('follow');
+const POLL_MS=1000,MAX_BACKOFF_MS=30000;let timer=0,paused=false,inFlight=false,failures=0;
+function setState(text,offline=false){state.textContent=text;state.classList.toggle('offline',offline)}
+function schedule(delay=POLL_MS){clearTimeout(timer);timer=setTimeout(refresh,delay)}
+async function refresh(){
+  if(paused||document.hidden){schedule();return}
+  if(inFlight)return
+  inFlight=true;log.setAttribute('aria-busy','true');const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),5000);
+  try{
+    const response=await fetch('/v1/local/server-log',{cache:'no-store',signal:controller.signal,headers:{Accept:'application/json'}});
+    if(!response.ok)throw new Error('HTTP '+response.status)
+    const payload=await response.json();if(typeof payload.log!=='string')throw new Error('invalid response')
+    const wasAtEnd=log.scrollHeight-log.scrollTop-log.clientHeight<32;log.textContent=payload.log;
+    if(follow.checked||wasAtEnd)log.scrollTop=log.scrollHeight
+    failures=0;setState('Updated '+new Date().toLocaleTimeString())
+  }catch(error){failures=Math.min(failures+1,5);setState(error.name==='AbortError'?'Update timed out':'Feed unavailable',true)
+  }finally{clearTimeout(timeout);inFlight=false;log.setAttribute('aria-busy','false');schedule(Math.min(MAX_BACKOFF_MS,POLL_MS*(2**failures)))}
+}
+pause.addEventListener('click',()=>{paused=!paused;pause.textContent=paused?'Resume updates':'Pause updates';pause.setAttribute('aria-pressed',String(paused));setState(paused?'Updates paused':'Resuming');if(!paused)refresh()});
+refreshNow.addEventListener('click',()=>{if(!inFlight)refresh()});
+copy.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(log.textContent||'');setState('Visible log copied')}catch(_){setState('Copy unavailable',true)}});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!paused)refresh()});window.addEventListener('pagehide',()=>clearTimeout(timer));refresh();
+</script></body></html>"""
 
 
 def _request_route(path) -> str:

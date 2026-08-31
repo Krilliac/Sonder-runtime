@@ -116,6 +116,31 @@ class TestCloudBoundary:
         for tier in route.ladder:
             assert tier != "cloud"
 
+    def test_selected_tier_uses_its_provider_binding(self, planner, policy):
+        available = AvailableModels(
+            tier_models={
+                "fast": "bonsai",
+                "general": "bonsai",
+                "code": "qwen",
+                "reasoning": "qwen",
+                "vision": "",
+            },
+            provider="ollama",
+            tier_providers={
+                "fast": "openai_compatible",
+                "general": "openai_compatible",
+                "code": "ollama",
+                "reasoning": "ollama",
+            },
+        )
+
+        route = planner.select(
+            RoutingRequest(lane="router", prompt="hello"), policy, available
+        )
+
+        assert route.provider == available.provider_for(route.tier)
+        assert route.provider in {"ollama", "openai_compatible"}
+
 
 class TestLaneMapping:
     def test_all_lanes_valid(self, planner, policy, available):
@@ -141,6 +166,15 @@ class TestFromPolicy:
         available = RoutePlanner.from_policy(policy)
         assert "reasoning" not in available.available_tiers
         assert "vision" not in available.available_tiers
+
+    def test_from_policy_preserves_per_tier_providers(self, policy):
+        available = RoutePlanner.from_policy(
+            policy,
+            provider="ollama",
+            tier_providers={"fast": "openai_compatible"},
+        )
+        assert available.provider_for("fast") == "openai_compatible"
+        assert available.provider_for("code") == "ollama"
 
 
 class TestNoSideEffects:

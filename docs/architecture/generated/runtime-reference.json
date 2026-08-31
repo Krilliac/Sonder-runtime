@@ -1324,6 +1324,33 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/cloud",
+      "native": true,
+      "params": [],
+      "risk": "dangerous",
+      "summary": "change process-local hosted/cloud consent",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "security",
+      "name": "/cloud_opt_in",
+      "native": false,
+      "params": [
+        {
+          "default": "status",
+          "name": "action",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "dangerous",
+      "summary": "Show, enable, or revoke process-local hosted/cloud model consent.",
+      "tool": "cloud_opt_in"
+    },
+    {
+      "aliases": [],
       "category": "dev",
       "name": "/codegen_build_loop",
       "native": false,
@@ -9149,12 +9176,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 304,
+    "commands": 306,
     "configuration": 74,
     "events": 43,
-    "tools": 205
+    "tools": 206
   },
-  "digest": "274cf30536ab679bf25028ccd19c23b831d2e15001382ceec8e09c6248721ea1",
+  "digest": "2779d916c22ff04111ec2926023f2c34e0a12cff1db2ac574c9472093de59809",
   "events": [
     {
       "name": "session.started",
@@ -9625,7 +9652,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "18af5f1b161e678b214674a07fae713d825f6d8b109a680235c9d1b8ea3d66ca",
+    "server.py": "7cdfaad1e787e812203f65d578f098b5473c4c1e1ad0f35e3148391761d754b5",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "8828256187e05826f8140fe8605e4406ed4dfcf2b17c2376f09477bc9935498c"
@@ -10675,6 +10702,21 @@
           "status"
         ],
         "title": "checklist_updateArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\n    Enabling is explicit consent for later ``cloud-*`` prompts to leave this\n    machine and potentially incur provider usage. The setting resets on restart.\n    ",
+      "name": "cloud_opt_in",
+      "parameters": {
+        "properties": {
+          "action": {
+            "default": "status",
+            "title": "Action",
+            "type": "string"
+          }
+        },
+        "title": "cloud_opt_inArguments",
         "type": "object"
       }
     },
