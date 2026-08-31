@@ -1295,7 +1295,10 @@ class SonderApi {
     }
 
     if (resp.statusCode == 401) {
-      throw SonderException('Unauthorized — check the API key.');
+      throw _responseException(
+        resp,
+        'Unauthorized — check the API key.',
+      );
     }
     if (resp.statusCode != 200) {
       throw _responseException(
