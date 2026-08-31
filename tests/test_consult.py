@@ -190,7 +190,7 @@ def test_server_wrapper_uses_active_process_gate_and_current_dispatcher(monkeypa
             return "YES. The answers agree."
         return "Use a bounded queue."
 
-    monkeypatch.setattr(server, "_CLOUD_RUNTIME_OVERRIDE", True)
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "ensemble_answer", fake_ensemble)
     monkeypatch.setattr(
         consult_module,
