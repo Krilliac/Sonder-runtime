@@ -28,6 +28,12 @@ def test_build_config_from_env_uses_defaults_without_environment_keys():
     assert build_config_from_env("local", {}) == RuntimeConfig(profile="local")
 
 
+def test_build_config_from_env_treats_a_blank_backend_as_ollama():
+    assert build_config_from_env(
+        "local", {"SONDER_MODEL_BACKEND": "   "}
+    ).model_backend == "ollama"
+
+
 def test_build_config_from_env_captures_mixed_provider_bindings():
     config = build_config_from_env(
         "local",

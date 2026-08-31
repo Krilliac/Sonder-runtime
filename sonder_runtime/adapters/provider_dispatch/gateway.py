@@ -20,22 +20,29 @@ class ProviderDispatchGateway:
         *,
         providers: Mapping[str, ModelGateway],
         tier_providers: Mapping[str, str],
+        default_generation_provider: str,
         embedding_provider: str,
     ) -> None:
         provider_map = dict(providers)
         tier_map = dict(tier_providers)
-        required = set(tier_map.values()) | {embedding_provider}
+        required = set(tier_map.values()) | {
+            default_generation_provider,
+            embedding_provider,
+        }
         missing = sorted(required - set(provider_map))
         if missing:
             raise InvalidInput("missing provider gateways: %s" % ", ".join(missing))
         self._providers = MappingProxyType(provider_map)
         self._tier_providers = MappingProxyType(tier_map)
+        self._default_generation_provider = default_generation_provider
         self._embedding_provider = embedding_provider
 
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
         provider = self._tier_providers.get(request.tier)
+        if provider is None and request.tier == "sonder":
+            provider = self._default_generation_provider
         if provider is None:
             raise InvalidInput("no provider binding for tier %r" % request.tier)
         return self._providers[provider].generate(request, context)
