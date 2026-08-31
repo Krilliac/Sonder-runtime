@@ -1549,7 +1549,7 @@ def _application():
         if _APP_GRAPH is None:
             from sonder_runtime.bootstrap import app as _bootstrap_app
             _APP_GRAPH = _bootstrap_app.build_application(
-                preference_connection_factory=_open_db,
+                preference_connection_factory=lambda: _open_db(),
                 preference_module_provider=lambda: preference_learning,
             )
         return _APP_GRAPH
