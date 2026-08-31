@@ -54,3 +54,54 @@ def test_application_graph_uses_packaged_selector(monkeypatch, tmp_path):
         )
     finally:
         bootstrap_app.reset_for_tests()
+
+from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
+from sonder_runtime.bootstrap.model_gateways import (
+    build_model_gateway as build_provider_model_gateway,
+)
+from sonder_runtime.bootstrap.provider_bindings import ProviderBindings
+
+
+class MarkerGateway:
+    pass
+
+
+def test_uniform_binding_returns_direct_gateway_and_builds_only_one_provider():
+    calls = []
+    ollama = MarkerGateway()
+    gateway = build_provider_model_gateway(
+        ProviderBindings.uniform("ollama"),
+        {
+            "ollama": lambda: calls.append("ollama") or ollama,
+            "openai_compatible": lambda: calls.append("openai_compatible")
+            or MarkerGateway(),
+        },
+    )
+    assert gateway is ollama
+    assert calls == ["ollama"]
+
+
+def test_mixed_binding_builds_dispatcher_and_only_referenced_providers():
+    bindings = ProviderBindings(
+        default_generation_provider="ollama",
+        tier_providers={
+            "fast": "openai_compatible",
+            "general": "openai_compatible",
+            "code": "ollama",
+            "reasoning": "ollama",
+            "vision": "ollama",
+        },
+        embedding_provider="ollama",
+    )
+    calls = []
+    gateway = build_provider_model_gateway(
+        bindings,
+        {
+            "ollama": lambda: calls.append("ollama") or MarkerGateway(),
+            "openai_compatible": lambda: calls.append("openai_compatible")
+            or MarkerGateway(),
+            "unused": lambda: calls.append("unused") or MarkerGateway(),
+        },
+    )
+    assert isinstance(gateway, ProviderDispatchGateway)
+    assert calls == ["ollama", "openai_compatible"]
