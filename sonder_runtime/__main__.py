@@ -667,7 +667,10 @@ def cmd_repl(args) -> int:
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
-    sonder_repl.main()
+    if args.json:
+        sonder_repl.run_jsonl()
+    else:
+        sonder_repl.main()
     return 0
 
 
@@ -868,14 +871,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def common(p, *, ollama_flag: bool = False):
+    def common(p, *, ollama_flag: bool = False, json_help: str = "JSON output"):
         p.add_argument("--config", help="path to sonder.toml")
         p.add_argument("--secrets", help="path to the secrets env file")
         p.add_argument(
             "--set", action="append", metavar="SECTION.KEY=VALUE",
             help="explicit configuration override (highest precedence)",
         )
-        p.add_argument("--json", action="store_true", help="JSON output")
+        p.add_argument("--json", action="store_true", help=json_help)
         if ollama_flag:
             p.add_argument(
                 "--skip-ollama", action="store_true",
@@ -961,7 +964,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("repl", help="run the interactive REPL")
-    common(p)
+    common(
+        p,
+        json_help=(
+            "emit stdout as sonder.repl-output.v1 JSON Lines without terminal chrome"
+        ),
+    )
     p.set_defaults(func=cmd_repl)
 
     p = sub.add_parser("mcp", help="run the MCP adapter")
