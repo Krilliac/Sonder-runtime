@@ -68,6 +68,7 @@ def build_model_gateway(
     return ProviderDispatchGateway(
         providers=gateways,
         tier_providers=selected.tier_providers,
+        default_generation_provider=selected.default_generation_provider,
         embedding_provider=selected.embedding_provider,
     )
 

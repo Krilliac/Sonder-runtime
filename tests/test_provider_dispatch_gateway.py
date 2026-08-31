@@ -44,6 +44,7 @@ def _gateway(ollama, prism):
             "reasoning": "ollama",
             "vision": "ollama",
         },
+        default_generation_provider="ollama",
         embedding_provider="ollama",
     )
 
@@ -85,6 +86,20 @@ def test_embeddings_ignore_generation_tiers_and_use_embedding_binding():
     assert prism.embedded == []
 
 
+def test_sonder_tier_uses_the_configured_default_generation_provider():
+    ollama = RecordingGateway("ollama")
+    prism = RecordingGateway("prism")
+    gateway = _gateway(ollama, prism)
+    request = ModelRequest(prompt="hello", tier="sonder")
+    context = _context()
+
+    response = gateway.generate(request, context)
+
+    assert response.text == "ollama"
+    assert ollama.generated == [(request, context)]
+    assert prism.generated == []
+
+
 def test_provider_failure_is_propagated_without_second_provider_call():
     ollama = RecordingGateway("ollama")
     prism = RecordingGateway("prism", fail=True)
@@ -108,5 +123,6 @@ def test_unknown_tier_and_missing_provider_fail_closed():
         ProviderDispatchGateway(
             providers={"ollama": ollama},
             tier_providers={"fast": "openai_compatible"},
+            default_generation_provider="ollama",
             embedding_provider="ollama",
         )

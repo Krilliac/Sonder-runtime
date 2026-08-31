@@ -60,3 +60,13 @@ def test_unknown_nonblank_provider_fails_closed(value):
 def test_uniform_constructor_normalizes_alias():
     bindings = ProviderBindings.uniform("openai")
     assert bindings.required_providers == frozenset({"openai_compatible"})
+
+
+def test_required_providers_includes_an_otherwise_unreferenced_default():
+    bindings = ProviderBindings(
+        default_generation_provider="ollama",
+        tier_providers={tier: "openai_compatible" for tier in PROVIDER_TIERS},
+        embedding_provider="openai_compatible",
+    )
+
+    assert bindings.required_providers == frozenset({"ollama", "openai_compatible"})

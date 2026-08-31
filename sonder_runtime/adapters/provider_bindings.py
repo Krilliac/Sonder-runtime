@@ -59,7 +59,11 @@ class ProviderBindings:
 
     @property
     def required_providers(self) -> frozenset[str]:
-        return frozenset((*self.tier_providers.values(), self.embedding_provider))
+        return frozenset((
+            self.default_generation_provider,
+            *self.tier_providers.values(),
+            self.embedding_provider,
+        ))
 
     def status_projection(self) -> dict[str, object]:
         return {
@@ -73,12 +77,18 @@ def provider_bindings_from_env(
     env: Mapping[str, str] | None = None,
 ) -> ProviderBindings:
     source = os.environ if env is None else env
-    default = normalize_provider(source.get("SONDER_MODEL_BACKEND", "ollama") or "ollama")
+    default = normalize_provider(
+        str(source.get("SONDER_MODEL_BACKEND", "") or "").strip() or "ollama"
+    )
     tiers = {
-        tier: normalize_provider(source.get(variable, "") or default)
+        tier: normalize_provider(
+            str(source.get(variable, "") or "").strip() or default
+        )
         for tier, variable in TIER_PROVIDER_ENV.items()
     }
-    embedding = normalize_provider(source.get("SONDER_EMBEDDING_PROVIDER", "") or default)
+    embedding = normalize_provider(
+        str(source.get("SONDER_EMBEDDING_PROVIDER", "") or "").strip() or default
+    )
     return ProviderBindings(default, tiers, embedding)
 
 

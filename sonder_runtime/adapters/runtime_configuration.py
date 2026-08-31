@@ -39,7 +39,10 @@ def build_config_from_env(
     )
     return RuntimeConfig(
         profile=profile,
-        model_backend=source.get("SONDER_MODEL_BACKEND", "ollama").strip().lower(),
+        model_backend=(
+            str(source.get("SONDER_MODEL_BACKEND", "") or "").strip().lower()
+            or "ollama"
+        ),
         sonder_home=source.get("SONDER_HOME", ""),
         provider_bindings=(
             provider_bindings_from_env(source) if has_provider_overrides else None
