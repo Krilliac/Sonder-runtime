@@ -91,6 +91,20 @@ class SubprocessJobProvider:
             launch_options["start_new_session"] = True
         elif self._platform == "nt":
             launch_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        containment_options = getattr(self._memory_limiter, "launch_options", None)
+        apply_process_limits = getattr(self._memory_limiter, "apply_process_limits", None)
+        resume_process = getattr(self._memory_limiter, "resume", None)
+        native_containment = callable(containment_options) and callable(apply_process_limits)
+        if native_containment:
+            prepared = containment_options(
+                request.memory_limit_bytes,
+                request.max_descendants + 1,
+            )
+            if not isinstance(prepared, dict):
+                raise TypeError("native containment launch options must be a mapping")
+            if "creationflags" in prepared and "creationflags" in launch_options:
+                launch_options["creationflags"] |= int(prepared.pop("creationflags"))
+            launch_options.update(prepared)
         deadline_at = None
         if request.deadline_seconds is not None:
             deadline_at = (
@@ -119,7 +133,13 @@ class SubprocessJobProvider:
             process_instance_identity = self._process_identity_resolver(process_id)
             if request.deadline_seconds is not None and not process_instance_identity:
                 raise RuntimeError("deadline jobs require a durable process identity")
-            if request.memory_limit_bytes is not None:
+            if native_containment:
+                memory_token = apply_process_limits(
+                    process,
+                    request.memory_limit_bytes,
+                    request.max_descendants + 1,
+                )
+            elif request.memory_limit_bytes is not None:
                 memory_token = self._memory_limiter.apply(
                     process, request.memory_limit_bytes,
                 )
@@ -132,6 +152,8 @@ class SubprocessJobProvider:
                     "process_instance_identity": process_instance_identity,
                 },
             )
+            if native_containment and callable(resume_process):
+                resume_process(process)
         except Exception as exc:
             if memory_token is not None:
                 memory_token.close()
@@ -224,6 +246,19 @@ class SubprocessJobProvider:
 
     def poll(self, job_id: str):
         return self._registry.poll(job_id)
+
+    def stream(
+        self,
+        job_id: str,
+        *,
+        max_events: int = 32,
+        max_bytes: int = 16 * 1024,
+    ):
+        return self._registry.stream(
+            job_id,
+            max_events=max_events,
+            max_bytes=max_bytes,
+        )
 
     def recover(self, *, kind_prefix: str, limit: int = 1024):
         if not isinstance(kind_prefix, str) or not kind_prefix:

@@ -85,6 +85,26 @@ class _MemoryLimiter:
         return self.token
 
 
+class _ContainmentLimiter:
+    def __init__(self) -> None:
+        self.events = []
+        self.token = _LimitToken()
+
+    def launch_options(self, memory_limit_bytes, process_limit):
+        self.events.append(("prepare", memory_limit_bytes, process_limit))
+        return {"containment_marker": "prepared"}
+
+    def apply_process_limits(self, process, memory_limit_bytes, process_limit):
+        self.events.append(("attach", process.pid, memory_limit_bytes, process_limit))
+        return self.token
+
+    def resume(self, process):
+        self.events.append(("resume", process.pid))
+
+    def apply(self, process, limit_bytes):
+        raise AssertionError("post-launch fallback must not be used")
+
+
 def _provider(cleanup, process, *, platform_name="posix", launch_options=None):
     options = launch_options if launch_options is not None else {}
 
@@ -97,6 +117,7 @@ def _provider(cleanup, process, *, platform_name="posix", launch_options=None):
         process_cleanup=cleanup,
         launcher=launch,
         platform_name=platform_name,
+        memory_limiter=_MemoryLimiter(),
     ), options
 
 
@@ -137,6 +158,43 @@ def test_memory_limit_is_enforced_before_job_publication_and_token_is_closed():
     assert limiter.calls == [(process, 256 * 1024 * 1024)]
     provider.wait(request.identity.job_id)
     assert limiter.token.closed is True
+
+
+def test_native_limits_are_prepared_before_launch_and_resume_after_attachment():
+    cleanup = _Cleanup(complete=True)
+    limiter = _ContainmentLimiter()
+    process = _Process()
+    launch = {}
+
+    def launcher(argv, **kwargs):
+        launch.update(kwargs)
+        limiter.events.append(("launch", process.pid))
+        return process
+
+    registry = DurableJobRegistry()
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        launcher=launcher,
+        platform_name="posix",
+        memory_limiter=limiter,
+    )
+    request = ProcessJobRequest(
+        JobIdentity("job-contained", "process", "execute", "idem-contained"),
+        ("python", "-c", "pass"),
+        max_descendants=3,
+        memory_limit_bytes=128 * 1024 * 1024,
+    )
+    provider.start(request)
+
+    assert launch["containment_marker"] == "prepared"
+    assert limiter.events == [
+        ("prepare", 128 * 1024 * 1024, 4),
+        ("launch", 77),
+        ("attach", 77, 128 * 1024 * 1024, 4),
+        ("resume", 77),
+    ]
+    assert registry.view("job-contained").process_id == 77
 
 
 def test_unenforceable_requested_memory_limit_aborts_before_registration():
@@ -197,6 +255,7 @@ def test_provider_uses_the_typed_process_tree_supervisor_end_to_end():
         process_cleanup=supervisor,
         launcher=lambda _argv, **_kwargs: process,
         platform_name="posix",
+        memory_limiter=_MemoryLimiter(),
     )
     provider.start(_request())
 
@@ -394,6 +453,7 @@ def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path):
         launcher=lambda _argv, **_kwargs: process,
         platform_name="posix",
         process_identity_resolver=lambda _pid: "birth-A",
+        memory_limiter=_MemoryLimiter(),
     )
     job_id = "job-pid-reused"
     first.start(ProcessJobRequest(
@@ -410,6 +470,7 @@ def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path):
         launcher=lambda _argv, **_kwargs: process,
         platform_name="posix",
         process_probe=lambda _pid, _expected: (PROCESS_ALIVE, "birth-B"),
+        memory_limiter=_MemoryLimiter(),
     )
     deadline = time.monotonic() + 5
     while reopened.poll(job_id).status is not JobStatus.INTERRUPTED and time.monotonic() < deadline:

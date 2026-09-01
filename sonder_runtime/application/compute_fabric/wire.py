@@ -66,6 +66,14 @@ _JOB_RECEIPT_FIELDS = {
     "state",
     "process_id",
     "artifacts",
+    "output_preview",
+    "output_watermark",
+    "output_truncated",
+}
+_JOB_RECEIPT_REQUIRED_FIELDS = _JOB_RECEIPT_FIELDS - {
+    "output_preview",
+    "output_watermark",
+    "output_truncated",
 }
 _ARTIFACT_FIELDS = {"name", "size_bytes", "mime_type", "sha256"}
 
@@ -235,11 +243,18 @@ def job_receipt_to_wire(receipt: RemoteJobReceipt) -> dict[str, Any]:
             }
             for artifact in receipt.artifacts
         ],
+        "output_preview": receipt.output_preview,
+        "output_watermark": receipt.output_watermark,
+        "output_truncated": receipt.output_truncated,
     }
 
 
 def job_receipt_from_wire(payload: Mapping[str, Any]) -> RemoteJobReceipt:
-    if not isinstance(payload, Mapping) or set(payload) != _JOB_RECEIPT_FIELDS:
+    if (
+        not isinstance(payload, Mapping)
+        or not _JOB_RECEIPT_REQUIRED_FIELDS.issubset(payload)
+        or set(payload) - _JOB_RECEIPT_FIELDS
+    ):
         raise ValueError("compute job receipt fields do not match the bounded schema")
     raw_artifacts = payload["artifacts"]
     if not isinstance(raw_artifacts, list) or len(raw_artifacts) > 256:
@@ -259,6 +274,9 @@ def job_receipt_from_wire(payload: Mapping[str, Any]) -> RemoteJobReceipt:
             state=payload["state"],
             process_id=payload["process_id"],
             artifacts=tuple(artifacts),
+            output_preview=payload.get("output_preview", ""),
+            output_watermark=payload.get("output_watermark", 0),
+            output_truncated=payload.get("output_truncated", False),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"compute job receipt is invalid: {exc}") from exc

@@ -9,6 +9,7 @@ The adapter deliberately exposes only enforcement, not RSS sampling.  A
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import Protocol
 
 
@@ -63,6 +64,87 @@ class NativeExtensionMemoryLimiter:
             "native extension memory enforcement is unsupported on this platform"
         )
 
+    def launch_options(
+        self,
+        memory_limit_bytes: int | None,
+        process_limit: int,
+    ) -> dict:
+        """Return limits that must be installed before child code executes."""
+        if isinstance(process_limit, bool) or process_limit < 1:
+            raise ExtensionMemoryLimitError("process limit must be positive")
+        if self._platform_name == "nt":
+            return {"creationflags": getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)}
+        if self._platform_name != "posix":
+            raise ExtensionMemoryLimitUnsupported(
+                "native process containment is unsupported on this platform"
+            )
+        resource = self._resource
+        if resource is None:
+            try:
+                import resource as resource_module
+            except ImportError as exc:
+                raise ExtensionMemoryLimitUnsupported(
+                    "native POSIX process containment is unavailable"
+                ) from exc
+            resource = resource_module
+        rlimit_as = getattr(resource, "RLIMIT_AS", None)
+        rlimit_nproc = getattr(resource, "RLIMIT_NPROC", None)
+        if rlimit_nproc is None or (
+            memory_limit_bytes is not None and rlimit_as is None
+        ):
+            raise ExtensionMemoryLimitUnsupported(
+                "required POSIX resource limits are unavailable"
+            )
+
+        def install_limits() -> None:
+            if memory_limit_bytes is not None:
+                resource.setrlimit(
+                    rlimit_as,
+                    (memory_limit_bytes, memory_limit_bytes),
+                )
+            resource.setrlimit(
+                rlimit_nproc,
+                (process_limit, process_limit),
+            )
+
+        return {"preexec_fn": install_limits}
+
+    def apply_process_limits(
+        self,
+        process: object,
+        memory_limit_bytes: int | None,
+        process_limit: int,
+    ) -> MemoryLimitToken:
+        """Attach post-create OS ownership while the Windows child is suspended."""
+        if self._platform_name == "nt":
+            return self._apply_windows_job(
+                process,
+                memory_limit_bytes=memory_limit_bytes,
+                process_limit=process_limit,
+            )
+        if self._platform_name == "posix":
+            return _PosixLimitToken()
+        raise ExtensionMemoryLimitUnsupported(
+            "native process containment is unsupported on this platform"
+        )
+
+    def resume(self, process: object) -> None:
+        if self._platform_name != "nt":
+            return
+        import ctypes
+
+        handle = getattr(process, "_handle", None)
+        if not handle:
+            raise ExtensionMemoryLimitError("process has no native Windows handle")
+        resume = ctypes.windll.ntdll.NtResumeProcess
+        resume.argtypes = [ctypes.c_void_p]
+        resume.restype = ctypes.c_long
+        status = int(resume(ctypes.c_void_p(int(handle))))
+        if status != 0:
+            raise ExtensionMemoryLimitError(
+                f"NtResumeProcess failed with status {status}"
+            )
+
     def _apply_posix(self, process: object, limit_bytes: int) -> MemoryLimitToken:
         resource = self._resource
         if resource is None:
@@ -90,6 +172,19 @@ class NativeExtensionMemoryLimiter:
 
     @staticmethod
     def _apply_windows(process: object, limit_bytes: int) -> MemoryLimitToken:
+        return NativeExtensionMemoryLimiter._apply_windows_job(
+            process,
+            memory_limit_bytes=limit_bytes,
+            process_limit=None,
+        )
+
+    @staticmethod
+    def _apply_windows_job(
+        process: object,
+        *,
+        memory_limit_bytes: int | None,
+        process_limit: int | None,
+    ) -> MemoryLimitToken:
         import ctypes
         import ctypes.wintypes as wintypes
 
@@ -139,8 +234,13 @@ class NativeExtensionMemoryLimiter:
         if not job:
             raise ExtensionMemoryLimitError("CreateJobObjectW failed")
         info = ExtendedLimitInformation()
-        info.BasicLimitInformation.LimitFlags = 0x00000100 | 0x00002000
-        info.ProcessMemoryLimit = limit_bytes
+        info.BasicLimitInformation.LimitFlags = 0x00002000
+        if memory_limit_bytes is not None:
+            info.BasicLimitInformation.LimitFlags |= 0x00000200
+            info.JobMemoryLimit = memory_limit_bytes
+        if process_limit is not None:
+            info.BasicLimitInformation.LimitFlags |= 0x00000008
+            info.BasicLimitInformation.ActiveProcessLimit = process_limit
         if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
             kernel32.CloseHandle(job)
             raise ExtensionMemoryLimitError("SetInformationJobObject failed")
