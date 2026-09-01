@@ -43,6 +43,7 @@ workspace_mappings = ["sonder"]
 allowed_flags = ["-q"]
 allowed_bounded_options = ["--color"]
 allowed_relative_path_options = ["--basetemp"]
+memory_limit_bytes = 536870912
 """,
         encoding="utf-8",
     )
@@ -58,6 +59,7 @@ allowed_relative_path_options = ["--basetemp"]
     assert config.compute.jobs[0].allowed_flags == ("-q",)
     assert config.compute.jobs[0].allowed_bounded_options == ("--color",)
     assert config.compute.jobs[0].allowed_relative_path_options == ("--basetemp",)
+    assert config.compute.jobs[0].memory_limit_bytes == 536870912
     assert config.features.cloud is False
 
 

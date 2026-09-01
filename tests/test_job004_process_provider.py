@@ -63,6 +63,27 @@ class _Cleanup:
         )
 
 
+class _LimitToken:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _MemoryLimiter:
+    def __init__(self, *, fail=False):
+        self.calls = []
+        self.token = _LimitToken()
+        self.fail = fail
+
+    def apply(self, process, limit_bytes):
+        self.calls.append((process, limit_bytes))
+        if self.fail:
+            raise RuntimeError("limit unavailable")
+        return self.token
+
+
 def _provider(cleanup, process, *, platform_name="posix", launch_options=None):
     options = launch_options if launch_options is not None else {}
 
@@ -90,6 +111,55 @@ def test_start_registers_process_identity_and_posix_group_for_cleanup():
     assert launch["kwargs"]["start_new_session"] is True
     assert launch["kwargs"]["env"]["SONDER_TEST"] == "1"
     assert launch["kwargs"]["cwd"] == str(Path("C:/workspace"))
+
+
+def test_memory_limit_is_enforced_before_job_publication_and_token_is_closed():
+    cleanup = _Cleanup(complete=True)
+    limiter = _MemoryLimiter()
+    process = _Process()
+    registry = DurableJobRegistry()
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        launcher=lambda _argv, **_kwargs: process,
+        platform_name="posix",
+        memory_limiter=limiter,
+    )
+    request = _request()
+    request = ProcessJobRequest(
+        request.identity,
+        request.argv,
+        cwd=request.cwd,
+        memory_limit_bytes=256 * 1024 * 1024,
+    )
+    provider.start(request)
+    assert limiter.calls == [(process, 256 * 1024 * 1024)]
+    provider.wait(request.identity.job_id)
+    assert limiter.token.closed is True
+
+
+def test_unenforceable_requested_memory_limit_aborts_before_registration():
+    cleanup = _Cleanup(complete=True)
+    limiter = _MemoryLimiter(fail=True)
+    process = _Process()
+    registry = DurableJobRegistry()
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        launcher=lambda _argv, **_kwargs: process,
+        platform_name="posix",
+        memory_limiter=limiter,
+    )
+    request = ProcessJobRequest(
+        JobIdentity("job-limit-fail", "process", "execute", "idem-limit-fail"),
+        ("python", "-c", "pass"),
+        memory_limit_bytes=128 * 1024 * 1024,
+    )
+    with pytest.raises(RuntimeError, match="limit unavailable"):
+        provider.start(request)
+    assert process.killed is True
+    with pytest.raises(KeyError):
+        registry.poll("job-limit-fail")
 
 
 def test_cancel_routes_the_concrete_job_through_typed_tree_cleanup():

@@ -35,6 +35,7 @@ class SubprocessJobProvider:
         lifecycle: JobRegistryLifecycleAdapter | None = None,
         output: DurableExecutionOutput | None = None,
         inline_output_bytes: int = 16 * 1024,
+        memory_limiter=None,
     ) -> None:
         if not all(callable(getattr(registry, name, None)) for name in (
             "start", "poll", "transition", "append_output", "stream",
@@ -50,9 +51,16 @@ class SubprocessJobProvider:
         self._platform = platform_name or os.name
         self._output = output
         self._inline_output_bytes = inline_output_bytes
+        if memory_limiter is None:
+            from ..extensions.memory_limits import NativeExtensionMemoryLimiter
+            memory_limiter = NativeExtensionMemoryLimiter(platform_name=self._platform)
+        if not callable(getattr(memory_limiter, "apply", None)):
+            raise TypeError("memory_limiter must provide apply")
+        self._memory_limiter = memory_limiter
         self._processes: dict[str, Any] = {}
         self._limits: dict[str, int] = {}
         self._deadline_timers: dict[str, threading.Timer] = {}
+        self._memory_tokens: dict[str, Any] = {}
         self._output_threads: dict[str, tuple[threading.Thread, ...]] = {}
         self._output_failures: dict[str, str] = {}
         self._output_failure_lock = threading.Lock()
@@ -83,6 +91,15 @@ class SubprocessJobProvider:
             raise RuntimeError("launcher did not return a positive process id")
         if self._platform == "posix":
             process_group_id = process_id
+        memory_token = None
+        if request.memory_limit_bytes is not None:
+            try:
+                memory_token = self._memory_limiter.apply(
+                    process, request.memory_limit_bytes,
+                )
+            except Exception:
+                self._abort_unregistered(process)
+                raise
         deadline_at = None
         if request.deadline_seconds is not None:
             deadline_at = (
@@ -92,6 +109,7 @@ class SubprocessJobProvider:
         persisted_metadata.update({
             "hard_deadline_at": deadline_at,
             "max_descendants": request.max_descendants,
+            "memory_limit_bytes": request.memory_limit_bytes,
         })
         try:
             record = self._registry.start(
@@ -101,10 +119,14 @@ class SubprocessJobProvider:
                 metadata=persisted_metadata,
             )
         except Exception:
+            if memory_token is not None:
+                memory_token.close()
             self._abort_unregistered(process)
             raise
         self._processes[request.identity.job_id] = process
         self._limits[request.identity.job_id] = request.max_descendants
+        if memory_token is not None:
+            self._memory_tokens[request.identity.job_id] = memory_token
         self._start_output_readers(request.identity.job_id, process)
         if request.deadline_seconds is not None:
             self._schedule_deadline(request.identity.job_id, request.deadline_seconds)
@@ -159,6 +181,7 @@ class SubprocessJobProvider:
         self._limits.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
+        self._release_memory_limit(job_id)
         return ProcessJobWait(record, exit_code)
 
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
@@ -171,6 +194,7 @@ class SubprocessJobProvider:
             self._limits.pop(job_id, None)
             self._output_threads.pop(job_id, None)
             self._discard_deadline(job_id)
+            self._release_memory_limit(job_id)
             if process is not None:
                 try:
                     process.wait(timeout=0)
@@ -202,6 +226,11 @@ class SubprocessJobProvider:
         except (KeyError, OSError):
             # A normal completion or concurrent cancellation may win the race.
             return
+        finally:
+            # The one-shot timer cannot enforce anything after this callback.
+            # Cleanup truth remains in the durable record/result; remove only
+            # stale in-process scheduler bookkeeping here.
+            self._deadline_timers.pop(job_id, None)
 
     def _schedule_deadline(self, job_id: str, delay_seconds: float) -> None:
         timer = threading.Timer(
@@ -248,6 +277,11 @@ class SubprocessJobProvider:
         timer = self._deadline_timers.pop(job_id, None)
         if timer is not None and timer is not threading.current_thread():
             timer.cancel()
+
+    def _release_memory_limit(self, job_id: str) -> None:
+        token = self._memory_tokens.pop(job_id, None)
+        if token is not None:
+            token.close()
 
     def _start_output_readers(self, job_id: str, process: Any) -> None:
         """Publish stdout/stderr incrementally when the process exposes pipes.

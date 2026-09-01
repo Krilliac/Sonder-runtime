@@ -77,6 +77,7 @@ class JobCatalogEntry:
     allowed_flags: frozenset[str] = frozenset()
     allowed_bounded_options: frozenset[str] = frozenset()
     allowed_relative_path_options: frozenset[str] = frozenset()
+    memory_limit_bytes: int | None = None
 
     def __post_init__(self) -> None:
         _identity(self.entry_id, "catalog entry id")
@@ -106,6 +107,12 @@ class JobCatalogEntry:
             raise ValueError("catalog options must be bounded option names")
         if any(left & right for index, left in enumerate(option_sets) for right in option_sets[index + 1:]):
             raise ValueError("catalog option names must have one value policy")
+        if self.memory_limit_bytes is not None and (
+            isinstance(self.memory_limit_bytes, bool)
+            or not isinstance(self.memory_limit_bytes, int)
+            or not 1 <= self.memory_limit_bytes <= 1 << 50
+        ):
+            raise ValueError("catalog memory_limit_bytes must be within 1..2^50")
 
     def argv_for(self, arguments: tuple[str, ...]) -> tuple[str, ...]:
         _validate_arguments(
@@ -492,6 +499,7 @@ class ComputeJobWorker:
             cwd=cwd,
             environment=environment,
             deadline_seconds=envelope.deadline_seconds,
+            memory_limit_bytes=entry.memory_limit_bytes,
             metadata=(
                 ("compute_worker_id", self.worker_id),
                 ("compute_controller_job_id", envelope.controller_job_id),

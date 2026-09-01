@@ -144,6 +144,7 @@ class ComputeJobConfig:
     allowed_flags: tuple[str, ...] = ()
     allowed_bounded_options: tuple[str, ...] = ()
     allowed_relative_path_options: tuple[str, ...] = ()
+    memory_limit_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -283,6 +284,7 @@ class SonderConfig:
                     "allowed_relative_path_options": list(
                         job.allowed_relative_path_options
                     ),
+                    "memory_limit_bytes": job.memory_limit_bytes,
                 }
                 for job in self.compute.jobs
             ],
@@ -465,6 +467,7 @@ def _apply_compute_section(
             "environment_allowlist", "workspace_mappings",
             "allowed_flags", "allowed_bounded_options",
             "allowed_relative_path_options",
+            "memory_limit_bytes",
         }
         for index, item in enumerate(jobs_raw):
             where = f"[compute].jobs[{index}]"
@@ -502,7 +505,21 @@ def _apply_compute_section(
                 allowed_relative_path_options=_string_list(
                     item, "allowed_relative_path_options", where, errors
                 ),
+                memory_limit_bytes=(
+                    item.get("memory_limit_bytes")
+                    if isinstance(item.get("memory_limit_bytes"), int)
+                    and not isinstance(item.get("memory_limit_bytes"), bool)
+                    else None
+                ),
             ))
+            if (
+                "memory_limit_bytes" in item
+                and (
+                    not isinstance(item["memory_limit_bytes"], int)
+                    or isinstance(item["memory_limit_bytes"], bool)
+                )
+            ):
+                errors.append(f"{where}.memory_limit_bytes must be an integer")
     return ComputeConfig(
         allow_remote=allow_remote,
         node_id=local_node_id,
@@ -968,6 +985,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             "relative-paths-and-test-selectors",
         }:
             errors.append(f"{where}.argument_policy is invalid")
+        if job.memory_limit_bytes is not None and not 1 <= job.memory_limit_bytes <= 1 << 50:
+            errors.append(f"{where}.memory_limit_bytes must be within 1..2^50")
         option_groups = (
             job.allowed_flags,
             job.allowed_bounded_options,

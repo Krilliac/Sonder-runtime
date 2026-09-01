@@ -19,6 +19,7 @@ class ProcessJobRequest:
     environment: tuple[tuple[str, str], ...] = ()
     max_descendants: int = 64
     deadline_seconds: int | None = None
+    memory_limit_bytes: int | None = None
     metadata: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -34,6 +35,12 @@ class ProcessJobRequest:
             or not 1 <= self.deadline_seconds <= 86_400
         ):
             raise ValueError("deadline_seconds must be within 1..86400")
+        if self.memory_limit_bytes is not None and (
+            isinstance(self.memory_limit_bytes, bool)
+            or not isinstance(self.memory_limit_bytes, int)
+            or not 1 <= self.memory_limit_bytes <= 1 << 50
+        ):
+            raise ValueError("memory_limit_bytes must be within 1..2^50")
         if any(not isinstance(key, str) or not key for key, _ in self.environment):
             raise ValueError("environment keys must be non-empty strings")
         seen: set[str] = set()
