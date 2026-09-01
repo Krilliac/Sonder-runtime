@@ -13,7 +13,7 @@ from sonder_runtime.application.compute_fabric.jobs import (
 from sonder_runtime.application.compute_fabric.registry import ComputeNodeRegistry
 from sonder_runtime.application.compute_fabric.service import ComputeFabricService
 from sonder_runtime.application.jobs.durable_registry import DurableJobRegistry
-from sonder_runtime.application.ports.jobs import JobIdentity
+from sonder_runtime.application.ports.jobs import JobIdentity, JobStatus
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.domain.compute_fabric import (
     ComputeCapability,
@@ -240,6 +240,22 @@ def test_workload_profile_capabilities_are_merged_before_placement() -> None:
     assert transport.submit_calls == 0
 
 
+def test_caller_and_profile_alternative_capabilities_are_both_required() -> None:
+    service, transport, _local = _service(
+        remote_capabilities=frozenset(
+            {ComputeCapability.CPU, ComputeCapability.CUDA}
+        )
+    )
+    request = replace(
+        _request(), any_capabilities=frozenset({ComputeCapability.CUDA}),
+    )
+
+    with pytest.raises(DependencyUnavailable, match="eligible remote"):
+        service.submit(request, _envelope())
+
+    assert transport.submit_calls == 0
+
+
 def test_container_profile_requires_digest_bound_input() -> None:
     service, _transport, _local = _service()
     request = replace(
@@ -276,6 +292,47 @@ def test_status_and_cancel_revalidate_complete_placement_ownership() -> None:
     transport.cancel = wrong_digest
     with pytest.raises(DependencyUnavailable, match="digest"):
         service.cancel("controller-job", reason="operator stop")
+
+
+@pytest.mark.parametrize(
+    ("remote_state", "durable_status"),
+    (
+        ("succeeded", JobStatus.SUCCEEDED),
+        ("failed", JobStatus.FAILED),
+        ("cancelled", JobStatus.CANCELLED),
+        ("interrupted", JobStatus.FAILED),
+    ),
+)
+def test_terminal_status_receipt_closes_durable_placement(
+    remote_state: str, durable_status: JobStatus,
+) -> None:
+    placements = DurableJobRegistry()
+    service, transport, _local = _service(placement_registry=placements)
+    service.submit(_request(), _envelope())
+    running_status = transport.status
+    transport.status = lambda node, remote_job_id: replace(
+        running_status(node, remote_job_id), state=remote_state,
+    )
+
+    service.status("controller-job")
+
+    record = next(placements.iter_kind("compute-placement", include_terminal=True))
+    assert record.status is durable_status
+
+
+def test_terminal_cancel_receipt_closes_durable_placement() -> None:
+    placements = DurableJobRegistry()
+    service, transport, _local = _service(placement_registry=placements)
+    service.submit(_request(), _envelope())
+    running_cancel = transport.cancel
+    transport.cancel = lambda node, remote_job_id, *, reason: replace(
+        running_cancel(node, remote_job_id, reason=reason), state="cancelled",
+    )
+
+    service.cancel("controller-job", reason="operator stop")
+
+    record = next(placements.iter_kind("compute-placement", include_terminal=True))
+    assert record.status is JobStatus.CANCELLED
 
 
 def test_controller_rehydrates_durable_placement_after_restart() -> None:
