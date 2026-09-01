@@ -21,6 +21,7 @@ network, filesystem, credential, or cloud permissions.
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import tomllib
@@ -37,13 +38,17 @@ from sonder_runtime.platform.config_environment import (
     env_int,
     parse_env_file as _parse_env_file,
 )
-from sonder_runtime.domain.compute_fabric import (
-    ComputeCapability,
-    ComputeNode,
-    WorkloadKind,
-)
-
 PROFILES = ("workstation-local", "server-private")
+
+_COMPUTE_WORKLOADS = frozenset({
+    "build", "test", "index", "analysis", "fuzz", "embedding", "training",
+    "render", "encode", "service", "container", "storage", "inference",
+})
+_COMPUTE_CAPABILITIES = frozenset({
+    "cpu", "ram", "cuda", "ollama", "llamacpp", "docker", "podman", "kvm",
+    "cmake", "msvc", "clang", "clangd", "clang-tidy", "sccache", "distcc",
+    "pytest", "embeddings", "qlora", "ffmpeg", "blender", "storage", "database",
+})
 
 # Keys that must only ever arrive through the secrets environment file or
 # process environment.  Their presence in TOML fails validation.
@@ -126,20 +131,6 @@ class ComputeNodeConfig:
     capabilities: tuple[str, ...] = ()
     workspace_mappings: tuple[str, ...] = ()
     preference_weight: float = 0.0
-
-    def to_domain(self) -> ComputeNode:
-        return ComputeNode(
-            node_id=self.node_id,
-            origin=self.origin,
-            local=False,
-            allowed_workloads=frozenset(WorkloadKind(item) for item in self.workloads),
-            configured_capabilities=frozenset(
-                ComputeCapability(item) for item in self.capabilities
-            ),
-            workspace_mappings=frozenset(self.workspace_mappings),
-            preference_weight=self.preference_weight,
-        )
-
 
 @dataclass(frozen=True)
 class ComputeJobConfig:
@@ -891,21 +882,49 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         where = f"[compute].nodes[{index}]"
         if not compute.allow_remote:
             errors.append(f"{where} requires [compute].allow_remote=true")
-        unknown_workloads = sorted(set(node.workloads) - {item.value for item in WorkloadKind})
+        unknown_workloads = sorted(set(node.workloads) - _COMPUTE_WORKLOADS)
         if unknown_workloads:
             errors.append(f"{where}.workloads contains unknown workload values: {unknown_workloads}")
         unknown_capabilities = sorted(
-            set(node.capabilities) - {item.value for item in ComputeCapability}
+            set(node.capabilities) - _COMPUTE_CAPABILITIES
         )
         if unknown_capabilities:
             errors.append(
                 f"{where}.capabilities contains unknown capability values: {unknown_capabilities}"
             )
-        if not unknown_workloads and not unknown_capabilities:
-            try:
-                node.to_domain()
-            except ValueError as exc:
-                errors.append(f"{where}: {exc}")
+        if not node.workloads:
+            errors.append(f"{where}.workloads must not be empty")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", node.node_id):
+            errors.append(f"{where}.id must be a bounded stable identity")
+        try:
+            origin = urlsplit(node.origin)
+            port = origin.port
+        except ValueError:
+            origin = None
+            port = None
+        if (
+            origin is None
+            or origin.scheme.lower() != "https"
+            or not origin.hostname
+            or port is None
+        ):
+            errors.append(f"{where}.origin must be an HTTPS origin with an explicit port")
+        elif origin.username is not None or origin.password is not None:
+            errors.append(f"{where}.origin must not contain inline credentials")
+        elif origin.path not in ("", "/") or origin.query or origin.fragment:
+            errors.append(f"{where}.origin must not include a path, query, or fragment")
+        if (
+            isinstance(node.preference_weight, bool)
+            or not isinstance(node.preference_weight, (int, float))
+            or not math.isfinite(float(node.preference_weight))
+            or not -100 <= float(node.preference_weight) <= 100
+        ):
+            errors.append(f"{where}.preference_weight must be between -100 and 100")
+        if any(
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", item)
+            for item in node.workspace_mappings
+        ):
+            errors.append(f"{where}.workspace_mappings contains an invalid identity")
     job_ids = [job.job_id for job in compute.jobs]
     if len(job_ids) != len(set(job_ids)):
         errors.append("[compute].jobs contains duplicate job identities")
@@ -914,8 +933,9 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", job.job_id):
             errors.append(f"{where}.id must be a bounded stable identity")
         try:
-            workload = WorkloadKind(job.workload)
-            if workload is WorkloadKind.INFERENCE:
+            if job.workload not in _COMPUTE_WORKLOADS:
+                raise ValueError
+            if job.workload == "inference":
                 errors.append(f"{where}.workload inference remains owned by the model gateway")
         except ValueError:
             errors.append(f"{where}.workload contains an unknown workload")
@@ -925,6 +945,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             errors.append(f"{where}.fixed_args exceeds its bound")
         if len(job.environment_allowlist) > 32:
             errors.append(f"{where}.environment_allowlist exceeds its bound")
+        if job.argument_policy not in {
+            "none",
+            "bounded",
+            "relative-paths-and-test-selectors",
+        }:
+            errors.append(f"{where}.argument_policy is invalid")
 
     for name in ("model_generations", "http_requests", "tool_processes",
                  "fleet_workers", "autopilot_runs", "training_jobs",

@@ -23,13 +23,22 @@ from sonder_runtime.domain.compute_fabric import (
 NOW = datetime(2026, 8, 31, 20, tzinfo=timezone.utc)
 
 
-def _node(node_id: str, *, local: bool) -> ComputeNode:
+def _node(
+    node_id: str,
+    *,
+    local: bool,
+    capabilities: frozenset[ComputeCapability] | None = None,
+) -> ComputeNode:
     return ComputeNode(
         node_id=node_id,
         origin=None if local else f"https://{node_id}.example:8443",
         local=local,
         allowed_workloads=frozenset({WorkloadKind.BUILD}),
-        configured_capabilities=frozenset({ComputeCapability.CPU, ComputeCapability.CMAKE}),
+        configured_capabilities=(
+            capabilities
+            if capabilities is not None
+            else frozenset({ComputeCapability.CPU, ComputeCapability.CMAKE})
+        ),
         workspace_mappings=frozenset({"sonder"}),
     )
 
@@ -45,12 +54,14 @@ def _snapshot(node: ComputeNode, *, age_seconds: int = 0) -> NodeSnapshot:
     )
 
 
-def _request(*, allow_local_fallback: bool = False) -> WorkloadRequest:
+def _request(
+    *, allow_remote: bool = True, allow_local_fallback: bool = False
+) -> WorkloadRequest:
     return WorkloadRequest(
         request_id="controller-job",
         kind=WorkloadKind.BUILD,
         workspace_mapping="sonder",
-        allow_remote=True,
+        allow_remote=allow_remote,
         allow_local_fallback=allow_local_fallback,
         idempotent=True,
     )
@@ -106,9 +117,16 @@ class _Transport:
         return _receipt(node.node_id, "already-running")
 
 
-def _service(*, remote_age: int = 0, ambiguous: bool = False):
+def _service(
+    *,
+    remote_age: int = 0,
+    ambiguous: bool = False,
+    remote_capabilities: frozenset[ComputeCapability] | None = None,
+):
     local = _node("local", local=True)
-    remote = _node("linux-node", local=False)
+    remote = _node(
+        "linux-node", local=False, capabilities=remote_capabilities
+    )
     registry = ComputeNodeRegistry((local, remote), snapshot_ttl=timedelta(seconds=30))
     registry.observe(_snapshot(local))
     registry.observe(_snapshot(remote, age_seconds=remote_age))
@@ -149,3 +167,20 @@ def test_request_and_envelope_identity_must_match() -> None:
     mismatched = WorkloadRequest(request_id="different", kind=WorkloadKind.BUILD)
     with pytest.raises(ValueError, match="controller identity"):
         service.submit(mismatched, _envelope())
+
+
+def test_per_workload_remote_consent_keeps_job_local() -> None:
+    service, transport, local = _service()
+    result = service.submit(_request(allow_remote=False), _envelope())
+    assert result.node_id == "local"
+    assert transport.submit_calls == 0
+    assert local.calls == 1
+
+
+def test_workload_profile_capabilities_are_merged_before_placement() -> None:
+    service, transport, _local = _service(
+        remote_capabilities=frozenset({ComputeCapability.CPU})
+    )
+    with pytest.raises(DependencyUnavailable, match="eligible remote"):
+        service.submit(_request(), _envelope())
+    assert transport.submit_calls == 0

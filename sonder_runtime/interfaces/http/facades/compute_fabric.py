@@ -10,7 +10,6 @@ from ....application.compute_fabric.wire import (
     job_receipt_to_wire,
     snapshot_to_wire,
 )
-from ....domain.compute_fabric import NodeSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,11 +19,9 @@ class ComputeFabricHttpResult:
 
 
 def dispatch_compute_snapshot(
-    snapshot_factory: Callable[[], NodeSnapshot],
+    snapshot_factory: Callable[[], Any],
 ) -> ComputeFabricHttpResult:
     snapshot = snapshot_factory()
-    if not isinstance(snapshot, NodeSnapshot):
-        raise TypeError("compute snapshot factory returned an invalid value")
     return ComputeFabricHttpResult({
         "object": "compute_snapshot",
         "snapshot": snapshot_to_wire(snapshot),

@@ -514,7 +514,22 @@ def build_application(
                 configured_capabilities=frozenset(ComputeCapability),
                 workspace_mappings=frozenset(mapping_names),
             )
-            remote = tuple(node.to_domain() for node in effective_config.compute.nodes)
+            remote = tuple(
+                ComputeNode(
+                    node_id=node.node_id,
+                    origin=node.origin,
+                    local=False,
+                    allowed_workloads=frozenset(
+                        WorkloadKind(item) for item in node.workloads
+                    ),
+                    configured_capabilities=frozenset(
+                        ComputeCapability(item) for item in node.capabilities
+                    ),
+                    workspace_mappings=frozenset(node.workspace_mappings),
+                    preference_weight=node.preference_weight,
+                )
+                for node in effective_config.compute.nodes
+            )
             compute_registry = ComputeNodeRegistry(
                 (local, *remote),
                 snapshot_ttl=timedelta(
