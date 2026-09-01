@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 
-from ...domain.compute_fabric import ComputeNode, NodeSnapshot
+from ...domain.compute_fabric import ComputeNode, NodeHealth, NodeSnapshot
 
 
 def _utc(value: datetime, label: str) -> datetime:
@@ -34,6 +34,7 @@ class ComputeNodeRegistry:
             configured[node.node_id] = node
         self._nodes = configured
         self._observations: dict[str, NodeSnapshot] = {}
+        self._probe_errors: dict[str, str] = {}
         self._snapshot_ttl = snapshot_ttl
         self._lock = RLock()
 
@@ -50,21 +51,79 @@ class ComputeNodeRegistry:
     def configured_nodes(self) -> tuple[ComputeNode, ...]:
         return tuple(self._nodes[node_id] for node_id in sorted(self._nodes))
 
-    def observe(self, snapshot: NodeSnapshot) -> NodeSnapshot:
+    def observe(
+        self,
+        snapshot: NodeSnapshot,
+        *,
+        received_at: datetime | None = None,
+    ) -> NodeSnapshot:
         configured = self.get_node(snapshot.node.node_id)
         if snapshot.node.local != configured.local:
             raise ValueError("observed node locality conflicts with configured authority")
         if snapshot.node.origin != configured.origin:
             raise ValueError("observed node origin conflicts with configured origin")
-        narrowed = replace(snapshot, node=configured)
+        controller_time = _utc(
+            received_at or snapshot.received_at or snapshot.observed_at,
+            "received_at",
+        )
+        narrowed = replace(
+            snapshot,
+            node=configured,
+            received_at=controller_time,
+        )
         with self._lock:
             prior = self._observations.get(configured.node_id)
-            if prior is not None and _utc(narrowed.observed_at, "observed_at") < _utc(
-                prior.observed_at, "prior observed_at"
+            if prior is not None and controller_time < _utc(
+                prior.received_at or prior.observed_at,
+                "prior received_at",
             ):
-                raise ValueError("compute node observation time cannot move backwards")
+                raise ValueError("compute node receipt time cannot move backwards")
             self._observations[configured.node_id] = narrowed
+            self._probe_errors.pop(configured.node_id, None)
         return narrowed
+
+    def mark_probe_failed(
+        self,
+        node_id: str,
+        *,
+        received_at: datetime,
+        evidence_ref: str,
+    ) -> NodeSnapshot:
+        configured = self.get_node(node_id)
+        controller_time = _utc(received_at, "received_at")
+        if not isinstance(evidence_ref, str) or not evidence_ref or len(evidence_ref) > 512:
+            raise ValueError("probe failure evidence must be a bounded string")
+        with self._lock:
+            prior = self._observations.get(node_id)
+            if prior is not None and controller_time < _utc(
+                prior.received_at or prior.observed_at,
+                "prior received_at",
+            ):
+                raise ValueError("compute node receipt time cannot move backwards")
+            failed = (
+                NodeSnapshot(
+                    node=configured,
+                    observed_at=controller_time,
+                    received_at=controller_time,
+                    health=NodeHealth.UNHEALTHY,
+                    evidence_ref=evidence_ref,
+                )
+                if prior is None
+                else replace(
+                    prior,
+                    node=configured,
+                    received_at=controller_time,
+                    health=NodeHealth.UNHEALTHY,
+                )
+            )
+            self._observations[node_id] = failed
+            self._probe_errors[node_id] = evidence_ref
+            return failed
+
+    def last_probe_error(self, node_id: str) -> str | None:
+        self.get_node(node_id)
+        with self._lock:
+            return self._probe_errors.get(node_id)
 
     def last_observation(self, node_id: str) -> NodeSnapshot | None:
         self.get_node(node_id)
@@ -84,7 +143,7 @@ class ComputeNodeRegistry:
         observed = self.last_observation(node_id)
         if observed is None:
             return True
-        return current - _utc(observed.observed_at, "observed_at") > self._snapshot_ttl
+        return current - observed.freshness_at > self._snapshot_ttl
 
 
 __all__ = ["ComputeNodeRegistry"]

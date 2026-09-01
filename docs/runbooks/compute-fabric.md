@@ -165,6 +165,11 @@ Configuration is maximum authority. Each worker snapshot narrows it to live
 capabilities and currently advertised workloads. A configured name is never
 treated as proof that a node is reachable.
 
+Sonder exports fixed-cardinality Prometheus metrics for configured/live/
+healthy/unhealthy/stale node counts, worker-reported active jobs, successful
+local/remote placements, and bounded placement-rejection reasons. Raw node
+names, workspace paths, commands, and artifact names are never metric labels.
+
 ## Dispatch invariants
 
 Before submitting, the controller obtains a fresh authenticated snapshot and
@@ -205,8 +210,10 @@ measured local snapshot satisfies every constraint.
    configured, remote compute is enabled, and its snapshot is healthy/fresh.
 2. On the node, verify the TLS proxy, API key, Sonder process, firewall, clock,
    workspace root, catalog entry, and external executable.
-3. A `probe-failed:*` evidence reference marks the node unhealthy immediately;
-   stale or unknown measurements are ineligible.
+3. A failed probe marks the node unhealthy immediately and records a bounded
+   `probe-failed:*` error separately. The last successful worker timestamp,
+   resources, capabilities, and evidence reference remain visible for diagnosis;
+   stale or unknown measurements are still ineligible.
 4. For an ambiguous submit, query the idempotency key before taking any action.
 5. Cancellation reports `cancelled` only when cleanup is quiescent; otherwise
    it remains `cancellation_requested` and needs operator follow-up.

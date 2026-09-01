@@ -22,6 +22,7 @@ from ...domain.compute_fabric import (
     ComputePlacementScheduler,
     PlacementDecision,
     WorkloadRequest,
+    NodeHealth,
 )
 from ...domain.compute_profiles import profile_for
 from ..ports.jobs import JobIdentity, JobStatus
@@ -57,6 +58,7 @@ class ComputeFabricService:
         now: Callable[[], datetime],
         refresh: Callable[[], None] | None = None,
         placement_registry=None,
+        metrics=None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
@@ -65,6 +67,7 @@ class ComputeFabricService:
         self._now = now
         self._refresh = refresh
         self._placement_registry = placement_registry
+        self._metrics = metrics
         self._placements: dict[str, _PlacementRecord] = {}
         self._lock = RLock()
         self._rehydrate_placements()
@@ -214,16 +217,56 @@ class ComputeFabricService:
             self._refresh()
         now = self._now()
         snapshots = self._registry.list_snapshots(now=now)
+        self._observe_inventory(snapshots, now=now)
         if request.local_only or not request.allow_remote:
             candidates = tuple(item for item in snapshots if item.node.local)
-            return self._scheduler.place(request, candidates, now=now)
+            decision = self._scheduler.place(request, candidates, now=now)
+            if decision.selected_node_id is None:
+                self._observe_rejection(decision)
+            return decision
 
         remote = tuple(item for item in snapshots if not item.node.local)
         decision = self._scheduler.place(request, remote, now=now)
         if decision.selected_node_id is not None or not request.allow_local_fallback:
+            if decision.selected_node_id is None:
+                self._observe_rejection(decision)
             return decision
         local = tuple(item for item in snapshots if item.node.local)
-        return self._scheduler.place(request, local, now=now)
+        local_decision = self._scheduler.place(request, local, now=now)
+        if local_decision.selected_node_id is None:
+            self._observe_rejection(local_decision)
+        return local_decision
+
+    def _observe_inventory(self, snapshots, *, now: datetime) -> None:
+        observe = getattr(self._metrics, "set_compute_inventory", None)
+        if not callable(observe):
+            return
+        stale_ids = {
+            snapshot.node.node_id
+            for snapshot in snapshots
+            if self._registry.is_stale(snapshot.node.node_id, now=now)
+        }
+        observe(
+            configured=len(self._registry.configured_nodes()),
+            live=sum(1 for item in snapshots if item.node.node_id not in stale_ids),
+            healthy=sum(
+                1 for item in snapshots
+                if item.node.node_id not in stale_ids and item.health is NodeHealth.HEALTHY
+            ),
+            unhealthy=sum(
+                1 for item in snapshots
+                if item.node.node_id not in stale_ids and item.health is NodeHealth.UNHEALTHY
+            ),
+            stale=len(stale_ids),
+            active_jobs=sum(item.active_jobs for item in snapshots),
+        )
+
+    def _observe_rejection(self, decision: PlacementDecision) -> None:
+        observe = getattr(self._metrics, "observe_compute_placement_rejection", None)
+        if not callable(observe):
+            return
+        reason = decision.candidates[0].reason_code if decision.candidates else "no_candidates"
+        observe(reason=reason)
 
     def submit(
         self,
@@ -294,6 +337,9 @@ class ComputeFabricService:
             request_sha256=envelope.request_sha256,
         )
         self._record_receipt(placed, receipt)
+        observe_placement = getattr(self._metrics, "observe_compute_placement", None)
+        if callable(observe_placement):
+            observe_placement(route="local" if node.local else "remote")
         return ComputeSubmission(node_id, placement, receipt)
 
     def status(self, controller_job_id: str) -> ComputeSubmission:

@@ -90,6 +90,45 @@ def test_registry_is_deterministic_and_marks_staleness_without_discarding_eviden
     assert registry.last_observation("node-a") is not None
 
 
+def test_probe_failure_preserves_evidence_and_worker_clock_cannot_poison_recovery() -> None:
+    node = _node()
+    registry = ComputeNodeRegistry((node,), snapshot_ttl=timedelta(seconds=30))
+    initial = replace(
+        _snapshot(node),
+        observed_at=NOW + timedelta(seconds=4),
+        evidence_ref="worker-snapshot:sha256:abc",
+    )
+    registry.observe(initial, received_at=NOW)
+
+    failed = registry.mark_probe_failed(
+        node.node_id,
+        received_at=NOW + timedelta(seconds=10),
+        evidence_ref="probe-failed:TimeoutError",
+    )
+    assert failed.health is NodeHealth.UNHEALTHY
+    assert failed.resources == initial.resources
+    assert failed.live_capabilities == initial.live_capabilities
+    assert failed.evidence_ref == initial.evidence_ref
+    assert failed.observed_at == initial.observed_at
+    assert failed.received_at == NOW + timedelta(seconds=10)
+    assert registry.last_probe_error(node.node_id) == "probe-failed:TimeoutError"
+
+    recovered = replace(
+        initial,
+        observed_at=NOW + timedelta(seconds=1),
+        health=NodeHealth.HEALTHY,
+        evidence_ref="worker-snapshot:sha256:def",
+    )
+    accepted = registry.observe(
+        recovered,
+        received_at=NOW + timedelta(seconds=20),
+    )
+    assert accepted.health is NodeHealth.HEALTHY
+    assert accepted.evidence_ref == "worker-snapshot:sha256:def"
+    assert accepted.received_at == NOW + timedelta(seconds=20)
+    assert registry.last_probe_error(node.node_id) is None
+
+
 def test_registry_requires_unique_configured_node_ids() -> None:
     with pytest.raises(ValueError, match="duplicate"):
         ComputeNodeRegistry((_node("same"), _node("same")))
