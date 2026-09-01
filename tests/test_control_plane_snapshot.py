@@ -45,6 +45,7 @@ def test_control_plane_snapshot_rejects_unknown_sections_and_mismatched_names():
                 "plans", "approvals", "jobs", "agents", "model_hardware",
                 "context", "memory_explanations", "extensions", "training",
                 "selfmod", "updates", "health", "startup_authorities",
+                "compute_fabric",
             )},
         )
 

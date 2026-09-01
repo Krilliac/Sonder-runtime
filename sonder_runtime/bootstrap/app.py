@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import importlib
 import os
 from pathlib import Path
@@ -97,6 +98,14 @@ from ..application.providers import (
     wire_specialized_providers,
 )
 from ..domain.provider_override_policy import ProviderOverridePolicy
+from ..domain.compute_fabric import (
+    ComputeCapability,
+    ComputeNode,
+    ComputePlacementScheduler,
+    NodeSnapshot,
+    WorkloadKind,
+)
+from ..application.compute_fabric.registry import ComputeNodeRegistry
 from ..application.ports.web import WebProvider
 from ..application.ports.session_repository import SessionRepository
 from ..application.ports.jobs import JobRegistry
@@ -160,6 +169,9 @@ class Application:
     selfmod_service: Callable[[], GuardedLegacySelfmodService] | None = None
     context_planning: ContextPlanningFacade | None = None
     control_plane_snapshot_service: ControlPlaneSnapshotService | None = None
+    compute_registry: Callable[[], ComputeNodeRegistry] | None = None
+    compute_snapshot: Callable[[], NodeSnapshot] | None = None
+    compute_scheduler: ComputePlacementScheduler | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -366,6 +378,12 @@ def build_application(
     experiment_manager: EphemeralExperimentManager | None = None
     extension_facade: ExtensionApplicationFacade | None = None
     selfmod_service: GuardedLegacySelfmodService | None = None
+    compute_registry: ComputeNodeRegistry | None = None
+    compute_snapshot_source = None
+    effective_config = config or SonderConfig()
+    compute_scheduler = ComputePlacementScheduler(
+        snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
+    )
 
     def get_session_repository() -> SessionRepository:
         nonlocal session_repository
@@ -462,6 +480,60 @@ def build_application(
                 output=spill_output,
             )
         return process_job_provider
+
+    def get_compute_registry() -> ComputeNodeRegistry:
+        nonlocal compute_registry
+        if compute_registry is None:
+            local_workloads = frozenset(
+                item for item in WorkloadKind if item is not WorkloadKind.INFERENCE
+            )
+            mapping_names = {"default"}
+            mapping_names.update(
+                Path(root).name
+                for root in effective_config.state.workspace_roots
+                if Path(root).name
+            )
+            local = ComputeNode(
+                node_id="local",
+                origin=None,
+                local=True,
+                allowed_workloads=local_workloads,
+                configured_capabilities=frozenset(ComputeCapability),
+                workspace_mappings=frozenset(mapping_names),
+            )
+            remote = tuple(node.to_domain() for node in effective_config.compute.nodes)
+            compute_registry = ComputeNodeRegistry(
+                (local, *remote),
+                snapshot_ttl=timedelta(
+                    seconds=effective_config.compute.snapshot_ttl_seconds
+                ),
+            )
+        return compute_registry
+
+    def get_compute_snapshot() -> NodeSnapshot:
+        nonlocal compute_snapshot_source
+        if compute_snapshot_source is None:
+            from ..adapters.compute_fabric.local_snapshot import (
+                LocalComputeSnapshotSource,
+            )
+
+            storage_path = Path(
+                effective_config.state.home or runtime_paths.default_home()
+            )
+            compute_snapshot_source = LocalComputeSnapshotSource(
+                storage_path=storage_path,
+                active_jobs=lambda: sum(
+                    1
+                    for record in get_job_service().list(limit=1024)
+                    if record.status.value in {"pending", "running", "cancelling"}
+                ),
+            )
+        registry = get_compute_registry()
+        snapshot = compute_snapshot_source.snapshot(
+            registry.get_node("local"),
+            now=datetime.now(timezone.utc),
+        )
+        return registry.observe(snapshot)
 
     def recover_jobs(**kwargs: object) -> JobRecoveryReport:
         """Reconcile durable process jobs through the typed tree supervisor."""
@@ -757,6 +829,38 @@ def build_application(
             "crash_count": record.crash_count,
         } for record in get_extension_registry().snapshot().records)
 
+    def compute_fabric_section():
+        registry = get_compute_registry()
+        try:
+            get_compute_snapshot()
+        except Exception as exc:
+            local_error = type(exc).__name__
+        else:
+            local_error = ""
+        now = datetime.now(timezone.utc)
+        rows = []
+        for node in registry.configured_nodes():
+            observed = registry.last_observation(node.node_id)
+            rows.append({
+                "node_id": node.node_id,
+                "local": node.local,
+                "configured": True,
+                "observed": observed is not None,
+                "stale": registry.is_stale(node.node_id, now=now),
+                "health": observed.health.value if observed is not None else "unknown",
+                "active_jobs": observed.active_jobs if observed is not None else None,
+                "workloads": sorted(item.value for item in node.allowed_workloads),
+                "capabilities": sorted(
+                    item.value
+                    for item in (
+                        observed.effective_capabilities
+                        if observed is not None else frozenset()
+                    )
+                ),
+                "probe_error": local_error if node.local else "",
+            })
+        return tuple(rows)
+
     default_control_plane_service = control_plane_snapshot_service or ControlPlaneSnapshotService({
         "sessions": session_section,
         "plans": task_section,
@@ -772,6 +876,7 @@ def build_application(
         "updates": update_section,
         "health": provider_section,
         "startup_authorities": startup_authority_section,
+        "compute_fabric": compute_fabric_section,
     })
 
     return Application(
@@ -837,6 +942,9 @@ def build_application(
         selfmod_service=get_selfmod_service,
         context_planning=context_planning,
         control_plane_snapshot_service=default_control_plane_service,
+        compute_registry=get_compute_registry,
+        compute_snapshot=get_compute_snapshot,
+        compute_scheduler=compute_scheduler,
     )
 
 
