@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
+import hashlib
 from threading import RLock
 from typing import Callable
 
@@ -14,13 +15,15 @@ from .jobs import (
 )
 from .registry import ComputeNodeRegistry
 from ..ports.compute_fabric import ComputeRemoteJobTransport
-from ...domain.common.errors import DependencyUnavailable, NotFound
+from ...domain.common.errors import Conflict, DependencyUnavailable, NotFound
 from ...domain.compute_fabric import (
+    CandidateDecision,
     ComputePlacementScheduler,
     PlacementDecision,
     WorkloadRequest,
 )
 from ...domain.compute_profiles import profile_for
+from ..ports.jobs import JobIdentity, JobStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +37,9 @@ class ComputeSubmission:
 class _PlacementRecord:
     node_id: str
     placement: PlacementDecision
-    envelope: RemoteJobEnvelope
+    controller_job_id: str
+    idempotency_key: str
+    request_sha256: str
     remote_job_id: str | None = None
 
 
@@ -50,6 +55,7 @@ class ComputeFabricService:
         local_worker: ComputeJobWorker,
         now: Callable[[], datetime],
         refresh: Callable[[], None] | None = None,
+        placement_registry=None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
@@ -57,8 +63,132 @@ class ComputeFabricService:
         self._local_worker = local_worker
         self._now = now
         self._refresh = refresh
+        self._placement_registry = placement_registry
         self._placements: dict[str, _PlacementRecord] = {}
         self._lock = RLock()
+        self._rehydrate_placements()
+
+    @staticmethod
+    def _placement_payload(record: _PlacementRecord) -> dict:
+        return {
+            "node_id": record.node_id,
+            "remote_job_id": record.remote_job_id,
+            "request_digest": record.placement.request_digest,
+            "candidates": [
+                {
+                    "node_id": candidate.node_id,
+                    "eligible": candidate.eligible,
+                    "reason_code": candidate.reason_code,
+                    "score": candidate.score,
+                }
+                for candidate in record.placement.candidates
+            ],
+            "ranked_node_ids": list(record.placement.ranked_node_ids),
+            "snapshot_digests": [list(item) for item in record.placement.snapshot_digests],
+        }
+
+    def _rehydrate_placements(self) -> None:
+        store = self._placement_registry
+        list_records = getattr(store, "list", None)
+        view_record = getattr(store, "view", None)
+        if not callable(list_records) or not callable(view_record):
+            return
+        recovered: dict[str, _PlacementRecord] = {}
+        for job in list_records(include_terminal=True, limit=1024):
+            if job.identity.kind != "compute-placement" or not isinstance(job.result, dict):
+                continue
+            metadata = getattr(view_record(job.identity.job_id), "metadata", None) or {}
+            payload = job.result
+            try:
+                placement = PlacementDecision(
+                    request_digest=str(payload["request_digest"]),
+                    selected_node_id=str(payload["node_id"]),
+                    candidates=tuple(
+                        CandidateDecision(
+                            node_id=str(item["node_id"]),
+                            eligible=bool(item["eligible"]),
+                            reason_code=str(item["reason_code"]),
+                            score=item.get("score"),
+                        )
+                        for item in payload.get("candidates", ())
+                    ),
+                    ranked_node_ids=tuple(str(item) for item in payload.get("ranked_node_ids", ())),
+                    snapshot_digests=tuple(
+                        (str(item[0]), str(item[1]))
+                        for item in payload.get("snapshot_digests", ())
+                    ),
+                )
+                controller_job_id = str(metadata["controller_job_id"])
+                recovered[controller_job_id] = _PlacementRecord(
+                    node_id=str(payload["node_id"]),
+                    placement=placement,
+                    controller_job_id=controller_job_id,
+                    idempotency_key=job.identity.idempotency_key,
+                    request_sha256=str(metadata["request_sha256"]),
+                    remote_job_id=(
+                        str(payload["remote_job_id"])
+                        if payload.get("remote_job_id") is not None
+                        else None
+                    ),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        with self._lock:
+            self._placements.update(recovered)
+
+    def _persist_placement(self, record: _PlacementRecord, *, create: bool = False) -> None:
+        store = self._placement_registry
+        if store is None:
+            return
+        storage_job_id = "cp-" + hashlib.sha256(
+            record.controller_job_id.encode("utf-8")
+        ).hexdigest()[:24]
+        if create:
+            store.start(
+                JobIdentity(
+                    storage_job_id,
+                    "compute-placement",
+                    record.controller_job_id,
+                    record.idempotency_key,
+                ),
+                metadata={
+                    "controller_job_id": record.controller_job_id,
+                    "request_sha256": record.request_sha256,
+                },
+            )
+        store.transition(
+            storage_job_id,
+            JobStatus.RUNNING,
+            result=self._placement_payload(record),
+        )
+
+    def _record_receipt(
+        self, record: _PlacementRecord, receipt: RemoteJobReceipt,
+    ) -> _PlacementRecord:
+        updated = replace(record, remote_job_id=receipt.remote_job_id)
+        with self._lock:
+            self._placements[record.controller_job_id] = updated
+        self._persist_placement(updated)
+        return updated
+
+    def _lookup_ambiguous(self, record: _PlacementRecord) -> RemoteJobReceipt:
+        node = self._registry.get_node(record.node_id)
+        receipt = (
+            self._local_worker.by_idempotency(record.idempotency_key)
+            if node.local
+            else self._transport.by_idempotency(node, record.idempotency_key)
+        )
+        if receipt is None:
+            raise DependencyUnavailable("compute placement outcome remains ambiguous")
+        validate_remote_job_receipt(
+            receipt,
+            worker_id=record.node_id,
+            controller_job_id=record.controller_job_id,
+            idempotency_key=record.idempotency_key,
+            request_sha256=record.request_sha256,
+        )
+        self._record_receipt(record, receipt)
+        return receipt
 
     @staticmethod
     def _profiled(request: WorkloadRequest) -> WorkloadRequest:
@@ -104,6 +234,17 @@ class ComputeFabricService:
             raise ValueError("workload and envelope workspace mappings must match")
         if request.idempotent != envelope.idempotent:
             raise ValueError("workload and envelope idempotency must match")
+        with self._lock:
+            existing = self._placements.get(request.request_id)
+        if existing is not None:
+            if (
+                existing.idempotency_key != envelope.idempotency_key
+                or existing.request_sha256 != envelope.request_sha256
+            ):
+                raise Conflict(
+                    "controller identity is already bound to another compute request"
+                )
+            return self.status(request.request_id)
         profiled = self._profiled(request)
         placement = self._place(profiled)
         node_id = placement.selected_node_id
@@ -113,10 +254,16 @@ class ComputeFabricService:
         node = self._registry.get_node(node_id)
         # Retain the digest-bound placement before any call whose outcome can
         # become ambiguous to the controller.
+        placed = _PlacementRecord(
+            node_id,
+            placement,
+            envelope.controller_job_id,
+            envelope.idempotency_key,
+            envelope.request_sha256,
+        )
         with self._lock:
-            self._placements[request.request_id] = _PlacementRecord(
-                node_id, placement, envelope,
-            )
+            self._placements[request.request_id] = placed
+        self._persist_placement(placed, create=True)
         if node.local:
             receipt = self._local_worker.submit(envelope)
         else:
@@ -137,17 +284,17 @@ class ComputeFabricService:
             idempotency_key=envelope.idempotency_key,
             request_sha256=envelope.request_sha256,
         )
-        with self._lock:
-            self._placements[request.request_id] = _PlacementRecord(
-                node_id, placement, envelope, receipt.remote_job_id,
-            )
+        self._record_receipt(placed, receipt)
         return ComputeSubmission(node_id, placement, receipt)
 
     def status(self, controller_job_id: str) -> ComputeSubmission:
         with self._lock:
             placed = self._placements.get(controller_job_id)
-        if placed is None or placed.remote_job_id is None:
+        if placed is None:
             raise NotFound("compute placement was not found")
+        if placed.remote_job_id is None:
+            receipt = self._lookup_ambiguous(placed)
+            return ComputeSubmission(placed.node_id, placed.placement, receipt)
         node_id = placed.node_id
         placement = placed.placement
         remote_job_id = placed.remote_job_id
@@ -160,9 +307,9 @@ class ComputeFabricService:
         validate_remote_job_receipt(
             receipt,
             worker_id=node_id,
-            controller_job_id=placed.envelope.controller_job_id,
-            idempotency_key=placed.envelope.idempotency_key,
-            request_sha256=placed.envelope.request_sha256,
+            controller_job_id=placed.controller_job_id,
+            idempotency_key=placed.idempotency_key,
+            request_sha256=placed.request_sha256,
             remote_job_id=remote_job_id,
         )
         return ComputeSubmission(node_id, placement, receipt)
@@ -170,8 +317,12 @@ class ComputeFabricService:
     def cancel(self, controller_job_id: str, *, reason: str) -> ComputeSubmission:
         with self._lock:
             placed = self._placements.get(controller_job_id)
-        if placed is None or placed.remote_job_id is None:
+        if placed is None:
             raise NotFound("compute placement was not found")
+        if placed.remote_job_id is None:
+            self._lookup_ambiguous(placed)
+            with self._lock:
+                placed = self._placements[controller_job_id]
         node_id = placed.node_id
         placement = placed.placement
         remote_job_id = placed.remote_job_id
@@ -184,9 +335,9 @@ class ComputeFabricService:
         validate_remote_job_receipt(
             receipt,
             worker_id=node_id,
-            controller_job_id=placed.envelope.controller_job_id,
-            idempotency_key=placed.envelope.idempotency_key,
-            request_sha256=placed.envelope.request_sha256,
+            controller_job_id=placed.controller_job_id,
+            idempotency_key=placed.idempotency_key,
+            request_sha256=placed.request_sha256,
             remote_job_id=remote_job_id,
         )
         return ComputeSubmission(node_id, placement, receipt)
