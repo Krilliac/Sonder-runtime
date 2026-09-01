@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import sys
 
 import pytest
 
 from sonder_runtime.application.compute_fabric.jobs import (
     ArgumentPolicy,
+    DigestBoundInput,
     JobCatalogEntry,
     RemoteArtifactReceipt,
     RemoteJobEnvelope,
@@ -51,6 +53,9 @@ def test_envelope_digest_is_stable_and_every_material_field_is_bound() -> None:
     assert first == _envelope()
     assert len(first.request_sha256) == 64
     assert first.request_sha256 != _envelope(arguments=("different.py",)).request_sha256
+    assert first.request_sha256 != _envelope(
+        input_artifacts=(DigestBoundInput("input.bin", 3, "a" * 64),)
+    ).request_sha256
     with pytest.raises(ValueError, match="digest"):
         replace(first, request_sha256="0" * 64)
 
@@ -75,14 +80,14 @@ def test_catalog_is_worker_owned_and_bounded() -> None:
     entry = JobCatalogEntry(
         entry_id="pytest",
         workload=WorkloadKind.TEST,
-        program="python",
+        program=sys.executable,
         fixed_args=("-m", "pytest"),
         argument_policy=ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS,
         environment_allowlist=frozenset({"PYTEST_ADDOPTS"}),
         workspace_mappings=frozenset({"sonder"}),
     )
     assert entry.argv_for(("tests/test_api.py",)) == (
-        "python", "-m", "pytest", "tests/test_api.py",
+        sys.executable, "-m", "pytest", "tests/test_api.py",
     )
     with pytest.raises(ValueError, match="environment"):
         entry.environment_for((("SECRET", "value"),))
@@ -93,3 +98,11 @@ def test_artifact_receipt_requires_content_digest_and_relative_name() -> None:
     assert receipt.size_bytes == 12
     with pytest.raises(ValueError):
         RemoteArtifactReceipt("../report", 12, "application/json", "a" * 64)
+
+
+def test_digest_bound_input_rejects_traversal_and_duplicate_names() -> None:
+    with pytest.raises(ValueError):
+        DigestBoundInput("../input.bin", 3, "a" * 64)
+    item = DigestBoundInput("input.bin", 3, "a" * 64)
+    with pytest.raises(ValueError, match="unique"):
+        _envelope(input_artifacts=(item, item))

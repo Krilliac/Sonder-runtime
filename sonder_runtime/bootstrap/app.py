@@ -581,6 +581,7 @@ def build_application(
                         job.allowed_relative_path_options
                     ),
                     memory_limit_bytes=job.memory_limit_bytes,
+                    artifact_paths=job.artifact_paths,
                 )
                 for job in effective_config.compute.jobs
             }

@@ -63,6 +63,7 @@ allowed_flags = ["-q"]
 allowed_bounded_options = ["--color"]
 allowed_relative_path_options = ["--basetemp"]
 memory_limit_bytes = 2147483648
+artifact_paths = ["reports/junit.xml"]
 
 [[compute.jobs]]
 id = "sonder-cmake-build"
@@ -111,10 +112,25 @@ worker must attach a native hard per-process memory limit before publishing
 the durable job; if Windows Job Objects or POSIX `prlimit` cannot enforce it,
 launch fails closed. The controller cannot raise or remove this bound.
 
+Container work must declare digest-bound input artifacts. Before launch, the
+worker resolves each declared input beneath the selected workspace and checks
+its exact byte count and SHA-256. The input list is part of the request digest.
+This prevents a controller from referring to mutable or workspace-escaping
+container inputs.
+
+Worker catalogs may name fixed `artifact_paths`. When a job reaches a terminal
+state, Sonder hashes every present regular file and publishes size, MIME type,
+and SHA-256 receipts. Bytes are available only through the authenticated admin
+route `GET /v1/compute/jobs/{remote_job_id}/artifacts/{encoded_name}`; the
+server revalidates the file against the published receipt immediately before
+delivery. Controllers perform the same length, type, header-digest, and body-
+digest checks. Native MCP can retrieve artifacts up to 96 KiB with
+`compute_artifact_fetch`; larger artifacts use the authenticated HTTP route.
+
 ## Native MCP controller tools
 
-The native MCP catalog exposes `compute_submit`, `compute_status`, and
-`compute_cancel`. `compute_submit` requires an explicit `allow_remote` boolean
+The native MCP catalog exposes `compute_submit`, `compute_status`,
+`compute_cancel`, and `compute_artifact_fetch`. `compute_submit` requires an explicit `allow_remote` boolean
 for every workload. Setting it does not override `[compute].allow_remote`; both
 the per-call and global gates must authorize private-node placement. Inference
 is excluded and remains owned by the model gateway.

@@ -12,8 +12,6 @@ class WorkloadProfile:
     all_capabilities: frozenset[ComputeCapability] = frozenset()
     any_capabilities: frozenset[ComputeCapability] = frozenset()
     requires_workspace: bool = False
-    requires_deadline: bool = False
-    requires_catalog_entry: bool = True
     requires_digest_bound_input: bool = False
     background_preferred: bool = False
 
@@ -52,7 +50,6 @@ _PROFILES = {
         WorkloadKind.FUZZ,
         all_capabilities=frozenset({ComputeCapability.CPU}),
         requires_workspace=True,
-        requires_deadline=True,
     ),
     WorkloadKind.EMBEDDING: WorkloadProfile(
         WorkloadKind.EMBEDDING,
@@ -61,14 +58,12 @@ _PROFILES = {
             ComputeCapability.OLLAMA,
             ComputeCapability.LLAMACPP,
         }),
-        requires_catalog_entry=False,
     ),
     WorkloadKind.TRAINING: WorkloadProfile(
         WorkloadKind.TRAINING,
         all_capabilities=frozenset({ComputeCapability.RAM}),
         any_capabilities=frozenset({ComputeCapability.CUDA, ComputeCapability.QLORA}),
         requires_workspace=True,
-        requires_deadline=True,
     ),
     WorkloadKind.RENDER: WorkloadProfile(
         WorkloadKind.RENDER,
@@ -83,7 +78,6 @@ _PROFILES = {
     WorkloadKind.SERVICE: WorkloadProfile(
         WorkloadKind.SERVICE,
         requires_workspace=True,
-        requires_deadline=True,
     ),
     WorkloadKind.CONTAINER: WorkloadProfile(
         WorkloadKind.CONTAINER,

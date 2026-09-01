@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
+import mimetypes
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 from threading import RLock
 from typing import Any, Mapping
@@ -66,6 +67,24 @@ class ArgumentPolicy(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class DigestBoundInput:
+    name: str
+    size_bytes: int
+    sha256: str
+
+    def __post_init__(self) -> None:
+        _relative(self.name, "input artifact name", allow_dot=False)
+        if (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or not 0 <= self.size_bytes <= 1 << 40
+        ):
+            raise ValueError("input artifact size must be within 0..2^40")
+        if not isinstance(self.sha256, str) or not _SHA256.fullmatch(self.sha256):
+            raise ValueError("input artifact digest must be SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
 class JobCatalogEntry:
     entry_id: str
     workload: WorkloadKind
@@ -78,13 +97,23 @@ class JobCatalogEntry:
     allowed_bounded_options: frozenset[str] = frozenset()
     allowed_relative_path_options: frozenset[str] = frozenset()
     memory_limit_bytes: int | None = None
+    artifact_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _identity(self.entry_id, "catalog entry id")
         if self.workload is WorkloadKind.INFERENCE:
             raise ValueError("inference remains owned by the model gateway")
-        if not isinstance(self.program, str) or not self.program or len(self.program) > 4096:
-            raise ValueError("catalog program must be non-empty and bounded")
+        if (
+            not isinstance(self.program, str)
+            or not self.program
+            or len(self.program) > 4096
+            or "\x00" in self.program
+            or not (
+                PurePosixPath(self.program).is_absolute()
+                or PureWindowsPath(self.program).is_absolute()
+            )
+        ):
+            raise ValueError("catalog program must be an absolute bounded path")
         if len(self.fixed_args) > 64 or any(
             not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value
             for value in self.fixed_args
@@ -113,6 +142,14 @@ class JobCatalogEntry:
             or not 1 <= self.memory_limit_bytes <= 1 << 50
         ):
             raise ValueError("catalog memory_limit_bytes must be within 1..2^50")
+        if len(self.artifact_paths) > 256:
+            raise ValueError("catalog artifact path count exceeds 256")
+        normalized_artifacts = [
+            _relative(path, "catalog artifact path", allow_dot=False)
+            for path in self.artifact_paths
+        ]
+        if len(normalized_artifacts) != len(set(normalized_artifacts)):
+            raise ValueError("catalog artifact paths must be unique")
 
     def argv_for(self, arguments: tuple[str, ...]) -> tuple[str, ...]:
         _validate_arguments(
@@ -221,6 +258,7 @@ class RemoteJobEnvelope:
     deadline_seconds: int
     idempotent: bool
     request_sha256: str
+    input_artifacts: tuple[DigestBoundInput, ...] = ()
 
     @classmethod
     def create(
@@ -236,6 +274,7 @@ class RemoteJobEnvelope:
         environment: tuple[tuple[str, str], ...] = (),
         deadline_seconds: int = 300,
         idempotent: bool = False,
+        input_artifacts: tuple[DigestBoundInput, ...] = (),
     ) -> "RemoteJobEnvelope":
         values = {
             "controller_job_id": controller_job_id,
@@ -248,6 +287,7 @@ class RemoteJobEnvelope:
             "environment": environment,
             "deadline_seconds": deadline_seconds,
             "idempotent": idempotent,
+            "input_artifacts": input_artifacts,
         }
         canonical = cls._canonical_values(**values)
         return cls(**values, request_sha256=_digest(canonical))
@@ -283,6 +323,18 @@ class RemoteJobEnvelope:
             raise ValueError("deadline_seconds must be within 1..86400")
         if not isinstance(values["idempotent"], bool):
             raise ValueError("idempotent must be boolean")
+        input_artifacts = values["input_artifacts"]
+        if (
+            not isinstance(input_artifacts, tuple)
+            or len(input_artifacts) > 64
+            or any(not isinstance(item, DigestBoundInput) for item in input_artifacts)
+        ):
+            raise ValueError("input artifacts must be a bounded typed tuple")
+        names = [item.name for item in input_artifacts]
+        if len(names) != len(set(names)):
+            raise ValueError("input artifact names must be unique")
+        if sum(item.size_bytes for item in input_artifacts) > 1 << 40:
+            raise ValueError("input artifact total exceeds 2^40 bytes")
         return {
             "controller_job_id": values["controller_job_id"],
             "idempotency_key": values["idempotency_key"],
@@ -294,6 +346,10 @@ class RemoteJobEnvelope:
             "environment": [list(pair) for pair in sorted(environment)],
             "deadline_seconds": deadline,
             "idempotent": values["idempotent"],
+            "input_artifacts": [
+                {"name": item.name, "size_bytes": item.size_bytes, "sha256": item.sha256}
+                for item in sorted(input_artifacts, key=lambda item: item.name)
+            ],
         }
 
     def __post_init__(self) -> None:
@@ -311,6 +367,7 @@ class RemoteJobEnvelope:
             environment=self.environment,
             deadline_seconds=self.deadline_seconds,
             idempotent=self.idempotent,
+            input_artifacts=self.input_artifacts,
         )
 
     def verify(self) -> None:
@@ -335,6 +392,22 @@ class RemoteArtifactReceipt:
             raise ValueError("artifact MIME type must be bounded")
         if not isinstance(self.sha256, str) or not _SHA256.fullmatch(self.sha256):
             raise ValueError("artifact digest must be SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteArtifactPayload:
+    receipt: RemoteArtifactReceipt
+    content: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.receipt, RemoteArtifactReceipt):
+            raise TypeError("artifact payload requires a receipt")
+        if not isinstance(self.content, bytes):
+            raise TypeError("artifact payload content must be bytes")
+        if len(self.content) != self.receipt.size_bytes:
+            raise ValueError("artifact payload size does not match its receipt")
+        if hashlib.sha256(self.content).hexdigest() != self.receipt.sha256:
+            raise ValueError("artifact payload digest does not match its receipt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +491,9 @@ class ComputeJobWorker:
         self._provider = provider
         self._by_idempotency: dict[str, RemoteJobReceipt] = {}
         self._by_job: dict[str, RemoteJobReceipt] = {}
+        self._artifact_context: dict[
+            str, tuple[Path, Path, tuple[str, ...]]
+        ] = {}
         self._lock = RLock()
         self._rehydrate()
 
@@ -451,6 +527,21 @@ class ComputeJobWorker:
                 raise Conflict("durable compute idempotency metadata is inconsistent")
             self._by_idempotency[receipt.idempotency_key] = receipt
             self._by_job[receipt.remote_job_id] = receipt
+            catalog_entry_id = metadata.get("compute_catalog_entry_id")
+            workspace_mapping = metadata.get("compute_workspace_mapping")
+            relative_cwd = metadata.get("compute_relative_cwd")
+            entry = self._catalog.get(catalog_entry_id)
+            root = self._workspaces.get(workspace_mapping)
+            if (
+                entry is not None
+                and root is not None
+                and isinstance(relative_cwd, str)
+            ):
+                cwd = (root / relative_cwd).resolve()
+                if cwd.is_relative_to(root):
+                    self._artifact_context[receipt.remote_job_id] = (
+                        root, cwd, entry.artifact_paths,
+                    )
 
     def submit(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
         try:
@@ -482,6 +573,7 @@ class ComputeJobWorker:
                 resolved_argument = (cwd / relative_path).resolve()
                 if not resolved_argument.is_relative_to(root):
                     raise ValueError("argument path would escape its configured workspace")
+            self._verify_inputs(root, cwd, envelope.input_artifacts)
             environment = entry.environment_for(envelope.environment)
         except ValueError as exc:
             raise InvalidInput(str(exc)) from exc
@@ -504,6 +596,9 @@ class ComputeJobWorker:
                 ("compute_worker_id", self.worker_id),
                 ("compute_controller_job_id", envelope.controller_job_id),
                 ("compute_request_sha256", envelope.request_sha256),
+                ("compute_catalog_entry_id", envelope.catalog_entry_id),
+                ("compute_workspace_mapping", envelope.workspace_mapping),
+                ("compute_relative_cwd", envelope.relative_cwd),
             ),
         )
         started = self._provider.start(request)
@@ -524,7 +619,85 @@ class ComputeJobWorker:
                 return prior
             self._by_idempotency[envelope.idempotency_key] = receipt
             self._by_job[remote_job_id] = receipt
+            self._artifact_context[remote_job_id] = (
+                root, cwd, entry.artifact_paths,
+            )
         return receipt
+
+    def _collect_artifacts(self, receipt: RemoteJobReceipt) -> RemoteJobReceipt:
+        if receipt.artifacts or receipt.state not in {
+            "succeeded", "failed", "cancelled", "interrupted",
+        }:
+            return receipt
+        context = self._artifact_context.get(receipt.remote_job_id)
+        if context is None:
+            return receipt
+        root, cwd, artifact_paths = context
+        artifacts: list[RemoteArtifactReceipt] = []
+        for relative_path in artifact_paths:
+            candidate = (cwd / relative_path).resolve()
+            if not candidate.is_relative_to(root):
+                raise InvalidInput("catalog artifact would escape its configured workspace")
+            try:
+                stat = candidate.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise InvalidInput("catalog artifact could not be inspected") from exc
+            if not candidate.is_file() or stat.st_size > 1 << 40:
+                raise InvalidInput("catalog artifact is not a bounded regular file")
+            digest = hashlib.sha256()
+            try:
+                with candidate.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+            except OSError as exc:
+                raise InvalidInput("catalog artifact could not be hashed") from exc
+            mime_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            artifacts.append(RemoteArtifactReceipt(
+                name=relative_path,
+                size_bytes=stat.st_size,
+                mime_type=mime_type,
+                sha256=digest.hexdigest(),
+            ))
+        if not artifacts:
+            return receipt
+        return RemoteJobReceipt(
+            worker_id=receipt.worker_id,
+            remote_job_id=receipt.remote_job_id,
+            controller_job_id=receipt.controller_job_id,
+            idempotency_key=receipt.idempotency_key,
+            request_sha256=receipt.request_sha256,
+            state=receipt.state,
+            process_id=receipt.process_id,
+            artifacts=tuple(artifacts),
+        )
+
+    @staticmethod
+    def _verify_inputs(
+        root: Path,
+        cwd: Path,
+        inputs: tuple[DigestBoundInput, ...],
+    ) -> None:
+        for expected in inputs:
+            candidate = (cwd / expected.name).resolve()
+            if not candidate.is_relative_to(root):
+                raise ValueError("input artifact would escape its configured workspace")
+            try:
+                stat = candidate.stat()
+            except OSError as exc:
+                raise ValueError("input artifact is unavailable") from exc
+            if not candidate.is_file() or stat.st_size != expected.size_bytes:
+                raise ValueError("input artifact size does not match its digest contract")
+            digest = hashlib.sha256()
+            try:
+                with candidate.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+            except OSError as exc:
+                raise ValueError("input artifact could not be verified") from exc
+            if digest.hexdigest() != expected.sha256:
+                raise ValueError("input artifact digest does not match its contract")
 
     def status(self, remote_job_id: str) -> RemoteJobReceipt:
         _identity(remote_job_id, "remote_job_id")
@@ -561,12 +734,47 @@ class ComputeJobWorker:
                 self._by_job[remote_job_id] = refreshed
                 self._by_idempotency[receipt.idempotency_key] = refreshed
             receipt = refreshed
+        receipt = self._collect_artifacts(receipt)
+        with self._lock:
+            self._by_job[remote_job_id] = receipt
+            self._by_idempotency[receipt.idempotency_key] = receipt
         return receipt
 
     def by_idempotency(self, idempotency_key: str) -> RemoteJobReceipt | None:
         _identity(idempotency_key, "idempotency_key")
         with self._lock:
             return self._by_idempotency.get(idempotency_key)
+
+    def read_artifact(
+        self,
+        remote_job_id: str,
+        name: str,
+        *,
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> RemoteArtifactPayload:
+        if isinstance(max_bytes, bool) or not 1 <= max_bytes <= 256 * 1024 * 1024:
+            raise InvalidInput("artifact read bound must be within 1..256MiB")
+        receipt = self.status(remote_job_id)
+        artifact = next((item for item in receipt.artifacts if item.name == name), None)
+        if artifact is None:
+            raise NotFound("compute artifact was not found")
+        if artifact.size_bytes > max_bytes:
+            raise InvalidInput("compute artifact exceeds the requested read bound")
+        context = self._artifact_context.get(remote_job_id)
+        if context is None:
+            raise NotFound("compute artifact workspace is unavailable")
+        root, cwd, _artifact_paths = context
+        candidate = (cwd / artifact.name).resolve()
+        if not candidate.is_relative_to(root):
+            raise InvalidInput("compute artifact would escape its configured workspace")
+        try:
+            content = candidate.read_bytes()
+        except OSError as exc:
+            raise NotFound("compute artifact is unavailable") from exc
+        try:
+            return RemoteArtifactPayload(artifact, content)
+        except ValueError as exc:
+            raise InvalidInput("compute artifact changed after receipt publication") from exc
 
     def cancel(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
         receipt = self.status(remote_job_id)
@@ -591,14 +799,20 @@ class ComputeJobWorker:
         with self._lock:
             self._by_job[remote_job_id] = cancelled
             self._by_idempotency[receipt.idempotency_key] = cancelled
+        cancelled = self._collect_artifacts(cancelled)
+        with self._lock:
+            self._by_job[remote_job_id] = cancelled
+            self._by_idempotency[receipt.idempotency_key] = cancelled
         return cancelled
 
 
 __all__ = [
     "ArgumentPolicy",
     "ComputeJobWorker",
+    "DigestBoundInput",
     "JobCatalogEntry",
     "RemoteArtifactReceipt",
+    "RemoteArtifactPayload",
     "RemoteJobEnvelope",
     "RemoteJobReceipt",
     "validate_remote_job_receipt",

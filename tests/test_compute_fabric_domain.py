@@ -238,3 +238,23 @@ def test_placement_and_snapshot_digests_are_stable_and_content_bound() -> None:
     decision = ComputePlacementScheduler().place(request, (first,), now=NOW)
     assert len(decision.request_digest) == 64
     assert decision.snapshot_digests == (("node", first.digest()),)
+
+
+def test_background_preference_applies_stronger_live_load_penalty() -> None:
+    snapshot = _snapshot("node", load=0.5)
+    scheduler = ComputePlacementScheduler()
+    foreground = scheduler.place(
+        WorkloadRequest("foreground", WorkloadKind.BUILD, allow_remote=True),
+        (snapshot,),
+        now=NOW,
+    )
+    background = scheduler.place(
+        WorkloadRequest(
+            "background", WorkloadKind.BUILD,
+            allow_remote=True,
+            background_preferred=True,
+        ),
+        (snapshot,),
+        now=NOW,
+    )
+    assert foreground.candidates[0].score - background.candidates[0].score == 30.0

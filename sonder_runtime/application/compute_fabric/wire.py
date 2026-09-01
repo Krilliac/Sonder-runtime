@@ -4,7 +4,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from .jobs import RemoteArtifactReceipt, RemoteJobEnvelope, RemoteJobReceipt
+from .jobs import (
+    DigestBoundInput,
+    RemoteArtifactReceipt,
+    RemoteJobEnvelope,
+    RemoteJobReceipt,
+)
 
 from ...domain.compute_fabric import (
     ComputeCapability,
@@ -50,6 +55,7 @@ _JOB_ENVELOPE_FIELDS = {
     "deadline_seconds",
     "idempotent",
     "request_sha256",
+    "input_artifacts",
 }
 _JOB_RECEIPT_FIELDS = {
     "worker_id",
@@ -177,12 +183,20 @@ def job_envelope_from_wire(payload: Mapping[str, Any]) -> RemoteJobEnvelope:
         raise ValueError("compute job fields do not match the bounded schema")
     arguments = payload["arguments"]
     environment = payload["environment"]
+    input_artifacts = payload["input_artifacts"]
     if not isinstance(arguments, list):
         raise ValueError("compute job arguments must be an array")
     if not isinstance(environment, list) or any(
         not isinstance(pair, list) or len(pair) != 2 for pair in environment
     ):
         raise ValueError("compute job environment must be a key/value array")
+    if not isinstance(input_artifacts, list) or len(input_artifacts) > 64:
+        raise ValueError("compute job input artifacts must be a bounded array")
+    typed_inputs: list[DigestBoundInput] = []
+    for item in input_artifacts:
+        if not isinstance(item, Mapping) or set(item) != {"name", "size_bytes", "sha256"}:
+            raise ValueError("compute job input artifact fields are invalid")
+        typed_inputs.append(DigestBoundInput(**dict(item)))
     try:
         workload = WorkloadKind(payload["workload"])
         return RemoteJobEnvelope(
@@ -197,6 +211,7 @@ def job_envelope_from_wire(payload: Mapping[str, Any]) -> RemoteJobEnvelope:
             deadline_seconds=payload["deadline_seconds"],
             idempotent=payload["idempotent"],
             request_sha256=payload["request_sha256"],
+            input_artifacts=tuple(typed_inputs),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"compute job envelope is invalid: {exc}") from exc

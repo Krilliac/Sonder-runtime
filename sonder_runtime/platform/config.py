@@ -26,7 +26,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass, field, fields, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
@@ -145,6 +145,7 @@ class ComputeJobConfig:
     allowed_bounded_options: tuple[str, ...] = ()
     allowed_relative_path_options: tuple[str, ...] = ()
     memory_limit_bytes: int | None = None
+    artifact_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -285,6 +286,7 @@ class SonderConfig:
                         job.allowed_relative_path_options
                     ),
                     "memory_limit_bytes": job.memory_limit_bytes,
+                    "artifact_paths": list(job.artifact_paths),
                 }
                 for job in self.compute.jobs
             ],
@@ -468,6 +470,7 @@ def _apply_compute_section(
             "allowed_flags", "allowed_bounded_options",
             "allowed_relative_path_options",
             "memory_limit_bytes",
+            "artifact_paths",
         }
         for index, item in enumerate(jobs_raw):
             where = f"[compute].jobs[{index}]"
@@ -511,6 +514,7 @@ def _apply_compute_section(
                     and not isinstance(item.get("memory_limit_bytes"), bool)
                     else None
                 ),
+                artifact_paths=_string_list(item, "artifact_paths", where, errors),
             ))
             if (
                 "memory_limit_bytes" in item
@@ -973,12 +977,30 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 errors.append(f"{where}.workload inference remains owned by the model gateway")
         except ValueError:
             errors.append(f"{where}.workload contains an unknown workload")
-        if not job.program or len(job.program) > 4096:
-            errors.append(f"{where}.program must be non-empty and bounded")
-        if len(job.fixed_args) > 64 or any(len(value) > 4096 for value in job.fixed_args):
+        if (
+            not job.program
+            or len(job.program) > 4096
+            or "\x00" in job.program
+            or not (
+                PurePosixPath(job.program).is_absolute()
+                or PureWindowsPath(job.program).is_absolute()
+            )
+        ):
+            errors.append(f"{where}.program must be an absolute bounded path")
+        if len(job.fixed_args) > 64 or any(
+            len(value) > 4096 or "\x00" in value for value in job.fixed_args
+        ):
             errors.append(f"{where}.fixed_args exceeds its bound")
-        if len(job.environment_allowlist) > 32:
-            errors.append(f"{where}.environment_allowlist exceeds its bound")
+        if len(job.environment_allowlist) > 32 or any(
+            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", value)
+            for value in job.environment_allowlist
+        ):
+            errors.append(f"{where}.environment_allowlist is invalid")
+        if any(
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value)
+            for value in job.workspace_mappings
+        ):
+            errors.append(f"{where}.workspace_mappings contains an invalid workspace identity")
         if job.argument_policy not in {
             "none",
             "bounded",
@@ -987,6 +1009,22 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             errors.append(f"{where}.argument_policy is invalid")
         if job.memory_limit_bytes is not None and not 1 <= job.memory_limit_bytes <= 1 << 50:
             errors.append(f"{where}.memory_limit_bytes must be within 1..2^50")
+        if len(job.artifact_paths) > 256:
+            errors.append(f"{where}.artifact_paths exceeds its bound")
+        for value in job.artifact_paths:
+            normalized = value.replace("\\", "/")
+            path = PurePosixPath(normalized)
+            if (
+                not value
+                or len(value) > 4096
+                or "\x00" in value
+                or normalized.startswith("/")
+                or not path.parts
+                or ".." in path.parts
+                or ":" in path.parts[0]
+            ):
+                errors.append(f"{where}.artifact_paths contains an invalid relative artifact")
+                break
         option_groups = (
             job.allowed_flags,
             job.allowed_bounded_options,

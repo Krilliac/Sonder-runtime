@@ -9,6 +9,7 @@ from typing import Callable
 
 from .jobs import (
     ComputeJobWorker,
+    RemoteArtifactPayload,
     RemoteJobEnvelope,
     RemoteJobReceipt,
     validate_remote_job_receipt,
@@ -203,6 +204,9 @@ class ComputeFabricService:
             any_capabilities=(
                 request.any_capabilities | profile.any_capabilities
             ),
+            background_preferred=(
+                request.background_preferred or profile.background_preferred
+            ),
         )
 
     def _place(self, request: WorkloadRequest) -> PlacementDecision:
@@ -234,6 +238,11 @@ class ComputeFabricService:
             raise ValueError("workload and envelope workspace mappings must match")
         if request.idempotent != envelope.idempotent:
             raise ValueError("workload and envelope idempotency must match")
+        profile = profile_for(request.kind)
+        if profile.requires_digest_bound_input and not envelope.input_artifacts:
+            raise ValueError(
+                f"{request.kind.value} workloads require digest-bound input artifacts"
+            )
         with self._lock:
             existing = self._placements.get(request.request_id)
         if existing is not None:
@@ -341,6 +350,36 @@ class ComputeFabricService:
             remote_job_id=remote_job_id,
         )
         return ComputeSubmission(node_id, placement, receipt)
+
+    def fetch_artifact(
+        self,
+        controller_job_id: str,
+        name: str,
+        *,
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> RemoteArtifactPayload:
+        submission = self.status(controller_job_id)
+        expected = next(
+            (artifact for artifact in submission.receipt.artifacts if artifact.name == name),
+            None,
+        )
+        if expected is None:
+            raise NotFound("compute artifact was not found")
+        if expected.size_bytes > max_bytes:
+            raise DependencyUnavailable("compute artifact exceeds the requested transfer bound")
+        node = self._registry.get_node(submission.node_id)
+        payload = (
+            self._local_worker.read_artifact(
+                submission.receipt.remote_job_id, name, max_bytes=max_bytes,
+            )
+            if node.local
+            else self._transport.fetch_artifact(
+                node, submission.receipt.remote_job_id, expected,
+            )
+        )
+        if payload.receipt != expected:
+            raise DependencyUnavailable("compute artifact payload receipt mismatch")
+        return payload
 
 
 __all__ = ["ComputeFabricService", "ComputeSubmission"]

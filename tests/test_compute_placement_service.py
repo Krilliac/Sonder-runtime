@@ -5,7 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sonder_runtime.application.compute_fabric.jobs import RemoteJobEnvelope, RemoteJobReceipt
+from sonder_runtime.application.compute_fabric.jobs import (
+    DigestBoundInput,
+    RemoteJobEnvelope,
+    RemoteJobReceipt,
+)
 from sonder_runtime.application.compute_fabric.registry import ComputeNodeRegistry
 from sonder_runtime.application.compute_fabric.service import ComputeFabricService
 from sonder_runtime.application.jobs.durable_registry import DurableJobRegistry
@@ -194,6 +198,24 @@ def test_workload_profile_capabilities_are_merged_before_placement() -> None:
     with pytest.raises(DependencyUnavailable, match="eligible remote"):
         service.submit(_request(), _envelope())
     assert transport.submit_calls == 0
+
+
+def test_container_profile_requires_digest_bound_input() -> None:
+    service, _transport, _local = _service()
+    request = replace(
+        _request(), kind=WorkloadKind.CONTAINER,
+    )
+    envelope = RemoteJobEnvelope.create(
+        controller_job_id="controller-job",
+        idempotency_key="idem-container",
+        workload=WorkloadKind.CONTAINER,
+        catalog_entry_id="container",
+        workspace_mapping="sonder",
+        deadline_seconds=300,
+        idempotent=True,
+    )
+    with pytest.raises(ValueError, match="digest-bound"):
+        service.submit(request, envelope)
 
 
 def test_status_and_cancel_revalidate_complete_placement_ownership() -> None:

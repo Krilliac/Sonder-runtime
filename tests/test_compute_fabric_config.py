@@ -44,6 +44,7 @@ allowed_flags = ["-q"]
 allowed_bounded_options = ["--color"]
 allowed_relative_path_options = ["--basetemp"]
 memory_limit_bytes = 536870912
+artifact_paths = ["reports/junit.xml"]
 """,
         encoding="utf-8",
     )
@@ -60,6 +61,7 @@ memory_limit_bytes = 536870912
     assert config.compute.jobs[0].allowed_bounded_options == ("--color",)
     assert config.compute.jobs[0].allowed_relative_path_options == ("--basetemp",)
     assert config.compute.jobs[0].memory_limit_bytes == 536870912
+    assert config.compute.jobs[0].artifact_paths == ("reports/junit.xml",)
     assert config.features.cloud is False
 
 
@@ -154,6 +156,27 @@ def test_compute_catalog_rejects_unknown_argument_policy(tmp_path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="argument_policy"):
+        load_config(path, env={})
+
+
+@pytest.mark.parametrize(
+    ("job_body", "message"),
+    (
+        ("program='python'", "absolute"),
+        ("program='/usr/bin/python'\nenvironment_allowlist=['BAD-NAME']", "environment"),
+        ("program='/usr/bin/python'\nworkspace_mappings=['bad/name']", "workspace"),
+        ("program='/usr/bin/python'\nartifact_paths=['../escape']", "artifact"),
+    ),
+)
+def test_compute_catalog_rejects_unsafe_worker_owned_fields(
+    tmp_path, job_body: str, message: str,
+) -> None:
+    path = tmp_path / "sonder.toml"
+    path.write_text(
+        "[compute]\n[[compute.jobs]]\nid='job'\nworkload='test'\n" + job_body + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=message):
         load_config(path, env={})
 
 

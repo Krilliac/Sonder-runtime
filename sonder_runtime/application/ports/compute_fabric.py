@@ -35,6 +35,10 @@ class ComputeRemoteJobTransport(Protocol):
         self, node: ComputeNode, remote_job_id: str, *, reason: str
     ) -> "RemoteJobReceipt": ...
 
+    def fetch_artifact(
+        self, node: ComputeNode, remote_job_id: str, expected
+    ): ...
+
 
 __all__ = [
     "ComputeNodeRegistryPort",

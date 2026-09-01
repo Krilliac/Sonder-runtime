@@ -4,7 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ....application.compute_fabric.jobs import ComputeJobWorker, RemoteJobReceipt
+from ....application.compute_fabric.jobs import (
+    ComputeJobWorker,
+    RemoteArtifactPayload,
+    RemoteJobReceipt,
+)
 from ....application.compute_fabric.wire import (
     job_envelope_from_wire,
     job_receipt_to_wire,
@@ -15,6 +19,12 @@ from ....application.compute_fabric.wire import (
 @dataclass(frozen=True, slots=True)
 class ComputeFabricHttpResult:
     body: dict[str, Any]
+    status_code: int = 200
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeArtifactHttpResult:
+    payload: RemoteArtifactPayload
     status_code: int = 200
 
 
@@ -74,8 +84,18 @@ def dispatch_compute_job_cancel(
     return _job_result(worker.cancel(remote_job_id, reason=reason))
 
 
+def dispatch_compute_job_artifact(
+    worker: ComputeJobWorker,
+    remote_job_id: str,
+    name: str,
+) -> ComputeArtifactHttpResult:
+    return ComputeArtifactHttpResult(worker.read_artifact(remote_job_id, name))
+
+
 __all__ = [
     "ComputeFabricHttpResult",
+    "ComputeArtifactHttpResult",
+    "dispatch_compute_job_artifact",
     "dispatch_compute_job_by_idempotency",
     "dispatch_compute_job_cancel",
     "dispatch_compute_job_status",
