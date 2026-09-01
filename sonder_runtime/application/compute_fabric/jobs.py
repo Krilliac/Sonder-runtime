@@ -1086,6 +1086,18 @@ class ComputeJobWorker:
                 size = 0
                 try:
                     with candidate.open("rb") as source, destination.open("xb") as target:
+                        opened_path = cls._opened_file_path(source)
+                        if not opened_path.is_relative_to(root):
+                            raise ValueError(
+                                "input artifact opened outside its configured workspace"
+                            )
+                        before = os.fstat(source.fileno())
+                        if not stat_module.S_ISREG(before.st_mode):
+                            raise ValueError("input artifact is not a regular file")
+                        if before.st_size != expected.size_bytes:
+                            raise ValueError(
+                                "input artifact size does not match its digest contract"
+                            )
                         for block in iter(lambda: source.read(1024 * 1024), b""):
                             size += len(block)
                             if size > expected.size_bytes:
@@ -1094,6 +1106,21 @@ class ComputeJobWorker:
                                 )
                             digest.update(block)
                             target.write(block)
+                        after = os.fstat(source.fileno())
+                        before_identity = (
+                            before.st_dev,
+                            before.st_ino,
+                            before.st_size,
+                            before.st_mtime_ns,
+                        )
+                        after_identity = (
+                            after.st_dev,
+                            after.st_ino,
+                            after.st_size,
+                            after.st_mtime_ns,
+                        )
+                        if size != before.st_size or before_identity != after_identity:
+                            raise ValueError("input artifact changed while staging")
                 except ValueError:
                     raise
                 except OSError as exc:

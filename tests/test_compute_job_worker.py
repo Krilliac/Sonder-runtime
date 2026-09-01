@@ -291,6 +291,41 @@ def test_worker_verifies_digest_bound_inputs_before_launch(tmp_path: Path) -> No
         ))
 
 
+def test_worker_rejects_opened_digest_input_outside_workspace(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    payload = tests / "input.bin"
+    payload.write_bytes(b"inside")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.bin"
+    outside.write_bytes(b"abc")
+    original_open = Path.open
+
+    def swapped_open(path, *args, **kwargs):
+        if path == payload and (not args or args[0] == "rb"):
+            return original_open(outside, *args, **kwargs)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", swapped_open)
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=CapturingProvider(),
+    )
+
+    with pytest.raises(InvalidInput, match="outside|escape"):
+        worker.submit(_envelope(
+            arguments=("input.bin",),
+            input_artifacts=(DigestBoundInput(
+                "input.bin", 3, hashlib.sha256(b"abc").hexdigest(),
+            ),),
+        ))
+
+
 def test_worker_rejects_digest_input_not_consumed_by_catalog_argv(tmp_path: Path) -> None:
     import hashlib
 

@@ -174,6 +174,20 @@ def test_start_registers_process_identity_and_posix_group_for_cleanup():
     assert launch["kwargs"]["cwd"] == str(Path("C:/workspace"))
 
 
+def test_start_scrubs_parent_control_secrets_before_request_overlay(monkeypatch):
+    monkeypatch.setenv("SONDER_API_KEY", "host-owner-secret")
+    monkeypatch.setenv("SONDER_OPENAI_API_KEY", "host-cloud-secret")
+    cleanup = _Cleanup(complete=True)
+    provider, launch = _provider(cleanup, _Process())
+
+    provider.start(_request())
+
+    environment = launch["kwargs"]["env"]
+    assert "SONDER_API_KEY" not in environment
+    assert "SONDER_OPENAI_API_KEY" not in environment
+    assert environment["SONDER_TEST"] == "1"
+
+
 def test_memory_limit_is_enforced_before_job_publication_and_token_is_closed():
     cleanup = _Cleanup(complete=True)
     limiter = _MemoryLimiter()

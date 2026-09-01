@@ -152,7 +152,13 @@ class ComputeFabricService:
         with self._lock:
             self._placements.update(recovered)
 
-    def _persist_placement(self, record: _PlacementRecord, *, create: bool = False) -> None:
+    def _persist_placement(
+        self,
+        record: _PlacementRecord,
+        *,
+        create: bool = False,
+        receipt_state: str | None = None,
+    ) -> None:
         store = self._placement_registry
         if store is None:
             return
@@ -173,9 +179,19 @@ class ComputeFabricService:
                     "placement_payload": self._placement_payload(record),
                 },
             )
+        terminal_status = {
+            "succeeded": JobStatus.SUCCEEDED,
+            "failed": JobStatus.FAILED,
+            "cancelled": JobStatus.CANCELLED,
+            # An interrupted remote attempt is no longer active. Placement
+            # records are accounting receipts rather than retryable work, so
+            # close it as failed while preserving the remote state in callers'
+            # validated RemoteJobReceipt.
+            "interrupted": JobStatus.FAILED,
+        }.get(receipt_state, JobStatus.RUNNING)
         store.transition(
             storage_job_id,
-            JobStatus.RUNNING,
+            terminal_status,
             result=self._placement_payload(record),
         )
 
@@ -185,7 +201,7 @@ class ComputeFabricService:
         updated = replace(record, remote_job_id=receipt.remote_job_id)
         with self._lock:
             self._placements[record.controller_job_id] = updated
-        self._persist_placement(updated)
+        self._persist_placement(updated, receipt_state=receipt.state)
         return updated
 
     def _lookup_ambiguous(self, record: _PlacementRecord) -> RemoteJobReceipt:
@@ -217,8 +233,9 @@ class ComputeFabricService:
             required_capabilities=(
                 request.required_capabilities | profile.all_capabilities
             ),
-            any_capabilities=(
-                request.any_capabilities | profile.any_capabilities
+            any_capability_groups=(
+                request.any_capability_groups
+                + ((profile.any_capabilities,) if profile.any_capabilities else ())
             ),
             background_preferred=(
                 request.background_preferred or profile.background_preferred
@@ -380,6 +397,7 @@ class ComputeFabricService:
             request_sha256=placed.request_sha256,
             remote_job_id=remote_job_id,
         )
+        self._record_receipt(placed, receipt)
         return ComputeSubmission(node_id, placement, receipt)
 
     def cancel(self, controller_job_id: str, *, reason: str) -> ComputeSubmission:
@@ -408,6 +426,7 @@ class ComputeFabricService:
             request_sha256=placed.request_sha256,
             remote_job_id=remote_job_id,
         )
+        self._record_receipt(placed, receipt)
         return ComputeSubmission(node_id, placement, receipt)
 
     def fetch_artifact(

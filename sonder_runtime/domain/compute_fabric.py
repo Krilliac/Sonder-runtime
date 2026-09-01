@@ -307,6 +307,7 @@ class WorkloadRequest:
     kind: WorkloadKind
     required_capabilities: frozenset[ComputeCapability] = frozenset()
     any_capabilities: frozenset[ComputeCapability] = frozenset()
+    any_capability_groups: tuple[frozenset[ComputeCapability], ...] = ()
     workspace_mapping: str | None = None
     min_free_ram_bytes: int = 0
     min_free_disk_bytes: int = 0
@@ -331,6 +332,19 @@ class WorkloadRequest:
         ):
             if any(not isinstance(item, ComputeCapability) for item in values):
                 raise ValueError(f"{label} contains an unknown capability")
+        if (
+            not isinstance(self.any_capability_groups, tuple)
+            or len(self.any_capability_groups) > 16
+            or any(
+                not isinstance(group, frozenset)
+                or not group
+                or any(not isinstance(item, ComputeCapability) for item in group)
+                for group in self.any_capability_groups
+            )
+        ):
+            raise ValueError(
+                "any_capability_groups must contain bounded non-empty capability sets"
+            )
         if self.workspace_mapping is not None:
             _require_identity(self.workspace_mapping, "workspace_mapping")
         for name in (
@@ -373,6 +387,10 @@ class WorkloadRequest:
             "kind": self.kind.value,
             "required_capabilities": sorted(item.value for item in self.required_capabilities),
             "any_capabilities": sorted(item.value for item in self.any_capabilities),
+            "any_capability_groups": [
+                sorted(item.value for item in group)
+                for group in self.any_capability_groups
+            ],
             "workspace_mapping": self.workspace_mapping,
             "min_free_ram_bytes": self.min_free_ram_bytes,
             "min_free_disk_bytes": self.min_free_disk_bytes,
@@ -490,6 +508,11 @@ class ComputePlacementScheduler:
             return reject("missing_capability")
         if request.any_capabilities and not (
             request.any_capabilities & snapshot.effective_capabilities
+        ):
+            return reject("missing_any_capability")
+        if any(
+            not group & snapshot.effective_capabilities
+            for group in request.any_capability_groups
         ):
             return reject("missing_any_capability")
         if request.workspace_mapping and request.workspace_mapping not in node.workspace_mappings:

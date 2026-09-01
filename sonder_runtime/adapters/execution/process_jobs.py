@@ -15,6 +15,7 @@ from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
 from .durable_output import DurableExecutionOutput
 from ...application.ports.jobs import JobStatus
+from ...platform import logging as runtime_logging
 from ..process_liveness import PROCESS_ALIVE, probe_process, process_identity
 from ..extensions.memory_limits import (
     PreparedProcessContainment,
@@ -91,7 +92,7 @@ class SubprocessJobProvider:
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
         if not isinstance(request, ProcessJobRequest):
             raise TypeError("request must be a ProcessJobRequest")
-        environment = dict(os.environ)
+        environment = runtime_logging.child_environment()
         environment.update(request.environment)
         launch_options: dict[str, Any] = {
             "cwd": None if request.cwd is None else str(Path(request.cwd)),
