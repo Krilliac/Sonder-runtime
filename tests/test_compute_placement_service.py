@@ -129,12 +129,29 @@ class _Transport:
         return _receipt(node.node_id, remote_job_id)
 
 
+class _Metrics:
+    def __init__(self) -> None:
+        self.inventories = []
+        self.placements = []
+        self.rejections = []
+
+    def set_compute_inventory(self, **values) -> None:
+        self.inventories.append(values)
+
+    def observe_compute_placement(self, *, route: str) -> None:
+        self.placements.append(route)
+
+    def observe_compute_placement_rejection(self, *, reason: str) -> None:
+        self.rejections.append(reason)
+
+
 def _service(
     *,
     remote_age: int = 0,
     ambiguous: bool = False,
     remote_capabilities: frozenset[ComputeCapability] | None = None,
     placement_registry=None,
+    metrics=None,
 ):
     local = _node("local", local=True)
     remote = _node(
@@ -152,8 +169,30 @@ def _service(
         local_worker=local_worker,
         now=lambda: NOW,
         placement_registry=placement_registry,
+        metrics=metrics,
     )
     return service, transport, local_worker
+
+
+def test_compute_metrics_report_bounded_inventory_routes_and_rejections() -> None:
+    metrics = _Metrics()
+    service, _transport, _local = _service(metrics=metrics)
+    service.submit(_request(), _envelope())
+    assert metrics.inventories[-1] == {
+        "configured": 2,
+        "live": 2,
+        "healthy": 2,
+        "unhealthy": 0,
+        "stale": 0,
+        "active_jobs": 0,
+    }
+    assert metrics.placements == ["remote"]
+
+    rejected = _Metrics()
+    service, _transport, _local = _service(remote_age=60, metrics=rejected)
+    with pytest.raises(DependencyUnavailable, match="eligible remote"):
+        service.submit(_request(), _envelope())
+    assert rejected.rejections == ["stale"]
 
 
 def test_submit_timeout_reconciles_idempotent_request_before_retry() -> None:

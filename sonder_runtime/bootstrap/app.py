@@ -634,14 +634,13 @@ def build_application(
                     node, now=observed_at
                 )
             except Exception as exc:
-                registry.observe(NodeSnapshot(
-                    node=node,
-                    observed_at=observed_at,
-                    health=NodeHealth.UNHEALTHY,
+                registry.mark_probe_failed(
+                    node.node_id,
+                    received_at=observed_at,
                     evidence_ref=f"probe-failed:{type(exc).__name__}",
-                ))
+                )
             else:
-                registry.observe(snapshot)
+                registry.observe(snapshot, received_at=observed_at)
 
     def get_compute_service() -> ComputeFabricService:
         nonlocal compute_service, compute_remote_transport
@@ -667,6 +666,7 @@ def build_application(
                 now=lambda: datetime.now(timezone.utc),
                 refresh=refresh_compute_snapshots,
                 placement_registry=get_job_registry(),
+                metrics=runtime_lifecycle.get().metrics,
             )
         return compute_service
 
@@ -983,6 +983,14 @@ def build_application(
                 "observed": observed is not None,
                 "stale": registry.is_stale(node.node_id, now=now),
                 "health": observed.health.value if observed is not None else "unknown",
+                "observed_at": (
+                    observed.observed_at.isoformat() if observed is not None else None
+                ),
+                "received_at": (
+                    observed.received_at.isoformat()
+                    if observed is not None and observed.received_at is not None
+                    else None
+                ),
                 "active_jobs": observed.active_jobs if observed is not None else None,
                 "workloads": sorted(item.value for item in node.allowed_workloads),
                 "capabilities": sorted(
@@ -992,7 +1000,10 @@ def build_application(
                         if observed is not None else frozenset()
                     )
                 ),
-                "probe_error": local_error if node.local else "",
+                "evidence_ref": observed.evidence_ref if observed is not None else None,
+                "probe_error": (
+                    local_error if node.local else registry.last_probe_error(node.node_id) or ""
+                ),
             })
         return tuple(rows)
 

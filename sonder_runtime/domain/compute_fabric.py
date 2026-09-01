@@ -215,6 +215,7 @@ class ComputeNode:
 class NodeSnapshot:
     node: ComputeNode
     observed_at: datetime
+    received_at: datetime | None = None
     health: NodeHealth = NodeHealth.UNKNOWN
     live_capabilities: frozenset[ComputeCapability] = frozenset()
     advertised_workloads: frozenset[WorkloadKind] = frozenset()
@@ -228,6 +229,8 @@ class NodeSnapshot:
         if not isinstance(self.node, ComputeNode):
             raise ValueError("node must be a ComputeNode")
         _aware_utc(self.observed_at, "observed_at")
+        if self.received_at is not None:
+            _aware_utc(self.received_at, "received_at")
         if not isinstance(self.health, NodeHealth):
             raise ValueError("health must be a NodeHealth")
         if any(not isinstance(item, ComputeCapability) for item in self.live_capabilities):
@@ -259,6 +262,15 @@ class NodeSnapshot:
         return self.node.configured_capabilities & self.live_capabilities
 
     @property
+    def freshness_at(self) -> datetime:
+        """Conservatively combine worker evidence time and controller receipt time."""
+        observed = _aware_utc(self.observed_at, "observed_at")
+        if self.received_at is None:
+            return observed
+        received = _aware_utc(self.received_at, "received_at")
+        return min(observed, received)
+
+    @property
     def effective_workloads(self) -> frozenset[WorkloadKind]:
         return self.node.allowed_workloads & self.advertised_workloads
 
@@ -268,6 +280,13 @@ class NodeSnapshot:
             "observed_at": _aware_utc(self.observed_at, "observed_at")
             .isoformat()
             .replace("+00:00", "Z"),
+            "received_at": (
+                _aware_utc(self.received_at, "received_at")
+                .isoformat()
+                .replace("+00:00", "Z")
+                if self.received_at is not None
+                else None
+            ),
             "health": self.health.value,
             "live_capabilities": sorted(item.value for item in self.live_capabilities),
             "advertised_workloads": sorted(item.value for item in self.advertised_workloads),
@@ -456,7 +475,7 @@ class ComputePlacementScheduler:
             return reject("node_avoided")
         if snapshot.health is not NodeHealth.HEALTHY:
             return reject("unhealthy")
-        observed = _aware_utc(snapshot.observed_at, "observed_at")
+        observed = snapshot.freshness_at
         if observed > now + timedelta(seconds=5):
             return reject("future_observation")
         if now - observed > self.snapshot_ttl:
