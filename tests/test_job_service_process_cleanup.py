@@ -20,12 +20,35 @@ class _Registry:
         self.record = JobRecord(_identity(), status=JobStatus.RUNNING)
         self.metadata = SimpleNamespace(process_id=process_id, process_group_id=process_group_id)
 
-    def cancel(self, job_id: str, *, reason: str = "cancelled") -> tuple[JobRecord, ...]:
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        reason: str = "cancelled",
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
         if job_id != self.record.identity.job_id:
             raise KeyError(job_id)
         self.record = JobRecord(
             self.record.identity,
             JobStatus.CANCELLED,
+            self.record.revision + 1,
+            error=reason,
+        )
+        return (self.record,)
+
+    def request_cancellation(
+        self,
+        job_id: str,
+        *,
+        reason: str = "cancelled",
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
+        if job_id != self.record.identity.job_id:
+            raise KeyError(job_id)
+        self.record = JobRecord(
+            self.record.identity,
+            JobStatus.CANCELLATION_REQUESTED,
             self.record.revision + 1,
             error=reason,
         )
@@ -55,6 +78,7 @@ def test_cancel_with_cleanup_is_bounded_and_reports_complete_receipt():
 
     assert result.cleanup_completed is True
     assert result.records[0].status is JobStatus.CANCELLED
+    assert result.records[0].is_terminal is True
     assert result.cleanup_receipts[0].complete is True
     assert supervisor.requests[0].process_id == 41
     assert supervisor.requests[0].max_descendants == 7
@@ -67,7 +91,7 @@ def test_cancel_with_cleanup_preserves_incomplete_receipt_truthfully():
 
     result = service.cancel_with_cleanup("job-1")
 
-    assert result.records[0].status is JobStatus.CANCELLED
+    assert result.records[0].status is JobStatus.CANCELLATION_REQUESTED
     assert result.cleanup_completed is False
     assert result.cleanup_receipts[0].complete is False
     assert result.detail == "child remains"
@@ -77,6 +101,7 @@ def test_cancel_with_cleanup_requires_proof_when_supervisor_or_metadata_is_missi
     no_supervisor = JobRegistryService(_Registry())
     result = no_supervisor.cancel_with_cleanup("job-1")
     assert result.cleanup_completed is False
+    assert result.records[0].status is JobStatus.CANCELLATION_REQUESTED
     assert result.cleanup_receipts == ()
     assert "not configured" in result.detail
 
@@ -85,6 +110,7 @@ def test_cancel_with_cleanup_requires_proof_when_supervisor_or_metadata_is_missi
     ))
     result = no_process.cancel_with_cleanup("job-1")
     assert result.cleanup_completed is False
+    assert result.records[0].status is JobStatus.CANCELLATION_REQUESTED
     assert result.cleanup_receipts == ()
     assert "process id" in result.detail
 

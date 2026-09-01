@@ -153,10 +153,17 @@ def test_native_compute_tools_are_bounded_and_require_explicit_remote_consent():
     ]["max_bytes"]["maximum"] == 98_304
 
 
-def test_native_compute_submit_status_and_cancel_route_to_compute_service():
+def test_native_compute_submit_status_and_cancel_route_to_compute_service(monkeypatch):
     from sonder_runtime.application.compute_fabric.jobs import RemoteJobReceipt
     from sonder_runtime.application.compute_fabric.service import ComputeSubmission
     from sonder_runtime.domain.compute_fabric import PlacementDecision
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    monkeypatch.setattr(
+        permission_policy,
+        "decide_for_caller",
+        lambda *_args, **_kwargs: SimpleNamespace(action="allow"),
+    )
 
     class _Compute:
         def __init__(self):
@@ -229,6 +236,45 @@ def test_native_compute_submit_status_and_cancel_route_to_compute_service():
     assert json.loads(rows[1]["result"]["output"])["remote_job_id"] == "remote-1"
     assert rows[2]["result"]["isError"] is False
     assert compute.cancelled == ("controller-1", "operator stop")
+
+
+def test_native_compute_mutations_obey_runtime_permission_policy(monkeypatch):
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    app = _app()
+    app.compute_service = lambda: SimpleNamespace(
+        submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("denied compute must not execute")
+        )
+    )
+    monkeypatch.setattr(
+        permission_policy,
+        "decide_for_caller",
+        lambda *_args, **_kwargs: SimpleNamespace(action="deny"),
+    )
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2.0", "capabilities": {"tools": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "compute_submit", "arguments": {
+                "request_id": "controller-denied", "workload": "test",
+                "catalog_entry_id": "pytest", "workspace_mapping": "sonder",
+                "allow_remote": True,
+            },
+        }},
+    ]
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO(
+            "\n".join(json.dumps(item) for item in requests) + "\n"
+        ),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["isError"] is True
+    assert rows[1]["result"]["error"] == "permission_denied"
 
 
 def test_native_catalog_contains_legacy_filesystem_alias_schemas():

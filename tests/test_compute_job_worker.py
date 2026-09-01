@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import sys
@@ -208,6 +209,35 @@ def test_worker_verifies_digest_bound_inputs_before_launch(tmp_path: Path) -> No
         ))
 
 
+def test_concurrent_identical_submissions_launch_exactly_once(tmp_path: Path) -> None:
+    import time
+
+    class SlowProvider(CapturingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.starts = 0
+
+        def start(self, request):
+            self.starts += 1
+            time.sleep(0.05)
+            return super().start(request)
+
+    (tmp_path / "tests").mkdir()
+    provider = SlowProvider()
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=provider,
+    )
+    envelope = _envelope()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        receipts = tuple(executor.map(lambda _index: worker.submit(envelope), range(2)))
+
+    assert provider.starts == 1
+    assert receipts[0] == receipts[1]
+
+
 def test_worker_status_refreshes_terminal_state_and_cancel_reports_cleanup_truth(
     tmp_path: Path,
 ) -> None:
@@ -279,6 +309,10 @@ def test_worker_emits_verified_receipts_for_catalog_artifacts(tmp_path: Path) ->
     report.write_bytes(b'{"ok":false}')
     with pytest.raises(InvalidInput, match="changed"):
         worker.read_artifact(started.remote_job_id, "report.json")
+
+    report.write_bytes(b"x" * (1024 * 1024))
+    with pytest.raises(InvalidInput, match="changed"):
+        worker.read_artifact(started.remote_job_id, "report.json", max_bytes=1024)
 
 
 def test_worker_rehydrates_digest_bound_receipt_after_restart(tmp_path: Path) -> None:

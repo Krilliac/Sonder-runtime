@@ -582,16 +582,41 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             raise McpTransportError(str(exc)) from exc
         canonical_name = _LEGACY_ALIASES.get(name, name)
         canonical_arguments = dict(arguments)
-        if canonical_name in _COMPUTE_NAMES:
-            return compute_result(canonical_name, canonical_arguments)
-        cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
         context = local_owner_context(
             correlation_id=uuid.uuid4().hex,
             source="mcp",
             workspace_roots=roots,
-            cloud_allowed=cloud_consent,
             timeout_seconds=60.0,
         )
+        if canonical_name in _COMPUTE_NAMES:
+            if canonical_name in {"compute_submit", "compute_cancel"}:
+                from ..adapters.security.permission_policy import permission_policy
+
+                decision = permission_policy.decide_for_caller(
+                    canonical_name,
+                    interactive=False,
+                    gate_control_exempt=False,
+                )
+                if (
+                    decision is not None
+                    and decision.action != permission_policy.allow_action()
+                ):
+                    return {
+                        "output": "compute host control denied by runtime permission policy",
+                        "isError": True,
+                        "error": "permission_denied",
+                        "evidence": {"tool": canonical_name},
+                    }
+            return compute_result(canonical_name, canonical_arguments)
+        cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
+        if cloud_consent:
+            context = local_owner_context(
+                correlation_id=context.correlation_id,
+                source="mcp",
+                workspace_roots=roots,
+                cloud_allowed=True,
+                timeout_seconds=60.0,
+            )
         if canonical_name in _VISION_NAMES:
             service = getattr(application, "vision", None)
             if service is None:

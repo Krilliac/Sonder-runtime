@@ -601,22 +601,26 @@ class ComputeJobWorker:
                 ("compute_relative_cwd", envelope.relative_cwd),
             ),
         )
-        started = self._provider.start(request)
-        receipt = RemoteJobReceipt(
-            worker_id=self.worker_id,
-            remote_job_id=remote_job_id,
-            controller_job_id=envelope.controller_job_id,
-            idempotency_key=envelope.idempotency_key,
-            request_sha256=envelope.request_sha256,
-            state=started.record.status.value,
-            process_id=started.process_id,
-        )
         with self._lock:
             prior = self._by_idempotency.get(envelope.idempotency_key)
             if prior is not None:
                 if prior.request_sha256 != envelope.request_sha256:
                     raise Conflict("idempotency key is already bound to another request")
                 return prior
+            # Keep reservation, process creation, and receipt publication in one
+            # worker critical section. The provider durably reserves the stable
+            # job identity before it creates the process, so concurrent callers
+            # cannot execute the same idempotency key twice.
+            started = self._provider.start(request)
+            receipt = RemoteJobReceipt(
+                worker_id=self.worker_id,
+                remote_job_id=remote_job_id,
+                controller_job_id=envelope.controller_job_id,
+                idempotency_key=envelope.idempotency_key,
+                request_sha256=envelope.request_sha256,
+                state=started.record.status.value,
+                process_id=started.process_id,
+            )
             self._by_idempotency[envelope.idempotency_key] = receipt
             self._by_job[remote_job_id] = receipt
             self._artifact_context[remote_job_id] = (
@@ -768,9 +772,12 @@ class ComputeJobWorker:
         if not candidate.is_relative_to(root):
             raise InvalidInput("compute artifact would escape its configured workspace")
         try:
-            content = candidate.read_bytes()
+            with candidate.open("rb") as stream:
+                content = stream.read(min(max_bytes, artifact.size_bytes) + 1)
         except OSError as exc:
             raise NotFound("compute artifact is unavailable") from exc
+        if len(content) > artifact.size_bytes:
+            raise InvalidInput("compute artifact changed after receipt publication")
         try:
             return RemoteArtifactPayload(artifact, content)
         except ValueError as exc:

@@ -18,6 +18,7 @@ class JobStatus(str, Enum):
     PENDING = "pending"
     CLAIMED = "claimed"
     RUNNING = "running"
+    CANCELLATION_REQUESTED = "cancellation_requested"
     PAUSED = "paused"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -193,6 +194,8 @@ class JobRegistry(Protocol):
              limit: int = 100) -> tuple[JobRecord, ...]: ...
     def cancel(self, job_id: str, *, reason: str = "cancelled",
                max_descendants: int = 256) -> tuple[JobRecord, ...]: ...
+    def request_cancellation(self, job_id: str, *, reason: str = "cancelled",
+                             max_descendants: int = 256) -> tuple[JobRecord, ...]: ...
     def claim(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> JobClaim | None: ...
     def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: int = 300,
                   claim_token: str | None = None) -> bool: ...

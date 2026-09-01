@@ -225,6 +225,54 @@ class SQLiteDurableJobRegistry:
             attempt=0, max_attempts=max_attempts,
         )
 
+    def attach_process(
+        self,
+        job_id: str,
+        *,
+        process_id: int,
+        process_group_id: int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> JobRecord:
+        """Atomically bind process identity to a reserved durable job."""
+        if isinstance(process_id, bool) or process_id <= 0:
+            raise ValueError("process_id must be positive")
+        if process_group_id is not None and (
+            isinstance(process_group_id, bool) or process_group_id <= 0
+        ):
+            raise ValueError("process_group_id must be positive")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            current = self._record(row)
+            if current is None:
+                raise KeyError(f"unknown job {job_id!r}")
+            if current.is_terminal:
+                raise ValueError("cannot attach a process to a terminal job")
+            if row[12] is not None:
+                raise ValueError("job already has an attached process")
+            current_metadata = {} if row[21] is None else json.loads(row[21])
+            current_metadata.update(dict(metadata or {}))
+            now = self._clock()
+            changed = connection.execute(
+                "UPDATE durable_job SET process_id=?,process_group_id=?,metadata_json=?,"
+                "revision=revision+1,updated_at=? WHERE job_id=? AND revision=? AND process_id IS NULL",
+                (
+                    process_id,
+                    process_group_id,
+                    _json(current_metadata),
+                    now,
+                    job_id,
+                    current.revision,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("job process attachment conflicted")
+            record = self._record(self._row(connection, job_id))
+            assert record is not None
+            return record
+
     def create(self, identity: JobIdentity, *, metadata: dict[str, Any] | None = None) -> JobRecord:
         """Satisfy the persistence-neutral JobRegistry creation port."""
         if metadata is not None and not isinstance(metadata, dict):
@@ -266,6 +314,45 @@ class SQLiteDurableJobRegistry:
                 " ORDER BY rowid LIMIT ?", (*args, limit)
             ).fetchall()
         return tuple(self._record(row) for row in rows if row is not None)  # type: ignore[misc]
+
+    def iter_kind(
+        self,
+        kind_prefix: str,
+        *,
+        include_terminal: bool = True,
+        page_size: int = 256,
+    ):
+        """Page deterministically through every record matching a kind prefix."""
+        if not isinstance(kind_prefix, str):
+            raise TypeError("kind_prefix must be text")
+        if isinstance(page_size, bool) or not 1 <= page_size <= 4096:
+            raise ValueError("page_size must be within 1..4096")
+        after_rowid = 0
+        while True:
+            clauses = ["rowid>?", "kind LIKE ? ESCAPE '\\'"]
+            escaped = kind_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            args: list[Any] = [after_rowid, escaped + "%"]
+            if not include_terminal:
+                clauses.append("status NOT IN (?,?,?)")
+                args.extend(status.value for status in TERMINAL_JOB_STATUSES)
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT rowid,job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
+                    "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
+                    "output_dropped_before,worker_id,lease_until,attempt,max_attempts,claim_token "
+                    "FROM durable_job WHERE " + " AND ".join(clauses) +
+                    " ORDER BY rowid LIMIT ?",
+                    (*args, page_size),
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                after_rowid = int(row[0])
+                record = self._record(row[1:])
+                if record is not None:
+                    yield record
+            if len(rows) < page_size:
+                return
 
     def all(self, *, limit: int = 1000) -> tuple[JobRecord, ...]:
         if isinstance(limit, bool) or limit < 1:
@@ -665,6 +752,54 @@ class SQLiteDurableJobRegistry:
                     "WHERE job_id=? AND status NOT IN (?,?,?)",
                     (JobStatus.CANCELLED.value, now, reason, current,
                      JobStatus.SUCCEEDED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value),
+                )
+            records = tuple(self._record(self._row(connection, item)) for item in ids)
+            return tuple(record for record in records if record is not None)
+
+    def request_cancellation(
+        self,
+        job_id: str,
+        *,
+        reason: str = "cancelled",
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
+        """Persist cancellation intent without claiming process quiescence."""
+        if not reason.strip():
+            raise ValueError("cancellation reason is required")
+        if isinstance(max_descendants, bool) or max_descendants < 0:
+            raise ValueError("max_descendants must be a non-negative integer")
+        queue = [job_id]
+        ids: list[str] = []
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            while queue:
+                current = queue.pop(0)
+                if current in ids:
+                    continue
+                if self._row(connection, current) is None:
+                    raise KeyError(f"unknown job {current!r}")
+                ids.append(current)
+                if len(ids) - 1 > max_descendants:
+                    raise ValueError("job cancellation exceeds max_descendants")
+                queue.extend(item[0] for item in connection.execute(
+                    "SELECT job_id FROM durable_job WHERE parent_job_id=? ORDER BY rowid",
+                    (current,),
+                ).fetchall())
+            now = self._clock()
+            for current in ids:
+                connection.execute(
+                    "UPDATE durable_job SET status=?,revision=revision+1,updated_at=?,error=? "
+                    "WHERE job_id=? AND status NOT IN (?,?,?,?)",
+                    (
+                        JobStatus.CANCELLATION_REQUESTED.value,
+                        now,
+                        reason,
+                        current,
+                        JobStatus.SUCCEEDED.value,
+                        JobStatus.FAILED.value,
+                        JobStatus.CANCELLED.value,
+                        JobStatus.CANCELLATION_REQUESTED.value,
+                    ),
                 )
             records = tuple(self._record(self._row(connection, item)) for item in ids)
             return tuple(record for record in records if record is not None)

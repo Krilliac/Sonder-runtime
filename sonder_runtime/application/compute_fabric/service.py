@@ -98,11 +98,23 @@ class ComputeFabricService:
         if not callable(list_records) or not callable(view_record):
             return
         recovered: dict[str, _PlacementRecord] = {}
-        for job in list_records(include_terminal=True, limit=1024):
-            if job.identity.kind != "compute-placement" or not isinstance(job.result, dict):
+        iterator = getattr(store, "iter_kind", None)
+        jobs = (
+            iterator("compute-placement", include_terminal=True)
+            if callable(iterator)
+            else list_records(include_terminal=True, limit=1024)
+        )
+        for job in jobs:
+            if job.identity.kind != "compute-placement":
                 continue
             metadata = getattr(view_record(job.identity.job_id), "metadata", None) or {}
-            payload = job.result
+            payload = (
+                job.result
+                if isinstance(job.result, dict)
+                else metadata.get("placement_payload")
+            )
+            if not isinstance(payload, dict):
+                continue
             try:
                 placement = PlacementDecision(
                     request_digest=str(payload["request_digest"]),
@@ -158,6 +170,7 @@ class ComputeFabricService:
                 metadata={
                     "controller_job_id": record.controller_job_id,
                     "request_sha256": record.request_sha256,
+                    "placement_payload": self._placement_payload(record),
                 },
             )
         store.transition(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
 
 from sonder_runtime.application.compute_fabric.refresh import refresh_remote_snapshots
@@ -57,3 +57,31 @@ def test_remote_snapshot_refresh_probes_nodes_concurrently() -> None:
         snapshot.health is NodeHealth.HEALTHY
         for snapshot in registry.list_snapshots(now=NOW)
     )
+
+
+def test_remote_snapshot_receipt_time_is_captured_after_probe_completion() -> None:
+    node = _node("node-a")
+    registry = ComputeNodeRegistry((node,))
+    instants = iter((NOW, NOW + timedelta(seconds=4)))
+
+    class Source:
+        def snapshot(self, candidate, *, now):
+            return NodeSnapshot(
+                node=candidate,
+                observed_at=now,
+                health=NodeHealth.HEALTHY,
+                live_capabilities=candidate.configured_capabilities,
+                advertised_workloads=candidate.allowed_workloads,
+            )
+
+    refresh_remote_snapshots(
+        registry,
+        Source(),
+        now=lambda: next(instants),
+        max_workers=1,
+    )
+
+    snapshot = registry.last_observation("node-a")
+    assert snapshot is not None
+    assert snapshot.observed_at == NOW
+    assert snapshot.received_at == NOW + timedelta(seconds=4)

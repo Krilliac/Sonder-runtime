@@ -18,6 +18,7 @@ from sonder_runtime.application.jobs.durable_registry import (
     ProcessTreeCleanupReceipt,
 )
 from sonder_runtime.application.ports.jobs import JobIdentity, JobStatus
+from sonder_runtime.adapters.process_liveness import PROCESS_ALIVE
 
 
 def _request(job_id: str = "job-process") -> ProcessJobRequest:
@@ -158,8 +159,9 @@ def test_unenforceable_requested_memory_limit_aborts_before_registration():
     with pytest.raises(RuntimeError, match="limit unavailable"):
         provider.start(request)
     assert process.killed is True
-    with pytest.raises(KeyError):
-        registry.poll("job-limit-fail")
+    failed = registry.poll("job-limit-fail")
+    assert failed.status is JobStatus.FAILED
+    assert failed.error == "process launch failed (RuntimeError)"
 
 
 def test_cancel_routes_the_concrete_job_through_typed_tree_cleanup():
@@ -215,6 +217,8 @@ def test_incomplete_cleanup_is_reported_and_live_mapping_is_retained():
     assert result.cleanup_completed is False
     assert result.cleanup_receipts[0].complete is False
     assert result.detail == "descendant remains"
+    assert result.records[0].status is JobStatus.CANCELLATION_REQUESTED
+    assert result.records[0].is_terminal is False
     assert provider.wait("job-process", timeout=0).timed_out is False
 
 
@@ -355,3 +359,83 @@ def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):
     assert "deadline" in reopened.poll(job_id).error
     assert process.poll() is not None
     assert job_id not in second._deadline_timers
+
+
+def test_deadline_reaps_an_already_completed_process_instead_of_cancelling(tmp_path):
+    registry = SQLiteDurableJobRegistry(tmp_path / "completed-before-deadline.db")
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=ProcessTreeSupervisor(platform_name=os.name),
+        platform_name=os.name,
+    )
+    job_id = "job-completed-before-deadline"
+    provider.start(ProcessJobRequest(
+        JobIdentity(job_id, "process", "execute", "idem-completed-before-deadline"),
+        (sys.executable, "-c", "pass"),
+        cwd=tmp_path,
+        deadline_seconds=1,
+    ))
+
+    deadline = time.monotonic() + 5
+    while not registry.poll(job_id).is_terminal and time.monotonic() < deadline:
+        time.sleep(.05)
+
+    assert registry.poll(job_id).status is JobStatus.SUCCEEDED
+
+
+def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path):
+    database = tmp_path / "pid-reuse.db"
+    registry = SQLiteDurableJobRegistry(database)
+    cleanup = _Cleanup(complete=True)
+    process = _Process()
+    first = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        launcher=lambda _argv, **_kwargs: process,
+        platform_name="posix",
+        process_identity_resolver=lambda _pid: "birth-A",
+    )
+    job_id = "job-pid-reused"
+    first.start(ProcessJobRequest(
+        JobIdentity(job_id, "process", "execute", "idem-pid-reused"),
+        ("python", "-c", "pass"),
+        deadline_seconds=1,
+    ))
+    first._discard_deadline(job_id)
+
+    reopened = SQLiteDurableJobRegistry(database)
+    second = SubprocessJobProvider(
+        reopened,
+        process_cleanup=cleanup,
+        launcher=lambda _argv, **_kwargs: process,
+        platform_name="posix",
+        process_probe=lambda _pid, _expected: (PROCESS_ALIVE, "birth-B"),
+    )
+    deadline = time.monotonic() + 5
+    while reopened.poll(job_id).status is not JobStatus.INTERRUPTED and time.monotonic() < deadline:
+        time.sleep(.05)
+
+    assert reopened.poll(job_id).status is JobStatus.INTERRUPTED
+    assert "identity" in reopened.poll(job_id).error
+    assert cleanup.requests == []
+    assert job_id not in second._deadline_timers
+
+
+def test_kind_scoped_recovery_is_not_capped_by_older_global_jobs():
+    registry = DurableJobRegistry()
+    for index in range(1_100):
+        registry.start(JobIdentity(
+            f"filler-{index}", "unrelated", f"op-{index}", f"idem-{index}"
+        ))
+    registry.start(JobIdentity(
+        "compute-last", "compute-test", "controller-last", "idem-compute-last"
+    ))
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+    )
+
+    recovered = provider.recover(kind_prefix="compute-", limit=1024)
+    assert [view.record.identity.job_id for view in recovered] == ["compute-last"]

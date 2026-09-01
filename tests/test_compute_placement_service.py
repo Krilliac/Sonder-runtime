@@ -13,6 +13,7 @@ from sonder_runtime.application.compute_fabric.jobs import (
 from sonder_runtime.application.compute_fabric.registry import ComputeNodeRegistry
 from sonder_runtime.application.compute_fabric.service import ComputeFabricService
 from sonder_runtime.application.jobs.durable_registry import DurableJobRegistry
+from sonder_runtime.application.ports.jobs import JobIdentity
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.domain.compute_fabric import (
     ComputeCapability,
@@ -291,3 +292,54 @@ def test_controller_rehydrates_durable_placement_after_restart() -> None:
     assert recovered.receipt.remote_job_id == "remote-1"
     assert second_transport.submit_calls == 0
     assert second_local.calls == 0
+
+
+def test_controller_recovers_crash_between_placement_create_and_transition() -> None:
+    class CrashAfterCreate:
+        def __init__(self) -> None:
+            self.store = DurableJobRegistry()
+            self.crash = True
+
+        def __getattr__(self, name):
+            return getattr(self.store, name)
+
+        def transition(self, *args, **kwargs):
+            if self.crash:
+                self.crash = False
+                raise RuntimeError("simulated controller crash")
+            return self.store.transition(*args, **kwargs)
+
+    placements = CrashAfterCreate()
+    first, _transport, _local = _service(placement_registry=placements)
+    with pytest.raises(RuntimeError, match="simulated controller crash"):
+        first.submit(_request(), _envelope())
+
+    second, second_transport, _second_local = _service(
+        placement_registry=placements,
+    )
+    recovered = second.submit(_request(), _envelope())
+    assert recovered.receipt.remote_job_id == "already-running"
+    assert second_transport.submit_calls == 0
+    assert second_transport.lookup_calls == 1
+
+
+def test_controller_recovery_is_not_hidden_by_older_global_jobs() -> None:
+    placements = DurableJobRegistry()
+    for index in range(1_100):
+        placements.start(
+            JobIdentity(
+                f"filler-{index}",
+                "unrelated",
+                f"op-{index}",
+                f"idem-filler-{index}",
+            )
+        )
+    first, _transport, _local = _service(placement_registry=placements)
+    first.submit(_request(), _envelope())
+
+    second, second_transport, _second_local = _service(
+        placement_registry=placements,
+    )
+    recovered = second.status("controller-job")
+    assert recovered.receipt.remote_job_id == "remote-1"
+    assert second_transport.submit_calls == 0
