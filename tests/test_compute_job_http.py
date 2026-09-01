@@ -11,7 +11,12 @@ import pytest
 
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
 import sonder_runtime.interfaces.http.serve as sonder_serve
-from sonder_runtime.application.compute_fabric.jobs import RemoteJobEnvelope, RemoteJobReceipt
+from sonder_runtime.application.compute_fabric.jobs import (
+    RemoteArtifactPayload,
+    RemoteArtifactReceipt,
+    RemoteJobEnvelope,
+    RemoteJobReceipt,
+)
 from sonder_runtime.application.compute_fabric.wire import job_envelope_to_wire
 from sonder_runtime.domain.compute_fabric import WorkloadKind
 
@@ -73,6 +78,16 @@ def _get(base: str, path: str):
         return error.code, json.loads(error.read())
 
 
+def _get_binary(base: str, path: str):
+    request = urllib.request.Request(
+        base + path,
+        headers={"Authorization": "Bearer test"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.status, dict(response.headers), response.read()
+
+
 class _Worker:
     def __init__(self):
         envelope = _envelope()
@@ -99,6 +114,21 @@ class _Worker:
     def cancel(self, remote_job_id, *, reason):
         assert reason == "operator requested"
         return self.status(remote_job_id)
+
+    def read_artifact(self, remote_job_id, name):
+        assert remote_job_id == "remote-1"
+        assert name == "reports/result.json"
+        content = b'{"ok":true}'
+        import hashlib
+        return RemoteArtifactPayload(
+            RemoteArtifactReceipt(
+                name=name,
+                size_bytes=len(content),
+                mime_type="application/json",
+                sha256=hashlib.sha256(content).hexdigest(),
+            ),
+            content,
+        )
 
 
 def _worker():
@@ -176,3 +206,30 @@ def test_job_status_idempotency_lookup_and_cancel_use_exact_admin_routes(
 
     status, _body = _get(http_server, "/v1/compute/jobs/remote-1/extra")
     assert status == 404
+
+
+def test_authenticated_artifact_route_delivers_digest_bound_bytes(
+    http_server, monkeypatch
+) -> None:
+    import hashlib
+    import urllib.parse
+
+    monkeypatch.setattr(
+        sonder_serve.Handler,
+        "_request_auth_context",
+        lambda _self: {"authorized": True, "mode": "api-key", "account": None},
+    )
+    monkeypatch.setattr(sonder_serve, "_admin_authorized", lambda _context: True)
+    monkeypatch.setattr(
+        "sonder_runtime.bootstrap.app.default_app",
+        lambda: SimpleNamespace(compute_job_worker=lambda: _worker()),
+    )
+    name = urllib.parse.quote("reports/result.json", safe="")
+    status, headers, body = _get_binary(
+        http_server, f"/v1/compute/jobs/remote-1/artifacts/{name}",
+    )
+    assert status == 200
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["X-Sonder-Artifact-Sha256"] == hashlib.sha256(body).hexdigest()
+    assert body == b'{"ok":true}'

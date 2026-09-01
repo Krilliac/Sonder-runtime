@@ -10,6 +10,7 @@ import pytest
 from sonder_runtime.application.compute_fabric.jobs import (
     ArgumentPolicy,
     ComputeJobWorker,
+    DigestBoundInput,
     JobCatalogEntry,
     RemoteJobEnvelope,
 )
@@ -44,7 +45,7 @@ def _entry() -> JobCatalogEntry:
     return JobCatalogEntry(
         entry_id="pytest",
         workload=WorkloadKind.TEST,
-        program="python",
+        program=sys.executable,
         fixed_args=("-m", "pytest"),
         argument_policy=ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS,
         environment_allowlist=frozenset({"PYTEST_ADDOPTS"}),
@@ -79,7 +80,7 @@ def test_worker_resolves_catalog_program_and_workspace(tmp_path: Path) -> None:
         provider=provider,
     )
     receipt = worker.submit(_envelope())
-    assert provider.request.argv == ("python", "-m", "pytest", "test_api.py")
+    assert provider.request.argv == (sys.executable, "-m", "pytest", "test_api.py")
     assert provider.request.cwd == (tmp_path / "tests").resolve()
     assert provider.request.environment == (("PYTEST_ADDOPTS", "-q"),)
     assert provider.request.deadline_seconds == 60
@@ -182,6 +183,31 @@ def test_worker_revalidates_digest_even_if_constructed_unsafely(tmp_path: Path) 
         worker.submit(envelope)
 
 
+def test_worker_verifies_digest_bound_inputs_before_launch(tmp_path: Path) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    payload = tests / "input.bin"
+    payload.write_bytes(b"abc")
+    provider = CapturingProvider()
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=provider,
+    )
+    digest = hashlib.sha256(b"abc").hexdigest()
+    worker.submit(_envelope(input_artifacts=(DigestBoundInput("input.bin", 3, digest),)))
+    assert provider.request is not None
+
+    with pytest.raises(InvalidInput, match="digest"):
+        worker.submit(_envelope(
+            idempotency_key="idem-bad-input",
+            input_artifacts=(DigestBoundInput("input.bin", 3, "0" * 64),),
+        ))
+
+
 def test_worker_status_refreshes_terminal_state_and_cancel_reports_cleanup_truth(
     tmp_path: Path,
 ) -> None:
@@ -211,6 +237,48 @@ def test_worker_status_refreshes_terminal_state_and_cancel_reports_cleanup_truth
     started = worker.submit(_envelope())
     assert worker.status(started.remote_job_id).state == "succeeded"
     assert worker.cancel(started.remote_job_id, reason="done").state == "cancelled"
+
+
+def test_worker_emits_verified_receipts_for_catalog_artifacts(tmp_path: Path) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    report = tests / "report.json"
+    report.write_bytes(b'{"ok":true}')
+
+    class CompletedProvider(CapturingProvider):
+        def wait(self, job_id, *, timeout=None):
+            return ProcessJobWait(
+                JobRecord(
+                    JobIdentity(
+                        job_id,
+                        kind="compute-test",
+                        operation_id="controller-job",
+                        idempotency_key="idem-1",
+                    ),
+                    status=JobStatus.SUCCEEDED,
+                ),
+                exit_code=0,
+            )
+
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": replace(_entry(), artifact_paths=("report.json",))},
+        workspace_mappings={"sonder": tmp_path},
+        provider=CompletedProvider(),
+    )
+    started = worker.submit(_envelope())
+    completed = worker.status(started.remote_job_id)
+    assert completed.artifacts[0].name == "report.json"
+    assert completed.artifacts[0].size_bytes == len(b'{"ok":true}')
+    assert completed.artifacts[0].sha256 == hashlib.sha256(b'{"ok":true}').hexdigest()
+    payload = worker.read_artifact(started.remote_job_id, "report.json")
+    assert payload.content == b'{"ok":true}'
+
+    report.write_bytes(b'{"ok":false}')
+    with pytest.raises(InvalidInput, match="changed"):
+        worker.read_artifact(started.remote_job_id, "report.json")
 
 
 def test_worker_rehydrates_digest_bound_receipt_after_restart(tmp_path: Path) -> None:

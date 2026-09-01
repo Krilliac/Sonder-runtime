@@ -11,6 +11,8 @@ import urllib.request
 from typing import Any
 
 from ...application.compute_fabric.jobs import (
+    RemoteArtifactPayload,
+    RemoteArtifactReceipt,
     RemoteJobEnvelope,
     RemoteJobReceipt,
     validate_remote_job_receipt,
@@ -262,6 +264,65 @@ class HttpsComputeJobTransport:
         return validate_remote_job_receipt(
             receipt, worker_id=node.node_id, remote_job_id=remote_job_id,
         )
+
+    def fetch_artifact(
+        self,
+        node: ComputeNode,
+        remote_job_id: str,
+        expected: RemoteArtifactReceipt,
+    ) -> RemoteArtifactPayload:
+        if not isinstance(expected, RemoteArtifactReceipt):
+            raise TypeError("expected artifact receipt is required")
+        if expected.size_bytes > 256 * 1024 * 1024:
+            raise DependencyUnavailable("compute artifact exceeds transport size bound")
+        path = (
+            "/v1/compute/jobs/"
+            + urllib.parse.quote(remote_job_id, safe="")
+            + "/artifacts/"
+            + urllib.parse.quote(expected.name, safe="")
+        )
+        request = urllib.request.Request(
+            self._origin(node) + path,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Accept": expected.mime_type,
+            },
+            method="GET",
+        )
+        try:
+            with self._opener(request, timeout=self._timeout) as response:
+                status = int(getattr(response, "status", 0))
+                if 300 <= status < 400:
+                    raise DependencyUnavailable("compute artifact redirect response rejected")
+                if status != 200:
+                    raise DependencyUnavailable(f"compute artifact HTTP status {status}")
+                headers = getattr(response, "headers", {})
+                raw = response.read(expected.size_bytes + 1)
+        except DependencyUnavailable:
+            raise
+        except urllib.error.HTTPError as exc:
+            raise DependencyUnavailable(f"compute artifact HTTP status {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            raise DependencyUnavailable(
+                f"compute artifact request failed: {type(exc).__name__}"
+            ) from exc
+        if len(raw) != expected.size_bytes:
+            raise DependencyUnavailable("compute artifact size differs from its receipt")
+        content_length = headers.get("Content-Length")
+        content_type = str(headers.get("Content-Type", "")).split(";", 1)[0]
+        digest = headers.get("X-Sonder-Artifact-Sha256")
+        if content_length != str(expected.size_bytes):
+            raise DependencyUnavailable("compute artifact length header differs from its receipt")
+        if content_type != expected.mime_type:
+            raise DependencyUnavailable("compute artifact type differs from its receipt")
+        if digest != expected.sha256:
+            raise DependencyUnavailable("compute artifact digest header differs from its receipt")
+        try:
+            return RemoteArtifactPayload(expected, raw)
+        except ValueError as exc:
+            raise DependencyUnavailable(
+                "compute artifact content differs from its receipt"
+            ) from exc
 
 
 __all__ = ["HttpsComputeJobTransport", "HttpsComputeSnapshotSource"]

@@ -11,9 +11,10 @@ from sonder_runtime.domain.compute_fabric import ComputeNode, WorkloadKind
 
 
 class _Response:
-    def __init__(self, status: int, body: bytes):
+    def __init__(self, status: int, body: bytes, headers=None):
         self.status = status
         self._body = body
+        self.headers = headers or {}
 
     def read(self, limit: int) -> bytes:
         return self._body[:limit]
@@ -167,3 +168,41 @@ def test_job_client_status_lookup_and_cancel_use_exact_paths() -> None:
         ("POST", "https://linux-node.example:8443/v1/compute/jobs/remote-1/cancel"),
     ]
     assert json.loads(seen[-1][2]) == {"reason": "operator requested"}
+
+
+def test_job_client_fetches_and_revalidates_digest_bound_artifact() -> None:
+    import hashlib
+    from sonder_runtime.application.compute_fabric.jobs import RemoteArtifactReceipt
+
+    content = b'{"ok":true}'
+    digest = hashlib.sha256(content).hexdigest()
+    expected = RemoteArtifactReceipt(
+        "reports/result.json", len(content), "application/json", digest,
+    )
+    seen = {}
+
+    def opener(request, *, timeout):
+        seen["url"] = request.full_url
+        return _Response(200, content, {
+            "Content-Length": str(len(content)),
+            "Content-Type": "application/json",
+            "X-Sonder-Artifact-Sha256": digest,
+        })
+
+    transport = HttpsComputeJobTransport(api_key="secret", opener=opener)
+    payload = transport.fetch_artifact(_node(), "remote-1", expected)
+    assert payload.content == content
+    assert seen["url"].endswith(
+        "/v1/compute/jobs/remote-1/artifacts/reports%2Fresult.json"
+    )
+
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        opener=lambda *_args, **_kwargs: _Response(200, b"changed", {
+            "Content-Length": "7",
+            "Content-Type": "application/json",
+            "X-Sonder-Artifact-Sha256": hashlib.sha256(b"changed").hexdigest(),
+        }),
+    )
+    with pytest.raises(DependencyUnavailable, match="receipt"):
+        transport.fetch_artifact(_node(), "remote-1", expected)

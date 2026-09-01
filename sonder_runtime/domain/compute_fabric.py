@@ -300,6 +300,7 @@ class WorkloadRequest:
     avoided_node_ids: frozenset[str] = frozenset()
     required_model: str | None = None
     idempotent: bool = False
+    background_preferred: bool = False
 
     def __post_init__(self) -> None:
         _require_identity(self.request_id, "request_id")
@@ -339,6 +340,7 @@ class WorkloadRequest:
             self.allow_remote,
             self.allow_local_fallback,
             self.idempotent,
+            self.background_preferred,
         )):
             raise ValueError("workload flags must be boolean")
         if self.local_only and self.allow_remote:
@@ -364,6 +366,7 @@ class WorkloadRequest:
             "avoided_node_ids": sorted(self.avoided_node_ids),
             "required_model": self.required_model,
             "idempotent": self.idempotent,
+            "background_preferred": self.background_preferred,
         }
 
     def digest(self) -> str:
@@ -489,7 +492,8 @@ class ComputePlacementScheduler:
         if snapshot.resources.free_vram_bytes is not None:
             score += min(snapshot.resources.free_vram_bytes / (1 << 30), 256.0) * 0.2
         if snapshot.resources.load_fraction is not None:
-            score -= snapshot.resources.load_fraction * 20.0
+            load_weight = 80.0 if request.background_preferred else 20.0
+            score -= snapshot.resources.load_fraction * load_weight
         score -= snapshot.active_jobs * 5.0
         if snapshot.round_trip_ms is not None:
             score -= min(snapshot.round_trip_ms, 60_000.0) * 0.001

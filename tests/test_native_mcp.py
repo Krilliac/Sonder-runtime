@@ -88,7 +88,7 @@ class _Jobs:
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
         "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect",
-        "compute_cancel", "compute_status", "compute_submit", "data_inspect", "data_query", "dependency_inventory",
+        "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit", "data_inspect", "data_query", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
         "file_batch_write", "file_copy", "file_delete", "file_digest", "file_edit",
         "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
@@ -122,6 +122,7 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
     }
     canonical_native = native_names - compatibility_aliases - {
         "vision_analyze", "compute_submit", "compute_status", "compute_cancel",
+        "compute_artifact_fetch",
     }
     assert canonical_native == packaged_executor | packaged_inspections
     assert len(canonical_native) == 40
@@ -147,6 +148,9 @@ def test_native_compute_tools_are_bounded_and_require_explicit_remote_consent():
     assert registry.require("compute_cancel").input_schema["required"] == [
         "controller_job_id", "reason",
     ]
+    assert registry.require("compute_artifact_fetch").input_schema[
+        "properties"
+    ]["max_bytes"]["maximum"] == 98_304
 
 
 def test_native_compute_submit_status_and_cancel_route_to_compute_service():

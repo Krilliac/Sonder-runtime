@@ -7,6 +7,7 @@ is demonstrated.
 """
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import uuid
@@ -64,6 +65,15 @@ _COMPUTE_TOOLS = (
                 "type": "object", "additionalProperties": {"type": "string"},
                 "maxProperties": 32,
             },
+            "input_artifacts": {
+                "type": "array", "maxItems": 64,
+                "items": {"type": "object", "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 4096},
+                    "size_bytes": {"type": "integer", "minimum": 0, "maximum": 1 << 40},
+                    "sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+                }, "required": ["name", "size_bytes", "sha256"],
+                 "additionalProperties": False},
+            },
             "deadline_seconds": {"type": "integer", "minimum": 1, "maximum": 86_400},
             "idempotent": _BOOL,
             "allow_remote": _BOOL,
@@ -85,6 +95,15 @@ _COMPUTE_TOOLS = (
             "controller_job_id": {"type": "string", "minLength": 1, "maxLength": 128},
             "reason": {"type": "string", "minLength": 1, "maxLength": 512},
         }, "required": ["controller_job_id", "reason"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "compute_artifact_fetch",
+        "Fetch one small digest-verified compute artifact through the authenticated transport",
+        {"type": "object", "properties": {
+            "controller_job_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "name": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 98_304},
+        }, "required": ["controller_job_id", "name"], "additionalProperties": False},
     ),
 )
 _NATIVE_TOOLS = (
@@ -440,7 +459,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         capabilities += ("tasks",)
 
     def compute_result(name: str, arguments: dict) -> dict:
-        from ..application.compute_fabric.jobs import RemoteJobEnvelope
+        from ..application.compute_fabric.jobs import DigestBoundInput, RemoteJobEnvelope
         from ..domain.compute_fabric import WorkloadKind, WorkloadRequest
 
         service_factory = getattr(application, "compute_service", None)
@@ -481,10 +500,34 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     environment=tuple(sorted(environment.items())),
                     deadline_seconds=arguments.get("deadline_seconds", 300),
                     idempotent=idempotent,
+                    input_artifacts=tuple(
+                        DigestBoundInput(**dict(item))
+                        for item in arguments.get("input_artifacts", ())
+                    ),
                 )
                 submission = service.submit(request, envelope)
             elif name == "compute_status":
                 submission = service.status(arguments["controller_job_id"])
+            elif name == "compute_artifact_fetch":
+                payload = service.fetch_artifact(
+                    arguments["controller_job_id"],
+                    arguments["name"],
+                    max_bytes=arguments.get("max_bytes", 98_304),
+                )
+                artifact = payload.receipt
+                output = {
+                    "name": artifact.name,
+                    "size_bytes": artifact.size_bytes,
+                    "mime_type": artifact.mime_type,
+                    "sha256": artifact.sha256,
+                    "content_base64": base64.b64encode(payload.content).decode("ascii"),
+                }
+                return {
+                    "output": json.dumps(output, sort_keys=True, separators=(",", ":")),
+                    "isError": False,
+                    "error": None,
+                    "evidence": {"sha256": artifact.sha256},
+                }
             else:
                 submission = service.cancel(
                     arguments["controller_job_id"], reason=arguments["reason"],

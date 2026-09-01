@@ -339,6 +339,16 @@ def _compute_job_route(path):
             return None
         value = urllib.parse.unquote(encoded)
         return ("by_idempotency", value) if value and "/" not in value else None
+    artifact_marker = "/artifacts/"
+    if artifact_marker in suffix:
+        encoded_job, encoded_name = suffix.split(artifact_marker, 1)
+        if not encoded_job or not encoded_name or "/" in encoded_job or "/" in encoded_name:
+            return None
+        job_id = urllib.parse.unquote(encoded_job)
+        artifact_name = urllib.parse.unquote(encoded_name)
+        if not job_id or "/" in job_id or not artifact_name:
+            return None
+        return "artifact", (job_id, artifact_name)
     if suffix.endswith("/cancel"):
         encoded = suffix[:-len("/cancel")]
         if not encoded or "/" in encoded:
@@ -3729,6 +3739,25 @@ class Handler(BaseHTTPRequestHandler):
             # This is a delivery failure, not a server traceback.
             return False
 
+    def _send_binary_payload(self, body, *, content_type, digest, status=200):
+        if not isinstance(body, bytes):
+            raise TypeError("binary response body must be bytes")
+        must_close = self._close_for_unread_body()
+        try:
+            self.send_response(status)
+            self._cors()
+            if must_close:
+                self.send_header("Connection", "close")
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Sonder-Artifact-Sha256", digest)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return False
+
     def _record_chat_completion_metric(self, lifecycle, result, started):
         """Record exactly one terminal metric for a chat-completion request."""
         if getattr(self, "_chat_completion_metrics_recorded", False):
@@ -3881,7 +3910,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload(result.body, status=result.status_code)
             return
         compute_route = _compute_job_route(path)
-        if compute_route is not None and compute_route[0] in ("status", "by_idempotency"):
+        if compute_route is not None and compute_route[0] in (
+            "status", "by_idempotency", "artifact",
+        ):
             context = self._request_auth_context()
             if not context["authorized"]:
                 self._send_auth_error()
@@ -3896,6 +3927,7 @@ class Handler(BaseHTTPRequestHandler):
             from sonder_runtime.bootstrap.app import default_app
             from sonder_runtime.interfaces.http.facades.compute_fabric import (
                 dispatch_compute_job_by_idempotency,
+                dispatch_compute_job_artifact,
                 dispatch_compute_job_status,
             )
 
@@ -3910,11 +3942,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
             operation, identity = compute_route
             try:
-                result = (
-                    dispatch_compute_job_status(worker_factory(), identity)
-                    if operation == "status"
-                    else dispatch_compute_job_by_idempotency(worker_factory(), identity)
-                )
+                if operation == "status":
+                    result = dispatch_compute_job_status(worker_factory(), identity)
+                elif operation == "by_idempotency":
+                    result = dispatch_compute_job_by_idempotency(worker_factory(), identity)
+                else:
+                    remote_job_id, artifact_name = identity
+                    artifact_result = dispatch_compute_job_artifact(
+                        worker_factory(), remote_job_id, artifact_name,
+                    )
+                    artifact = artifact_result.payload
+                    self._send_binary_payload(
+                        artifact.content,
+                        content_type=artifact.receipt.mime_type,
+                        digest=artifact.receipt.sha256,
+                        status=artifact_result.status_code,
+                    )
+                    return
             except (NotFound, KeyError):
                 self._send_not_found()
                 return
