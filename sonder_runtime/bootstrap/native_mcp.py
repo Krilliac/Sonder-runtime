@@ -7,6 +7,8 @@ is demonstrated.
 """
 from __future__ import annotations
 
+import base64
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -43,6 +45,67 @@ _ARCHIVE_CREATE_FILES = {"type": "integer", "minimum": 1, "maximum": 10_000}
 _ARCHIVE_CREATE_ENTRIES = {"type": "integer", "minimum": 1, "maximum": 20_000}
 _ARCHIVE_CREATE_DEPTH = {"type": "integer", "minimum": 1, "maximum": 64}
 _ARCHIVE_INPUTS_JSON = {"type": "string", "minLength": 2, "maxLength": 1_000_000}
+_COMPUTE_WORKLOADS = [
+    "analysis", "build", "container", "embedding", "encode", "fuzz",
+    "index", "render", "service", "storage", "test", "training",
+]
+_COMPUTE_TOOLS = (
+    ToolDescriptor(
+        "compute_submit",
+        "Place one bounded catalog job locally or on an explicitly authorized private node",
+        {"type": "object", "properties": {
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
+            "workload": {"type": "string", "enum": _COMPUTE_WORKLOADS},
+            "catalog_entry_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "workspace_mapping": {"type": "string", "minLength": 1, "maxLength": 128},
+            "relative_cwd": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "arguments": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
+            "environment": {
+                "type": "object", "additionalProperties": {"type": "string"},
+                "maxProperties": 32,
+            },
+            "input_artifacts": {
+                "type": "array", "maxItems": 64,
+                "items": {"type": "object", "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 4096},
+                    "size_bytes": {"type": "integer", "minimum": 0, "maximum": 1 << 40},
+                    "sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+                }, "required": ["name", "size_bytes", "sha256"],
+                 "additionalProperties": False},
+            },
+            "deadline_seconds": {"type": "integer", "minimum": 1, "maximum": 86_400},
+            "idempotent": _BOOL,
+            "allow_remote": _BOOL,
+            "allow_local_fallback": _BOOL,
+        }, "required": [
+            "request_id", "workload", "catalog_entry_id", "workspace_mapping",
+            "allow_remote",
+        ], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "compute_status", "Read one previously placed compute job",
+        {"type": "object", "properties": {
+            "controller_job_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        }, "required": ["controller_job_id"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "compute_cancel", "Cancel one previously placed compute job and prove cleanup",
+        {"type": "object", "properties": {
+            "controller_job_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        }, "required": ["controller_job_id", "reason"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "compute_artifact_fetch",
+        "Fetch one small digest-verified compute artifact through the authenticated transport",
+        {"type": "object", "properties": {
+            "controller_job_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "name": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 98_304},
+        }, "required": ["controller_job_id", "name"], "additionalProperties": False},
+    ),
+)
 _NATIVE_TOOLS = (
     ToolDescriptor(
         "directory_tree", "List a bounded guarded directory tree",
@@ -351,9 +414,10 @@ _INSPECTION_TOOLS = (
         }, "required": ["left", "right"], "additionalProperties": False},
     ),
 )
-_NATIVE_TOOLS += _INSPECTION_TOOLS
+_NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS
 _INSPECTION_NAMES = frozenset(item.name for item in _INSPECTION_TOOLS)
 _VISION_NAMES = frozenset({"vision_analyze"})
+_COMPUTE_NAMES = frozenset(item.name for item in _COMPUTE_TOOLS)
 
 
 _LEGACY_ALIASES = {
@@ -394,6 +458,116 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
     if callable(task_handler):
         capabilities += ("tasks",)
 
+    def compute_result(name: str, arguments: dict) -> dict:
+        from ..application.compute_fabric.jobs import DigestBoundInput, RemoteJobEnvelope
+        from ..domain.compute_fabric import WorkloadKind, WorkloadRequest
+
+        service_factory = getattr(application, "compute_service", None)
+        if not callable(service_factory):
+            return {
+                "output": "compute fabric is not configured", "isError": True,
+                "error": "DependencyUnavailable", "evidence": {},
+            }
+        try:
+            service = service_factory()
+            if name == "compute_submit":
+                kind = WorkloadKind(arguments["workload"])
+                request_id = arguments["request_id"]
+                idempotency_key = arguments.get("idempotency_key", request_id)
+                workspace = arguments["workspace_mapping"]
+                allow_remote = arguments["allow_remote"]
+                allow_local_fallback = arguments.get("allow_local_fallback", False)
+                idempotent = arguments.get("idempotent", False)
+                request = WorkloadRequest(
+                    request_id=request_id,
+                    kind=kind,
+                    workspace_mapping=workspace,
+                    allow_remote=allow_remote,
+                    allow_local_fallback=allow_local_fallback,
+                    idempotent=idempotent,
+                )
+                environment = arguments.get("environment", {})
+                if not isinstance(environment, dict):
+                    raise ValueError("environment must be an object")
+                envelope = RemoteJobEnvelope.create(
+                    controller_job_id=request_id,
+                    idempotency_key=idempotency_key,
+                    workload=kind,
+                    catalog_entry_id=arguments["catalog_entry_id"],
+                    workspace_mapping=workspace,
+                    relative_cwd=arguments.get("relative_cwd", "."),
+                    arguments=tuple(arguments.get("arguments", ())),
+                    environment=tuple(sorted(environment.items())),
+                    deadline_seconds=arguments.get("deadline_seconds", 300),
+                    idempotent=idempotent,
+                    input_artifacts=tuple(
+                        DigestBoundInput(**dict(item))
+                        for item in arguments.get("input_artifacts", ())
+                    ),
+                )
+                submission = service.submit(request, envelope)
+            elif name == "compute_status":
+                submission = service.status(arguments["controller_job_id"])
+            elif name == "compute_artifact_fetch":
+                payload = service.fetch_artifact(
+                    arguments["controller_job_id"],
+                    arguments["name"],
+                    max_bytes=arguments.get("max_bytes", 98_304),
+                )
+                artifact = payload.receipt
+                output = {
+                    "name": artifact.name,
+                    "size_bytes": artifact.size_bytes,
+                    "mime_type": artifact.mime_type,
+                    "sha256": artifact.sha256,
+                    "content_base64": base64.b64encode(payload.content).decode("ascii"),
+                }
+                return {
+                    "output": json.dumps(output, sort_keys=True, separators=(",", ":")),
+                    "isError": False,
+                    "error": None,
+                    "evidence": {"sha256": artifact.sha256},
+                }
+            else:
+                submission = service.cancel(
+                    arguments["controller_job_id"], reason=arguments["reason"],
+                )
+        except Exception as exc:
+            return {
+                "output": str(exc), "isError": True,
+                "error": type(exc).__name__, "evidence": {},
+            }
+        receipt = submission.receipt
+        payload = {
+            "node_id": submission.node_id,
+            "remote_job_id": receipt.remote_job_id,
+            "controller_job_id": receipt.controller_job_id,
+            "idempotency_key": receipt.idempotency_key,
+            "state": receipt.state,
+            "request_sha256": receipt.request_sha256,
+            "artifacts": [
+                {
+                    "name": artifact.name,
+                    "size_bytes": artifact.size_bytes,
+                    "mime_type": artifact.mime_type,
+                    "sha256": artifact.sha256,
+                }
+                for artifact in receipt.artifacts
+            ],
+            "output_preview": receipt.output_preview,
+            "output_watermark": receipt.output_watermark,
+            "output_truncated": receipt.output_truncated,
+        }
+        return {
+            "output": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            "isError": False,
+            "error": None,
+            "evidence": {
+                "node_id": submission.node_id,
+                "request_sha256": receipt.request_sha256,
+            },
+        }
+
     def execute(name: str, arguments: dict) -> dict:
         descriptor = registry.get(name)
         if descriptor is None:
@@ -411,14 +585,41 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             raise McpTransportError(str(exc)) from exc
         canonical_name = _LEGACY_ALIASES.get(name, name)
         canonical_arguments = dict(arguments)
-        cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
         context = local_owner_context(
             correlation_id=uuid.uuid4().hex,
             source="mcp",
             workspace_roots=roots,
-            cloud_allowed=cloud_consent,
             timeout_seconds=60.0,
         )
+        if canonical_name in _COMPUTE_NAMES:
+            if canonical_name in {"compute_submit", "compute_cancel"}:
+                from ..adapters.security.permission_policy import permission_policy
+
+                decision = permission_policy.decide_for_caller(
+                    canonical_name,
+                    interactive=False,
+                    gate_control_exempt=False,
+                )
+                if (
+                    decision is not None
+                    and decision.action != permission_policy.allow_action()
+                ):
+                    return {
+                        "output": "compute host control denied by runtime permission policy",
+                        "isError": True,
+                        "error": "permission_denied",
+                        "evidence": {"tool": canonical_name},
+                    }
+            return compute_result(canonical_name, canonical_arguments)
+        cloud_consent = bool(canonical_arguments.pop("consent", False)) if canonical_name in {"web_fetch", "web_search", "weather_lookup", "approximate_location_lookup"} else False
+        if cloud_consent:
+            context = local_owner_context(
+                correlation_id=context.correlation_id,
+                source="mcp",
+                workspace_roots=roots,
+                cloud_allowed=True,
+                timeout_seconds=60.0,
+            )
         if canonical_name in _VISION_NAMES:
             service = getattr(application, "vision", None)
             if service is None:

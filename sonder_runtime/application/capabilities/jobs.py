@@ -158,6 +158,35 @@ class JobRegistryService:
             self._lifecycle.record_many(records)
         return records
 
+    def request_cancellation(
+        self,
+        job_id: str,
+        reason: str = "cancelled",
+        *,
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
+        """Persist cancellation intent without claiming process cleanup."""
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise InvalidInput("job_id is required")
+        if not isinstance(reason, str) or not reason.strip():
+            raise InvalidInput("cancellation reason is required")
+        if isinstance(max_descendants, bool) or max_descendants < 0:
+            raise InvalidInput("max_descendants must be a non-negative integer")
+        request = getattr(self._port, "request_cancellation", None)
+        if not callable(request):
+            raise InvalidInput("durable cancellation intent is not supported")
+        try:
+            records = tuple(request(
+                job_id,
+                reason=reason,
+                max_descendants=max_descendants,
+            ))
+        except KeyError as exc:
+            raise NotFound(f"job {job_id!r} not found") from exc
+        if self._lifecycle is not None:
+            self._lifecycle.record_many(records)
+        return records
+
     def cancel_with_cleanup(
         self,
         job_id: str,
@@ -175,7 +204,11 @@ class JobRegistryService:
         """
         if isinstance(max_descendants, bool) or max_descendants < 1:
             raise InvalidInput("max_descendants must be positive")
-        records = self.cancel(job_id, reason)
+        records = self.request_cancellation(
+            job_id,
+            reason,
+            max_descendants=max_descendants,
+        )
         supervisor = process_cleanup if process_cleanup is not None else self._process_cleanup
         if supervisor is None:
             return JobCancellationResult(records, detail="process cleanup contract is not configured")
@@ -200,6 +233,9 @@ class JobRegistryService:
                     getattr(metadata, "process_group_id", None),
                     max_descendants,
                     reason,
+                    (getattr(metadata, "metadata", None) or {}).get(
+                        "process_instance_identity"
+                    ),
                 ))
                 if not isinstance(receipt, ProcessTreeCleanupReceipt):
                     return JobCancellationResult(
@@ -222,7 +258,12 @@ class JobRegistryService:
                     records, tuple(receipts), False,
                     f"process-tree cleanup failed: {type(exc).__name__}",
                 )
-        return JobCancellationResult(records, tuple(receipts), True)
+        cancelled = self.cancel(
+            job_id,
+            reason,
+            max_descendants=max_descendants,
+        )
+        return JobCancellationResult(cancelled, tuple(receipts), True)
 
     def claim(self, job_id: str, worker_id: str, *, lease_seconds: int = 300) -> JobClaim:
         if not worker_id.strip() or lease_seconds <= 0:

@@ -13,7 +13,9 @@ of the model — an uncensored or "abliterated" model changes what it will
   proxy regardless ([secure-remote-access](../runbooks/secure-remote-access.md)).
 - **Consent gates**, each independent and default-off: cloud/hosted models
   (`SONDER_ALLOW_CLOUD`), web tools (`SONDER_WEB_TOOLS`), remote Ollama
-  (`SONDER_ALLOW_REMOTE_OLLAMA`), approximate location, model reasoning
+  (`SONDER_ALLOW_REMOTE_OLLAMA`), private-node whole-job compute
+  (`SONDER_ALLOW_REMOTE_COMPUTE`, additionally requiring per-workload
+  `allow_remote`), approximate location, model reasoning
   (`SONDER_EXPOSE_REASONING`), and private chain-of-thought
   (`SONDER_ALLOW_PRIVATE_COT`). Runtime policy can never turn any of these on.
 - **`SONDER_ALLOW_PRIVATE_COT` takes a second, separate act.** It is the one

@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from ..execution.world_control import (
     BoundedOutputBuffer,
@@ -47,6 +47,7 @@ class ProcessTreeCleanupRequest:
     process_group_id: int | None
     max_descendants: int = 64
     reason: str = "job cancelled"
+    process_identity: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_id.strip() or self.process_id <= 0:
@@ -57,6 +58,8 @@ class ProcessTreeCleanupRequest:
             raise ValueError("max_descendants must be positive")
         if not self.reason.strip():
             raise ValueError("cleanup reason is required")
+        if self.process_identity is not None and not self.process_identity.strip():
+            raise ValueError("process identity must be non-empty when provided")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +108,7 @@ class DurableJobView:
     child_job_ids: tuple[str, ...]
     process_id: int | None = None
     process_group_id: int | None = None
+    metadata: Mapping[str, Any] | None = None
 
 
 class DurableJobRegistry:
@@ -127,6 +131,7 @@ class DurableJobRegistry:
         self._children: dict[str, list[str]] = {}
         self._outputs: dict[str, BoundedOutputBuffer] = {}
         self._processes: dict[str, tuple[int, int | None]] = {}
+        self._metadata: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
 
     def start(
@@ -137,6 +142,7 @@ class DurableJobRegistry:
         process_id: int | None = None,
         process_group_id: int | None = None,
         max_attempts: int = 3,
+        metadata: Mapping[str, Any] | None = None,
     ) -> JobRecord:
         """Create one pending job and validate its parent before publication."""
         if not isinstance(identity, JobIdentity):
@@ -156,6 +162,8 @@ class DurableJobRegistry:
             if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
                     or not 1 <= max_attempts <= MAX_JOB_ATTEMPTS):
                 raise ValueError(f"max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}")
+            if metadata is not None and not isinstance(metadata, Mapping):
+                raise TypeError("metadata must be a mapping")
             if parent != identity.parent_job_id:
                 identity = replace(identity, parent_job_id=parent)
             now = self._clock()
@@ -172,7 +180,41 @@ class DurableJobRegistry:
             )
             if process_id is not None:
                 self._processes[identity.job_id] = (process_id, process_group_id)
+            self._metadata[identity.job_id] = dict(metadata or {})
             return record
+
+    def attach_process(
+        self,
+        job_id: str,
+        *,
+        process_id: int,
+        process_group_id: int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> JobRecord:
+        """Attach one owned process to a previously reserved durable job."""
+        if isinstance(process_id, bool) or process_id <= 0:
+            raise ValueError("process_id must be positive")
+        if process_group_id is not None and (
+            isinstance(process_group_id, bool) or process_group_id <= 0
+        ):
+            raise ValueError("process_group_id must be positive")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
+        with self._lock:
+            current = self.poll(job_id)
+            if current.is_terminal:
+                raise ValueError("cannot attach a process to a terminal job")
+            if job_id in self._processes:
+                raise ValueError("job already has an attached process")
+            self._processes[job_id] = (process_id, process_group_id)
+            self._metadata[job_id].update(dict(metadata or {}))
+            updated = replace(
+                current,
+                revision=current.revision + 1,
+                updated_at=self._clock(),
+            )
+            self._records[job_id] = updated
+            return updated
 
     def list(
         self,
@@ -193,6 +235,28 @@ class DurableJobRegistry:
                 values = tuple(record for record in values if record.status not in TERMINAL_JOB_STATUSES)
             return values[:limit]
 
+    def iter_kind(
+        self,
+        kind_prefix: str,
+        *,
+        include_terminal: bool = True,
+        page_size: int = 256,
+    ):
+        """Iterate a stable kind-scoped snapshot without a fixed recovery cap."""
+        if not isinstance(kind_prefix, str):
+            raise TypeError("kind_prefix must be text")
+        if isinstance(page_size, bool) or not 1 <= page_size <= 4096:
+            raise ValueError("page_size must be within 1..4096")
+        with self._lock:
+            records = tuple(
+                record
+                for record in self._records.values()
+                if record.identity.kind.startswith(kind_prefix)
+                and (include_terminal or not record.is_terminal)
+            )
+        for offset in range(0, len(records), page_size):
+            yield from records[offset:offset + page_size]
+
     def poll(self, job_id: str) -> JobRecord:
         with self._lock:
             try:
@@ -209,6 +273,7 @@ class DurableJobRegistry:
                 record.identity.parent_job_id,
                 tuple(self._children.get(job_id, ())),
                 *(process or (None, None)),
+                dict(self._metadata.get(job_id, {})),
             )
 
     def stream(
@@ -295,6 +360,41 @@ class DurableJobRegistry:
                     continue
                 changed.append(self.transition(current_id, JobStatus.CANCELLED, error=reason))
             return tuple(changed)
+
+    def request_cancellation(
+        self,
+        job_id: str,
+        *,
+        reason: str = "cancelled",
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
+        """Persist a nonterminal cancellation intent before OS cleanup."""
+        if not reason.strip():
+            raise ValueError("cancellation reason is required")
+        if isinstance(max_descendants, bool) or max_descendants < 0:
+            raise ValueError("max_descendants must be a non-negative integer")
+        with self._lock:
+            self.poll(job_id)
+            ids: list[str] = []
+            queue = [job_id]
+            while queue:
+                current_id = queue.pop(0)
+                ids.append(current_id)
+                if len(ids) - 1 > max_descendants:
+                    raise ValueError("job cancellation exceeds max_descendants")
+                queue.extend(self._children.get(current_id, ()))
+            records: list[JobRecord] = []
+            for current_id in ids:
+                current = self._records[current_id]
+                if current.is_terminal or current.status is JobStatus.CANCELLATION_REQUESTED:
+                    records.append(current)
+                    continue
+                records.append(self.transition(
+                    current_id,
+                    JobStatus.CANCELLATION_REQUESTED,
+                    error=reason,
+                ))
+            return tuple(records)
 
     def retry(self, job_id: str, *, expected_revision: int | None = None) -> JobRecord | None:
         """Explicitly requeue failed or interrupted work within its retry budget."""
