@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from ..execution.world_control import (
     BoundedOutputBuffer,
@@ -105,6 +105,7 @@ class DurableJobView:
     child_job_ids: tuple[str, ...]
     process_id: int | None = None
     process_group_id: int | None = None
+    metadata: Mapping[str, Any] | None = None
 
 
 class DurableJobRegistry:
@@ -127,6 +128,7 @@ class DurableJobRegistry:
         self._children: dict[str, list[str]] = {}
         self._outputs: dict[str, BoundedOutputBuffer] = {}
         self._processes: dict[str, tuple[int, int | None]] = {}
+        self._metadata: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
 
     def start(
@@ -137,6 +139,7 @@ class DurableJobRegistry:
         process_id: int | None = None,
         process_group_id: int | None = None,
         max_attempts: int = 3,
+        metadata: Mapping[str, Any] | None = None,
     ) -> JobRecord:
         """Create one pending job and validate its parent before publication."""
         if not isinstance(identity, JobIdentity):
@@ -156,6 +159,8 @@ class DurableJobRegistry:
             if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
                     or not 1 <= max_attempts <= MAX_JOB_ATTEMPTS):
                 raise ValueError(f"max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}")
+            if metadata is not None and not isinstance(metadata, Mapping):
+                raise TypeError("metadata must be a mapping")
             if parent != identity.parent_job_id:
                 identity = replace(identity, parent_job_id=parent)
             now = self._clock()
@@ -172,6 +177,7 @@ class DurableJobRegistry:
             )
             if process_id is not None:
                 self._processes[identity.job_id] = (process_id, process_group_id)
+            self._metadata[identity.job_id] = dict(metadata or {})
             return record
 
     def list(
@@ -209,6 +215,7 @@ class DurableJobRegistry:
                 record.identity.parent_job_id,
                 tuple(self._children.get(job_id, ())),
                 *(process or (None, None)),
+                dict(self._metadata.get(job_id, {})),
             )
 
     def stream(

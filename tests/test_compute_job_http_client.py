@@ -102,6 +102,47 @@ def test_job_client_rejects_worker_identity_mismatch_and_oversize() -> None:
         transport.submit(_node(), _envelope())
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("controller_job_id", "other-controller", "controller"),
+        ("idempotency_key", "other-idem", "idempotency"),
+        ("request_sha256", "0" * 64, "digest"),
+    ),
+)
+def test_job_client_submit_validates_complete_receipt_ownership(field, value, message) -> None:
+    body = json.loads(_receipt_body())
+    body["job"][field] = value
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        opener=lambda *_args, **_kwargs: _Response(202, json.dumps(body).encode()),
+    )
+    with pytest.raises(DependencyUnavailable, match=message):
+        transport.submit(_node(), _envelope())
+
+
+def test_job_client_status_cancel_and_lookup_validate_requested_identity() -> None:
+    body = json.loads(_receipt_body())
+    body["job"]["remote_job_id"] = "different-job"
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        opener=lambda *_args, **_kwargs: _Response(200, json.dumps(body).encode()),
+    )
+    with pytest.raises(DependencyUnavailable, match="remote job"):
+        transport.status(_node(), "remote-1")
+    with pytest.raises(DependencyUnavailable, match="remote job"):
+        transport.cancel(_node(), "remote-1", reason="stop")
+
+    body["job"]["remote_job_id"] = "remote-1"
+    body["job"]["idempotency_key"] = "different-idem"
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        opener=lambda *_args, **_kwargs: _Response(200, json.dumps(body).encode()),
+    )
+    with pytest.raises(DependencyUnavailable, match="idempotency"):
+        transport.by_idempotency(_node(), "idem-1")
+
+
 def test_job_client_status_lookup_and_cancel_use_exact_paths() -> None:
     seen = []
 

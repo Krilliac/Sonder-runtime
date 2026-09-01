@@ -12,13 +12,19 @@ from typing import Any, Mapping
 
 from ..execution.process_jobs import ProcessJobProvider, ProcessJobRequest
 from ..ports.jobs import JobIdentity
-from ...domain.common.errors import Conflict, InvalidInput, NotFound
+from ...domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
 from ...domain.compute_fabric import WorkloadKind
 
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ENVIRONMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_OPTION = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_BOUNDED_OPTION_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_REMOTE_JOB_STATES = frozenset({
+    "pending", "claimed", "running", "paused", "cancelling",
+    "cancellation_requested", "succeeded", "failed", "cancelled", "interrupted",
+})
 
 
 def _identity(value: str, label: str) -> str:
@@ -68,6 +74,9 @@ class JobCatalogEntry:
     argument_policy: ArgumentPolicy = ArgumentPolicy.NONE
     environment_allowlist: frozenset[str] = frozenset()
     workspace_mappings: frozenset[str] = frozenset()
+    allowed_flags: frozenset[str] = frozenset()
+    allowed_bounded_options: frozenset[str] = frozenset()
+    allowed_relative_path_options: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         _identity(self.entry_id, "catalog entry id")
@@ -88,9 +97,24 @@ class JobCatalogEntry:
             raise ValueError("catalog environment allowlist is invalid")
         for mapping in self.workspace_mappings:
             _identity(mapping, "catalog workspace mapping")
+        option_sets = (
+            self.allowed_flags,
+            self.allowed_bounded_options,
+            self.allowed_relative_path_options,
+        )
+        if any(not _OPTION.fullmatch(option) for values in option_sets for option in values):
+            raise ValueError("catalog options must be bounded option names")
+        if any(left & right for index, left in enumerate(option_sets) for right in option_sets[index + 1:]):
+            raise ValueError("catalog option names must have one value policy")
 
     def argv_for(self, arguments: tuple[str, ...]) -> tuple[str, ...]:
-        _validate_arguments(arguments, self.argument_policy)
+        _validate_arguments(
+            arguments,
+            self.argument_policy,
+            allowed_flags=self.allowed_flags,
+            allowed_bounded_options=self.allowed_bounded_options,
+            allowed_relative_path_options=self.allowed_relative_path_options,
+        )
         return (self.program, *self.fixed_args, *arguments)
 
     def environment_for(
@@ -109,7 +133,14 @@ class JobCatalogEntry:
         return tuple(sorted(environment))
 
 
-def _validate_arguments(arguments: tuple[str, ...], policy: ArgumentPolicy) -> None:
+def _validate_arguments(
+    arguments: tuple[str, ...],
+    policy: ArgumentPolicy,
+    *,
+    allowed_flags: frozenset[str] = frozenset(),
+    allowed_bounded_options: frozenset[str] = frozenset(),
+    allowed_relative_path_options: frozenset[str] = frozenset(),
+) -> None:
     if not isinstance(arguments, tuple) or len(arguments) > 64 or any(
         not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value
         for value in arguments
@@ -117,12 +148,57 @@ def _validate_arguments(arguments: tuple[str, ...], policy: ArgumentPolicy) -> N
         raise ValueError("arguments exceed their bound")
     if policy is ArgumentPolicy.NONE and arguments:
         raise ValueError("catalog entry does not accept arguments")
-    if policy is ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS:
-        for value in arguments:
-            if value.startswith("-"):
+    for value in arguments:
+        if value.startswith("-"):
+            option, separator, option_value = value.partition("=")
+            if not _OPTION.fullmatch(option):
+                raise ValueError("argument option name is invalid")
+            if not separator:
+                if option not in allowed_flags:
+                    raise ValueError(f"argument option {option!r} is not allowed by the catalog")
                 continue
+            if option in allowed_bounded_options:
+                if not _BOUNDED_OPTION_VALUE.fullmatch(option_value):
+                    raise ValueError(f"argument option {option!r} has an invalid bounded value")
+                continue
+            if option in allowed_relative_path_options:
+                _relative(option_value, f"argument option {option!r}")
+                continue
+            raise ValueError(f"argument option {option!r} is not allowed by the catalog")
+        if policy is ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS:
             path_part = value.split("::", 1)[0]
             _relative(path_part, "argument")
+
+
+def _validate_envelope_arguments(arguments: tuple[str, ...]) -> None:
+    """Validate transport shape without granting any catalog option authority."""
+    if not isinstance(arguments, tuple) or len(arguments) > 64 or any(
+        not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value
+        for value in arguments
+    ):
+        raise ValueError("arguments exceed their bound")
+    for value in arguments:
+        if value.startswith("-"):
+            option = value.partition("=")[0]
+            if not _OPTION.fullmatch(option):
+                raise ValueError("argument option name is invalid")
+            continue
+        _relative(value.split("::", 1)[0], "argument")
+
+
+def _relative_argument_paths(
+    entry: JobCatalogEntry,
+    arguments: tuple[str, ...],
+) -> tuple[str, ...]:
+    paths: list[str] = []
+    for value in arguments:
+        if value.startswith("-"):
+            option, separator, option_value = value.partition("=")
+            if separator and option in entry.allowed_relative_path_options:
+                paths.append(option_value)
+        elif entry.argument_policy is ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS:
+            paths.append(value.split("::", 1)[0])
+    return tuple(paths)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,11 +257,7 @@ class RemoteJobEnvelope:
         _identity(values["workspace_mapping"], "workspace_mapping")
         relative_cwd = _relative(values["relative_cwd"], "relative_cwd")
         arguments = values["arguments"]
-        _validate_arguments(arguments, ArgumentPolicy.BOUNDED)
-        for argument in arguments:
-            if argument.startswith("-"):
-                continue
-            _relative(argument.split("::", 1)[0], "argument")
+        _validate_envelope_arguments(arguments)
         environment = values["environment"]
         if not isinstance(environment, tuple) or len(environment) > 32:
             raise ValueError("environment exceeds its bound")
@@ -279,14 +351,39 @@ class RemoteJobReceipt:
             _identity(value, label)
         if not _SHA256.fullmatch(self.request_sha256):
             raise ValueError("receipt request digest must be SHA-256")
-        if not isinstance(self.state, str) or not self.state or len(self.state) > 64:
-            raise ValueError("receipt state must be bounded")
+        if self.state not in _REMOTE_JOB_STATES:
+            raise ValueError("receipt state is not a recognized bounded state")
         if self.process_id is not None and (
             isinstance(self.process_id, bool) or not isinstance(self.process_id, int) or self.process_id < 1
         ):
             raise ValueError("receipt process id must be positive")
         if len(self.artifacts) > 256:
             raise ValueError("receipt artifact count exceeds its bound")
+
+
+def validate_remote_job_receipt(
+    receipt: RemoteJobReceipt,
+    *,
+    worker_id: str,
+    controller_job_id: str | None = None,
+    idempotency_key: str | None = None,
+    request_sha256: str | None = None,
+    remote_job_id: str | None = None,
+) -> RemoteJobReceipt:
+    """Fail closed unless a receipt belongs to the exact requested operation."""
+    if not isinstance(receipt, RemoteJobReceipt):
+        raise DependencyUnavailable("compute job response is not a receipt")
+    expected = (
+        ("worker identity", receipt.worker_id, worker_id),
+        ("controller identity", receipt.controller_job_id, controller_job_id),
+        ("idempotency identity", receipt.idempotency_key, idempotency_key),
+        ("request digest", receipt.request_sha256, request_sha256),
+        ("remote job identity", receipt.remote_job_id, remote_job_id),
+    )
+    for label, actual, wanted in expected:
+        if wanted is not None and actual != wanted:
+            raise DependencyUnavailable(f"compute job receipt {label} mismatch")
+    return receipt
 
 
 class ComputeJobWorker:
@@ -315,6 +412,38 @@ class ComputeJobWorker:
         self._by_idempotency: dict[str, RemoteJobReceipt] = {}
         self._by_job: dict[str, RemoteJobReceipt] = {}
         self._lock = RLock()
+        self._rehydrate()
+
+    def _rehydrate(self) -> None:
+        recover = getattr(self._provider, "recover", None)
+        if not callable(recover):
+            return
+        for view in recover(kind_prefix="compute-", limit=1024):
+            record = view.record
+            metadata = getattr(view, "metadata", None) or {}
+            if metadata.get("compute_worker_id") != self.worker_id:
+                continue
+            controller_job_id = metadata.get("compute_controller_job_id")
+            request_sha256 = metadata.get("compute_request_sha256")
+            if not isinstance(controller_job_id, str) or not isinstance(request_sha256, str):
+                continue
+            try:
+                receipt = RemoteJobReceipt(
+                    worker_id=self.worker_id,
+                    remote_job_id=record.identity.job_id,
+                    controller_job_id=controller_job_id,
+                    idempotency_key=record.identity.idempotency_key,
+                    request_sha256=request_sha256,
+                    state=record.status.value,
+                    process_id=getattr(view, "process_id", None),
+                )
+            except ValueError:
+                continue
+            prior = self._by_idempotency.get(receipt.idempotency_key)
+            if prior is not None and prior.request_sha256 != receipt.request_sha256:
+                raise Conflict("durable compute idempotency metadata is inconsistent")
+            self._by_idempotency[receipt.idempotency_key] = receipt
+            self._by_job[receipt.remote_job_id] = receipt
 
     def submit(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
         try:
@@ -342,6 +471,10 @@ class ComputeJobWorker:
             if not cwd.is_relative_to(root):
                 raise ValueError("workspace escape")
             argv = entry.argv_for(envelope.arguments)
+            for relative_path in _relative_argument_paths(entry, envelope.arguments):
+                resolved_argument = (cwd / relative_path).resolve()
+                if not resolved_argument.is_relative_to(root):
+                    raise ValueError("argument path would escape its configured workspace")
             environment = entry.environment_for(envelope.environment)
         except ValueError as exc:
             raise InvalidInput(str(exc)) from exc
@@ -358,6 +491,12 @@ class ComputeJobWorker:
             argv=argv,
             cwd=cwd,
             environment=environment,
+            deadline_seconds=envelope.deadline_seconds,
+            metadata=(
+                ("compute_worker_id", self.worker_id),
+                ("compute_controller_job_id", envelope.controller_job_id),
+                ("compute_request_sha256", envelope.request_sha256),
+            ),
         )
         started = self._provider.start(request)
         receipt = RemoteJobReceipt(
@@ -392,14 +531,21 @@ class ComputeJobWorker:
             "cancelling",
             "cancellation_requested",
         }:
-            outcome = wait(remote_job_id, timeout=0)
+            try:
+                outcome = wait(remote_job_id, timeout=0)
+                record = outcome.record
+            except KeyError:
+                poll = getattr(self._provider, "poll", None)
+                if not callable(poll):
+                    raise
+                record = poll(remote_job_id)
             refreshed = RemoteJobReceipt(
                 worker_id=receipt.worker_id,
                 remote_job_id=receipt.remote_job_id,
                 controller_job_id=receipt.controller_job_id,
                 idempotency_key=receipt.idempotency_key,
                 request_sha256=receipt.request_sha256,
-                state=outcome.record.status.value,
+                state=record.status.value,
                 process_id=receipt.process_id,
                 artifacts=receipt.artifacts,
             )
@@ -447,4 +593,5 @@ __all__ = [
     "RemoteArtifactReceipt",
     "RemoteJobEnvelope",
     "RemoteJobReceipt",
+    "validate_remote_job_receipt",
 ]

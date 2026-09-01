@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -196,3 +197,91 @@ def test_running_process_publishes_incremental_output_before_wait(tmp_path):
 def test_request_rejects_empty_argv():
     with pytest.raises(ValueError, match="argv"):
         ProcessJobRequest(JobIdentity("j", "process", "execute", "i"), ())
+
+
+@pytest.mark.parametrize("deadline", [0, -1, True, 86_401])
+def test_request_rejects_invalid_deadline(deadline):
+    with pytest.raises(ValueError, match="deadline_seconds"):
+        ProcessJobRequest(
+            JobIdentity("j", "process", "execute", "i"),
+            ("python", "-c", "pass"),
+            deadline_seconds=deadline,
+        )
+
+
+def test_worker_enforces_deadline_without_controller_polling(tmp_path):
+    registry = SQLiteDurableJobRegistry(tmp_path / "deadline-jobs.db")
+    cleanup = ProcessTreeSupervisor(platform_name=os.name, timeout_seconds=5)
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        platform_name=os.name,
+    )
+    job_id = "job-hard-deadline"
+    started = provider.start(ProcessJobRequest(
+        JobIdentity(job_id, "process", "execute", "idem-hard-deadline"),
+        (sys.executable, "-c", "import time; time.sleep(30)"),
+        cwd=tmp_path,
+        deadline_seconds=1,
+        max_descendants=4,
+    ))
+    process = provider._processes[job_id]
+
+    deadline = time.monotonic() + 8
+    while (
+        (
+            registry.poll(job_id).status is not JobStatus.CANCELLED
+            or process.poll() is None
+            or job_id in provider._processes
+        )
+        and time.monotonic() < deadline
+    ):
+        time.sleep(.05)
+
+    assert registry.poll(job_id).status is JobStatus.CANCELLED
+    assert "deadline" in registry.poll(job_id).error
+    assert process.poll() is not None
+    assert job_id not in provider._processes
+
+
+def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):
+    database = tmp_path / "deadline-restart.db"
+    registry = SQLiteDurableJobRegistry(database)
+    cleanup = ProcessTreeSupervisor(platform_name=os.name, timeout_seconds=5)
+    first = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        platform_name=os.name,
+    )
+    job_id = "job-restarted-deadline"
+    first.start(ProcessJobRequest(
+        JobIdentity(job_id, "process", "execute", "idem-restarted-deadline"),
+        (sys.executable, "-c", "import time; time.sleep(30)"),
+        cwd=tmp_path,
+        deadline_seconds=2,
+        max_descendants=4,
+    ))
+    process = first._processes[job_id]
+    first._discard_deadline(job_id)
+
+    reopened = SQLiteDurableJobRegistry(database)
+    second = SubprocessJobProvider(
+        reopened,
+        process_cleanup=cleanup,
+        platform_name=os.name,
+    )
+    deadline = time.monotonic() + 9
+    while (
+        (
+            reopened.poll(job_id).status is not JobStatus.CANCELLED
+            or process.poll() is None
+            or job_id in second._deadline_timers
+        )
+        and time.monotonic() < deadline
+    ):
+        time.sleep(.05)
+
+    assert reopened.poll(job_id).status is JobStatus.CANCELLED
+    assert "deadline" in reopened.poll(job_id).error
+    assert process.poll() is not None
+    assert job_id not in second._deadline_timers

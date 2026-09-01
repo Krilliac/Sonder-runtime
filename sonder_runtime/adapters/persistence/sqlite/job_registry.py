@@ -9,8 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Lock
-from typing import Any, Callable
-from typing import Iterator
+from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
 from sonder_runtime.application.execution.world_control import (
@@ -48,7 +47,8 @@ CREATE TABLE IF NOT EXISTS durable_job (
     lease_until TEXT,
     attempt INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
-    claim_token TEXT
+    claim_token TEXT,
+    metadata_json TEXT
 );
 CREATE INDEX IF NOT EXISTS durable_job_parent ON durable_job(parent_job_id);
 CREATE INDEX IF NOT EXISTS durable_job_operation ON durable_job(operation_id);
@@ -176,12 +176,13 @@ class SQLiteDurableJobRegistry:
             "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
             "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
             "output_dropped_before,worker_id,lease_until,attempt,max_attempts,claim_token "
+            ",metadata_json "
             "FROM durable_job WHERE job_id=?", (job_id,)
         ).fetchone()
 
     def start(self, identity: JobIdentity, *, parent_job_id: str | None = None,
               process_id: int | None = None, process_group_id: int | None = None,
-              max_attempts: int = 3) -> JobRecord:
+              max_attempts: int = 3, metadata: Mapping[str, Any] | None = None) -> JobRecord:
         if not isinstance(identity, JobIdentity):
             raise TypeError("identity must be a JobIdentity")
         parent = parent_job_id if parent_job_id is not None else identity.parent_job_id
@@ -194,6 +195,8 @@ class SQLiteDurableJobRegistry:
         if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
                 or not 1 <= max_attempts <= MAX_JOB_ATTEMPTS):
             raise ValueError(f"max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
         if parent is not None and parent == identity.parent_job_id:
             pass
         elif parent is not None:
@@ -208,11 +211,12 @@ class SQLiteDurableJobRegistry:
             try:
                 connection.execute(
                     "INSERT INTO durable_job(job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,"
-                    "status,revision,created_at,updated_at,result_json,error,process_id,process_group_id,max_attempts) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "status,revision,created_at,updated_at,result_json,error,process_id,process_group_id,max_attempts,metadata_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identity.job_id, identity.kind, identity.operation_id, identity.idempotency_key,
                      identity.parent_job_id, identity.parent_session_id, JobStatus.PENDING.value, 0,
-                     now, now, None, "", process_id, process_group_id, max_attempts),
+                     now, now, None, "", process_id, process_group_id, max_attempts,
+                     _json(dict(metadata or {}))),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"job {identity.job_id!r} already exists") from exc
@@ -284,8 +288,9 @@ class SQLiteDurableJobRegistry:
             children = tuple(item[0] for item in connection.execute(
                 "SELECT job_id FROM durable_job WHERE parent_job_id=? ORDER BY rowid", (job_id,)
             ).fetchall())
+        metadata = {} if row[21] is None else json.loads(row[21])
         return DurableJobView(record, record.identity.parent_job_id, children,
-                              row[12], row[13])
+                              row[12], row[13], metadata)
 
     def append_output(self, job_id: str, stream: OutputStream, data: str,
                       *, spill: SpillReference | None = None) -> None:
@@ -770,6 +775,8 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         )
     if "claim_token" not in columns:
         connection.execute("ALTER TABLE durable_job ADD COLUMN claim_token TEXT")
+    if "metadata_json" not in columns:
+        connection.execute("ALTER TABLE durable_job ADD COLUMN metadata_json TEXT")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS durable_job_stale_lease "
         "ON durable_job(status, lease_until)"

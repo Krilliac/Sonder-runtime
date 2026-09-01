@@ -575,6 +575,11 @@ def build_application(
                     argument_policy=ArgumentPolicy(job.argument_policy),
                     environment_allowlist=frozenset(job.environment_allowlist),
                     workspace_mappings=frozenset(job.workspace_mappings),
+                    allowed_flags=frozenset(job.allowed_flags),
+                    allowed_bounded_options=frozenset(job.allowed_bounded_options),
+                    allowed_relative_path_options=frozenset(
+                        job.allowed_relative_path_options
+                    ),
                 )
                 for job in effective_config.compute.jobs
             }
