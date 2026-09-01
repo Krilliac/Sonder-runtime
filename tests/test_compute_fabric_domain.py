@@ -125,6 +125,7 @@ def test_scheduler_rejects_stale_or_under_resourced_nodes_and_is_deterministic()
         required_capabilities=frozenset({ComputeCapability.CMAKE}),
         workspace_mapping="sonder",
         min_free_ram_bytes=8 << 30,
+        allow_remote=True,
     )
     stale = replace(_snapshot("stale"), observed_at=NOW - timedelta(minutes=2))
     low = _snapshot("low", free_ram=4 << 30)
@@ -167,6 +168,7 @@ def test_scheduler_reports_each_hard_constraint_without_fallback_guessing() -> N
             min_free_ram_bytes=1,
             min_free_disk_bytes=2,
             max_load_fraction=0.9,
+            allow_remote=True,
             avoided_node_ids=frozenset({"avoided"}),
         )
         decision = scheduler.place(request, (node,), now=NOW)
@@ -193,11 +195,34 @@ def test_inference_placement_remains_owned_by_model_gateway() -> None:
         ComputePlacementScheduler().place(request, (_snapshot("remote"),), now=NOW)
 
 
+def test_remote_compute_requires_per_workload_opt_in() -> None:
+    scheduler = ComputePlacementScheduler()
+    snapshot = _snapshot("linux-node")
+
+    denied = scheduler.place(
+        WorkloadRequest("without-consent", WorkloadKind.BUILD),
+        (snapshot,),
+        now=NOW,
+    )
+    assert denied.selected_node_id is None
+    assert denied.candidates[0].reason_code == "remote_not_allowed"
+
+    allowed = scheduler.place(
+        WorkloadRequest(
+            "with-consent", WorkloadKind.BUILD, allow_remote=True
+        ),
+        (snapshot,),
+        now=NOW,
+    )
+    assert allowed.selected_node_id == "linux-node"
+
+
 def test_unknown_gpu_headroom_does_not_satisfy_a_gpu_floor() -> None:
     request = WorkloadRequest(
         request_id="gpu",
         kind=WorkloadKind.BUILD,
         min_free_vram_bytes=1,
+        allow_remote=True,
     )
     decision = ComputePlacementScheduler().place(request, (_snapshot("node"),), now=NOW)
     assert decision.candidates[0].reason_code == "vram_unknown"
@@ -209,7 +234,7 @@ def test_placement_and_snapshot_digests_are_stable_and_content_bound() -> None:
     assert first.digest() == second.digest()
     assert first.digest() != replace(first, active_jobs=1).digest()
 
-    request = WorkloadRequest("request", WorkloadKind.BUILD)
+    request = WorkloadRequest("request", WorkloadKind.BUILD, allow_remote=True)
     decision = ComputePlacementScheduler().place(request, (first,), now=NOW)
     assert len(decision.request_digest) == 64
     assert decision.snapshot_digests == (("node", first.digest()),)

@@ -13,6 +13,22 @@ from sonder_runtime.application.compute_fabric.jobs import (
 from sonder_runtime.domain.compute_fabric import WorkloadKind
 
 
+def test_workspace_root_dot_is_valid_but_not_an_artifact_name() -> None:
+    envelope = RemoteJobEnvelope.create(
+        controller_job_id="controller-job",
+        idempotency_key="idem-root",
+        workload=WorkloadKind.BUILD,
+        catalog_entry_id="build",
+        workspace_mapping="sonder",
+        relative_cwd=".",
+    )
+    assert envelope.relative_cwd == "."
+    with pytest.raises(ValueError, match="artifact"):
+        RemoteArtifactReceipt(
+            name=".", size_bytes=0, mime_type="text/plain", sha256="0" * 64
+        )
+
+
 def _envelope(**changes) -> RemoteJobEnvelope:
     values = dict(
         controller_job_id="controller-job",

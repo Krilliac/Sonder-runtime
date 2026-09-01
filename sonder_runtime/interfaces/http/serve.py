@@ -71,7 +71,7 @@ from sonder_runtime.interfaces.http.facades.model_request import (
     ModelFacadeError,
     ModelRequestFacade,
 )
-from sonder_runtime.domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
+from sonder_runtime.domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.execution.world_control import OutputWatermark
 from sonder_runtime.application.ports.model_gateway import ModelRequest
@@ -322,6 +322,33 @@ def _job_cancel_id(path):
         return None
     job_id = urllib.parse.unquote(encoded)
     return job_id if job_id and "/" not in job_id else None
+
+
+def _compute_job_route(path):
+    """Return an exact compute-job operation and one decoded identity."""
+    if path == "/v1/compute/jobs":
+        return "submit", None
+    prefix = "/v1/compute/jobs/"
+    if not path.startswith(prefix):
+        return None
+    suffix = path[len(prefix):]
+    idempotency_prefix = "by-idempotency/"
+    if suffix.startswith(idempotency_prefix):
+        encoded = suffix[len(idempotency_prefix):]
+        if not encoded or "/" in encoded:
+            return None
+        value = urllib.parse.unquote(encoded)
+        return ("by_idempotency", value) if value and "/" not in value else None
+    if suffix.endswith("/cancel"):
+        encoded = suffix[:-len("/cancel")]
+        if not encoded or "/" in encoded:
+            return None
+        value = urllib.parse.unquote(encoded)
+        return ("cancel", value) if value and "/" not in value else None
+    if not suffix or "/" in suffix:
+        return None
+    value = urllib.parse.unquote(suffix)
+    return ("status", value) if value and "/" not in value else None
 
 
 def _job_start_payload(req):
@@ -3853,6 +3880,64 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json_payload(result.body, status=result.status_code)
             return
+        compute_route = _compute_job_route(path)
+        if compute_route is not None and compute_route[0] in ("status", "by_idempotency"):
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "administrator authorization is required",
+                               "type": "forbidden", "code": "FORBIDDEN"}},
+                    status=403,
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.interfaces.http.facades.compute_fabric import (
+                dispatch_compute_job_by_idempotency,
+                dispatch_compute_job_status,
+            )
+
+            worker_factory = default_app().compute_job_worker
+            if worker_factory is None:
+                self._send_json_payload(
+                    {"error": {"message": "compute job worker is unavailable",
+                               "type": "server_error",
+                               "code": "COMPUTE_JOB_WORKER_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            operation, identity = compute_route
+            try:
+                result = (
+                    dispatch_compute_job_status(worker_factory(), identity)
+                    if operation == "status"
+                    else dispatch_compute_job_by_idempotency(worker_factory(), identity)
+                )
+            except (NotFound, KeyError):
+                self._send_not_found()
+                return
+            except (InvalidInput, ValueError, TypeError) as error:
+                self._send_json_payload(
+                    {"error": {"message": str(error), "type": "invalid_request"}},
+                    status=400,
+                )
+                return
+            except Exception as exc:
+                self.log_error("compute job status failed: %s", type(exc).__name__)
+                self._send_json_payload(
+                    {"error": {"message": "compute job status is unavailable",
+                               "type": "server_error",
+                               "code": "COMPUTE_JOB_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            if result is None:
+                self._send_not_found()
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
         if _is_extension_route(path):
             context = self._request_auth_context()
             if not context["authorized"]:
@@ -4616,6 +4701,74 @@ class Handler(BaseHTTPRequestHandler):
             operation_context(self._correlation(), context)
             if callable(operation_context) else None
         )
+        compute_route = _compute_job_route(path)
+        if compute_route is not None and compute_route[0] in ("submit", "cancel"):
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    sonder_lifecycle.error_envelope(
+                        "FORBIDDEN",
+                        "administrator authorization is required",
+                        self._correlation(),
+                        retryable=False,
+                    ),
+                    status=403,
+                )
+                return
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.interfaces.http.facades.compute_fabric import (
+                dispatch_compute_job_cancel,
+                dispatch_compute_job_submit,
+            )
+
+            worker_factory = default_app().compute_job_worker
+            if worker_factory is None:
+                self._send_json_payload(
+                    {"error": {"message": "compute job worker is unavailable",
+                               "type": "server_error",
+                               "code": "COMPUTE_JOB_WORKER_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            operation, identity = compute_route
+            try:
+                if operation == "submit":
+                    result = dispatch_compute_job_submit(worker_factory(), req)
+                else:
+                    reason = req.get("reason")
+                    if set(req) != {"reason"} or not isinstance(reason, str):
+                        raise ValueError("reason must be the only request field")
+                    result = dispatch_compute_job_cancel(
+                        worker_factory(), identity, reason
+                    )
+            except Conflict as error:
+                self._send_json_payload(
+                    {"error": {"message": str(error), "type": "conflict"}},
+                    status=409,
+                )
+                return
+            except NotFound:
+                self._send_not_found()
+                return
+            except (InvalidInput, ValueError, TypeError) as error:
+                self._send_json_payload(
+                    {"error": {"message": str(error), "type": "invalid_request"}},
+                    status=400,
+                )
+                return
+            except Exception as exc:
+                self.log_error("compute job request failed: %s", type(exc).__name__)
+                self._send_json_payload(
+                    {"error": {"message": "compute job request failed",
+                               "type": "server_error",
+                               "code": "COMPUTE_JOB_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
         if path == "/a2a":
             if not context["authorized"]:
                 self._send_auth_error()

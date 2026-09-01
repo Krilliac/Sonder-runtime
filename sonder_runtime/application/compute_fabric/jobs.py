@@ -31,11 +31,18 @@ def _relative(value: str, label: str, *, allow_dot: bool = True) -> str:
     if not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value:
         raise ValueError(f"{label} must be a bounded relative path")
     normalized = value.replace("\\", "/")
-    path = PurePosixPath(normalized)
-    if normalized.startswith("/") or ":" in path.parts[0] or ".." in path.parts:
-        raise ValueError(f"{label} must not escape its workspace")
-    if not allow_dot and normalized in ("", "."):
+    if normalized == ".":
+        if allow_dot:
+            return normalized
         raise ValueError(f"{label} must name a relative artifact")
+    path = PurePosixPath(normalized)
+    if (
+        not path.parts
+        or normalized.startswith("/")
+        or ":" in path.parts[0]
+        or ".." in path.parts
+    ):
+        raise ValueError(f"{label} must not escape its workspace")
     return normalized
 
 
@@ -378,6 +385,28 @@ class ComputeJobWorker:
             receipt = self._by_job.get(remote_job_id)
         if receipt is None:
             raise NotFound("compute job was not found")
+        wait = getattr(self._provider, "wait", None)
+        if callable(wait) and receipt.state in {
+            "pending",
+            "running",
+            "cancelling",
+            "cancellation_requested",
+        }:
+            outcome = wait(remote_job_id, timeout=0)
+            refreshed = RemoteJobReceipt(
+                worker_id=receipt.worker_id,
+                remote_job_id=receipt.remote_job_id,
+                controller_job_id=receipt.controller_job_id,
+                idempotency_key=receipt.idempotency_key,
+                request_sha256=receipt.request_sha256,
+                state=outcome.record.status.value,
+                process_id=receipt.process_id,
+                artifacts=receipt.artifacts,
+            )
+            with self._lock:
+                self._by_job[remote_job_id] = refreshed
+                self._by_idempotency[receipt.idempotency_key] = refreshed
+            receipt = refreshed
         return receipt
 
     def by_idempotency(self, idempotency_key: str) -> RemoteJobReceipt | None:
@@ -389,14 +418,19 @@ class ComputeJobWorker:
         receipt = self.status(remote_job_id)
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
             raise InvalidInput("cancellation reason must be non-empty and bounded")
-        self._provider.cancel(remote_job_id, reason=reason)
+        result = self._provider.cancel(remote_job_id, reason=reason)
+        cleanup_completed = bool(getattr(result, "cleanup_completed", False))
+        if isinstance(result, Mapping):
+            cleanup_completed = bool(
+                result.get("cleanup_completed", result.get("quiescent", False))
+            )
         cancelled = RemoteJobReceipt(
             worker_id=receipt.worker_id,
             remote_job_id=receipt.remote_job_id,
             controller_job_id=receipt.controller_job_id,
             idempotency_key=receipt.idempotency_key,
             request_sha256=receipt.request_sha256,
-            state="cancellation_requested",
+            state="cancelled" if cleanup_completed else "cancellation_requested",
             process_id=receipt.process_id,
             artifacts=receipt.artifacts,
         )

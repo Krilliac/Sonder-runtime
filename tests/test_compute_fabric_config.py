@@ -43,7 +43,7 @@ workspace_mappings = ["sonder"]
 """,
         encoding="utf-8",
     )
-    config = load_config(path, env={})
+    config = load_config(path, env={"SONDER_API_KEY": "x" * 24})
     assert config.compute.allow_remote is True
     assert config.compute.node_id == "controller"
     assert config.compute.snapshot_ttl_seconds == 45
@@ -52,6 +52,21 @@ workspace_mappings = ["sonder"]
     assert config.compute.nodes[0].preference_weight == 2.5
     assert config.compute.jobs[0].job_id == "pytest"
     assert config.compute.jobs[0].fixed_args == ("-m", "pytest")
+    assert config.features.cloud is False
+
+
+def test_remote_compute_consent_does_not_enable_cloud_and_requires_auth(tmp_path) -> None:
+    path = tmp_path / "sonder.toml"
+    path.write_text(
+        """[compute]\nallow_remote=true\n[[compute.nodes]]\nid='n1'\norigin='https://n1:8443'\nworkloads=['build']\n""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="SONDER_API_KEY"):
+        load_config(path, env={})
+
+    config = load_config(path, env={"SONDER_API_KEY": "x" * 24})
+    assert config.compute.allow_remote is True
+    assert config.features.cloud is False
 
 
 @pytest.mark.parametrize(
