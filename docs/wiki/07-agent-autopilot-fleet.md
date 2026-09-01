@@ -125,6 +125,23 @@ control request with the same idempotency key returns the existing
 operation instead of starting a duplicate. On unclean shutdown, the drain
 sequence marks unfinished ownership interrupted so recovery is deliberate.
 
+## Private compute fabric
+
+Fleet parallelism and compute placement are related but distinct. Fleet splits
+model/agent tasks into workers; the compute fabric places one cataloged build,
+test, index, analysis, fuzz, embedding, training, render, encode, service,
+container, or storage job on one measured host.
+
+Remote compute requires both the operator's `[compute].allow_remote=true` gate
+and per-workload `allow_remote=true`. Local fallback is a separate request flag.
+The scheduler uses fresh authenticated snapshots and cannot widen configured
+node, workload, capability, or workspace authority. Programs and fixed
+arguments live in the worker's catalog; a controller cannot submit an arbitrary
+executable. Inference remains in the model gateway/Ollama pool.
+
+See [Private Compute Fabric](../runbooks/compute-fabric.md) for configuration,
+networking, catalog examples, ambiguity reconciliation, and recovery.
+
 ## Speculation interplay
 
 While the model generates its next tool decision, the host can

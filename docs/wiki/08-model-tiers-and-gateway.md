@@ -214,3 +214,8 @@ note: [use-facts-model](../runbooks/use-facts-model.md).
 - **Hosted/cloud tiers** — set `[features].cloud = true` /
   `SONDER_ALLOW_CLOUD=1`. Both are explicit consent gates; default is fully
   local. A non-Ollama frontier API would slot in as a new gateway adapter.
+- **Private-node compute** — independently set `[compute].allow_remote = true`
+  (or `SONDER_ALLOW_REMOTE_COMPUTE=1`) and opt in on each workload request.
+  This schedules whole build/test/media/training jobs and does not enable a
+  cloud tier or replace the inference gateway. See
+  [Private Compute Fabric](../runbooks/compute-fabric.md).

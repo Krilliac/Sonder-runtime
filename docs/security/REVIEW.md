@@ -204,7 +204,11 @@ drift as files change. Anchor on the named function, not just the integer.
   refuses without `consent=True`, agent path `server.py:10394` requires
   `allow_web` **and** `allow_location` **and** `consent`; remote-Ollama —
   `sonder_config.py:418-422` rejects a non-loopback `ollama.url` unless
-  `allow_remote` is set; cloud — `sonder_config.py:331` `SONDER_ALLOW_CLOUD`
+  `allow_remote` is set; private-node compute —
+  `sonder_runtime/platform/config.py` reads `SONDER_ALLOW_REMOTE_COMPUTE`,
+  rejects configured remote nodes without that global gate, HTTPS, and a
+  strong API key, while `WorkloadRequest.allow_remote` independently gates
+  each whole-job placement; cloud — `sonder_config.py:331` `SONDER_ALLOW_CLOUD`
   feature flag, enforced at the operation-context gate (`server.py:743`);
   private chain-of-thought — `server.py:309` `private_cot_opt_in_enabled`
   (`SONDER_ALLOW_PRIVATE_COT`, off by default) **and** `server.py:326`
