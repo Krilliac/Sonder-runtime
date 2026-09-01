@@ -14,10 +14,12 @@ import json
 import math
 import re
 from typing import Any, Iterable
-from urllib.parse import urlsplit
 
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_HTTPS_ORIGIN = re.compile(
+    r"^https://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):([0-9]{1,5})/?$"
+)
 
 
 class WorkloadKind(StrEnum):
@@ -187,17 +189,13 @@ class ComputeNode:
             return
         if not isinstance(self.origin, str):
             raise ValueError("remote nodes require an HTTPS origin")
-        try:
-            parsed = urlsplit(self.origin)
-            port = parsed.port
-        except ValueError as exc:
-            raise ValueError("remote nodes require a valid HTTPS origin") from exc
-        if parsed.scheme.lower() != "https" or not parsed.hostname or port is None:
-            raise ValueError("remote nodes require an HTTPS origin with an explicit port")
-        if parsed.username is not None or parsed.password is not None:
+        match = _HTTPS_ORIGIN.fullmatch(self.origin)
+        if match is None and "@" in self.origin:
             raise ValueError("remote node origins must not contain inline credentials")
-        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-            raise ValueError("remote node origin must not include a path, query, or fragment")
+        if match is None:
+            raise ValueError("remote nodes require an HTTPS origin with an explicit port")
+        if not 1 <= int(match.group(1)) <= 65_535:
+            raise ValueError("remote nodes require a valid HTTPS port")
 
     def as_dict(self) -> dict[str, Any]:
         return {

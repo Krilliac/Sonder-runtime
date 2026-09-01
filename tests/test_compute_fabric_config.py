@@ -139,6 +139,16 @@ def test_compute_configuration_limits_remote_nodes(tmp_path) -> None:
         load_config(path, env={})
 
 
+def test_compute_catalog_rejects_unknown_argument_policy(tmp_path) -> None:
+    path = tmp_path / "sonder.toml"
+    path.write_text(
+        """[compute]\n[[compute.jobs]]\nid='build'\nworkload='build'\nprogram='cmake'\nargument_policy='shell'\n""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="argument_policy"):
+        load_config(path, env={})
+
+
 def test_redacted_dump_serializes_nested_compute_configuration() -> None:
     dumped = load_config(env={}).as_redacted_dict()
     assert dumped["compute"] == {
