@@ -5,6 +5,8 @@ import os
 import signal
 import subprocess
 
+from .process_liveness import PROCESS_ALIVE, probe_process
+
 from ..application.jobs.durable_registry import (
     ProcessTreeCleanupReceipt,
     ProcessTreeCleanupRequest,
@@ -29,6 +31,7 @@ class ProcessTreeSupervisor:
         subprocess_module=subprocess,
         platform_name: str | None = None,
         timeout_seconds: float = 5.0,
+        process_probe=probe_process,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -37,10 +40,25 @@ class ProcessTreeSupervisor:
         self._subprocess = subprocess_module
         self._platform = platform_name or getattr(os_module, "name", "")
         self._timeout = float(timeout_seconds)
+        if not callable(process_probe):
+            raise TypeError("process_probe must be callable")
+        self._process_probe = process_probe
 
     def cleanup(self, request: ProcessTreeCleanupRequest) -> ProcessTreeCleanupReceipt:
         if not isinstance(request, ProcessTreeCleanupRequest):
             raise TypeError("request must be a ProcessTreeCleanupRequest")
+        if request.process_identity is not None:
+            state, observed_identity = self._process_probe(
+                request.process_id,
+                request.process_identity,
+            )
+            if state != PROCESS_ALIVE or observed_identity != request.process_identity:
+                return ProcessTreeCleanupReceipt(
+                    request.job_id,
+                    False,
+                    complete=False,
+                    detail="process identity is no longer owned by this job",
+                )
         if self._platform == "nt":
             return self._windows_cleanup(request)
         if self._platform == "posix":

@@ -28,11 +28,13 @@ def refresh_remote_snapshots(
         return
 
     def probe(node: ComputeNode) -> tuple[ComputeNode, datetime, NodeSnapshot | None, str | None]:
-        received_at = now()
+        request_started_at = now()
         try:
-            snapshot = source.snapshot(node, now=received_at)
+            snapshot = source.snapshot(node, now=request_started_at)
         except Exception as exc:
+            received_at = now()
             return node, received_at, None, f"probe-failed:{type(exc).__name__}"
+        received_at = now()
         return node, received_at, snapshot, None
 
     with ThreadPoolExecutor(

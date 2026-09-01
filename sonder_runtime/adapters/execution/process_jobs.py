@@ -15,6 +15,7 @@ from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
 from .durable_output import DurableExecutionOutput
 from ...application.ports.jobs import JobStatus
+from ..process_liveness import PROCESS_ALIVE, probe_process, process_identity
 
 
 class SubprocessJobProvider:
@@ -36,9 +37,11 @@ class SubprocessJobProvider:
         output: DurableExecutionOutput | None = None,
         inline_output_bytes: int = 16 * 1024,
         memory_limiter=None,
+        process_identity_resolver=process_identity,
+        process_probe=probe_process,
     ) -> None:
         if not all(callable(getattr(registry, name, None)) for name in (
-            "start", "poll", "transition", "append_output", "stream",
+            "start", "attach_process", "poll", "transition", "append_output", "stream",
         )):
             raise TypeError("registry must provide the durable process-job operations")
         if not callable(getattr(process_cleanup, "cleanup", None)):
@@ -57,6 +60,10 @@ class SubprocessJobProvider:
         if not callable(getattr(memory_limiter, "apply", None)):
             raise TypeError("memory_limiter must provide apply")
         self._memory_limiter = memory_limiter
+        if not callable(process_identity_resolver) or not callable(process_probe):
+            raise TypeError("process identity resolver and probe must be callable")
+        self._process_identity_resolver = process_identity_resolver
+        self._process_probe = process_probe
         self._processes: dict[str, Any] = {}
         self._limits: dict[str, int] = {}
         self._deadline_timers: dict[str, threading.Timer] = {}
@@ -84,22 +91,6 @@ class SubprocessJobProvider:
             launch_options["start_new_session"] = True
         elif self._platform == "nt":
             launch_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        process = self._launcher(list(request.argv), **launch_options)
-        process_id = getattr(process, "pid", None)
-        if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
-            self._abort_unregistered(process)
-            raise RuntimeError("launcher did not return a positive process id")
-        if self._platform == "posix":
-            process_group_id = process_id
-        memory_token = None
-        if request.memory_limit_bytes is not None:
-            try:
-                memory_token = self._memory_limiter.apply(
-                    process, request.memory_limit_bytes,
-                )
-            except Exception:
-                self._abort_unregistered(process)
-                raise
         deadline_at = None
         if request.deadline_seconds is not None:
             deadline_at = (
@@ -110,18 +101,47 @@ class SubprocessJobProvider:
             "hard_deadline_at": deadline_at,
             "max_descendants": request.max_descendants,
             "memory_limit_bytes": request.memory_limit_bytes,
+            "launch_state": "reserved",
         })
+        record = self._registry.start(
+            request.identity,
+            metadata=persisted_metadata,
+        )
+        process = None
+        memory_token = None
         try:
-            record = self._registry.start(
-                request.identity,
+            process = self._launcher(list(request.argv), **launch_options)
+            process_id = getattr(process, "pid", None)
+            if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
+                raise RuntimeError("launcher did not return a positive process id")
+            if self._platform == "posix":
+                process_group_id = process_id
+            process_instance_identity = self._process_identity_resolver(process_id)
+            if request.deadline_seconds is not None and not process_instance_identity:
+                raise RuntimeError("deadline jobs require a durable process identity")
+            if request.memory_limit_bytes is not None:
+                memory_token = self._memory_limiter.apply(
+                    process, request.memory_limit_bytes,
+                )
+            record = self._registry.attach_process(
+                request.identity.job_id,
                 process_id=process_id,
                 process_group_id=process_group_id,
-                metadata=persisted_metadata,
+                metadata={
+                    "launch_state": "attached",
+                    "process_instance_identity": process_instance_identity,
+                },
             )
-        except Exception:
+        except Exception as exc:
             if memory_token is not None:
                 memory_token.close()
-            self._abort_unregistered(process)
+            if process is not None:
+                self._abort_unregistered(process)
+            self._registry.transition(
+                request.identity.job_id,
+                JobStatus.FAILED,
+                error=f"process launch failed ({type(exc).__name__})",
+            )
             raise
         self._processes[request.identity.job_id] = process
         self._limits[request.identity.job_id] = request.max_descendants
@@ -210,10 +230,19 @@ class SubprocessJobProvider:
             raise ValueError("kind_prefix is required")
         if isinstance(limit, bool) or not 1 <= limit <= 4096:
             raise ValueError("recovery limit must be within 1..4096")
+        iterator = getattr(self._registry, "iter_kind", None)
+        records = (
+            iterator(kind_prefix, include_terminal=True)
+            if callable(iterator)
+            else (
+                record
+                for record in self._registry.list(include_terminal=True, limit=limit)
+                if record.identity.kind.startswith(kind_prefix)
+            )
+        )
         return tuple(
             self._registry.view(record.identity.job_id)
-            for record in self._registry.list(include_terminal=True, limit=limit)
-            if record.identity.kind.startswith(kind_prefix)
+            for record in records
         )
 
     def _expire_deadline(self, job_id: str) -> None:
@@ -222,6 +251,33 @@ class SubprocessJobProvider:
             record = self._registry.poll(job_id)
             if record.is_terminal:
                 return
+            process = self._processes.get(job_id)
+            if process is not None:
+                poll = getattr(process, "poll", None)
+                if callable(poll) and poll() is not None:
+                    self.wait(job_id, timeout=0)
+                    return
+            else:
+                view = self._registry.view(job_id)
+                metadata = getattr(view, "metadata", None) or {}
+                expected_identity = metadata.get("process_instance_identity")
+                process_id = getattr(view, "process_id", None)
+                if not isinstance(expected_identity, str) or not expected_identity:
+                    self._mark_interrupted(
+                        job_id,
+                        "deadline owner identity was not durably recorded",
+                    )
+                    return
+                state, observed_identity = self._process_probe(
+                    process_id,
+                    expected_identity,
+                )
+                if state != PROCESS_ALIVE or observed_identity != expected_identity:
+                    self._mark_interrupted(
+                        job_id,
+                        "deadline owner process exited or changed identity",
+                    )
+                    return
             self.cancel(job_id, reason="process deadline exceeded")
         except (KeyError, OSError):
             # A normal completion or concurrent cancellation may win the race.
@@ -249,7 +305,13 @@ class SubprocessJobProvider:
         if not callable(list_jobs) or not callable(view_job):
             return
         now = datetime.now(timezone.utc)
-        for record in list_jobs(include_terminal=False, limit=1024):
+        iterator = getattr(self._registry, "iter_kind", None)
+        records = (
+            iterator("", include_terminal=False)
+            if callable(iterator)
+            else list_jobs(include_terminal=False, limit=1024)
+        )
+        for record in records:
             view = view_job(record.identity.job_id)
             metadata = getattr(view, "metadata", None) or {}
             raw_deadline = metadata.get("hard_deadline_at")
@@ -263,15 +325,32 @@ class SubprocessJobProvider:
                 if limit < 1:
                     raise ValueError
             except (TypeError, ValueError):
-                # Corrupt safety metadata must not silently grant unlimited runtime.
-                self._limits[record.identity.job_id] = 64
-                self._schedule_deadline(record.identity.job_id, 0)
+                self._mark_interrupted(
+                    record.identity.job_id,
+                    "persisted deadline safety metadata is invalid",
+                )
+                continue
+            process_identity_value = metadata.get("process_instance_identity")
+            if not isinstance(process_identity_value, str) or not process_identity_value:
+                self._mark_interrupted(
+                    record.identity.job_id,
+                    "persisted process identity is unavailable after restart",
+                )
                 continue
             self._limits[record.identity.job_id] = limit
             self._schedule_deadline(
                 record.identity.job_id,
                 (deadline.astimezone(timezone.utc) - now).total_seconds(),
             )
+
+    def _mark_interrupted(self, job_id: str, detail: str) -> None:
+        record = self._registry.transition(
+            job_id,
+            JobStatus.INTERRUPTED,
+            error=detail,
+        )
+        if self._jobs._lifecycle is not None:
+            self._jobs._lifecycle.record(record)
 
     def _discard_deadline(self, job_id: str) -> None:
         timer = self._deadline_timers.pop(job_id, None)
