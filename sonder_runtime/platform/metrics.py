@@ -33,6 +33,28 @@ except ImportError:  # pragma: no cover - exercised on minimal installs
 # re-validated here as defense in depth against a future caller passing free
 # text.
 _WORKER_LABEL = re.compile(r"^w[0-9]{1,3}$")
+_COMPUTE_REJECTION_REASONS = frozenset({
+    "node_avoided",
+    "unhealthy",
+    "future_observation",
+    "stale",
+    "workload_not_allowed",
+    "local_only",
+    "remote_not_allowed",
+    "missing_capability",
+    "missing_any_capability",
+    "workspace_unavailable",
+    "model_unavailable",
+    "ram_unknown",
+    "insufficient_ram",
+    "disk_unknown",
+    "insufficient_disk",
+    "vram_unknown",
+    "insufficient_vram",
+    "load_unknown",
+    "load_too_high",
+    "no_candidates",
+})
 
 
 class _NoopMetric:
@@ -189,6 +211,26 @@ class MetricsRegistry:
                 "slot and state",
                 ["worker", "state"], registry=self._registry,
             )
+            self.compute_nodes = Gauge(
+                "sonder_compute_nodes",
+                "Configured compute nodes by bounded current state",
+                ["state"], registry=self._registry,
+            )
+            self.compute_active_jobs = Gauge(
+                "sonder_compute_active_jobs",
+                "Active jobs reported by the compute fabric",
+                registry=self._registry,
+            )
+            self.compute_placements_total = Counter(
+                "sonder_compute_placements_total",
+                "Successful compute placements by local or remote route",
+                ["route"], registry=self._registry,
+            )
+            self.compute_placement_rejections_total = Counter(
+                "sonder_compute_placement_rejections_total",
+                "Compute placement rejections by bounded reason code",
+                ["reason"], registry=self._registry,
+            )
         else:
             noop = _NoopMetric()
             for name in (
@@ -205,6 +247,8 @@ class MetricsRegistry:
                 "redaction_failures_total", "auth_failures_total",
                 "ollama_worker_requests_total", "ollama_worker_duration_seconds",
                 "ollama_worker_circuit_state_total",
+                "compute_nodes", "compute_active_jobs",
+                "compute_placements_total", "compute_placement_rejections_total",
             ):
                 setattr(self, name, noop)
 
@@ -284,6 +328,38 @@ class MetricsRegistry:
         self.ollama_worker_circuit_state_total.labels(
             worker=label, state=transition
         ).inc()
+
+    def set_compute_inventory(
+        self,
+        *,
+        configured: int,
+        live: int,
+        healthy: int,
+        unhealthy: int,
+        stale: int,
+        active_jobs: int,
+    ) -> None:
+        """Publish content-free compute inventory using a fixed state label set."""
+        values = {
+            "configured": configured,
+            "live": live,
+            "healthy": healthy,
+            "unhealthy": unhealthy,
+            "stale": stale,
+        }
+        for state, value in values.items():
+            bounded = value if type(value) is int and value >= 0 else 0
+            self.compute_nodes.labels(state=state).set(bounded)
+        bounded_jobs = active_jobs if type(active_jobs) is int and active_jobs >= 0 else 0
+        self.compute_active_jobs.set(bounded_jobs)
+
+    def observe_compute_placement(self, *, route: str) -> None:
+        bounded = route if route in {"local", "remote"} else "other"
+        self.compute_placements_total.labels(route=bounded).inc()
+
+    def observe_compute_placement_rejection(self, *, reason: str) -> None:
+        bounded = reason if reason in _COMPUTE_REJECTION_REASONS else "other"
+        self.compute_placement_rejections_total.labels(reason=bounded).inc()
 
     def set_build_info(self, version: str, commit: str) -> None:
         self.build_info.labels(version=version, commit=commit).set(1)

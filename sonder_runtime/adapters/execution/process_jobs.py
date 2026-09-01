@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +15,12 @@ from ...application.jobs.session_lifecycle import JobRegistryLifecycleAdapter
 from ...application.execution.world_control import OutputStream
 from .durable_output import DurableExecutionOutput
 from ...application.ports.jobs import JobStatus
+from ...platform import logging as runtime_logging
+from ..process_liveness import PROCESS_ALIVE, probe_process, process_identity
+from ..extensions.memory_limits import (
+    PreparedProcessContainment,
+    ProcessContainmentResult,
+)
 
 
 class SubprocessJobProvider:
@@ -34,9 +41,14 @@ class SubprocessJobProvider:
         lifecycle: JobRegistryLifecycleAdapter | None = None,
         output: DurableExecutionOutput | None = None,
         inline_output_bytes: int = 16 * 1024,
+        memory_limiter=None,
+        process_identity_resolver=process_identity,
+        process_probe=probe_process,
+        timer_factory=threading.Timer,
+        cleanup_retry_seconds: float = 1.0,
     ) -> None:
         if not all(callable(getattr(registry, name, None)) for name in (
-            "start", "poll", "transition", "append_output", "stream",
+            "start", "attach_process", "poll", "transition", "append_output", "stream",
         )):
             raise TypeError("registry must provide the durable process-job operations")
         if not callable(getattr(process_cleanup, "cleanup", None)):
@@ -49,16 +61,38 @@ class SubprocessJobProvider:
         self._platform = platform_name or os.name
         self._output = output
         self._inline_output_bytes = inline_output_bytes
+        if memory_limiter is None:
+            from ..extensions.memory_limits import NativeExtensionMemoryLimiter
+            memory_limiter = NativeExtensionMemoryLimiter(platform_name=self._platform)
+        if not callable(getattr(memory_limiter, "apply", None)):
+            raise TypeError("memory_limiter must provide apply")
+        self._memory_limiter = memory_limiter
+        if not callable(process_identity_resolver) or not callable(process_probe):
+            raise TypeError("process identity resolver and probe must be callable")
+        self._process_identity_resolver = process_identity_resolver
+        self._process_probe = process_probe
+        if not callable(timer_factory):
+            raise TypeError("timer_factory must be callable")
+        if cleanup_retry_seconds <= 0 or cleanup_retry_seconds > 60:
+            raise ValueError("cleanup_retry_seconds must be within (0, 60]")
+        self._timer_factory = timer_factory
+        self._cleanup_retry_seconds = float(cleanup_retry_seconds)
         self._processes: dict[str, Any] = {}
         self._limits: dict[str, int] = {}
+        self._deadline_timers: dict[str, threading.Timer] = {}
+        self._launch_locks: dict[str, threading.RLock] = {}
+        self._memory_tokens: dict[str, Any] = {}
+        self._unresolved_scopes: dict[str, dict[str, Any]] = {}
         self._output_threads: dict[str, tuple[threading.Thread, ...]] = {}
         self._output_failures: dict[str, str] = {}
         self._output_failure_lock = threading.Lock()
+        self._timer_lock = threading.RLock()
+        self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
         if not isinstance(request, ProcessJobRequest):
             raise TypeError("request must be a ProcessJobRequest")
-        environment = dict(os.environ)
+        environment = runtime_logging.child_environment()
         environment.update(request.environment)
         launch_options: dict[str, Any] = {
             "cwd": None if request.cwd is None else str(Path(request.cwd)),
@@ -73,25 +107,185 @@ class SubprocessJobProvider:
             launch_options["start_new_session"] = True
         elif self._platform == "nt":
             launch_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        process = self._launcher(list(request.argv), **launch_options)
-        process_id = getattr(process, "pid", None)
-        if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
-            self._abort_unregistered(process)
-            raise RuntimeError("launcher did not return a positive process id")
-        if self._platform == "posix":
-            process_group_id = process_id
+        launch_argv = tuple(request.argv)
+        prepared_scope: PreparedProcessContainment | None = None
+        containment_options = getattr(self._memory_limiter, "launch_options", None)
+        apply_process_limits = getattr(self._memory_limiter, "apply_process_limits", None)
+        resume_process = getattr(self._memory_limiter, "resume", None)
+        native_containment = False
+        if request.require_job_scope:
+            prepare_scope = getattr(self._memory_limiter, "prepare_process_job", None)
+            if not callable(prepare_scope):
+                raise RuntimeError("strong process containment is not configured")
+            prepared_scope = prepare_scope(
+                request.identity.job_id,
+                launch_argv,
+                request.memory_limit_bytes,
+                request.max_descendants + 1,
+            )
+            if not isinstance(prepared_scope, PreparedProcessContainment):
+                raise TypeError("native job containment returned an invalid preparation")
+            launch_argv = prepared_scope.argv
+            prepared_options = dict(prepared_scope.launch_options)
+            if "creationflags" in prepared_options and "creationflags" in launch_options:
+                launch_options["creationflags"] |= int(prepared_options.pop("creationflags"))
+            launch_options.update(prepared_options)
+        elif (
+            request.memory_limit_bytes is not None
+            and callable(containment_options)
+            and callable(apply_process_limits)
+        ):
+            native_containment = True
+            prepared_options = containment_options(
+                request.memory_limit_bytes,
+                request.max_descendants + 1,
+            )
+            if not isinstance(prepared_options, dict):
+                raise TypeError("native containment launch options must be a mapping")
+            prepared_options = dict(prepared_options)
+            if "creationflags" in prepared_options and "creationflags" in launch_options:
+                launch_options["creationflags"] |= int(prepared_options.pop("creationflags"))
+            launch_options.update(prepared_options)
+        deadline_at = None
+        if request.deadline_seconds is not None:
+            deadline_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=request.deadline_seconds)
+            ).isoformat()
+        persisted_metadata = dict(request.metadata)
+        persisted_metadata.update({
+            "hard_deadline_at": deadline_at,
+            "max_descendants": request.max_descendants,
+            "memory_limit_bytes": request.memory_limit_bytes,
+            "launch_state": "reserved",
+            "require_job_scope": "1" if request.require_job_scope else "0",
+        })
+        if prepared_scope is not None:
+            persisted_metadata.update(dict(prepared_scope.metadata))
+        record = self._registry.start(
+            request.identity,
+            metadata=persisted_metadata,
+        )
+        process = None
+        memory_token = None if prepared_scope is None else prepared_scope.token
+        launch_lock = threading.RLock()
+        with self._timer_lock:
+            self._launch_locks[request.identity.job_id] = launch_lock
+        if memory_token is not None:
+            self._limits[request.identity.job_id] = request.max_descendants
+            self._memory_tokens[request.identity.job_id] = memory_token
+        launch_lock.acquire()
         try:
-            record = self._registry.start(
-                request.identity,
+            if deadline_at is not None:
+                self._schedule_deadline_at(request.identity.job_id, deadline_at)
+            current = self._registry.poll(request.identity.job_id)
+            if current.is_terminal or current.status is JobStatus.CANCELLATION_REQUESTED:
+                raise RuntimeError("process deadline expired before launch")
+            process = self._launcher(list(launch_argv), **launch_options)
+            process_id = getattr(process, "pid", None)
+            if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
+                raise RuntimeError("launcher did not return a positive process id")
+            if self._platform == "posix":
+                process_group_id = process_id
+            process_instance_identity = self._process_identity_resolver(process_id)
+            if request.deadline_seconds is not None and not process_instance_identity:
+                raise RuntimeError("deadline jobs require a durable process identity")
+            if prepared_scope is not None and prepared_scope.post_attach_required:
+                if not callable(apply_process_limits):
+                    raise RuntimeError("post-create process containment is not configured")
+                memory_token = apply_process_limits(
+                    process,
+                    request.memory_limit_bytes,
+                    request.max_descendants + 1,
+                )
+            elif native_containment:
+                memory_token = apply_process_limits(
+                    process,
+                    request.memory_limit_bytes,
+                    request.max_descendants + 1,
+                )
+            elif request.memory_limit_bytes is not None:
+                memory_token = self._memory_limiter.apply(
+                    process, request.memory_limit_bytes,
+                )
+            if memory_token is not None:
+                self._limits[request.identity.job_id] = request.max_descendants
+                self._memory_tokens[request.identity.job_id] = memory_token
+            if self._registry.poll(request.identity.job_id).status is JobStatus.CANCELLATION_REQUESTED:
+                raise RuntimeError("process deadline expired during launch")
+            record = self._registry.attach_process(
+                request.identity.job_id,
                 process_id=process_id,
                 process_group_id=process_group_id,
+                metadata={
+                    "launch_state": "attached",
+                    "process_instance_identity": process_instance_identity,
+                },
             )
-        except Exception:
-            self._abort_unregistered(process)
+            if (
+                (native_containment or (
+                    prepared_scope is not None and prepared_scope.post_attach_required
+                ))
+                and callable(resume_process)
+            ):
+                resume_process(process)
+            self._processes[request.identity.job_id] = process
+            self._limits[request.identity.job_id] = request.max_descendants
+            if memory_token is not None:
+                self._memory_tokens[request.identity.job_id] = memory_token
+            self._start_output_readers(request.identity.job_id, process)
+        except Exception as exc:
+            if process is not None:
+                self._abort_unregistered(process)
+            containment = self._quiesce_containment(
+                request.identity.job_id, force=True,
+            )
+            cleanup_complete = containment is None or containment.complete
+            if cleanup_complete and memory_token is not None:
+                try:
+                    memory_token.close()
+                except Exception:
+                    cleanup_complete = False
+                else:
+                    self._memory_tokens.pop(request.identity.job_id, None)
+            current = self._registry.poll(request.identity.job_id)
+            if cleanup_complete:
+                self._limits.pop(request.identity.job_id, None)
+                self._discard_deadline(request.identity.job_id)
+                if not current.is_terminal:
+                    try:
+                        if current.status is JobStatus.CANCELLATION_REQUESTED:
+                            self._jobs.cancel(
+                                request.identity.job_id,
+                                "process deadline expired during launch",
+                                max_descendants=request.max_descendants,
+                            )
+                        else:
+                            self._registry.transition(
+                                request.identity.job_id,
+                                JobStatus.FAILED,
+                                error=f"process launch failed ({type(exc).__name__})",
+                            )
+                    except Exception:
+                        pass
+            else:
+                self._jobs.request_cancellation(
+                    request.identity.job_id,
+                    (
+                        containment.detail
+                        if containment is not None and containment.detail
+                        else "process launch cleanup is incomplete"
+                    ),
+                    max_descendants=request.max_descendants,
+                )
+                self._schedule_deadline(
+                    request.identity.job_id, self._cleanup_retry_seconds,
+                )
             raise
-        self._processes[request.identity.job_id] = process
-        self._limits[request.identity.job_id] = request.max_descendants
-        self._start_output_readers(request.identity.job_id, process)
+        finally:
+            launch_lock.release()
+            with self._timer_lock:
+                if self._launch_locks.get(request.identity.job_id) is launch_lock:
+                    self._launch_locks.pop(request.identity.job_id, None)
         return ProcessJobStart(record, process_id, process_group_id)
 
     def wait(self, job_id: str, *, timeout: float | None = None) -> ProcessJobWait:
@@ -120,6 +314,34 @@ class SubprocessJobProvider:
                 exit_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return ProcessJobWait(self._registry.poll(job_id), None, timed_out=True)
+        containment = self._quiesce_containment(job_id, force=True)
+        if containment is not None and not containment.complete:
+            records = self._jobs.request_cancellation(
+                job_id,
+                containment.detail or "process containment cleanup is incomplete",
+                max_descendants=self._limits.get(job_id, 64),
+            )
+            self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+            return ProcessJobWait(records[-1], exit_code)
+        current = self._registry.poll(job_id)
+        if containment is not None and (
+            containment.forced or current.status is JobStatus.CANCELLATION_REQUESTED
+        ):
+            reason = (
+                containment.detail
+                or "job scope required forced descendant cleanup after process exit"
+            )
+            if current.status is not JobStatus.CANCELLATION_REQUESTED:
+                self._jobs.request_cancellation(
+                    job_id, reason, max_descendants=self._limits.get(job_id, 64),
+                )
+            records = self._jobs.cancel(
+                job_id, reason, max_descendants=self._limits.get(job_id, 64),
+            )
+            self._forget_local_job(job_id)
+            return ProcessJobWait(records[-1], exit_code)
+        if containment is not None:
+            self._release_memory_limit(job_id)
         output_failure = self._take_output_failure(job_id)
         status = (
             JobStatus.SUCCEEDED
@@ -142,23 +364,357 @@ class SubprocessJobProvider:
         self._processes.pop(job_id, None)
         self._limits.pop(job_id, None)
         self._output_threads.pop(job_id, None)
+        self._discard_deadline(job_id)
+        if containment is None:
+            self._release_memory_limit(job_id)
         return ProcessJobWait(record, exit_code)
 
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
+        with self._timer_lock:
+            launch_lock = self._launch_locks.get(job_id)
+        if launch_lock is None:
+            return self._cancel_owned(job_id, reason)
+        with launch_lock:
+            return self._cancel_owned(job_id, reason)
+
+    def _cancel_owned(self, job_id: str, reason: str) -> JobCancellationResult:
         limit = self._limits.get(job_id, 64)
-        result = self._jobs.cancel_with_cleanup(job_id, reason, max_descendants=limit)
+        unresolved_scope = self._unresolved_scopes.get(job_id)
+        if unresolved_scope is not None and not self._restore_scope_owner(
+            job_id, unresolved_scope,
+        ):
+            records = self._jobs.request_cancellation(
+                job_id,
+                reason,
+                max_descendants=limit,
+            )
+            result = JobCancellationResult(
+                records,
+                cleanup_completed=False,
+                detail="persisted job scope ownership is unresolved",
+            )
+            if self._jobs._lifecycle is not None:
+                self._jobs._lifecycle.record_many(result.records)
+            self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+            return result
+        containment = self._quiesce_containment(job_id, force=True)
+        if containment is not None and not containment.complete:
+            records = self._jobs.request_cancellation(
+                job_id,
+                reason,
+                max_descendants=limit,
+            )
+            result = JobCancellationResult(
+                records,
+                cleanup_completed=False,
+                detail=containment.detail or "job scope cleanup is incomplete",
+            )
+        elif containment is not None:
+            current = self._registry.poll(job_id)
+            if current.status is not JobStatus.CANCELLATION_REQUESTED:
+                self._jobs.request_cancellation(
+                    job_id,
+                    reason,
+                    max_descendants=limit,
+                )
+            records = self._jobs.cancel(job_id, reason, max_descendants=limit)
+            result = JobCancellationResult(
+                records,
+                cleanup_completed=True,
+                detail=containment.detail,
+            )
+        else:
+            result = self._jobs.cancel_with_cleanup(job_id, reason, max_descendants=limit)
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record_many(result.records)
         if result.cleanup_completed:
-            process = self._processes.pop(job_id, None)
-            self._limits.pop(job_id, None)
-            self._output_threads.pop(job_id, None)
+            process = self._processes.get(job_id)
+            self._forget_local_job(job_id)
             if process is not None:
                 try:
                     process.wait(timeout=0)
                 except (subprocess.TimeoutExpired, OSError):
                     pass
+        else:
+            self._schedule_deadline(job_id, self._cleanup_retry_seconds)
         return result
+
+    def poll(self, job_id: str):
+        return self._registry.poll(job_id)
+
+    def stream(
+        self,
+        job_id: str,
+        *,
+        max_events: int = 32,
+        max_bytes: int = 16 * 1024,
+    ):
+        return self._registry.stream(
+            job_id,
+            max_events=max_events,
+            max_bytes=max_bytes,
+        )
+
+    def recover(self, *, kind_prefix: str, limit: int = 1024):
+        if not isinstance(kind_prefix, str) or not kind_prefix:
+            raise ValueError("kind_prefix is required")
+        if isinstance(limit, bool) or not 1 <= limit <= 4096:
+            raise ValueError("recovery limit must be within 1..4096")
+        iterator = getattr(self._registry, "iter_kind", None)
+        records = (
+            iterator(kind_prefix, include_terminal=True)
+            if callable(iterator)
+            else (
+                record
+                for record in self._registry.list(include_terminal=True, limit=limit)
+                if record.identity.kind.startswith(kind_prefix)
+            )
+        )
+        return tuple(
+            self._registry.view(record.identity.job_id)
+            for record in records
+        )
+
+    def _expire_deadline(self, job_id: str) -> None:
+        """Cancel a still-live process tree even when its controller vanished."""
+        self._discard_deadline(job_id)
+        with self._timer_lock:
+            launch_lock = self._launch_locks.get(job_id)
+        if launch_lock is None:
+            self._expire_deadline_owned(job_id)
+            return
+        with launch_lock:
+            self._expire_deadline_owned(job_id)
+
+    def _expire_deadline_owned(self, job_id: str) -> None:
+        retry_cleanup = False
+        try:
+            record = self._registry.poll(job_id)
+            if record.is_terminal:
+                return
+            process = self._processes.get(job_id)
+            if process is not None:
+                poll = getattr(process, "poll", None)
+                if callable(poll) and poll() is not None:
+                    self.wait(job_id, timeout=0)
+                    return
+            else:
+                view = self._registry.view(job_id)
+                metadata = getattr(view, "metadata", None) or {}
+                if job_id in self._unresolved_scopes:
+                    self.cancel(job_id, reason="process deadline exceeded")
+                    return
+                if job_id in self._memory_tokens:
+                    self.cancel(job_id, reason="process deadline exceeded")
+                    return
+                if metadata.get("launch_state") == "reserved":
+                    self._jobs.request_cancellation(
+                        job_id,
+                        "process deadline exceeded during launch",
+                        max_descendants=self._limits.get(job_id, 64),
+                    )
+                    retry_cleanup = True
+                    return
+                expected_identity = metadata.get("process_instance_identity")
+                process_id = getattr(view, "process_id", None)
+                if not isinstance(expected_identity, str) or not expected_identity:
+                    self._mark_interrupted(
+                        job_id,
+                        "deadline owner identity was not durably recorded",
+                    )
+                    return
+                state, observed_identity = self._process_probe(
+                    process_id,
+                    expected_identity,
+                )
+                if state != PROCESS_ALIVE or observed_identity != expected_identity:
+                    self._mark_interrupted(
+                        job_id,
+                        "deadline owner process exited or changed identity",
+                    )
+                    return
+            self.cancel(job_id, reason="process deadline exceeded")
+        except KeyError:
+            # A normal completion or concurrent cancellation may win the race.
+            return
+        except OSError:
+            retry_cleanup = True
+        finally:
+            if retry_cleanup:
+                try:
+                    if not self._registry.poll(job_id).is_terminal:
+                        self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                except KeyError:
+                    pass
+
+    def _schedule_deadline(self, job_id: str, delay_seconds: float) -> None:
+        timer = self._timer_factory(
+            max(0.0, delay_seconds),
+            self._expire_deadline,
+            args=(job_id,),
+        )
+        timer.daemon = True
+        with self._timer_lock:
+            prior = self._deadline_timers.get(job_id)
+            if prior is not None and prior is not threading.current_thread():
+                prior.cancel()
+            self._deadline_timers[job_id] = timer
+        timer.start()
+
+    def _schedule_deadline_at(self, job_id: str, raw_deadline: str) -> None:
+        deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        delay = (deadline.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+        self._schedule_deadline(job_id, delay)
+
+    def _restore_deadlines(self) -> None:
+        """Re-arm persisted hard deadlines after a worker/provider restart."""
+        list_jobs = getattr(self._registry, "list", None)
+        view_job = getattr(self._registry, "view", None)
+        if not callable(list_jobs) or not callable(view_job):
+            return
+        iterator = getattr(self._registry, "iter_kind", None)
+        records = (
+            iterator("", include_terminal=False)
+            if callable(iterator)
+            else list_jobs(include_terminal=False, limit=1024)
+        )
+        for record in records:
+            view = view_job(record.identity.job_id)
+            metadata = getattr(view, "metadata", None) or {}
+            is_systemd_scope = metadata.get("containment_kind") == "systemd_scope"
+            if is_systemd_scope:
+                if not self._restore_scope_owner(record.identity.job_id, metadata):
+                    self._jobs.request_cancellation(
+                        record.identity.job_id,
+                        "persisted systemd scope ownership is unresolved",
+                        max_descendants=64,
+                    )
+                    self._limits[record.identity.job_id] = 64
+                    self._schedule_deadline(record.identity.job_id, 0)
+                    continue
+            raw_deadline = metadata.get("hard_deadline_at")
+            if not isinstance(raw_deadline, str) or not raw_deadline:
+                if is_systemd_scope:
+                    self._jobs.request_cancellation(
+                        record.identity.job_id,
+                        "persisted deadline safety metadata is missing",
+                        max_descendants=64,
+                    )
+                    self._limits[record.identity.job_id] = 64
+                    self._schedule_deadline(record.identity.job_id, 0)
+                continue
+            try:
+                deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                limit = int(metadata.get("max_descendants", 64))
+                if limit < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                if is_systemd_scope:
+                    self._jobs.request_cancellation(
+                        record.identity.job_id,
+                        "persisted deadline safety metadata is invalid",
+                        max_descendants=64,
+                    )
+                    self._limits[record.identity.job_id] = 64
+                    self._schedule_deadline(record.identity.job_id, 0)
+                else:
+                    self._mark_interrupted(
+                        record.identity.job_id,
+                        "persisted deadline safety metadata is invalid",
+                    )
+                continue
+            self._limits[record.identity.job_id] = limit
+            if is_systemd_scope:
+                self._schedule_deadline_at(record.identity.job_id, raw_deadline)
+                continue
+            process_identity_value = metadata.get("process_instance_identity")
+            if not isinstance(process_identity_value, str) or not process_identity_value:
+                self._mark_interrupted(
+                    record.identity.job_id,
+                    "persisted process identity is unavailable after restart",
+                )
+                continue
+            self._schedule_deadline_at(record.identity.job_id, raw_deadline)
+
+    def _mark_interrupted(self, job_id: str, detail: str) -> None:
+        record = self._registry.transition(
+            job_id,
+            JobStatus.INTERRUPTED,
+            error=detail,
+        )
+        if self._jobs._lifecycle is not None:
+            self._jobs._lifecycle.record(record)
+
+    def _discard_deadline(self, job_id: str) -> None:
+        with self._timer_lock:
+            timer = self._deadline_timers.pop(job_id, None)
+        if timer is not None and timer is not threading.current_thread():
+            timer.cancel()
+
+    def _quiesce_containment(
+        self,
+        job_id: str,
+        *,
+        force: bool,
+    ) -> ProcessContainmentResult | None:
+        token = self._memory_tokens.get(job_id)
+        if token is None:
+            return None
+        quiesce = getattr(token, "quiesce", None)
+        if not callable(quiesce):
+            return None
+        try:
+            result = quiesce(force=force)
+        except Exception as exc:
+            return ProcessContainmentResult(
+                False,
+                forced=force,
+                detail=f"process containment cleanup failed: {type(exc).__name__}",
+            )
+        if not isinstance(result, ProcessContainmentResult):
+            return ProcessContainmentResult(
+                False,
+                forced=force,
+                detail="process containment returned invalid cleanup proof",
+            )
+        return result
+
+    def _restore_scope_owner(self, job_id: str, metadata: dict[str, Any]) -> bool:
+        if job_id in self._memory_tokens:
+            self._unresolved_scopes.pop(job_id, None)
+            return True
+        restore_scope = getattr(self._memory_limiter, "restore_process_job", None)
+        if not callable(restore_scope):
+            self._unresolved_scopes[job_id] = dict(metadata)
+            return False
+        try:
+            token = restore_scope(job_id, metadata)
+        except Exception:
+            self._unresolved_scopes[job_id] = dict(metadata)
+            return False
+        if token is None:
+            self._unresolved_scopes[job_id] = dict(metadata)
+            return False
+        self._memory_tokens[job_id] = token
+        self._unresolved_scopes.pop(job_id, None)
+        return True
+
+    def _forget_local_job(self, job_id: str) -> None:
+        self._processes.pop(job_id, None)
+        self._limits.pop(job_id, None)
+        self._unresolved_scopes.pop(job_id, None)
+        self._output_threads.pop(job_id, None)
+        self._discard_deadline(job_id)
+        self._release_memory_limit(job_id)
+
+    def _release_memory_limit(self, job_id: str) -> None:
+        token = self._memory_tokens.pop(job_id, None)
+        if token is not None:
+            token.close()
 
     def _start_output_readers(self, job_id: str, process: Any) -> None:
         """Publish stdout/stderr incrementally when the process exposes pipes.

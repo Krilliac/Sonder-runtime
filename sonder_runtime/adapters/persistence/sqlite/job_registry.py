@@ -9,8 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Lock
-from typing import Any, Callable
-from typing import Iterator
+from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
 from sonder_runtime.application.execution.world_control import (
@@ -48,7 +47,8 @@ CREATE TABLE IF NOT EXISTS durable_job (
     lease_until TEXT,
     attempt INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
-    claim_token TEXT
+    claim_token TEXT,
+    metadata_json TEXT
 );
 CREATE INDEX IF NOT EXISTS durable_job_parent ON durable_job(parent_job_id);
 CREATE INDEX IF NOT EXISTS durable_job_operation ON durable_job(operation_id);
@@ -176,12 +176,13 @@ class SQLiteDurableJobRegistry:
             "SELECT job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
             "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
             "output_dropped_before,worker_id,lease_until,attempt,max_attempts,claim_token "
+            ",metadata_json "
             "FROM durable_job WHERE job_id=?", (job_id,)
         ).fetchone()
 
     def start(self, identity: JobIdentity, *, parent_job_id: str | None = None,
               process_id: int | None = None, process_group_id: int | None = None,
-              max_attempts: int = 3) -> JobRecord:
+              max_attempts: int = 3, metadata: Mapping[str, Any] | None = None) -> JobRecord:
         if not isinstance(identity, JobIdentity):
             raise TypeError("identity must be a JobIdentity")
         parent = parent_job_id if parent_job_id is not None else identity.parent_job_id
@@ -194,6 +195,8 @@ class SQLiteDurableJobRegistry:
         if (isinstance(max_attempts, bool) or not isinstance(max_attempts, int)
                 or not 1 <= max_attempts <= MAX_JOB_ATTEMPTS):
             raise ValueError(f"max_attempts must be between 1 and {MAX_JOB_ATTEMPTS}")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
         if parent is not None and parent == identity.parent_job_id:
             pass
         elif parent is not None:
@@ -208,11 +211,12 @@ class SQLiteDurableJobRegistry:
             try:
                 connection.execute(
                     "INSERT INTO durable_job(job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,"
-                    "status,revision,created_at,updated_at,result_json,error,process_id,process_group_id,max_attempts) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "status,revision,created_at,updated_at,result_json,error,process_id,process_group_id,max_attempts,metadata_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identity.job_id, identity.kind, identity.operation_id, identity.idempotency_key,
                      identity.parent_job_id, identity.parent_session_id, JobStatus.PENDING.value, 0,
-                     now, now, None, "", process_id, process_group_id, max_attempts),
+                     now, now, None, "", process_id, process_group_id, max_attempts,
+                     _json(dict(metadata or {}))),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"job {identity.job_id!r} already exists") from exc
@@ -220,6 +224,54 @@ class SQLiteDurableJobRegistry:
             identity, JobStatus.PENDING, 0, now, now,
             attempt=0, max_attempts=max_attempts,
         )
+
+    def attach_process(
+        self,
+        job_id: str,
+        *,
+        process_id: int,
+        process_group_id: int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> JobRecord:
+        """Atomically bind process identity to a reserved durable job."""
+        if isinstance(process_id, bool) or process_id <= 0:
+            raise ValueError("process_id must be positive")
+        if process_group_id is not None and (
+            isinstance(process_group_id, bool) or process_group_id <= 0
+        ):
+            raise ValueError("process_group_id must be positive")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            current = self._record(row)
+            if current is None:
+                raise KeyError(f"unknown job {job_id!r}")
+            if current.is_terminal:
+                raise ValueError("cannot attach a process to a terminal job")
+            if row[12] is not None:
+                raise ValueError("job already has an attached process")
+            current_metadata = {} if row[21] is None else json.loads(row[21])
+            current_metadata.update(dict(metadata or {}))
+            now = self._clock()
+            changed = connection.execute(
+                "UPDATE durable_job SET process_id=?,process_group_id=?,metadata_json=?,"
+                "revision=revision+1,updated_at=? WHERE job_id=? AND revision=? AND process_id IS NULL",
+                (
+                    process_id,
+                    process_group_id,
+                    _json(current_metadata),
+                    now,
+                    job_id,
+                    current.revision,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("job process attachment conflicted")
+            record = self._record(self._row(connection, job_id))
+            assert record is not None
+            return record
 
     def create(self, identity: JobIdentity, *, metadata: dict[str, Any] | None = None) -> JobRecord:
         """Satisfy the persistence-neutral JobRegistry creation port."""
@@ -263,6 +315,45 @@ class SQLiteDurableJobRegistry:
             ).fetchall()
         return tuple(self._record(row) for row in rows if row is not None)  # type: ignore[misc]
 
+    def iter_kind(
+        self,
+        kind_prefix: str,
+        *,
+        include_terminal: bool = True,
+        page_size: int = 256,
+    ):
+        """Page deterministically through every record matching a kind prefix."""
+        if not isinstance(kind_prefix, str):
+            raise TypeError("kind_prefix must be text")
+        if isinstance(page_size, bool) or not 1 <= page_size <= 4096:
+            raise ValueError("page_size must be within 1..4096")
+        after_rowid = 0
+        while True:
+            clauses = ["rowid>?", "kind LIKE ? ESCAPE '\\'"]
+            escaped = kind_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            args: list[Any] = [after_rowid, escaped + "%"]
+            if not include_terminal:
+                clauses.append("status NOT IN (?,?,?)")
+                args.extend(status.value for status in TERMINAL_JOB_STATUSES)
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT rowid,job_id,kind,operation_id,idempotency_key,parent_job_id,parent_session_id,status,"
+                    "revision,created_at,updated_at,result_json,error,process_id,process_group_id,output_next,"
+                    "output_dropped_before,worker_id,lease_until,attempt,max_attempts,claim_token "
+                    "FROM durable_job WHERE " + " AND ".join(clauses) +
+                    " ORDER BY rowid LIMIT ?",
+                    (*args, page_size),
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                after_rowid = int(row[0])
+                record = self._record(row[1:])
+                if record is not None:
+                    yield record
+            if len(rows) < page_size:
+                return
+
     def all(self, *, limit: int = 1000) -> tuple[JobRecord, ...]:
         if isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be positive")
@@ -284,8 +375,9 @@ class SQLiteDurableJobRegistry:
             children = tuple(item[0] for item in connection.execute(
                 "SELECT job_id FROM durable_job WHERE parent_job_id=? ORDER BY rowid", (job_id,)
             ).fetchall())
+        metadata = {} if row[21] is None else json.loads(row[21])
         return DurableJobView(record, record.identity.parent_job_id, children,
-                              row[12], row[13])
+                              row[12], row[13], metadata)
 
     def append_output(self, job_id: str, stream: OutputStream, data: str,
                       *, spill: SpillReference | None = None) -> None:
@@ -664,6 +756,54 @@ class SQLiteDurableJobRegistry:
             records = tuple(self._record(self._row(connection, item)) for item in ids)
             return tuple(record for record in records if record is not None)
 
+    def request_cancellation(
+        self,
+        job_id: str,
+        *,
+        reason: str = "cancelled",
+        max_descendants: int = 256,
+    ) -> tuple[JobRecord, ...]:
+        """Persist cancellation intent without claiming process quiescence."""
+        if not reason.strip():
+            raise ValueError("cancellation reason is required")
+        if isinstance(max_descendants, bool) or max_descendants < 0:
+            raise ValueError("max_descendants must be a non-negative integer")
+        queue = [job_id]
+        ids: list[str] = []
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            while queue:
+                current = queue.pop(0)
+                if current in ids:
+                    continue
+                if self._row(connection, current) is None:
+                    raise KeyError(f"unknown job {current!r}")
+                ids.append(current)
+                if len(ids) - 1 > max_descendants:
+                    raise ValueError("job cancellation exceeds max_descendants")
+                queue.extend(item[0] for item in connection.execute(
+                    "SELECT job_id FROM durable_job WHERE parent_job_id=? ORDER BY rowid",
+                    (current,),
+                ).fetchall())
+            now = self._clock()
+            for current in ids:
+                connection.execute(
+                    "UPDATE durable_job SET status=?,revision=revision+1,updated_at=?,error=? "
+                    "WHERE job_id=? AND status NOT IN (?,?,?,?)",
+                    (
+                        JobStatus.CANCELLATION_REQUESTED.value,
+                        now,
+                        reason,
+                        current,
+                        JobStatus.SUCCEEDED.value,
+                        JobStatus.FAILED.value,
+                        JobStatus.CANCELLED.value,
+                        JobStatus.CANCELLATION_REQUESTED.value,
+                    ),
+                )
+            records = tuple(self._record(self._row(connection, item)) for item in ids)
+            return tuple(record for record in records if record is not None)
+
     def collect(self, job_id: str) -> JobRecord:
         record = self.poll(job_id)
         if not record.is_terminal:
@@ -770,6 +910,8 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         )
     if "claim_token" not in columns:
         connection.execute("ALTER TABLE durable_job ADD COLUMN claim_token TEXT")
+    if "metadata_json" not in columns:
+        connection.execute("ALTER TABLE durable_job ADD COLUMN metadata_json TEXT")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS durable_job_stale_lease "
         "ON durable_job(status, lease_until)"

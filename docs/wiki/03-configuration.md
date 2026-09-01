@@ -67,6 +67,14 @@ worker_cooldown_seconds = 30
 worker_capability_ttl_seconds = 300
 worker_probe_timeout_ms = 2000
 
+[compute]
+allow_remote = false               # private-node compute consent gate
+node_id = "local"
+snapshot_ttl_seconds = 30
+probe_timeout_ms = 2000
+# Add [[compute.nodes]] and worker-owned [[compute.jobs]] only after following
+# docs/runbooks/compute-fabric.md. Remote jobs also require per-request consent.
+
 [features]
 cloud = false                       # hosted-model consent gate
 web = false                         # web tools consent gate
@@ -130,7 +138,10 @@ ceiling and are visible in `master_capacity`. Without a per-run `worker_cap`,
 the conservative hardware-derived worker width is unchanged.
 
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
-`SONDER_ALLOW_REMOTE_OLLAMA`. To add independent Ollama hosts to the local
+`SONDER_ALLOW_REMOTE_OLLAMA`, and `SONDER_ALLOW_REMOTE_COMPUTE`. These are
+independent: enabling private-node compute does not enable remote inference or
+hosted models. Remote compute also requires per-workload consent. See
+[Private Compute Fabric](../runbooks/compute-fabric.md). To add independent Ollama hosts to the local
 inference pool, set `SONDER_OLLAMA_WORKERS` to a comma- or semicolon-separated
 list of origins, for example:
 

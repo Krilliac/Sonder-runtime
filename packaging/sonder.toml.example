@@ -38,6 +38,15 @@ allow_remote = false
 startup_timeout_seconds = 60
 request_timeout_seconds = 300
 
+[compute]
+# Private-node compute is a separate consent lane from remote Ollama and cloud.
+# See docs/runbooks/compute-fabric.md before adding [[compute.nodes]] or
+# worker-owned [[compute.jobs]]. Every remote workload must also opt in.
+allow_remote = false
+node_id = "local"
+snapshot_ttl_seconds = 30
+probe_timeout_ms = 2000
+
 [features]
 cloud = false
 web = false

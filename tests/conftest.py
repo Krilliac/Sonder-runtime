@@ -55,6 +55,28 @@ def _isolate_fleet_ledger():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_typed_ollama_endpoint():
+    """Restore the process-global typed Ollama endpoint around each test.
+
+    ``bootstrap.app`` pins the typed endpoint (``configure_typed_endpoint``)
+    when it composes an application from a config, and from then on the
+    process ignores ``OLLAMA_HOST``. A composition test that never called
+    ``reset_for_tests`` therefore made every later origin-policy test in the
+    same process silently test the pinned default instead of its monkeypatched
+    host -- ``test_promotion_eval``'s loopback rejections failed only when
+    scheduled after a composing test on the same xdist worker. Save/restore
+    rather than unconditional reset, so a test that legitimately configures
+    the endpoint still sees its own value while it runs.
+    """
+    from sonder_runtime.adapters.inference import ollama_endpoint
+
+    with ollama_endpoint._configuration_lock:
+        before = ollama_endpoint._configured_endpoint
+    yield
+    ollama_endpoint.configure_typed_endpoint(before)
+
+
+@pytest.fixture(autouse=True)
 def _configure_http_legacy_boundary(monkeypatch):
     """Exercise the same explicit runtime injection as the serve bootstrap."""
     import server

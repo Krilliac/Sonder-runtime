@@ -87,7 +87,8 @@ class _Jobs:
 
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
-        "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect", "data_inspect", "data_query", "dependency_inventory",
+        "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect",
+        "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit", "data_inspect", "data_query", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
         "file_batch_write", "file_copy", "file_delete", "file_digest", "file_edit",
         "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
@@ -119,12 +120,182 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
             "sonder_runtime.bootstrap.native_mcp", fromlist=["_LEGACY_ALIASES"]
         )._LEGACY_ALIASES.items() if name != target
     }
-    canonical_native = native_names - compatibility_aliases - {"vision_analyze"}
+    canonical_native = native_names - compatibility_aliases - {
+        "vision_analyze", "compute_submit", "compute_status", "compute_cancel",
+        "compute_artifact_fetch",
+    }
     assert canonical_native == packaged_executor | packaged_inspections
     assert len(canonical_native) == 40
     assert compatibility_aliases == {
         "directory_create", "file_edit", "file_read", "file_write", "workspace_run",
     }
+
+
+def test_native_compute_tools_are_bounded_and_require_explicit_remote_consent():
+    registry = native_tool_registry()
+    submit = registry.require("compute_submit").input_schema
+    assert submit["additionalProperties"] is False
+    assert submit["required"] == [
+        "request_id", "workload", "catalog_entry_id", "workspace_mapping",
+        "allow_remote",
+    ]
+    assert "inference" not in submit["properties"]["workload"]["enum"]
+    assert submit["properties"]["deadline_seconds"]["maximum"] == 86_400
+    assert submit["properties"]["arguments"]["maxItems"] == 64
+    assert registry.require("compute_status").input_schema["required"] == [
+        "controller_job_id",
+    ]
+    assert registry.require("compute_cancel").input_schema["required"] == [
+        "controller_job_id", "reason",
+    ]
+    assert registry.require("compute_artifact_fetch").input_schema[
+        "properties"
+    ]["max_bytes"]["maximum"] == 98_304
+
+
+def test_native_compute_submit_status_and_cancel_route_to_compute_service(monkeypatch):
+    from sonder_runtime.application.compute_fabric.jobs import RemoteJobReceipt
+    from sonder_runtime.application.compute_fabric.service import ComputeSubmission
+    from sonder_runtime.domain.compute_fabric import PlacementDecision
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    monkeypatch.setattr(
+        permission_policy,
+        "decide_for_caller",
+        lambda *_args, **_kwargs: SimpleNamespace(action="allow"),
+    )
+
+    class _Compute:
+        def __init__(self):
+            self.submitted = None
+            self.cancelled = None
+
+        def _result(self, controller_id="controller-1"):
+            return ComputeSubmission(
+                "linux-node",
+                PlacementDecision(controller_id, "linux-node", (), ("linux-node",), ()),
+                RemoteJobReceipt(
+                    worker_id="linux-node",
+                    remote_job_id="remote-1",
+                    controller_job_id=controller_id,
+                    idempotency_key="idem-1",
+                    request_sha256="a" * 64,
+                    state="running",
+                ),
+            )
+
+        def submit(self, request, envelope):
+            self.submitted = (request, envelope)
+            return self._result(request.request_id)
+
+        def status(self, controller_job_id):
+            return self._result(controller_job_id)
+
+        def cancel(self, controller_job_id, *, reason):
+            self.cancelled = (controller_job_id, reason)
+            return self._result(controller_job_id)
+
+    compute = _Compute()
+    app = _app()
+    app.compute_service = lambda: compute
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2.0", "capabilities": {"tools": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "compute_submit", "arguments": {
+                "request_id": "controller-1", "idempotency_key": "idem-1",
+                "workload": "test", "catalog_entry_id": "pytest",
+                "workspace_mapping": "sonder", "relative_cwd": "tests",
+                "arguments": ["test_api.py"], "deadline_seconds": 60,
+                "idempotent": True, "allow_remote": True,
+                "allow_local_fallback": False,
+            },
+        }},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "compute_status", "arguments": {
+                "controller_job_id": "controller-1",
+            },
+        }},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "compute_cancel", "arguments": {
+                "controller_job_id": "controller-1", "reason": "operator stop",
+            },
+        }},
+    ]
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO("\n".join(json.dumps(item) for item in requests) + "\n"),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert compute.submitted[0].allow_remote is True
+    assert compute.submitted[0].allow_local_fallback is False
+    assert compute.submitted[1].deadline_seconds == 60
+    assert json.loads(rows[1]["result"]["output"])["remote_job_id"] == "remote-1"
+    assert rows[2]["result"]["isError"] is False
+    assert compute.cancelled == ("controller-1", "operator stop")
+
+
+def test_native_compute_mutations_obey_runtime_permission_policy(monkeypatch):
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    app = _app()
+    app.compute_service = lambda: SimpleNamespace(
+        submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("denied compute must not execute")
+        )
+    )
+    monkeypatch.setattr(
+        permission_policy,
+        "decide_for_caller",
+        lambda *_args, **_kwargs: SimpleNamespace(action="deny"),
+    )
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2.0", "capabilities": {"tools": {}},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "compute_submit", "arguments": {
+                "request_id": "controller-denied", "workload": "test",
+                "catalog_entry_id": "pytest", "workspace_mapping": "sonder",
+                "allow_remote": True,
+            },
+        }},
+    ]
+    output = io.StringIO()
+    run_native_mcp(
+        app,
+        input_stream=io.StringIO(
+            "\n".join(json.dumps(item) for item in requests) + "\n"
+        ),
+        output_stream=output,
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[1]["result"]["isError"] is True
+    assert rows[1]["result"]["error"] == "permission_denied"
+
+
+def test_native_compute_mutations_have_deliberate_unpatched_permission_classes():
+    import permission_modes
+
+    assert permission_modes.risk_of("compute_submit") == "execution"
+    assert permission_modes.risk_of("compute_cancel") == "mutation"
+    submit = permission_modes.decide(
+        "compute_submit",
+        interactive=False,
+        mode=permission_modes.AUTO,
+        rule_lookup=lambda _name: None,
+    )
+    cancel = permission_modes.decide(
+        "compute_cancel",
+        interactive=False,
+        mode=permission_modes.AUTO,
+        rule_lookup=lambda _name: None,
+    )
+    assert submit.action == permission_modes.ALLOW
+    assert cancel.action == permission_modes.ALLOW
 
 
 def test_native_catalog_contains_legacy_filesystem_alias_schemas():

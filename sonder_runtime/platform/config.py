@@ -21,11 +21,12 @@ network, filesystem, credential, or cloud permissions.
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import tomllib
 from dataclasses import dataclass, field, fields, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
@@ -37,8 +38,17 @@ from sonder_runtime.platform.config_environment import (
     env_int,
     parse_env_file as _parse_env_file,
 )
-
 PROFILES = ("workstation-local", "server-private")
+
+_COMPUTE_WORKLOADS = frozenset({
+    "build", "test", "index", "analysis", "fuzz", "embedding", "training",
+    "render", "encode", "service", "container", "storage", "inference",
+})
+_COMPUTE_CAPABILITIES = frozenset({
+    "cpu", "ram", "cuda", "ollama", "llamacpp", "docker", "podman", "kvm",
+    "cmake", "msvc", "clang", "clangd", "clang-tidy", "sccache", "distcc",
+    "pytest", "embeddings", "qlora", "ffmpeg", "blender", "storage", "database",
+})
 
 # Keys that must only ever arrive through the secrets environment file or
 # process environment.  Their presence in TOML fails validation.
@@ -114,6 +124,41 @@ class OllamaConfig:
 
 
 @dataclass(frozen=True)
+class ComputeNodeConfig:
+    node_id: str = ""
+    origin: str = ""
+    workloads: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
+    workspace_mappings: tuple[str, ...] = ()
+    preference_weight: float = 0.0
+
+@dataclass(frozen=True)
+class ComputeJobConfig:
+    job_id: str = ""
+    workload: str = ""
+    program: str = ""
+    fixed_args: tuple[str, ...] = ()
+    argument_policy: str = "none"
+    environment_allowlist: tuple[str, ...] = ()
+    workspace_mappings: tuple[str, ...] = ()
+    allowed_flags: tuple[str, ...] = ()
+    allowed_bounded_options: tuple[str, ...] = ()
+    allowed_relative_path_options: tuple[str, ...] = ()
+    memory_limit_bytes: int | None = None
+    artifact_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ComputeConfig:
+    allow_remote: bool = False
+    node_id: str = "local"
+    snapshot_ttl_seconds: int = 30
+    probe_timeout_ms: int = 2_000
+    nodes: tuple[ComputeNodeConfig, ...] = ()
+    jobs: tuple[ComputeJobConfig, ...] = ()
+
+
+@dataclass(frozen=True)
 class FeaturesConfig:
     cloud: bool = False
     web: bool = False
@@ -179,6 +224,7 @@ class SonderConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     state: StateConfig = field(default_factory=StateConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    compute: ComputeConfig = field(default_factory=ComputeConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     capacity: CapacityConfig = field(default_factory=CapacityConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -209,6 +255,42 @@ class SonderConfig:
                 )
                 for f in fields(value)
             }
+        out["compute"] = {
+            "allow_remote": self.compute.allow_remote,
+            "node_id": self.compute.node_id,
+            "snapshot_ttl_seconds": self.compute.snapshot_ttl_seconds,
+            "probe_timeout_ms": self.compute.probe_timeout_ms,
+            "nodes": [
+                {
+                    "id": node.node_id,
+                    "origin": node.origin,
+                    "workloads": list(node.workloads),
+                    "capabilities": list(node.capabilities),
+                    "workspace_mappings": list(node.workspace_mappings),
+                    "preference_weight": node.preference_weight,
+                }
+                for node in self.compute.nodes
+            ],
+            "jobs": [
+                {
+                    "id": job.job_id,
+                    "workload": job.workload,
+                    "program": job.program,
+                    "fixed_args": list(job.fixed_args),
+                    "argument_policy": job.argument_policy,
+                    "environment_allowlist": list(job.environment_allowlist),
+                    "workspace_mappings": list(job.workspace_mappings),
+                    "allowed_flags": list(job.allowed_flags),
+                    "allowed_bounded_options": list(job.allowed_bounded_options),
+                    "allowed_relative_path_options": list(
+                        job.allowed_relative_path_options
+                    ),
+                    "memory_limit_bytes": job.memory_limit_bytes,
+                    "artifact_paths": list(job.artifact_paths),
+                }
+                for job in self.compute.jobs
+            ],
+        }
         out["secrets"] = self.secrets.as_redacted_dict()
         return out
 
@@ -299,6 +381,159 @@ def _apply_section(current, section_name: str, raw: dict, errors: list[str]):
     return replace(current, **updates) if updates else current
 
 
+def _string_list(
+    raw: dict,
+    key: str,
+    where: str,
+    errors: list[str],
+) -> tuple[str, ...]:
+    value = raw.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        errors.append(f"{where}.{key} must be a list of strings")
+        return ()
+    return tuple(value)
+
+
+def _apply_compute_section(
+    current: ComputeConfig,
+    raw: dict,
+    errors: list[str],
+) -> ComputeConfig:
+    known = {
+        "allow_remote", "node_id", "snapshot_ttl_seconds", "probe_timeout_ms",
+        "nodes", "jobs",
+    }
+    for key in raw:
+        if key not in known:
+            errors.append(f"unknown key [compute].{key}")
+
+    allow_remote = raw.get("allow_remote", current.allow_remote)
+    if not isinstance(allow_remote, bool):
+        errors.append("[compute].allow_remote must be a boolean")
+        allow_remote = current.allow_remote
+    local_node_id = raw.get("node_id", current.node_id)
+    if not isinstance(local_node_id, str):
+        errors.append("[compute].node_id must be a string")
+        local_node_id = current.node_id
+    snapshot_ttl = raw.get("snapshot_ttl_seconds", current.snapshot_ttl_seconds)
+    if not isinstance(snapshot_ttl, int) or isinstance(snapshot_ttl, bool):
+        errors.append("[compute].snapshot_ttl_seconds must be an integer")
+        snapshot_ttl = current.snapshot_ttl_seconds
+    probe_timeout = raw.get("probe_timeout_ms", current.probe_timeout_ms)
+    if not isinstance(probe_timeout, int) or isinstance(probe_timeout, bool):
+        errors.append("[compute].probe_timeout_ms must be an integer")
+        probe_timeout = current.probe_timeout_ms
+
+    nodes_raw = raw.get("nodes", [])
+    nodes: list[ComputeNodeConfig] = []
+    if not isinstance(nodes_raw, list) or not all(isinstance(item, dict) for item in nodes_raw):
+        errors.append("[compute].nodes must be an array of tables")
+    else:
+        node_keys = {
+            "id", "origin", "workloads", "capabilities",
+            "workspace_mappings", "preference_weight",
+        }
+        for index, item in enumerate(nodes_raw):
+            where = f"[compute].nodes[{index}]"
+            for key in item:
+                if key not in node_keys:
+                    errors.append(f"unknown key {where}.{key}")
+            remote_node_id = item.get("id", "")
+            origin = item.get("origin", "")
+            if not isinstance(remote_node_id, str):
+                errors.append(f"{where}.id must be a string")
+                remote_node_id = ""
+            if not isinstance(origin, str):
+                errors.append(f"{where}.origin must be a string")
+                origin = ""
+            weight = item.get("preference_weight", 0.0)
+            if not isinstance(weight, (int, float)) or isinstance(weight, bool):
+                errors.append(f"{where}.preference_weight must be a number")
+                weight = 0.0
+            nodes.append(ComputeNodeConfig(
+                node_id=remote_node_id,
+                origin=origin,
+                workloads=_string_list(item, "workloads", where, errors),
+                capabilities=_string_list(item, "capabilities", where, errors),
+                workspace_mappings=_string_list(item, "workspace_mappings", where, errors),
+                preference_weight=float(weight),
+            ))
+
+    jobs_raw = raw.get("jobs", [])
+    jobs: list[ComputeJobConfig] = []
+    if not isinstance(jobs_raw, list) or not all(isinstance(item, dict) for item in jobs_raw):
+        errors.append("[compute].jobs must be an array of tables")
+    else:
+        job_keys = {
+            "id", "workload", "program", "fixed_args", "argument_policy",
+            "environment_allowlist", "workspace_mappings",
+            "allowed_flags", "allowed_bounded_options",
+            "allowed_relative_path_options",
+            "memory_limit_bytes",
+            "artifact_paths",
+        }
+        for index, item in enumerate(jobs_raw):
+            where = f"[compute].jobs[{index}]"
+            for key in item:
+                if key not in job_keys:
+                    errors.append(f"unknown key {where}.{key}")
+            scalar: dict[str, str] = {}
+            for key, default in (
+                ("id", ""),
+                ("workload", ""),
+                ("program", ""),
+                ("argument_policy", "none"),
+            ):
+                value = item.get(key, default)
+                if not isinstance(value, str):
+                    errors.append(f"{where}.{key} must be a string")
+                    value = default
+                scalar[key] = value
+            jobs.append(ComputeJobConfig(
+                job_id=scalar["id"],
+                workload=scalar["workload"],
+                program=scalar["program"],
+                fixed_args=_string_list(item, "fixed_args", where, errors),
+                argument_policy=scalar["argument_policy"],
+                environment_allowlist=_string_list(
+                    item, "environment_allowlist", where, errors
+                ),
+                workspace_mappings=_string_list(
+                    item, "workspace_mappings", where, errors
+                ),
+                allowed_flags=_string_list(item, "allowed_flags", where, errors),
+                allowed_bounded_options=_string_list(
+                    item, "allowed_bounded_options", where, errors
+                ),
+                allowed_relative_path_options=_string_list(
+                    item, "allowed_relative_path_options", where, errors
+                ),
+                memory_limit_bytes=(
+                    item.get("memory_limit_bytes")
+                    if isinstance(item.get("memory_limit_bytes"), int)
+                    and not isinstance(item.get("memory_limit_bytes"), bool)
+                    else None
+                ),
+                artifact_paths=_string_list(item, "artifact_paths", where, errors),
+            ))
+            if (
+                "memory_limit_bytes" in item
+                and (
+                    not isinstance(item["memory_limit_bytes"], int)
+                    or isinstance(item["memory_limit_bytes"], bool)
+                )
+            ):
+                errors.append(f"{where}.memory_limit_bytes must be an integer")
+    return ComputeConfig(
+        allow_remote=allow_remote,
+        node_id=local_node_id,
+        snapshot_ttl_seconds=snapshot_ttl,
+        probe_timeout_ms=probe_timeout,
+        nodes=tuple(nodes),
+        jobs=tuple(jobs),
+    )
+
+
 # Private aliases preserve the existing monkeypatch/import surface while the
 # implementation lives in the dedicated configuration-environment boundary.
 _env_bool = env_bool
@@ -312,6 +547,9 @@ def _apply_environment(
     server = config.server
     state = config.state
     ollama = config.ollama
+    compute = config.compute
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", compute.node_id):
+        errors.append("[compute].node_id must be a bounded stable identity")
     features = config.features
     secrets = config.secrets
 
@@ -436,6 +674,22 @@ def _apply_environment(
             ollama.worker_probe_timeout_ms, errors,
         ),
     )
+    if "SONDER_ALLOW_REMOTE_COMPUTE" in env:
+        compute = replace(
+            compute,
+            allow_remote=_env_bool(env["SONDER_ALLOW_REMOTE_COMPUTE"]),
+        )
+    compute = replace(
+        compute,
+        snapshot_ttl_seconds=_env_int(
+            "SONDER_COMPUTE_SNAPSHOT_TTL_SECONDS", env,
+            compute.snapshot_ttl_seconds, errors,
+        ),
+        probe_timeout_ms=_env_int(
+            "SONDER_COMPUTE_PROBE_TIMEOUT_MS", env,
+            compute.probe_timeout_ms, errors,
+        ),
+    )
     if "SONDER_ALLOW_CLOUD" in env:
         features = replace(features, cloud=_env_bool(env["SONDER_ALLOW_CLOUD"]))
     if "SONDER_WEB_TOOLS" in env:
@@ -470,6 +724,7 @@ def _apply_environment(
         server=server,
         state=state,
         ollama=ollama,
+        compute=compute,
         features=features,
         secrets=secrets,
     )
@@ -644,6 +899,150 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if getattr(config.ollama, name) > maximum:
             errors.append(f"[ollama].{name} must be <= {maximum}")
 
+    compute = config.compute
+    if not 1 <= compute.snapshot_ttl_seconds <= 3_600:
+        errors.append("[compute].snapshot_ttl_seconds must be within 1..3600")
+    if not 1 <= compute.probe_timeout_ms <= 30_000:
+        errors.append("[compute].probe_timeout_ms must be within 1..30000")
+    if len(compute.nodes) > 15:
+        errors.append("[compute].nodes supports at most 15 remote nodes")
+    node_ids = [node.node_id for node in compute.nodes]
+    if compute.node_id in node_ids:
+        errors.append("[compute].node_id must differ from remote node identities")
+    if len(node_ids) != len(set(node_ids)):
+        errors.append("[compute].nodes contains duplicate node identities")
+    if compute.nodes and len(config.secrets.api_key) < MIN_API_KEY_LENGTH:
+        errors.append(
+            "[compute].nodes requires SONDER_API_KEY of at least "
+            f"{MIN_API_KEY_LENGTH} characters for authenticated remote compute"
+        )
+    for index, node in enumerate(compute.nodes):
+        where = f"[compute].nodes[{index}]"
+        if not compute.allow_remote:
+            errors.append(f"{where} requires [compute].allow_remote=true")
+        unknown_workloads = sorted(set(node.workloads) - _COMPUTE_WORKLOADS)
+        if unknown_workloads:
+            errors.append(f"{where}.workloads contains unknown workload values: {unknown_workloads}")
+        unknown_capabilities = sorted(
+            set(node.capabilities) - _COMPUTE_CAPABILITIES
+        )
+        if unknown_capabilities:
+            errors.append(
+                f"{where}.capabilities contains unknown capability values: {unknown_capabilities}"
+            )
+        if not node.workloads:
+            errors.append(f"{where}.workloads must not be empty")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", node.node_id):
+            errors.append(f"{where}.id must be a bounded stable identity")
+        try:
+            origin = urlsplit(node.origin)
+            port = origin.port
+        except ValueError:
+            origin = None
+            port = None
+        if (
+            origin is None
+            or origin.scheme.lower() != "https"
+            or not origin.hostname
+            or port is None
+        ):
+            errors.append(f"{where}.origin must be an HTTPS origin with an explicit port")
+        elif origin.username is not None or origin.password is not None:
+            errors.append(f"{where}.origin must not contain inline credentials")
+        elif origin.path not in ("", "/") or origin.query or origin.fragment:
+            errors.append(f"{where}.origin must not include a path, query, or fragment")
+        if (
+            isinstance(node.preference_weight, bool)
+            or not isinstance(node.preference_weight, (int, float))
+            or not math.isfinite(float(node.preference_weight))
+            or not -100 <= float(node.preference_weight) <= 100
+        ):
+            errors.append(f"{where}.preference_weight must be between -100 and 100")
+        if any(
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", item)
+            for item in node.workspace_mappings
+        ):
+            errors.append(f"{where}.workspace_mappings contains an invalid identity")
+    job_ids = [job.job_id for job in compute.jobs]
+    if len(job_ids) != len(set(job_ids)):
+        errors.append("[compute].jobs contains duplicate job identities")
+    for index, job in enumerate(compute.jobs):
+        where = f"[compute].jobs[{index}]"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", job.job_id):
+            errors.append(f"{where}.id must be a bounded stable identity")
+        try:
+            if job.workload not in _COMPUTE_WORKLOADS:
+                raise ValueError
+            if job.workload == "inference":
+                errors.append(f"{where}.workload inference remains owned by the model gateway")
+        except ValueError:
+            errors.append(f"{where}.workload contains an unknown workload")
+        if (
+            not job.program
+            or len(job.program) > 4096
+            or "\x00" in job.program
+            or not (
+                PurePosixPath(job.program).is_absolute()
+                or PureWindowsPath(job.program).is_absolute()
+            )
+        ):
+            errors.append(f"{where}.program must be an absolute bounded path")
+        if len(job.fixed_args) > 64 or any(
+            len(value) > 4096 or "\x00" in value for value in job.fixed_args
+        ):
+            errors.append(f"{where}.fixed_args exceeds its bound")
+        if len(job.environment_allowlist) > 32 or any(
+            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", value)
+            for value in job.environment_allowlist
+        ):
+            errors.append(f"{where}.environment_allowlist is invalid")
+        if any(
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value)
+            for value in job.workspace_mappings
+        ):
+            errors.append(f"{where}.workspace_mappings contains an invalid workspace identity")
+        if job.argument_policy not in {
+            "none",
+            "bounded",
+            "relative-paths-and-test-selectors",
+        }:
+            errors.append(f"{where}.argument_policy is invalid")
+        if job.memory_limit_bytes is not None and not 1 <= job.memory_limit_bytes <= 1 << 50:
+            errors.append(f"{where}.memory_limit_bytes must be within 1..2^50")
+        if len(job.artifact_paths) > 256:
+            errors.append(f"{where}.artifact_paths exceeds its bound")
+        for value in job.artifact_paths:
+            normalized = value.replace("\\", "/")
+            path = PurePosixPath(normalized)
+            if (
+                not value
+                or len(value) > 4096
+                or "\x00" in value
+                or normalized.startswith("/")
+                or not path.parts
+                or ".." in path.parts
+                or ":" in path.parts[0]
+            ):
+                errors.append(f"{where}.artifact_paths contains an invalid relative artifact")
+                break
+        option_groups = (
+            job.allowed_flags,
+            job.allowed_bounded_options,
+            job.allowed_relative_path_options,
+        )
+        if any(
+            not re.fullmatch(r"--?[A-Za-z0-9][A-Za-z0-9_-]{0,63}", option)
+            for group in option_groups
+            for option in group
+        ):
+            errors.append(f"{where} contains an invalid allowed option name")
+        if any(
+            set(left) & set(right)
+            for group_index, left in enumerate(option_groups)
+            for right in option_groups[group_index + 1:]
+        ):
+            errors.append(f"{where} assigns more than one policy to an option")
+
     for name in ("model_generations", "http_requests", "tool_processes",
                  "fleet_workers", "autopilot_runs", "training_jobs",
                  "queue_depth"):
@@ -722,6 +1121,14 @@ def load_config(
                     )
                 else:
                     errors.append(f"[{key}] must be a table")
+            elif key == "compute":
+                if isinstance(value, dict):
+                    config = replace(
+                        config,
+                        compute=_apply_compute_section(config.compute, value, errors),
+                    )
+                else:
+                    errors.append("[compute] must be a table")
             else:
                 errors.append(f"unknown top-level key {key!r}")
 

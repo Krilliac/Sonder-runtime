@@ -93,6 +93,10 @@ def test_enabled_metric_names_and_label_sets_remain_unchanged():
         "sonder_ollama_worker_requests": ("worker", "result"),
         "sonder_ollama_worker_duration_seconds": ("worker",),
         "sonder_ollama_worker_circuit_state": ("worker", "state"),
+        "sonder_compute_nodes": ("state",),
+        "sonder_compute_active_jobs": (),
+        "sonder_compute_placements": ("route",),
+        "sonder_compute_placement_rejections": ("reason",),
     }
     for name, labels in expected.items():
         collector = collectors[name]
