@@ -206,3 +206,26 @@ def test_job_client_fetches_and_revalidates_digest_bound_artifact() -> None:
     )
     with pytest.raises(DependencyUnavailable, match="receipt"):
         transport.fetch_artifact(_node(), "remote-1", expected)
+
+
+def test_job_client_rejects_receipt_larger_than_worker_transport_limit() -> None:
+    from sonder_runtime.application.compute_fabric.jobs import (
+        MAX_COMPUTE_ARTIFACT_BYTES,
+        RemoteArtifactReceipt,
+    )
+
+    expected = RemoteArtifactReceipt(
+        "reports/oversized.bin",
+        MAX_COMPUTE_ARTIFACT_BYTES + 1,
+        "application/octet-stream",
+        "0" * 64,
+    )
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        opener=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("oversized receipt must fail before transport")
+        ),
+    )
+
+    with pytest.raises(DependencyUnavailable, match="transport size bound"):
+        transport.fetch_artifact(_node(), "remote-1", expected)

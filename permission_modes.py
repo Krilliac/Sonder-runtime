@@ -280,6 +280,14 @@ UNCLASSIFIED = "unclassified"
 # loop actions that really run no tool, so it cannot become a list of strings.
 NON_TOOL_WORK = {"sleep": "safe"}
 
+# Host-control tools registered by the native MCP transport rather than the
+# legacy server MCP registry. Keeping the two compute mutations explicit here
+# makes unattended policy fail by deliberate class instead of "unclassified".
+NATIVE_MCP_WORK = {
+    "compute_submit": "execution",
+    "compute_cancel": "mutation",
+}
+
 # risk class -> action, per mode. "execution" is a synthetic class: tools that
 # start a host process, split out of `ask`/`mutation` so acceptEdits and auto
 # differ by something real.
@@ -629,6 +637,8 @@ def risk_of(tool_name: str) -> str:
         return "execution"
     if catalogued:
         return catalogued
+    if name in NATIVE_MCP_WORK:
+        return NATIVE_MCP_WORK[name]
     # Work that fronts no registered tool, graded because it was declared.
     # Checked after the catalog so a real tool of the same name always wins.
     if name in NON_TOOL_WORK:

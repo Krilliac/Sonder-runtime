@@ -10,6 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from sonder_runtime.adapters.execution.process_jobs import SubprocessJobProvider
+from sonder_runtime.adapters.extensions.memory_limits import (
+    PreparedProcessContainment,
+    ProcessContainmentResult,
+)
 from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
 from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
 from sonder_runtime.application.execution.process_jobs import ProcessJobRequest
@@ -105,6 +109,41 @@ class _ContainmentLimiter:
         raise AssertionError("post-launch fallback must not be used")
 
 
+class _ScopedToken(_LimitToken):
+    def __init__(self, *results: ProcessContainmentResult) -> None:
+        super().__init__()
+        self.results = list(results)
+        self.calls: list[bool] = []
+
+    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+        self.calls.append(force)
+        if self.results:
+            return self.results.pop(0)
+        return ProcessContainmentResult(True)
+
+
+class _ScopedLimiter:
+    def __init__(self, token: _ScopedToken) -> None:
+        self.token = token
+        self.calls = []
+        self.restore_calls = []
+
+    def prepare_process_job(self, job_id, argv, memory_limit_bytes, process_limit):
+        self.calls.append((job_id, argv, memory_limit_bytes, process_limit))
+        return PreparedProcessContainment(
+            argv=("systemd-run", "--scope", *argv),
+            launch_options={"scope_marker": job_id},
+            token=self.token,
+        )
+
+    def apply(self, process, limit_bytes):
+        raise AssertionError("scoped process jobs must not use the fallback limiter")
+
+    def restore_process_job(self, job_id, metadata):
+        self.restore_calls.append((job_id, dict(metadata)))
+        return self.token
+
+
 def _provider(cleanup, process, *, platform_name="posix", launch_options=None):
     options = launch_options if launch_options is not None else {}
 
@@ -195,6 +234,475 @@ def test_native_limits_are_prepared_before_launch_and_resume_after_attachment():
         ("resume", 77),
     ]
     assert registry.view("job-contained").process_id == 77
+
+
+def test_strong_scope_must_be_quiescent_before_terminal_success():
+    cleanup = _Cleanup(complete=True)
+    token = _ScopedToken(
+        ProcessContainmentResult(False, detail="scope still populated"),
+        ProcessContainmentResult(True, forced=True, detail="scope killed"),
+    )
+    limiter = _ScopedLimiter(token)
+    process = _Process()
+    launch = {}
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=cleanup,
+        launcher=lambda argv, **kwargs: launch.update(argv=argv, kwargs=kwargs) or process,
+        platform_name="posix",
+        memory_limiter=limiter,
+    )
+    request = _request("job-scoped")
+    request = ProcessJobRequest(
+        request.identity,
+        request.argv,
+        cwd=request.cwd,
+        max_descendants=request.max_descendants,
+        require_job_scope=True,
+    )
+
+    provider.start(request)
+    waited = provider.wait(request.identity.job_id)
+
+    assert tuple(launch["argv"][:2]) == ("systemd-run", "--scope")
+    assert waited.record.status is JobStatus.CANCELLATION_REQUESTED
+    assert waited.record.is_terminal is False
+    assert token.closed is False
+    cancelled = provider.cancel(request.identity.job_id, "scope cleanup retry")
+    assert cancelled.cleanup_completed is True
+    assert cancelled.records[0].status is JobStatus.CANCELLED
+    assert token.calls == [True, True]
+    assert token.closed is True
+
+
+def test_hard_deadline_watchdog_starts_before_process_launch():
+    events = []
+    timers = []
+
+    class Timer:
+        def __init__(self, delay, callback, args=()):
+            self.delay = delay
+            self.callback = callback
+            self.args = args
+            self.daemon = False
+            timers.append(self)
+
+        def start(self):
+            events.append("timer-start")
+
+        def cancel(self):
+            events.append("timer-cancel")
+
+    def launcher(_argv, **_kwargs):
+        events.append("process-launch")
+        return _Process()
+
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=True),
+        launcher=launcher,
+        platform_name="posix",
+        memory_limiter=_MemoryLimiter(),
+        timer_factory=Timer,
+        process_identity_resolver=lambda _pid: "birth-deadline-order",
+    )
+    request = _request("job-deadline-order")
+    request = ProcessJobRequest(
+        request.identity,
+        request.argv,
+        deadline_seconds=30,
+    )
+
+    provider.start(request)
+
+    assert events[:2] == ["timer-start", "process-launch"]
+    assert 0 < timers[0].delay <= 30
+    provider._discard_deadline(request.identity.job_id)
+
+
+def test_prelaunch_deadline_callback_prevents_scope_creation():
+    launches = []
+
+    class ImmediateTimer:
+        def __init__(self, _delay, callback, args=()):
+            self.callback = callback
+            self.args = args
+            self.daemon = False
+
+        def start(self):
+            self.callback(*self.args)
+
+        def cancel(self):
+            return None
+
+    token = _ScopedToken(ProcessContainmentResult(True))
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda _argv, **_kwargs: launches.append(True) or _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        timer_factory=ImmediateTimer,
+    )
+    request = ProcessJobRequest(
+        JobIdentity("job-prelaunch-deadline", "compute-test", "controller", "idem-prelaunch"),
+        ("python", "-c", "pass"),
+        deadline_seconds=30,
+        require_job_scope=True,
+    )
+
+    with pytest.raises(RuntimeError, match="deadline expired before launch"):
+        provider.start(request)
+
+    assert launches == []
+    assert provider.poll(request.identity.job_id).status is JobStatus.CANCELLED
+
+
+def test_timer_start_failure_cleans_reserved_scope_and_remains_discoverable():
+    class BrokenTimer:
+        def __init__(self, _delay, _callback, args=()):
+            self.args = args
+            self.daemon = False
+
+        def start(self):
+            raise RuntimeError("timer start failed")
+
+        def cancel(self):
+            return None
+
+    token = _ScopedToken(ProcessContainmentResult(True))
+    job_id = "job-timer-start-failure"
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda _argv, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("timer failure must prevent launch")
+        ),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        timer_factory=BrokenTimer,
+    )
+    request = ProcessJobRequest(
+        JobIdentity(job_id, "compute-test", "controller", "idem-timer-failure"),
+        ("python", "-c", "pass"),
+        deadline_seconds=30,
+        require_job_scope=True,
+    )
+
+    with pytest.raises(RuntimeError, match="timer start failed"):
+        provider.start(request)
+
+    assert provider.poll(job_id).status is JobStatus.FAILED
+    assert job_id not in provider._memory_tokens
+    assert job_id not in provider._launch_locks
+    assert token.closed is True
+
+
+def test_expired_deadline_rearms_cleanup_after_incomplete_attempt():
+    timers = []
+
+    class Timer:
+        def __init__(self, delay, callback, args=()):
+            self.delay = delay
+            self.callback = callback
+            self.args = args
+            self.daemon = False
+            timers.append(self)
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=False),
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+        memory_limiter=_MemoryLimiter(),
+        timer_factory=Timer,
+        cleanup_retry_seconds=0.25,
+        process_identity_resolver=lambda _pid: "birth-deadline-retry",
+    )
+    request = _request("job-deadline-retry")
+    request = ProcessJobRequest(request.identity, request.argv, deadline_seconds=30)
+    provider.start(request)
+    provider._expire_deadline(request.identity.job_id)
+
+    assert provider.poll(request.identity.job_id).status is JobStatus.CANCELLATION_REQUESTED
+    assert len(timers) == 2
+    assert timers[-1].delay == pytest.approx(0.25)
+    assert request.identity.job_id in provider._deadline_timers
+
+
+def test_restarted_systemd_scope_is_reowned_before_invalid_metadata_cleanup():
+    class Timer:
+        def __init__(self, _delay, _callback, args=()):
+            self.args = args
+            self.daemon = False
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    job_id = "job-restarted-invalid-scope"
+    token = _ScopedToken(ProcessContainmentResult(True, forced=True))
+    limiter = _ScopedLimiter(token)
+    registry = DurableJobRegistry()
+    registry.start(
+        JobIdentity(job_id, "compute-test", "controller", "idem-restarted-scope"),
+        metadata={
+            "hard_deadline_at": "2099-01-01T00:00:00+00:00",
+            "max_descendants": "0",
+            "containment_kind": "systemd_scope",
+            "containment_unit": "sonder-compute-0123456789abcdefabcd.scope",
+            "containment_user": "1",
+        },
+    )
+
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=False),
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+        memory_limiter=limiter,
+        timer_factory=Timer,
+    )
+    cancelled = provider.cancel(job_id, "invalid persisted safety metadata")
+
+    assert cancelled.cleanup_completed is True
+    assert cancelled.records[0].status is JobStatus.CANCELLED
+    assert token.calls == [True]
+
+
+def test_restarted_systemd_scope_without_deadline_fails_closed():
+    class Timer:
+        def __init__(self, _delay, _callback, args=()):
+            self.args = args
+            self.daemon = False
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    job_id = "job-restarted-missing-deadline"
+    limiter = _ScopedLimiter(_ScopedToken(ProcessContainmentResult(True, forced=True)))
+    registry = DurableJobRegistry()
+    registry.start(
+        JobIdentity(job_id, "compute-test", "controller", "idem-missing-deadline"),
+        metadata={
+            "max_descendants": "4",
+            "containment_kind": "systemd_scope",
+            "containment_unit": "sonder-compute-0123456789abcdefabcd.scope",
+            "containment_user": "1",
+        },
+    )
+
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=False),
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+        memory_limiter=limiter,
+        timer_factory=Timer,
+    )
+
+    assert provider.poll(job_id).status is JobStatus.CANCELLATION_REQUESTED
+    assert job_id in provider._deadline_timers
+
+
+def test_launch_failure_stays_nonterminal_until_scope_is_empty():
+    timers = []
+
+    class Timer:
+        def __init__(self, delay, callback, args=()):
+            self.delay = delay
+            self.callback = callback
+            self.args = args
+            self.daemon = False
+            timers.append(self)
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    job_id = "job-scope-launch-failure"
+    token = _ScopedToken(
+        ProcessContainmentResult(False, forced=True, detail="scope still populated"),
+        ProcessContainmentResult(True, forced=True, detail="scope emptied"),
+    )
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        timer_factory=Timer,
+        cleanup_retry_seconds=0.25,
+        process_identity_resolver=lambda _pid: (_ for _ in ()).throw(
+            RuntimeError("identity unavailable")
+        ),
+    )
+    request = ProcessJobRequest(
+        JobIdentity(job_id, "compute-test", "controller", "idem-launch-failure"),
+        ("python", "-c", "pass"),
+        deadline_seconds=30,
+        require_job_scope=True,
+    )
+
+    with pytest.raises(RuntimeError, match="identity unavailable"):
+        provider.start(request)
+
+    assert provider.poll(job_id).status is JobStatus.CANCELLATION_REQUESTED
+    assert job_id in provider._memory_tokens
+    assert token.closed is False
+    assert timers[-1].delay == pytest.approx(0.25)
+    cancelled = provider.cancel(job_id, "retry launch cleanup")
+    assert cancelled.cleanup_completed is True
+    assert cancelled.records[0].status is JobStatus.CANCELLED
+
+
+def test_restarted_reserved_scope_deadline_uses_restored_owner_and_safe_limit():
+    class Timer:
+        def __init__(self, _delay, _callback, args=()):
+            self.args = args
+            self.daemon = False
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    job_id = "job-restarted-reserved-scope"
+    token = _ScopedToken(ProcessContainmentResult(True, forced=True))
+    limiter = _ScopedLimiter(token)
+    registry = DurableJobRegistry()
+    registry.start(
+        JobIdentity(job_id, "compute-test", "controller", "idem-reserved-scope"),
+        metadata={
+            "hard_deadline_at": "2099-01-01T00:00:00+00:00",
+            "max_descendants": "invalid",
+            "launch_state": "reserved",
+            "containment_kind": "systemd_scope",
+            "containment_unit": "sonder-compute-0123456789abcdefabcd.scope",
+            "containment_user": "1",
+        },
+    )
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+        memory_limiter=limiter,
+        timer_factory=Timer,
+    )
+
+    provider._expire_deadline(job_id)
+
+    assert provider.poll(job_id).status is JobStatus.CANCELLED
+    assert token.calls == [True]
+
+
+def test_unrestorable_scope_never_uses_generic_cleanup_as_terminal_proof():
+    class Timer:
+        def __init__(self, _delay, _callback, args=()):
+            self.args = args
+            self.daemon = False
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    class BrokenScopeLimiter(_MemoryLimiter):
+        def restore_process_job(self, _job_id, _metadata):
+            raise RuntimeError("systemd unavailable")
+
+    job_id = "job-unrestorable-scope"
+    cleanup = _Cleanup(complete=True)
+    registry = DurableJobRegistry()
+    registry.start(
+        JobIdentity(job_id, "compute-test", "controller", "idem-unrestorable"),
+        process_id=77,
+        process_group_id=77,
+        metadata={
+            "hard_deadline_at": "2099-01-01T00:00:00+00:00",
+            "max_descendants": "4",
+            "launch_state": "attached",
+            "containment_kind": "systemd_scope",
+            "containment_unit": "sonder-compute-0123456789abcdefabcd.scope",
+            "containment_user": "1",
+        },
+    )
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=cleanup,
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+        memory_limiter=BrokenScopeLimiter(),
+        timer_factory=Timer,
+    )
+
+    cancelled = provider.cancel(job_id, "operator cancellation")
+
+    assert cancelled.cleanup_completed is False
+    assert provider.poll(job_id).status is JobStatus.CANCELLATION_REQUESTED
+    assert cleanup.requests == []
+    assert job_id in provider._deadline_timers
+
+
+def test_direct_scope_cancellation_rearms_cleanup_retry():
+    timers = []
+
+    class Timer:
+        def __init__(self, delay, callback, args=()):
+            self.delay = delay
+            self.callback = callback
+            self.args = args
+            self.daemon = False
+            timers.append(self)
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    job_id = "job-direct-cancel-retry"
+    token = _ScopedToken(
+        ProcessContainmentResult(False, forced=True, detail="scope still populated")
+    )
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda _argv, **_kwargs: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        timer_factory=Timer,
+        cleanup_retry_seconds=0.25,
+        process_identity_resolver=lambda _pid: "birth-direct-cancel",
+    )
+    provider.start(ProcessJobRequest(
+        JobIdentity(job_id, "compute-test", "controller", "idem-direct-cancel"),
+        ("python", "-c", "pass"),
+        deadline_seconds=30,
+        require_job_scope=True,
+    ))
+
+    cancelled = provider.cancel(job_id, "operator cancellation")
+
+    assert cancelled.cleanup_completed is False
+    assert len(timers) == 2
+    assert timers[-1].delay == pytest.approx(0.25)
 
 
 def test_unenforceable_requested_memory_limit_aborts_before_registration():
