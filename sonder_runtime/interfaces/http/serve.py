@@ -3821,6 +3821,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._auth_rate_limited():
             return
+        if path == "/v1/compute/snapshot":
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.interfaces.http.facades.compute_fabric import (
+                dispatch_compute_snapshot,
+            )
+
+            snapshot_factory = default_app().compute_snapshot
+            if snapshot_factory is None:
+                self._send_json_payload(
+                    {"error": {"message": "compute snapshot is unavailable",
+                               "type": "server_error",
+                               "code": "COMPUTE_SNAPSHOT_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            try:
+                result = dispatch_compute_snapshot(snapshot_factory)
+            except Exception as exc:
+                self.log_error("compute snapshot failed: %s", type(exc).__name__)
+                self._send_json_payload(
+                    {"error": {"message": "compute snapshot is unavailable",
+                               "type": "server_error",
+                               "code": "COMPUTE_SNAPSHOT_UNAVAILABLE"}},
+                    status=503,
+                )
+                return
+            self._send_json_payload(result.body, status=result.status_code)
+            return
         if _is_extension_route(path):
             context = self._request_auth_context()
             if not context["authorized"]:
