@@ -27,6 +27,7 @@ proxy for remote access) unless it says otherwise.
 - [suspected-secret-exposure.md](suspected-secret-exposure.md)
 - [unsafe-lab.md](unsafe-lab.md) — disposable isolated-host testing with model tool policy deliberately removed
 - [multi-pc-ollama.md](multi-pc-ollama.md) — pool independent Ollama hosts over HTTPS
+- [multi-node-windows-private-link.md](multi-node-windows-private-link.md) — prepare and validate Windows workers over a dedicated private link
 
 For conceptual, in-depth documentation of each subsystem, see the
 [Wiki](../wiki/README.md).
