@@ -625,22 +625,14 @@ def build_application(
                 timeout_seconds=effective_config.compute.probe_timeout_ms / 1000.0,
             )
         registry = get_compute_registry()
-        for node in registry.configured_nodes():
-            if node.local:
-                continue
-            observed_at = datetime.now(timezone.utc)
-            try:
-                snapshot = compute_remote_snapshot_source.snapshot(
-                    node, now=observed_at
-                )
-            except Exception as exc:
-                registry.mark_probe_failed(
-                    node.node_id,
-                    received_at=observed_at,
-                    evidence_ref=f"probe-failed:{type(exc).__name__}",
-                )
-            else:
-                registry.observe(snapshot, received_at=observed_at)
+        from ..application.compute_fabric.refresh import refresh_remote_snapshots
+
+        refresh_remote_snapshots(
+            registry,
+            compute_remote_snapshot_source,
+            now=lambda: datetime.now(timezone.utc),
+            max_workers=8,
+        )
 
     def get_compute_service() -> ComputeFabricService:
         nonlocal compute_service, compute_remote_transport
