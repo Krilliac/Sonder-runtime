@@ -8,6 +8,7 @@ import pytest
 from sonder_runtime.application.compute_fabric.jobs import RemoteJobEnvelope, RemoteJobReceipt
 from sonder_runtime.application.compute_fabric.registry import ComputeNodeRegistry
 from sonder_runtime.application.compute_fabric.service import ComputeFabricService
+from sonder_runtime.application.jobs.durable_registry import DurableJobRegistry
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.domain.compute_fabric import (
     ComputeCapability,
@@ -129,6 +130,7 @@ def _service(
     remote_age: int = 0,
     ambiguous: bool = False,
     remote_capabilities: frozenset[ComputeCapability] | None = None,
+    placement_registry=None,
 ):
     local = _node("local", local=True)
     remote = _node(
@@ -145,6 +147,7 @@ def _service(
         transport=transport,
         local_worker=local_worker,
         now=lambda: NOW,
+        placement_registry=placement_registry,
     )
     return service, transport, local_worker
 
@@ -211,3 +214,19 @@ def test_status_and_cancel_revalidate_complete_placement_ownership() -> None:
     transport.cancel = wrong_digest
     with pytest.raises(DependencyUnavailable, match="digest"):
         service.cancel("controller-job", reason="operator stop")
+
+
+def test_controller_rehydrates_durable_placement_after_restart() -> None:
+    placements = DurableJobRegistry()
+    first, transport, local = _service(placement_registry=placements)
+    submitted = first.submit(_request(), _envelope())
+    assert submitted.receipt.remote_job_id == "remote-1"
+
+    second, second_transport, second_local = _service(
+        placement_registry=placements,
+    )
+    recovered = second.status("controller-job")
+    assert recovered.node_id == "linux-node"
+    assert recovered.receipt.remote_job_id == "remote-1"
+    assert second_transport.submit_calls == 0
+    assert second_local.calls == 0

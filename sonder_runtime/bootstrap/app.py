@@ -664,6 +664,7 @@ def build_application(
                 local_worker=get_compute_job_worker(),
                 now=lambda: datetime.now(timezone.utc),
                 refresh=refresh_compute_snapshots,
+                placement_registry=get_job_registry(),
             )
         return compute_service
 

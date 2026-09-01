@@ -59,6 +59,9 @@ fixed_args = ["-m", "pytest"]
 argument_policy = "relative-paths-and-test-selectors"
 environment_allowlist = ["PYTEST_ADDOPTS"]
 workspace_mappings = ["sonder-runtime"]
+allowed_flags = ["-q"]
+allowed_bounded_options = ["--color"]
+allowed_relative_path_options = ["--basetemp"]
 
 [[compute.jobs]]
 id = "sonder-cmake-build"
@@ -95,6 +98,25 @@ Use absolute programs. The operator installs CMake, compilers, pytest,
 clangd/clang-tidy, fuzzers, FFmpeg, Blender, CUDA/QLoRA dependencies,
 Docker/Podman, databases, and cache services. Merely finding an executable does
 not prove it is healthy, GPU-enabled, licensed, or ready for a particular job.
+
+Controller-supplied options are denied unless the worker catalog names them.
+Flags take no value, bounded options use `--name=value` with a scalar value,
+and relative-path options use `--name=relative/path`. Put invariant options in
+`fixed_args`; controller absolute paths and workspace-escaping symlinks are
+rejected.
+
+## Native MCP controller tools
+
+The native MCP catalog exposes `compute_submit`, `compute_status`, and
+`compute_cancel`. `compute_submit` requires an explicit `allow_remote` boolean
+for every workload. Setting it does not override `[compute].allow_remote`; both
+the per-call and global gates must authorize private-node placement. Inference
+is excluded and remains owned by the model gateway.
+
+Controller placement identity, selected node, request digest, idempotency key,
+and remote job identity are stored in the durable job registry. After a Sonder
+restart, status and cancellation rehydrate that record and reconcile an
+ambiguous idempotent dispatch by its idempotency key before retrying.
 
 ## Controller configuration
 
