@@ -277,6 +277,27 @@ def test_native_compute_mutations_obey_runtime_permission_policy(monkeypatch):
     assert rows[1]["result"]["error"] == "permission_denied"
 
 
+def test_native_compute_mutations_have_deliberate_unpatched_permission_classes():
+    import permission_modes
+
+    assert permission_modes.risk_of("compute_submit") == "execution"
+    assert permission_modes.risk_of("compute_cancel") == "mutation"
+    submit = permission_modes.decide(
+        "compute_submit",
+        interactive=False,
+        mode=permission_modes.AUTO,
+        rule_lookup=lambda _name: None,
+    )
+    cancel = permission_modes.decide(
+        "compute_cancel",
+        interactive=False,
+        mode=permission_modes.AUTO,
+        rule_lookup=lambda _name: None,
+    )
+    assert submit.action == permission_modes.ALLOW
+    assert cancel.action == permission_modes.ALLOW
+
+
 def test_native_catalog_contains_legacy_filesystem_alias_schemas():
     registry = native_tool_registry()
     read = registry.require("file_read")

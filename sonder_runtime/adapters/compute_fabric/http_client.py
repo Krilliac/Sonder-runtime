@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any
 
 from ...application.compute_fabric.jobs import (
+    MAX_COMPUTE_ARTIFACT_BYTES,
     RemoteArtifactPayload,
     RemoteArtifactReceipt,
     RemoteJobEnvelope,
@@ -273,7 +274,7 @@ class HttpsComputeJobTransport:
     ) -> RemoteArtifactPayload:
         if not isinstance(expected, RemoteArtifactReceipt):
             raise TypeError("expected artifact receipt is required")
-        if expected.size_bytes > 256 * 1024 * 1024:
+        if expected.size_bytes > MAX_COMPUTE_ARTIFACT_BYTES:
             raise DependencyUnavailable("compute artifact exceeds transport size bound")
         path = (
             "/v1/compute/jobs/"

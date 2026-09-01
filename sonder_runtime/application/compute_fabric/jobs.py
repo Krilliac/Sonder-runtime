@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
+import stat as stat_module
 import tempfile
 from threading import RLock
 from typing import Any, Mapping
@@ -18,6 +19,11 @@ from ..execution.process_jobs import ProcessJobProvider, ProcessJobRequest
 from ..ports.jobs import JobIdentity
 from ...domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
 from ...domain.compute_fabric import WorkloadKind
+from .artifact_spool import (
+    ArtifactSpoolConflict,
+    ArtifactSpoolError,
+    PrivateDirectoryAnchor,
+)
 
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -29,6 +35,9 @@ _REMOTE_JOB_STATES = frozenset({
     "pending", "claimed", "running", "paused", "cancelling",
     "cancellation_requested", "succeeded", "failed", "cancelled", "interrupted",
 })
+MAX_COMPUTE_ARTIFACT_BYTES = 64 * 1024 * 1024
+MAX_COMPUTE_ARTIFACTS = 256
+_ARTIFACT_LOCK_STRIPES = 64
 
 
 def _identity(value: str, label: str) -> str:
@@ -145,8 +154,10 @@ class JobCatalogEntry:
             or not 1 <= self.memory_limit_bytes <= 1 << 50
         ):
             raise ValueError("catalog memory_limit_bytes must be within 1..2^50")
-        if len(self.artifact_paths) > 256:
-            raise ValueError("catalog artifact path count exceeds 256")
+        if len(self.artifact_paths) > MAX_COMPUTE_ARTIFACTS:
+            raise ValueError(
+                f"catalog artifact path count exceeds {MAX_COMPUTE_ARTIFACTS}"
+            )
         normalized_artifacts = [
             _relative(path, "catalog artifact path", allow_dot=False)
             for path in self.artifact_paths
@@ -443,7 +454,7 @@ class RemoteJobReceipt:
             isinstance(self.process_id, bool) or not isinstance(self.process_id, int) or self.process_id < 1
         ):
             raise ValueError("receipt process id must be positive")
-        if len(self.artifacts) > 256:
+        if len(self.artifacts) > MAX_COMPUTE_ARTIFACTS:
             raise ValueError("receipt artifact count exceeds its bound")
         if not isinstance(self.output_preview, str) or len(
             self.output_preview.encode("utf-8")
@@ -514,6 +525,13 @@ class ComputeJobWorker:
         ] = {}
         self._input_stages: dict[str, Path] = {}
         self._lock = RLock()
+        self._artifact_locks = tuple(RLock() for _ in range(_ARTIFACT_LOCK_STRIPES))
+        try:
+            self._artifact_root = PrivateDirectoryAnchor.open_base(
+                self._artifact_stage_base()
+            )
+        except (ArtifactSpoolError, OSError) as exc:
+            raise InvalidInput("private compute artifact spool is unsafe") from exc
         self._rehydrate()
 
     def _rehydrate(self) -> None:
@@ -628,6 +646,7 @@ class ComputeJobWorker:
             environment=environment,
             deadline_seconds=envelope.deadline_seconds,
             memory_limit_bytes=entry.memory_limit_bytes,
+            require_job_scope=True,
             metadata=(
                 ("compute_worker_id", self.worker_id),
                 ("compute_controller_job_id", envelope.controller_job_id),
@@ -653,6 +672,28 @@ class ComputeJobWorker:
             except Exception:
                 if input_stage is not None:
                     self._remove_input_stage(input_stage)
+                poll = getattr(self._provider, "poll", None)
+                if callable(poll):
+                    try:
+                        failed_record = poll(remote_job_id)
+                    except Exception:
+                        failed_record = None
+                    failed_status = getattr(failed_record, "status", None)
+                    failed_state = getattr(failed_status, "value", None)
+                    if failed_state in {
+                        "failed", "cancellation_requested", "cancelled", "interrupted",
+                    }:
+                        failed = RemoteJobReceipt(
+                            worker_id=self.worker_id,
+                            remote_job_id=remote_job_id,
+                            controller_job_id=envelope.controller_job_id,
+                            idempotency_key=envelope.idempotency_key,
+                            request_sha256=envelope.request_sha256,
+                            state=failed_state,
+                            process_id=None,
+                        )
+                        self._by_idempotency[envelope.idempotency_key] = failed
+                        self._by_job[remote_job_id] = failed
                 raise
             receipt = RemoteJobReceipt(
                 worker_id=self.worker_id,
@@ -681,35 +722,56 @@ class ComputeJobWorker:
         if context is None:
             return receipt
         root, cwd, artifact_paths = context
-        artifacts: list[RemoteArtifactReceipt] = []
-        for relative_path in artifact_paths:
-            candidate = (cwd / relative_path).resolve()
-            if not candidate.is_relative_to(root):
-                raise InvalidInput("catalog artifact would escape its configured workspace")
-            try:
-                stat = candidate.stat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise InvalidInput("catalog artifact could not be inspected") from exc
-            if not candidate.is_file() or stat.st_size > 1 << 40:
-                raise InvalidInput("catalog artifact is not a bounded regular file")
-            digest = hashlib.sha256()
-            try:
-                with candidate.open("rb") as stream:
-                    for block in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(block)
-            except OSError as exc:
-                raise InvalidInput("catalog artifact could not be hashed") from exc
-            mime_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-            artifacts.append(RemoteArtifactReceipt(
-                name=relative_path,
-                size_bytes=stat.st_size,
-                mime_type=mime_type,
-                sha256=digest.hexdigest(),
-            ))
-        if not artifacts:
-            return receipt
+        artifact_lock = self._artifact_lock_for(receipt.remote_job_id)
+        with artifact_lock:
+            with self._artifact_stage(receipt) as stage:
+                durable = self._load_artifact_manifest(stage, receipt)
+                if durable is not None:
+                    return self._with_artifacts(receipt, durable)
+                artifacts: list[RemoteArtifactReceipt] = []
+                for relative_path in artifact_paths:
+                    candidate = (cwd / relative_path).resolve()
+                    if not candidate.is_relative_to(root):
+                        raise InvalidInput(
+                            "catalog artifact would escape its configured workspace"
+                        )
+                    snapshot_name = self._artifact_snapshot_name(
+                        receipt.request_sha256, relative_path,
+                    )
+                    if stage.exists(snapshot_name):
+                        raise Conflict(
+                            "compute artifact snapshot exists without a request-bound receipt"
+                        )
+                    try:
+                        size_bytes, sha256 = self._snapshot_artifact(
+                            stage, root, candidate, snapshot_name,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    except ArtifactSpoolConflict as exc:
+                        raise Conflict(str(exc)) from exc
+                    except (ArtifactSpoolError, OSError) as exc:
+                        raise InvalidInput(
+                            "catalog artifact could not be snapshotted"
+                        ) from exc
+                    mime_type = (
+                        mimetypes.guess_type(candidate.name)[0]
+                        or "application/octet-stream"
+                    )
+                    artifacts.append(RemoteArtifactReceipt(
+                        name=relative_path,
+                        size_bytes=size_bytes,
+                        mime_type=mime_type,
+                        sha256=sha256,
+                    ))
+                self._publish_artifact_manifest(stage, receipt, tuple(artifacts))
+                return self._with_artifacts(receipt, tuple(artifacts))
+
+    @staticmethod
+    def _with_artifacts(
+        receipt: RemoteJobReceipt,
+        artifacts: tuple[RemoteArtifactReceipt, ...],
+    ) -> RemoteJobReceipt:
         return RemoteJobReceipt(
             worker_id=receipt.worker_id,
             remote_job_id=receipt.remote_job_id,
@@ -718,11 +780,248 @@ class ComputeJobWorker:
             request_sha256=receipt.request_sha256,
             state=receipt.state,
             process_id=receipt.process_id,
-            artifacts=tuple(artifacts),
+            artifacts=artifacts,
             output_preview=receipt.output_preview,
             output_watermark=receipt.output_watermark,
             output_truncated=receipt.output_truncated,
         )
+
+    @staticmethod
+    def _artifact_stage_base() -> Path:
+        return Path(tempfile.gettempdir()) / "sonder-compute-artifacts"
+
+    @staticmethod
+    def _artifact_snapshot_name(request_sha256: str, name: str) -> str:
+        return hashlib.new(
+            "sha256", f"{request_sha256}\x00{name}".encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _artifact_binding(receipt: RemoteJobReceipt) -> dict[str, str]:
+        return {
+            "worker_id": receipt.worker_id,
+            "remote_job_id": receipt.remote_job_id,
+            "controller_job_id": receipt.controller_job_id,
+            "idempotency_key": receipt.idempotency_key,
+            "request_sha256": receipt.request_sha256,
+        }
+
+    def _artifact_lock_for(self, remote_job_id: str) -> RLock:
+        stripe = int.from_bytes(
+            hashlib.new("sha256", remote_job_id.encode("utf-8")).digest()[:8], "big"
+        ) % len(self._artifact_locks)
+        return self._artifact_locks[stripe]
+
+    def _artifact_stage(self, receipt: RemoteJobReceipt) -> PrivateDirectoryAnchor:
+        binding = self._artifact_binding(receipt)
+        job_key = hashlib.new(
+            "sha256", receipt.remote_job_id.encode("utf-8")
+        ).hexdigest()
+        try:
+            stage, created = self._artifact_root.child(job_key)
+        except (ArtifactSpoolError, OSError) as exc:
+            raise InvalidInput("private compute artifact job spool is unsafe") from exc
+        if created:
+            try:
+                stage.write_json_once("binding.json", binding)
+            except FileExistsError:
+                pass
+        try:
+            raw = stage.read_bytes("binding.json", max_bytes=16 * 1024)
+            observed = json.loads(raw.decode("utf-8"))
+        except FileNotFoundError as exc:
+            stage.close()
+            raise Conflict("compute artifact spool is not request-bound") from exc
+        except (ArtifactSpoolError, OSError, UnicodeError, ValueError) as exc:
+            stage.close()
+            raise InvalidInput("compute artifact spool binding is invalid") from exc
+        if observed != binding:
+            stage.close()
+            raise Conflict("compute artifact spool belongs to a different request")
+        return stage
+
+    def _load_artifact_manifest(
+        self,
+        stage: PrivateDirectoryAnchor,
+        receipt: RemoteJobReceipt,
+    ) -> tuple[RemoteArtifactReceipt, ...] | None:
+        if not stage.exists("receipt.json"):
+            return None
+        try:
+            raw = stage.read_bytes("receipt.json", max_bytes=256 * 1024)
+            value = json.loads(raw.decode("utf-8"))
+        except (ArtifactSpoolError, OSError, UnicodeError, ValueError) as exc:
+            raise InvalidInput("compute artifact snapshot receipt is invalid") from exc
+        expected = self._artifact_binding(receipt)
+        if not isinstance(value, dict) or any(
+            value.get(key) != wanted for key, wanted in expected.items()
+        ):
+            raise Conflict("compute artifact snapshot receipt belongs to a different request")
+        rows = value.get("artifacts")
+        if not isinstance(rows, list) or len(rows) > MAX_COMPUTE_ARTIFACTS:
+            raise InvalidInput("compute artifact snapshot receipt is invalid")
+        artifacts: list[RemoteArtifactReceipt] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise InvalidInput("compute artifact snapshot receipt is invalid")
+            try:
+                artifact = RemoteArtifactReceipt(
+                    name=row["name"],
+                    size_bytes=row["size_bytes"],
+                    mime_type=row["mime_type"],
+                    sha256=row["sha256"],
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise InvalidInput("compute artifact snapshot receipt is invalid") from exc
+            snapshot_name = self._artifact_snapshot_name(
+                receipt.request_sha256, artifact.name,
+            )
+            try:
+                with stage.open_read(snapshot_name) as stream:
+                    size_bytes, digest = self._copy_stable_stream(
+                        stream, root=stage.path,
+                    )
+            except (ArtifactSpoolError, OSError) as exc:
+                raise InvalidInput("compute artifact snapshot is unavailable") from exc
+            if size_bytes != artifact.size_bytes or digest != artifact.sha256:
+                raise InvalidInput("compute artifact snapshot does not match its receipt")
+            artifacts.append(artifact)
+        return tuple(artifacts)
+
+    def _publish_artifact_manifest(
+        self,
+        stage: PrivateDirectoryAnchor,
+        receipt: RemoteJobReceipt,
+        artifacts: tuple[RemoteArtifactReceipt, ...],
+    ) -> None:
+        value: dict[str, Any] = self._artifact_binding(receipt)
+        value["artifacts"] = [
+            {
+                "name": artifact.name,
+                "size_bytes": artifact.size_bytes,
+                "mime_type": artifact.mime_type,
+                "sha256": artifact.sha256,
+            }
+            for artifact in artifacts
+        ]
+        try:
+            stage.write_json_once("receipt.json", value)
+        except FileExistsError:
+            durable = self._load_artifact_manifest(stage, receipt)
+            if durable != artifacts:
+                raise Conflict("compute artifact snapshot receipt publication raced")
+
+    @staticmethod
+    def _opened_file_path(stream) -> Path:
+        """Return the kernel-resolved path for an already-open file handle."""
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            import msvcrt
+
+            handle = msvcrt.get_osfhandle(stream.fileno())
+            get_final_path = ctypes.WinDLL(
+                "kernel32", use_last_error=True,
+            ).GetFinalPathNameByHandleW
+            get_final_path.argtypes = (
+                wintypes.HANDLE,
+                wintypes.LPWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+            )
+            get_final_path.restype = wintypes.DWORD
+            buffer = ctypes.create_unicode_buffer(32_768)
+            length = get_final_path(handle, buffer, len(buffer), 0)
+            if length == 0 or length >= len(buffer):
+                raise OSError(ctypes.get_last_error(), "open file path is unavailable")
+            value = buffer.value
+            if value.startswith("\\\\?\\UNC\\"):
+                value = "\\\\" + value[8:]
+            elif value.startswith("\\\\?\\"):
+                value = value[4:]
+            return Path(value)
+        proc_path = Path(f"/proc/self/fd/{stream.fileno()}")
+        if proc_path.exists():
+            value = os.readlink(proc_path)
+            if value.endswith(" (deleted)"):
+                raise OSError("open file was unlinked during snapshot")
+            return Path(value)
+        if hasattr(os, "uname") and os.uname().sysname == "Darwin":
+            import fcntl
+
+            value = fcntl.fcntl(stream.fileno(), 50, b"\0" * 4096)
+            return Path(value.split(b"\0", 1)[0].decode("utf-8"))
+        raise OSError("kernel-resolved open file paths are unsupported")
+
+    @classmethod
+    def _copy_stable_stream(cls, stream, *, root: Path, target=None) -> tuple[int, str]:
+        opened_path = cls._opened_file_path(stream)
+        if not opened_path.is_relative_to(root):
+            raise InvalidInput("catalog artifact opened outside its configured workspace")
+        digest = hashlib.sha256()
+        total = 0
+        before = os.fstat(stream.fileno())
+        if not stat_module.S_ISREG(before.st_mode):
+            raise InvalidInput("catalog artifact is not a regular file")
+        if before.st_size > MAX_COMPUTE_ARTIFACT_BYTES:
+            raise InvalidInput("catalog artifact exceeds the transport limit")
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            total += len(block)
+            if total > MAX_COMPUTE_ARTIFACT_BYTES:
+                raise InvalidInput("catalog artifact exceeds the transport limit")
+            digest.update(block)
+            if target is not None:
+                target.write(block)
+        after = os.fstat(stream.fileno())
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if total != before.st_size or before_identity != after_identity:
+            raise InvalidInput("catalog artifact changed while hashing")
+        return total, digest.hexdigest()
+
+    @classmethod
+    def _snapshot_artifact(
+        cls,
+        stage: PrivateDirectoryAnchor,
+        root: Path,
+        candidate: Path,
+        snapshot_name: str,
+    ) -> tuple[int, str]:
+        """Copy one contained stable handle into a private immutable snapshot."""
+        descriptor, temporary_name = stage.create_temporary()
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                target_path = cls._opened_file_path(target)
+                if not target_path.is_relative_to(stage.path):
+                    raise InvalidInput("compute artifact snapshot escaped its private root")
+                with candidate.open("rb") as source:
+                    result = cls._copy_stable_stream(source, root=root, target=target)
+                target.flush()
+                os.fsync(target.fileno())
+            try:
+                stage.publish(temporary_name, snapshot_name)
+            except FileExistsError as exc:
+                raise ArtifactSpoolConflict(
+                    "compute artifact snapshot publication raced"
+                ) from exc
+            return result
+        except Exception:
+            try:
+                if stage.exists(temporary_name):
+                    stage.unlink(temporary_name)
+            except OSError:
+                pass
+            raise
 
     def _project_output(self, receipt: RemoteJobReceipt) -> RemoteJobReceipt:
         stream = getattr(self._provider, "stream", None)
@@ -838,7 +1137,7 @@ class ComputeJobWorker:
             function(path)
 
         try:
-            shutil.rmtree(resolved, onexc=make_writable_and_retry)
+            shutil.rmtree(resolved, onerror=make_writable_and_retry)
         except OSError:
             # Cleanup failure cannot rewrite execution truth. The stage remains
             # inside the dedicated temp root for later maintenance.
@@ -906,34 +1205,55 @@ class ComputeJobWorker:
         remote_job_id: str,
         name: str,
         *,
-        max_bytes: int = 64 * 1024 * 1024,
+        max_bytes: int = MAX_COMPUTE_ARTIFACT_BYTES,
     ) -> RemoteArtifactPayload:
-        if isinstance(max_bytes, bool) or not 1 <= max_bytes <= 256 * 1024 * 1024:
-            raise InvalidInput("artifact read bound must be within 1..256MiB")
+        if (
+            isinstance(max_bytes, bool)
+            or not 1 <= max_bytes <= MAX_COMPUTE_ARTIFACT_BYTES
+        ):
+            raise InvalidInput("artifact read bound must be within 1..64MiB")
         receipt = self.status(remote_job_id)
         artifact = next((item for item in receipt.artifacts if item.name == name), None)
         if artifact is None:
             raise NotFound("compute artifact was not found")
         if artifact.size_bytes > max_bytes:
             raise InvalidInput("compute artifact exceeds the requested read bound")
-        context = self._artifact_context.get(remote_job_id)
-        if context is None:
-            raise NotFound("compute artifact workspace is unavailable")
-        root, cwd, _artifact_paths = context
-        candidate = (cwd / artifact.name).resolve()
-        if not candidate.is_relative_to(root):
-            raise InvalidInput("compute artifact would escape its configured workspace")
+        snapshot_name = self._artifact_snapshot_name(
+            receipt.request_sha256, artifact.name,
+        )
         try:
-            with candidate.open("rb") as stream:
-                content = stream.read(min(max_bytes, artifact.size_bytes) + 1)
-        except OSError as exc:
+            with self._artifact_lock_for(remote_job_id):
+                with self._artifact_stage(receipt) as stage:
+                    with stage.open_read(snapshot_name) as stream:
+                        opened_path = self._opened_file_path(stream)
+                        if not opened_path.is_relative_to(stage.path):
+                            raise InvalidInput(
+                                "compute artifact snapshot escaped its private root"
+                            )
+                        before = os.fstat(stream.fileno())
+                        if not stat_module.S_ISREG(before.st_mode):
+                            raise InvalidInput(
+                                "compute artifact snapshot is not a regular file"
+                            )
+                        content = stream.read(artifact.size_bytes + 1)
+                        after = os.fstat(stream.fileno())
+        except (ArtifactSpoolError, OSError) as exc:
             raise NotFound("compute artifact is unavailable") from exc
-        if len(content) > artifact.size_bytes:
-            raise InvalidInput("compute artifact changed after receipt publication")
+        before_identity = (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+        )
+        after_identity = (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+        )
+        if (
+            len(content) != artifact.size_bytes
+            or before_identity != after_identity
+        ):
+            raise InvalidInput("compute artifact snapshot changed after publication")
         try:
             return RemoteArtifactPayload(artifact, content)
         except ValueError as exc:
-            raise InvalidInput("compute artifact changed after receipt publication") from exc
+            raise InvalidInput("compute artifact snapshot changed after publication") from exc
 
     def cancel(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
         receipt = self.status(remote_job_id)
@@ -976,6 +1296,8 @@ __all__ = [
     "ComputeJobWorker",
     "DigestBoundInput",
     "JobCatalogEntry",
+    "MAX_COMPUTE_ARTIFACTS",
+    "MAX_COMPUTE_ARTIFACT_BYTES",
     "RemoteArtifactReceipt",
     "RemoteArtifactPayload",
     "RemoteJobEnvelope",

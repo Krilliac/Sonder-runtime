@@ -107,10 +107,22 @@ and relative-path options use `--name=relative/path`. Put invariant options in
 `fixed_args`; controller absolute paths and workspace-escaping symlinks are
 rejected.
 
-`memory_limit_bytes` is worker-owned catalog policy. When configured, the
-worker must attach a native hard per-process memory limit before publishing
-the durable job; if Windows Job Objects or POSIX `prlimit` cannot enforce it,
-launch fails closed. The controller cannot raise or remove this bound.
+`memory_limit_bytes` is worker-owned catalog policy. Compute jobs use an
+OS-owned aggregate job boundary: a Windows Job Object or a transient Linux
+systemd scope. Linux workers require `systemd-run` and `systemctl`; launch fails
+closed when those tools are unavailable. The scope applies `TasksMax` to the
+owner plus its bounded descendants and, when configured, `MemoryMax` to the
+whole cgroup. Non-root workers use the user manager by default; set
+`SONDER_COMPUTE_SYSTEMD_USER=false` only when the service deliberately runs
+against the system manager. Generic non-compute process jobs retain their
+existing per-process memory limiter. The controller cannot raise or remove a
+worker-owned bound.
+
+Sonder persists the scope identity and reclaims it after worker restart. A job
+cannot report terminal success while the scope is still populated. Deadline or
+operator cancellation remains `cancellation_requested` until the process tree
+is proven empty; forced scope cleanup produces a cancelled result rather than
+turning an incompletely contained run into success.
 
 Container work must declare digest-bound input artifacts. Before launch, the
 worker resolves each declared input beneath the selected workspace and checks
@@ -119,13 +131,16 @@ This prevents a controller from referring to mutable or workspace-escaping
 container inputs.
 
 Worker catalogs may name fixed `artifact_paths`. When a job reaches a terminal
-state, Sonder hashes every present regular file and publishes size, MIME type,
-and SHA-256 receipts. Bytes are available only through the authenticated admin
-route `GET /v1/compute/jobs/{remote_job_id}/artifacts/{encoded_name}`; the
-server revalidates the file against the published receipt immediately before
-delivery. Controllers perform the same length, type, header-digest, and body-
-digest checks. Native MCP can retrieve artifacts up to 96 KiB with
-`compute_artifact_fetch`; larger artifacts use the authenticated HTTP route.
+state, Sonder opens each present regular file, hashes that exact handle, and
+publishes size, MIME type, and SHA-256 only when the handle and path remain the
+same stable file throughout the snapshot. Artifacts above 64 MiB are rejected.
+Bytes are available only through the authenticated admin route
+`GET /v1/compute/jobs/{remote_job_id}/artifacts/{encoded_name}`; the server
+revalidates the file against the published receipt immediately before delivery.
+Controllers enforce the same 64 MiB transport ceiling and perform the same
+length, type, header-digest, and body-digest checks. Native MCP can retrieve
+artifacts up to 96 KiB with `compute_artifact_fetch`; larger accepted artifacts
+use the authenticated HTTP route.
 
 ## Native MCP controller tools
 
@@ -133,7 +148,9 @@ The native MCP catalog exposes `compute_submit`, `compute_status`,
 `compute_cancel`, and `compute_artifact_fetch`. `compute_submit` requires an explicit `allow_remote` boolean
 for every workload. Setting it does not override `[compute].allow_remote`; both
 the per-call and global gates must authorize private-node placement. Inference
-is excluded and remains owned by the model gateway.
+is excluded and remains owned by the model gateway. Permission modes classify
+submission as execution and cancellation as mutation; neither operation falls
+through to an unclassified default.
 
 Controller placement identity, selected node, request digest, idempotency key,
 and remote job identity are stored in the durable job registry. After a Sonder

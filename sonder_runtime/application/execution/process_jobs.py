@@ -21,6 +21,7 @@ class ProcessJobRequest:
     deadline_seconds: int | None = None
     memory_limit_bytes: int | None = None
     metadata: tuple[tuple[str, str], ...] = ()
+    require_job_scope: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, JobIdentity):
@@ -41,6 +42,8 @@ class ProcessJobRequest:
             or not 1 <= self.memory_limit_bytes <= 1 << 50
         ):
             raise ValueError("memory_limit_bytes must be within 1..2^50")
+        if not isinstance(self.require_job_scope, bool):
+            raise TypeError("require_job_scope must be a boolean")
         if any(not isinstance(key, str) or not key for key, _ in self.environment):
             raise ValueError("environment keys must be non-empty strings")
         seen: set[str] = set()
