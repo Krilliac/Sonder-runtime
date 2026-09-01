@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 218,
+      "file_count": 221,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -77,6 +77,9 @@
         "sonder_runtime/adapters/command_completion.py",
         "sonder_runtime/adapters/command_parsing.py",
         "sonder_runtime/adapters/command_surface.py",
+        "sonder_runtime/adapters/compute_fabric/__init__.py",
+        "sonder_runtime/adapters/compute_fabric/http_client.py",
+        "sonder_runtime/adapters/compute_fabric/local_snapshot.py",
         "sonder_runtime/adapters/config_validation.py",
         "sonder_runtime/adapters/content_services.py",
         "sonder_runtime/adapters/context_formatting.py",
@@ -267,7 +270,7 @@
       ]
     },
     {
-      "file_count": 260,
+      "file_count": 266,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -301,6 +304,11 @@
         "sonder_runtime/application/compaction/append_service.py",
         "sonder_runtime/application/compaction/legacy.py",
         "sonder_runtime/application/compaction/session_service.py",
+        "sonder_runtime/application/compute_fabric/__init__.py",
+        "sonder_runtime/application/compute_fabric/jobs.py",
+        "sonder_runtime/application/compute_fabric/registry.py",
+        "sonder_runtime/application/compute_fabric/service.py",
+        "sonder_runtime/application/compute_fabric/wire.py",
         "sonder_runtime/application/context.py",
         "sonder_runtime/application/context_health.py",
         "sonder_runtime/application/context_integration.py",
@@ -391,6 +399,7 @@
         "sonder_runtime/application/ports/clock.py",
         "sonder_runtime/application/ports/command_catalog.py",
         "sonder_runtime/application/ports/compaction.py",
+        "sonder_runtime/application/ports/compute_fabric.py",
         "sonder_runtime/application/ports/content_services.py",
         "sonder_runtime/application/ports/evaluation.py",
         "sonder_runtime/application/ports/evaluation_history.py",
@@ -555,7 +564,7 @@
       ]
     },
     {
-      "file_count": 107,
+      "file_count": 109,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -583,6 +592,8 @@
         "sonder_runtime/domain/common/errors.py",
         "sonder_runtime/domain/common/events.py",
         "sonder_runtime/domain/common/ids.py",
+        "sonder_runtime/domain/compute_fabric.py",
+        "sonder_runtime/domain/compute_profiles.py",
         "sonder_runtime/domain/context/__init__.py",
         "sonder_runtime/domain/context/compaction.py",
         "sonder_runtime/domain/context/hardware_sizing.py",
@@ -668,7 +679,7 @@
       ]
     },
     {
-      "file_count": 37,
+      "file_count": 38,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -685,6 +696,7 @@
         "sonder_runtime/interfaces/http/facades/__init__.py",
         "sonder_runtime/interfaces/http/facades/a2a.py",
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
+        "sonder_runtime/interfaces/http/facades/compute_fabric.py",
         "sonder_runtime/interfaces/http/facades/control_plane.py",
         "sonder_runtime/interfaces/http/facades/extensions.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
