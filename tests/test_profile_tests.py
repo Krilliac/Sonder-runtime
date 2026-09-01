@@ -82,7 +82,9 @@ def test_two_worker_mode_uses_file_grouped_xdist(tmp_path):
         ],
         capture_output=True,
         text=True,
-        timeout=30,
+        # Nested xdist worker startup can exceed 30 seconds on Windows while
+        # the repository's full process-heavy suite is already active.
+        timeout=60,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
