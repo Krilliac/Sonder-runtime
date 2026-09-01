@@ -62,6 +62,7 @@ workspace_mappings = ["sonder-runtime"]
 allowed_flags = ["-q"]
 allowed_bounded_options = ["--color"]
 allowed_relative_path_options = ["--basetemp"]
+memory_limit_bytes = 2147483648
 
 [[compute.jobs]]
 id = "sonder-cmake-build"
@@ -104,6 +105,11 @@ Flags take no value, bounded options use `--name=value` with a scalar value,
 and relative-path options use `--name=relative/path`. Put invariant options in
 `fixed_args`; controller absolute paths and workspace-escaping symlinks are
 rejected.
+
+`memory_limit_bytes` is worker-owned catalog policy. When configured, the
+worker must attach a native hard per-process memory limit before publishing
+the durable job; if Windows Job Objects or POSIX `prlimit` cannot enforce it,
+launch fails closed. The controller cannot raise or remove this bound.
 
 ## Native MCP controller tools
 

@@ -580,6 +580,7 @@ def build_application(
                     allowed_relative_path_options=frozenset(
                         job.allowed_relative_path_options
                     ),
+                    memory_limit_bytes=job.memory_limit_bytes,
                 )
                 for job in effective_config.compute.jobs
             }

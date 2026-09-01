@@ -49,6 +49,7 @@ def _entry() -> JobCatalogEntry:
         argument_policy=ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS,
         environment_allowlist=frozenset({"PYTEST_ADDOPTS"}),
         workspace_mappings=frozenset({"sonder"}),
+        memory_limit_bytes=512 * 1024 * 1024,
     )
 
 
@@ -82,6 +83,7 @@ def test_worker_resolves_catalog_program_and_workspace(tmp_path: Path) -> None:
     assert provider.request.cwd == (tmp_path / "tests").resolve()
     assert provider.request.environment == (("PYTEST_ADDOPTS", "-q"),)
     assert provider.request.deadline_seconds == 60
+    assert provider.request.memory_limit_bytes == 512 * 1024 * 1024
     assert receipt.worker_id == "worker-1"
     assert receipt.request_sha256 == _envelope().request_sha256
     assert receipt.state == "running"
