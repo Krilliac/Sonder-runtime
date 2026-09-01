@@ -554,6 +554,9 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 }
                 for artifact in receipt.artifacts
             ],
+            "output_preview": receipt.output_preview,
+            "output_watermark": receipt.output_watermark,
+            "output_truncated": receipt.output_truncated,
         }
         return {
             "output": json.dumps(payload, sort_keys=True, separators=(",", ":")),

@@ -4,6 +4,7 @@ from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -16,6 +17,12 @@ from sonder_runtime.application.compute_fabric.jobs import (
     RemoteJobEnvelope,
 )
 from sonder_runtime.application.execution.process_jobs import ProcessJobStart, ProcessJobWait
+from sonder_runtime.application.execution.world_control import (
+    OutputEvent,
+    OutputPage,
+    OutputStream,
+    OutputWatermark,
+)
 from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 from sonder_runtime.domain.common.errors import Conflict, InvalidInput
 from sonder_runtime.domain.compute_fabric import WorkloadKind
@@ -156,6 +163,39 @@ def test_worker_rejects_argument_symlink_that_escapes_workspace(tmp_path: Path) 
         worker.submit(_envelope(relative_cwd=".", arguments=("escape/test_api.py",)))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_worker_rejects_argument_junction_escape_without_symlink_privilege(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_api.py").write_text("pass", encoding="utf-8")
+    junction = workspace / "escape"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stdout + created.stderr
+    try:
+        worker = ComputeJobWorker(
+            worker_id="worker-1",
+            catalog={"pytest": _entry()},
+            workspace_mappings={"sonder": workspace},
+            provider=CapturingProvider(),
+        )
+        with pytest.raises(InvalidInput, match="escape"):
+            worker.submit(_envelope(
+                relative_cwd=".",
+                arguments=("escape/test_api.py",),
+            ))
+    finally:
+        os.rmdir(junction)
+
+
 def test_worker_idempotency_returns_same_job_and_conflict_rejects(tmp_path: Path) -> None:
     provider = CapturingProvider()
     worker = ComputeJobWorker(
@@ -199,13 +239,42 @@ def test_worker_verifies_digest_bound_inputs_before_launch(tmp_path: Path) -> No
         provider=provider,
     )
     digest = hashlib.sha256(b"abc").hexdigest()
-    worker.submit(_envelope(input_artifacts=(DigestBoundInput("input.bin", 3, digest),)))
+    worker.submit(_envelope(
+        arguments=("input.bin",),
+        input_artifacts=(DigestBoundInput("input.bin", 3, digest),),
+    ))
     assert provider.request is not None
+    staged = Path(provider.request.argv[-1])
+    assert staged.is_absolute()
+    assert staged.read_bytes() == b"abc"
+    payload.write_bytes(b"mutated")
+    assert staged.read_bytes() == b"abc"
 
     with pytest.raises(InvalidInput, match="digest"):
         worker.submit(_envelope(
             idempotency_key="idem-bad-input",
+            arguments=("input.bin",),
             input_artifacts=(DigestBoundInput("input.bin", 3, "0" * 64),),
+        ))
+
+
+def test_worker_rejects_digest_input_not_consumed_by_catalog_argv(tmp_path: Path) -> None:
+    import hashlib
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "input.bin").write_bytes(b"abc")
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=CapturingProvider(),
+    )
+    with pytest.raises(InvalidInput, match="explicit catalog argument"):
+        worker.submit(_envelope(
+            input_artifacts=(DigestBoundInput(
+                "input.bin", 3, hashlib.sha256(b"abc").hexdigest()
+            ),),
         ))
 
 
@@ -267,6 +336,52 @@ def test_worker_status_refreshes_terminal_state_and_cancel_reports_cleanup_truth
     started = worker.submit(_envelope())
     assert worker.status(started.remote_job_id).state == "succeeded"
     assert worker.cancel(started.remote_job_id, reason="done").state == "cancelled"
+
+
+def test_worker_status_projects_bounded_output_preview_and_watermark(
+    tmp_path: Path,
+) -> None:
+    class OutputProvider(CapturingProvider):
+        def wait(self, job_id, *, timeout=None):
+            return ProcessJobWait(
+                JobRecord(
+                    JobIdentity(
+                        job_id,
+                        kind="compute-test",
+                        operation_id="controller-job",
+                        idempotency_key="idem-1",
+                    ),
+                    status=JobStatus.FAILED,
+                ),
+                exit_code=1,
+            )
+
+        def stream(self, job_id, *, max_events, max_bytes):
+            assert max_events == 32
+            assert max_bytes == 16 * 1024
+            return OutputPage(
+                (
+                    OutputEvent(
+                        OutputWatermark(7),
+                        OutputStream.STDERR,
+                        "compile failed\n",
+                    ),
+                ),
+                OutputWatermark(7),
+                has_more=True,
+            )
+
+    (tmp_path / "tests").mkdir()
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=OutputProvider(),
+    )
+    receipt = worker.status(worker.submit(_envelope()).remote_job_id)
+    assert receipt.output_preview == "compile failed\n"
+    assert receipt.output_watermark == 7
+    assert receipt.output_truncated is True
 
 
 def test_worker_emits_verified_receipts_for_catalog_artifacts(tmp_path: Path) -> None:

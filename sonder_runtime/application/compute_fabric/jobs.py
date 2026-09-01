@@ -6,8 +6,11 @@ from enum import StrEnum
 import hashlib
 import json
 import mimetypes
+import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
+import shutil
+import tempfile
 from threading import RLock
 from typing import Any, Mapping
 
@@ -420,6 +423,9 @@ class RemoteJobReceipt:
     state: str
     process_id: int | None = None
     artifacts: tuple[RemoteArtifactReceipt, ...] = ()
+    output_preview: str = ""
+    output_watermark: int = 0
+    output_truncated: bool = False
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -439,6 +445,18 @@ class RemoteJobReceipt:
             raise ValueError("receipt process id must be positive")
         if len(self.artifacts) > 256:
             raise ValueError("receipt artifact count exceeds its bound")
+        if not isinstance(self.output_preview, str) or len(
+            self.output_preview.encode("utf-8")
+        ) > 16 * 1024:
+            raise ValueError("receipt output preview exceeds its bound")
+        if (
+            isinstance(self.output_watermark, bool)
+            or not isinstance(self.output_watermark, int)
+            or self.output_watermark < 0
+        ):
+            raise ValueError("receipt output watermark must be non-negative")
+        if not isinstance(self.output_truncated, bool):
+            raise ValueError("receipt output truncation flag must be boolean")
 
 
 def validate_remote_job_receipt(
@@ -494,6 +512,7 @@ class ComputeJobWorker:
         self._artifact_context: dict[
             str, tuple[Path, Path, tuple[str, ...]]
         ] = {}
+        self._input_stages: dict[str, Path] = {}
         self._lock = RLock()
         self._rehydrate()
 
@@ -542,6 +561,12 @@ class ComputeJobWorker:
                     self._artifact_context[receipt.remote_job_id] = (
                         root, cwd, entry.artifact_paths,
                     )
+            raw_stage = metadata.get("compute_input_stage")
+            if isinstance(raw_stage, str) and raw_stage:
+                stage = Path(raw_stage).resolve()
+                base = self._input_stage_base().resolve()
+                if stage.is_relative_to(base) and stage.is_dir():
+                    self._input_stages[receipt.remote_job_id] = stage
 
     def submit(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
         try:
@@ -573,13 +598,24 @@ class ComputeJobWorker:
                 resolved_argument = (cwd / relative_path).resolve()
                 if not resolved_argument.is_relative_to(root):
                     raise ValueError("argument path would escape its configured workspace")
-            self._verify_inputs(root, cwd, envelope.input_artifacts)
             environment = entry.environment_for(envelope.environment)
         except ValueError as exc:
             raise InvalidInput(str(exc)) from exc
         remote_job_id = "cf-" + hashlib.sha256(
             f"{self.worker_id}\x00{envelope.idempotency_key}".encode("utf-8")
         ).hexdigest()[:24]
+        input_stage = None
+        if envelope.input_artifacts:
+            try:
+                input_stage, argv = self._stage_inputs(
+                    remote_job_id,
+                    root,
+                    cwd,
+                    argv,
+                    envelope.input_artifacts,
+                )
+            except ValueError as exc:
+                raise InvalidInput(str(exc)) from exc
         request = ProcessJobRequest(
             identity=JobIdentity(
                 job_id=remote_job_id,
@@ -599,6 +635,7 @@ class ComputeJobWorker:
                 ("compute_catalog_entry_id", envelope.catalog_entry_id),
                 ("compute_workspace_mapping", envelope.workspace_mapping),
                 ("compute_relative_cwd", envelope.relative_cwd),
+                ("compute_input_stage", "" if input_stage is None else str(input_stage)),
             ),
         )
         with self._lock:
@@ -611,7 +648,12 @@ class ComputeJobWorker:
             # worker critical section. The provider durably reserves the stable
             # job identity before it creates the process, so concurrent callers
             # cannot execute the same idempotency key twice.
-            started = self._provider.start(request)
+            try:
+                started = self._provider.start(request)
+            except Exception:
+                if input_stage is not None:
+                    self._remove_input_stage(input_stage)
+                raise
             receipt = RemoteJobReceipt(
                 worker_id=self.worker_id,
                 remote_job_id=remote_job_id,
@@ -626,6 +668,8 @@ class ComputeJobWorker:
             self._artifact_context[remote_job_id] = (
                 root, cwd, entry.artifact_paths,
             )
+            if input_stage is not None:
+                self._input_stages[remote_job_id] = input_stage
         return receipt
 
     def _collect_artifacts(self, receipt: RemoteJobReceipt) -> RemoteJobReceipt:
@@ -675,33 +719,135 @@ class ComputeJobWorker:
             state=receipt.state,
             process_id=receipt.process_id,
             artifacts=tuple(artifacts),
+            output_preview=receipt.output_preview,
+            output_watermark=receipt.output_watermark,
+            output_truncated=receipt.output_truncated,
+        )
+
+    def _project_output(self, receipt: RemoteJobReceipt) -> RemoteJobReceipt:
+        stream = getattr(self._provider, "stream", None)
+        if not callable(stream):
+            return receipt
+        try:
+            page = stream(
+                receipt.remote_job_id,
+                max_events=32,
+                max_bytes=16 * 1024,
+            )
+            preview = "".join(event.data for event in page.events)
+            encoded = preview.encode("utf-8")
+            if len(encoded) > 16 * 1024:
+                preview = encoded[: 16 * 1024].decode("utf-8", errors="ignore")
+            watermark = page.next_watermark.sequence
+            truncated = bool(page.truncated or page.has_more)
+        except Exception:
+            return receipt
+        return RemoteJobReceipt(
+            worker_id=receipt.worker_id,
+            remote_job_id=receipt.remote_job_id,
+            controller_job_id=receipt.controller_job_id,
+            idempotency_key=receipt.idempotency_key,
+            request_sha256=receipt.request_sha256,
+            state=receipt.state,
+            process_id=receipt.process_id,
+            artifacts=receipt.artifacts,
+            output_preview=preview,
+            output_watermark=watermark,
+            output_truncated=truncated,
         )
 
     @staticmethod
-    def _verify_inputs(
+    def _input_stage_base() -> Path:
+        base = Path(tempfile.gettempdir()) / "sonder-compute-inputs"
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return base
+
+    @classmethod
+    def _stage_inputs(
+        cls,
+        remote_job_id: str,
         root: Path,
         cwd: Path,
+        argv: tuple[str, ...],
         inputs: tuple[DigestBoundInput, ...],
-    ) -> None:
-        for expected in inputs:
-            candidate = (cwd / expected.name).resolve()
-            if not candidate.is_relative_to(root):
-                raise ValueError("input artifact would escape its configured workspace")
-            try:
-                stat = candidate.stat()
-            except OSError as exc:
-                raise ValueError("input artifact is unavailable") from exc
-            if not candidate.is_file() or stat.st_size != expected.size_bytes:
-                raise ValueError("input artifact size does not match its digest contract")
-            digest = hashlib.sha256()
-            try:
-                with candidate.open("rb") as stream:
-                    for block in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(block)
-            except OSError as exc:
-                raise ValueError("input artifact could not be verified") from exc
-            if digest.hexdigest() != expected.sha256:
-                raise ValueError("input artifact digest does not match its contract")
+    ) -> tuple[Path, tuple[str, ...]]:
+        """Copy verified bytes to a private snapshot and bind argv to it."""
+        stage = Path(tempfile.mkdtemp(
+            prefix=f"{remote_job_id}-",
+            dir=cls._input_stage_base(),
+        )).resolve()
+        replacements: dict[str, str] = {}
+        try:
+            for index, expected in enumerate(inputs):
+                candidate = (cwd / expected.name).resolve()
+                if not candidate.is_relative_to(root):
+                    raise ValueError("input artifact would escape its configured workspace")
+                destination = stage / f"{index:02d}-{Path(expected.name).name}"
+                digest = hashlib.sha256()
+                size = 0
+                try:
+                    with candidate.open("rb") as source, destination.open("xb") as target:
+                        for block in iter(lambda: source.read(1024 * 1024), b""):
+                            size += len(block)
+                            if size > expected.size_bytes:
+                                raise ValueError(
+                                    "input artifact size does not match its digest contract"
+                                )
+                            digest.update(block)
+                            target.write(block)
+                except ValueError:
+                    raise
+                except OSError as exc:
+                    raise ValueError("input artifact could not be staged") from exc
+                if size != expected.size_bytes:
+                    raise ValueError("input artifact size does not match its digest contract")
+                if digest.hexdigest() != expected.sha256:
+                    raise ValueError("input artifact digest does not match its contract")
+                try:
+                    destination.chmod(0o400)
+                except OSError as exc:
+                    raise ValueError("staged input could not be made read-only") from exc
+                replacements[expected.name.replace("\\", "/")] = str(destination)
+            rewritten: list[str] = []
+            consumed: set[str] = set()
+            for item in argv:
+                normalized = item.replace("\\", "/")
+                replacement = replacements.get(normalized)
+                if replacement is None:
+                    rewritten.append(item)
+                else:
+                    rewritten.append(replacement)
+                    consumed.add(normalized)
+            if consumed != set(replacements):
+                raise ValueError(
+                    "every digest-bound input must be an explicit catalog argument"
+                )
+            return stage, tuple(rewritten)
+        except Exception:
+            cls._remove_input_stage(stage)
+            raise
+
+    @staticmethod
+    def _remove_input_stage(stage: Path) -> None:
+        base = ComputeJobWorker._input_stage_base().resolve()
+        resolved = stage.resolve()
+        if not resolved.is_relative_to(base) or resolved == base:
+            return
+        def make_writable_and_retry(function, path, _error) -> None:
+            os.chmod(path, 0o700)
+            function(path)
+
+        try:
+            shutil.rmtree(resolved, onexc=make_writable_and_retry)
+        except OSError:
+            # Cleanup failure cannot rewrite execution truth. The stage remains
+            # inside the dedicated temp root for later maintenance.
+            return
+
+    def _cleanup_input_stage(self, remote_job_id: str) -> None:
+        stage = self._input_stages.pop(remote_job_id, None)
+        if stage is not None:
+            self._remove_input_stage(stage)
 
     def status(self, remote_job_id: str) -> RemoteJobReceipt:
         _identity(remote_job_id, "remote_job_id")
@@ -733,12 +879,18 @@ class ComputeJobWorker:
                 state=record.status.value,
                 process_id=receipt.process_id,
                 artifacts=receipt.artifacts,
+                output_preview=receipt.output_preview,
+                output_watermark=receipt.output_watermark,
+                output_truncated=receipt.output_truncated,
             )
             with self._lock:
                 self._by_job[remote_job_id] = refreshed
                 self._by_idempotency[receipt.idempotency_key] = refreshed
             receipt = refreshed
+        receipt = self._project_output(receipt)
         receipt = self._collect_artifacts(receipt)
+        if receipt.state in {"succeeded", "failed", "cancelled", "interrupted"}:
+            self._cleanup_input_stage(remote_job_id)
         with self._lock:
             self._by_job[remote_job_id] = receipt
             self._by_idempotency[receipt.idempotency_key] = receipt
@@ -802,11 +954,17 @@ class ComputeJobWorker:
             state="cancelled" if cleanup_completed else "cancellation_requested",
             process_id=receipt.process_id,
             artifacts=receipt.artifacts,
+            output_preview=receipt.output_preview,
+            output_watermark=receipt.output_watermark,
+            output_truncated=receipt.output_truncated,
         )
         with self._lock:
             self._by_job[remote_job_id] = cancelled
             self._by_idempotency[receipt.idempotency_key] = cancelled
+        cancelled = self._project_output(cancelled)
         cancelled = self._collect_artifacts(cancelled)
+        if cancelled.state in {"cancelled", "interrupted"}:
+            self._cleanup_input_stage(remote_job_id)
         with self._lock:
             self._by_job[remote_job_id] = cancelled
             self._by_idempotency[receipt.idempotency_key] = cancelled
