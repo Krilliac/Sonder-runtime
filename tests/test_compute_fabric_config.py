@@ -40,6 +40,9 @@ fixed_args = ["-m", "pytest"]
 argument_policy = "relative-paths-and-test-selectors"
 environment_allowlist = ["PYTEST_ADDOPTS"]
 workspace_mappings = ["sonder"]
+allowed_flags = ["-q"]
+allowed_bounded_options = ["--color"]
+allowed_relative_path_options = ["--basetemp"]
 """,
         encoding="utf-8",
     )
@@ -52,6 +55,9 @@ workspace_mappings = ["sonder"]
     assert config.compute.nodes[0].preference_weight == 2.5
     assert config.compute.jobs[0].job_id == "pytest"
     assert config.compute.jobs[0].fixed_args == ("-m", "pytest")
+    assert config.compute.jobs[0].allowed_flags == ("-q",)
+    assert config.compute.jobs[0].allowed_bounded_options == ("--color",)
+    assert config.compute.jobs[0].allowed_relative_path_options == ("--basetemp",)
     assert config.features.cloud is False
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -116,6 +117,12 @@ class _Transport:
         self.lookup_calls += 1
         return _receipt(node.node_id, "already-running")
 
+    def status(self, node, remote_job_id):
+        return _receipt(node.node_id, remote_job_id)
+
+    def cancel(self, node, remote_job_id, *, reason):
+        return _receipt(node.node_id, remote_job_id)
+
 
 def _service(
     *,
@@ -184,3 +191,23 @@ def test_workload_profile_capabilities_are_merged_before_placement() -> None:
     with pytest.raises(DependencyUnavailable, match="eligible remote"):
         service.submit(_request(), _envelope())
     assert transport.submit_calls == 0
+
+
+def test_status_and_cancel_revalidate_complete_placement_ownership() -> None:
+    service, transport, _local = _service()
+    service.submit(_request(), _envelope())
+    valid_status = transport.status
+
+    def wrong_controller(node, remote_job_id):
+        return replace(valid_status(node, remote_job_id), controller_job_id="other")
+
+    transport.status = wrong_controller
+    with pytest.raises(DependencyUnavailable, match="controller"):
+        service.status("controller-job")
+
+    def wrong_digest(node, remote_job_id, *, reason):
+        return replace(_receipt(node.node_id, remote_job_id), request_sha256="0" * 64)
+
+    transport.cancel = wrong_digest
+    with pytest.raises(DependencyUnavailable, match="digest"):
+        service.cancel("controller-job", reason="operator stop")

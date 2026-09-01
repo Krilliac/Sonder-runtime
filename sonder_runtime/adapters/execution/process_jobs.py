@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,9 +52,11 @@ class SubprocessJobProvider:
         self._inline_output_bytes = inline_output_bytes
         self._processes: dict[str, Any] = {}
         self._limits: dict[str, int] = {}
+        self._deadline_timers: dict[str, threading.Timer] = {}
         self._output_threads: dict[str, tuple[threading.Thread, ...]] = {}
         self._output_failures: dict[str, str] = {}
         self._output_failure_lock = threading.Lock()
+        self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
         if not isinstance(request, ProcessJobRequest):
@@ -80,11 +83,22 @@ class SubprocessJobProvider:
             raise RuntimeError("launcher did not return a positive process id")
         if self._platform == "posix":
             process_group_id = process_id
+        deadline_at = None
+        if request.deadline_seconds is not None:
+            deadline_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=request.deadline_seconds)
+            ).isoformat()
+        persisted_metadata = dict(request.metadata)
+        persisted_metadata.update({
+            "hard_deadline_at": deadline_at,
+            "max_descendants": request.max_descendants,
+        })
         try:
             record = self._registry.start(
                 request.identity,
                 process_id=process_id,
                 process_group_id=process_group_id,
+                metadata=persisted_metadata,
             )
         except Exception:
             self._abort_unregistered(process)
@@ -92,6 +106,8 @@ class SubprocessJobProvider:
         self._processes[request.identity.job_id] = process
         self._limits[request.identity.job_id] = request.max_descendants
         self._start_output_readers(request.identity.job_id, process)
+        if request.deadline_seconds is not None:
+            self._schedule_deadline(request.identity.job_id, request.deadline_seconds)
         return ProcessJobStart(record, process_id, process_group_id)
 
     def wait(self, job_id: str, *, timeout: float | None = None) -> ProcessJobWait:
@@ -142,6 +158,7 @@ class SubprocessJobProvider:
         self._processes.pop(job_id, None)
         self._limits.pop(job_id, None)
         self._output_threads.pop(job_id, None)
+        self._discard_deadline(job_id)
         return ProcessJobWait(record, exit_code)
 
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
@@ -153,12 +170,84 @@ class SubprocessJobProvider:
             process = self._processes.pop(job_id, None)
             self._limits.pop(job_id, None)
             self._output_threads.pop(job_id, None)
+            self._discard_deadline(job_id)
             if process is not None:
                 try:
                     process.wait(timeout=0)
                 except (subprocess.TimeoutExpired, OSError):
                     pass
         return result
+
+    def poll(self, job_id: str):
+        return self._registry.poll(job_id)
+
+    def recover(self, *, kind_prefix: str, limit: int = 1024):
+        if not isinstance(kind_prefix, str) or not kind_prefix:
+            raise ValueError("kind_prefix is required")
+        if isinstance(limit, bool) or not 1 <= limit <= 4096:
+            raise ValueError("recovery limit must be within 1..4096")
+        return tuple(
+            self._registry.view(record.identity.job_id)
+            for record in self._registry.list(include_terminal=True, limit=limit)
+            if record.identity.kind.startswith(kind_prefix)
+        )
+
+    def _expire_deadline(self, job_id: str) -> None:
+        """Cancel a still-live process tree even when its controller vanished."""
+        try:
+            record = self._registry.poll(job_id)
+            if record.is_terminal:
+                return
+            self.cancel(job_id, reason="process deadline exceeded")
+        except (KeyError, OSError):
+            # A normal completion or concurrent cancellation may win the race.
+            return
+
+    def _schedule_deadline(self, job_id: str, delay_seconds: float) -> None:
+        timer = threading.Timer(
+            max(0.0, delay_seconds),
+            self._expire_deadline,
+            args=(job_id,),
+        )
+        timer.daemon = True
+        self._deadline_timers[job_id] = timer
+        timer.start()
+
+    def _restore_deadlines(self) -> None:
+        """Re-arm persisted hard deadlines after a worker/provider restart."""
+        list_jobs = getattr(self._registry, "list", None)
+        view_job = getattr(self._registry, "view", None)
+        if not callable(list_jobs) or not callable(view_job):
+            return
+        now = datetime.now(timezone.utc)
+        for record in list_jobs(include_terminal=False, limit=1024):
+            view = view_job(record.identity.job_id)
+            metadata = getattr(view, "metadata", None) or {}
+            raw_deadline = metadata.get("hard_deadline_at")
+            if not isinstance(raw_deadline, str) or not raw_deadline:
+                continue
+            try:
+                deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                limit = int(metadata.get("max_descendants", 64))
+                if limit < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                # Corrupt safety metadata must not silently grant unlimited runtime.
+                self._limits[record.identity.job_id] = 64
+                self._schedule_deadline(record.identity.job_id, 0)
+                continue
+            self._limits[record.identity.job_id] = limit
+            self._schedule_deadline(
+                record.identity.job_id,
+                (deadline.astimezone(timezone.utc) - now).total_seconds(),
+            )
+
+    def _discard_deadline(self, job_id: str) -> None:
+        timer = self._deadline_timers.pop(job_id, None)
+        if timer is not None and timer is not threading.current_thread():
+            timer.cancel()
 
     def _start_output_readers(self, job_id: str, process: Any) -> None:
         """Publish stdout/stderr incrementally when the process exposes pipes.

@@ -10,7 +10,11 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from ...application.compute_fabric.jobs import RemoteJobEnvelope, RemoteJobReceipt
+from ...application.compute_fabric.jobs import (
+    RemoteJobEnvelope,
+    RemoteJobReceipt,
+    validate_remote_job_receipt,
+)
 from ...application.compute_fabric.wire import (
     job_envelope_to_wire,
     job_receipt_from_wire,
@@ -191,9 +195,7 @@ class HttpsComputeJobTransport:
             receipt = job_receipt_from_wire(envelope["job"])
         except (TypeError, ValueError) as exc:
             raise DependencyUnavailable(str(exc)) from exc
-        if receipt.worker_id != node.node_id:
-            raise DependencyUnavailable("compute job worker identity mismatch")
-        return receipt
+        return validate_remote_job_receipt(receipt, worker_id=node.node_id)
 
     def submit(
         self, node: ComputeNode, envelope: RemoteJobEnvelope
@@ -206,7 +208,13 @@ class HttpsComputeJobTransport:
             allowed_statuses=frozenset({200, 202}),
         )
         assert receipt is not None
-        return receipt
+        return validate_remote_job_receipt(
+            receipt,
+            worker_id=node.node_id,
+            controller_job_id=envelope.controller_job_id,
+            idempotency_key=envelope.idempotency_key,
+            request_sha256=envelope.request_sha256,
+        )
 
     def status(self, node: ComputeNode, remote_job_id: str) -> RemoteJobReceipt:
         receipt = self._request(
@@ -215,12 +223,14 @@ class HttpsComputeJobTransport:
             path="/v1/compute/jobs/" + urllib.parse.quote(remote_job_id, safe=""),
         )
         assert receipt is not None
-        return receipt
+        return validate_remote_job_receipt(
+            receipt, worker_id=node.node_id, remote_job_id=remote_job_id,
+        )
 
     def by_idempotency(
         self, node: ComputeNode, idempotency_key: str
     ) -> RemoteJobReceipt | None:
-        return self._request(
+        receipt = self._request(
             node,
             method="GET",
             path=(
@@ -228,6 +238,11 @@ class HttpsComputeJobTransport:
                 + urllib.parse.quote(idempotency_key, safe="")
             ),
             not_found_none=True,
+        )
+        if receipt is None:
+            return None
+        return validate_remote_job_receipt(
+            receipt, worker_id=node.node_id, idempotency_key=idempotency_key,
         )
 
     def cancel(
@@ -244,7 +259,9 @@ class HttpsComputeJobTransport:
             body={"reason": reason},
         )
         assert receipt is not None
-        return receipt
+        return validate_remote_job_receipt(
+            receipt, worker_id=node.node_id, remote_job_id=remote_job_id,
+        )
 
 
 __all__ = ["HttpsComputeJobTransport", "HttpsComputeSnapshotSource"]

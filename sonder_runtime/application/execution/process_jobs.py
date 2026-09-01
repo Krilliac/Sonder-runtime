@@ -18,6 +18,8 @@ class ProcessJobRequest:
     cwd: Path | None = None
     environment: tuple[tuple[str, str], ...] = ()
     max_descendants: int = 64
+    deadline_seconds: int | None = None
+    metadata: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, JobIdentity):
@@ -26,8 +28,26 @@ class ProcessJobRequest:
             raise ValueError("argv must contain non-empty strings")
         if isinstance(self.max_descendants, bool) or self.max_descendants < 1:
             raise ValueError("max_descendants must be positive")
+        if self.deadline_seconds is not None and (
+            isinstance(self.deadline_seconds, bool)
+            or not isinstance(self.deadline_seconds, int)
+            or not 1 <= self.deadline_seconds <= 86_400
+        ):
+            raise ValueError("deadline_seconds must be within 1..86400")
         if any(not isinstance(key, str) or not key for key, _ in self.environment):
             raise ValueError("environment keys must be non-empty strings")
+        seen: set[str] = set()
+        for key, value in self.metadata:
+            if (
+                not isinstance(key, str)
+                or not key
+                or key in seen
+                or not isinstance(value, str)
+                or len(value) > 4096
+                or "\x00" in value
+            ):
+                raise ValueError("metadata must contain unique bounded string pairs")
+            seen.add(key)
 
 
 @dataclass(frozen=True, slots=True)

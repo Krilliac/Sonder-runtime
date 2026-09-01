@@ -141,6 +141,9 @@ class ComputeJobConfig:
     argument_policy: str = "none"
     environment_allowlist: tuple[str, ...] = ()
     workspace_mappings: tuple[str, ...] = ()
+    allowed_flags: tuple[str, ...] = ()
+    allowed_bounded_options: tuple[str, ...] = ()
+    allowed_relative_path_options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -275,6 +278,11 @@ class SonderConfig:
                     "argument_policy": job.argument_policy,
                     "environment_allowlist": list(job.environment_allowlist),
                     "workspace_mappings": list(job.workspace_mappings),
+                    "allowed_flags": list(job.allowed_flags),
+                    "allowed_bounded_options": list(job.allowed_bounded_options),
+                    "allowed_relative_path_options": list(
+                        job.allowed_relative_path_options
+                    ),
                 }
                 for job in self.compute.jobs
             ],
@@ -455,6 +463,8 @@ def _apply_compute_section(
         job_keys = {
             "id", "workload", "program", "fixed_args", "argument_policy",
             "environment_allowlist", "workspace_mappings",
+            "allowed_flags", "allowed_bounded_options",
+            "allowed_relative_path_options",
         }
         for index, item in enumerate(jobs_raw):
             where = f"[compute].jobs[{index}]"
@@ -484,6 +494,13 @@ def _apply_compute_section(
                 ),
                 workspace_mappings=_string_list(
                     item, "workspace_mappings", where, errors
+                ),
+                allowed_flags=_string_list(item, "allowed_flags", where, errors),
+                allowed_bounded_options=_string_list(
+                    item, "allowed_bounded_options", where, errors
+                ),
+                allowed_relative_path_options=_string_list(
+                    item, "allowed_relative_path_options", where, errors
                 ),
             ))
     return ComputeConfig(
@@ -951,6 +968,23 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             "relative-paths-and-test-selectors",
         }:
             errors.append(f"{where}.argument_policy is invalid")
+        option_groups = (
+            job.allowed_flags,
+            job.allowed_bounded_options,
+            job.allowed_relative_path_options,
+        )
+        if any(
+            not re.fullmatch(r"--?[A-Za-z0-9][A-Za-z0-9_-]{0,63}", option)
+            for group in option_groups
+            for option in group
+        ):
+            errors.append(f"{where} contains an invalid allowed option name")
+        if any(
+            set(left) & set(right)
+            for group_index, left in enumerate(option_groups)
+            for right in option_groups[group_index + 1:]
+        ):
+            errors.append(f"{where} assigns more than one policy to an option")
 
     for name in ("model_generations", "http_requests", "tool_processes",
                  "fleet_workers", "autopilot_runs", "training_jobs",

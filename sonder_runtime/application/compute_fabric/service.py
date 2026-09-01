@@ -6,7 +6,12 @@ from datetime import datetime
 from threading import RLock
 from typing import Callable
 
-from .jobs import ComputeJobWorker, RemoteJobEnvelope, RemoteJobReceipt
+from .jobs import (
+    ComputeJobWorker,
+    RemoteJobEnvelope,
+    RemoteJobReceipt,
+    validate_remote_job_receipt,
+)
 from .registry import ComputeNodeRegistry
 from ..ports.compute_fabric import ComputeRemoteJobTransport
 from ...domain.common.errors import DependencyUnavailable, NotFound
@@ -23,6 +28,14 @@ class ComputeSubmission:
     node_id: str
     placement: PlacementDecision
     receipt: RemoteJobReceipt
+
+
+@dataclass(frozen=True, slots=True)
+class _PlacementRecord:
+    node_id: str
+    placement: PlacementDecision
+    envelope: RemoteJobEnvelope
+    remote_job_id: str | None = None
 
 
 class ComputeFabricService:
@@ -44,7 +57,7 @@ class ComputeFabricService:
         self._local_worker = local_worker
         self._now = now
         self._refresh = refresh
-        self._placements: dict[str, tuple[str, PlacementDecision, str | None]] = {}
+        self._placements: dict[str, _PlacementRecord] = {}
         self._lock = RLock()
 
     @staticmethod
@@ -101,7 +114,9 @@ class ComputeFabricService:
         # Retain the digest-bound placement before any call whose outcome can
         # become ambiguous to the controller.
         with self._lock:
-            self._placements[request.request_id] = (node_id, placement, None)
+            self._placements[request.request_id] = _PlacementRecord(
+                node_id, placement, envelope,
+            )
         if node.local:
             receipt = self._local_worker.submit(envelope)
         else:
@@ -115,43 +130,64 @@ class ComputeFabricService:
                 )
                 if receipt is None:
                     raise
-        if receipt.worker_id != node_id:
-            raise DependencyUnavailable("compute job receipt worker identity mismatch")
-        if receipt.request_sha256 != envelope.request_sha256:
-            raise DependencyUnavailable("compute job receipt request digest mismatch")
+        validate_remote_job_receipt(
+            receipt,
+            worker_id=node_id,
+            controller_job_id=envelope.controller_job_id,
+            idempotency_key=envelope.idempotency_key,
+            request_sha256=envelope.request_sha256,
+        )
         with self._lock:
-            self._placements[request.request_id] = (
-                node_id,
-                placement,
-                receipt.remote_job_id,
+            self._placements[request.request_id] = _PlacementRecord(
+                node_id, placement, envelope, receipt.remote_job_id,
             )
         return ComputeSubmission(node_id, placement, receipt)
 
     def status(self, controller_job_id: str) -> ComputeSubmission:
         with self._lock:
             placed = self._placements.get(controller_job_id)
-        if placed is None or placed[2] is None:
+        if placed is None or placed.remote_job_id is None:
             raise NotFound("compute placement was not found")
-        node_id, placement, remote_job_id = placed
+        node_id = placed.node_id
+        placement = placed.placement
+        remote_job_id = placed.remote_job_id
         node = self._registry.get_node(node_id)
         receipt = (
             self._local_worker.status(remote_job_id)
             if node.local
             else self._transport.status(node, remote_job_id)
         )
+        validate_remote_job_receipt(
+            receipt,
+            worker_id=node_id,
+            controller_job_id=placed.envelope.controller_job_id,
+            idempotency_key=placed.envelope.idempotency_key,
+            request_sha256=placed.envelope.request_sha256,
+            remote_job_id=remote_job_id,
+        )
         return ComputeSubmission(node_id, placement, receipt)
 
     def cancel(self, controller_job_id: str, *, reason: str) -> ComputeSubmission:
         with self._lock:
             placed = self._placements.get(controller_job_id)
-        if placed is None or placed[2] is None:
+        if placed is None or placed.remote_job_id is None:
             raise NotFound("compute placement was not found")
-        node_id, placement, remote_job_id = placed
+        node_id = placed.node_id
+        placement = placed.placement
+        remote_job_id = placed.remote_job_id
         node = self._registry.get_node(node_id)
         receipt = (
             self._local_worker.cancel(remote_job_id, reason=reason)
             if node.local
             else self._transport.cancel(node, remote_job_id, reason=reason)
+        )
+        validate_remote_job_receipt(
+            receipt,
+            worker_id=node_id,
+            controller_job_id=placed.envelope.controller_job_id,
+            idempotency_key=placed.envelope.idempotency_key,
+            request_sha256=placed.envelope.request_sha256,
+            remote_job_id=remote_job_id,
         )
         return ComputeSubmission(node_id, placement, receipt)
 
