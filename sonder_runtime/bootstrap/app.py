@@ -494,7 +494,7 @@ def build_application(
                 if Path(root).name
             )
             local = ComputeNode(
-                node_id="local",
+                node_id=effective_config.compute.node_id,
                 origin=None,
                 local=True,
                 allowed_workloads=local_workloads,
@@ -530,7 +530,7 @@ def build_application(
             )
         registry = get_compute_registry()
         snapshot = compute_snapshot_source.snapshot(
-            registry.get_node("local"),
+            registry.get_node(effective_config.compute.node_id),
             now=datetime.now(timezone.utc),
         )
         return registry.observe(snapshot)

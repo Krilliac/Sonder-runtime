@@ -8,6 +8,7 @@ from sonder_runtime.platform.config import ConfigError, load_config
 def test_default_compute_config_is_local_only_and_remote_disabled() -> None:
     config = load_config(env={})
     assert config.compute.allow_remote is False
+    assert config.compute.node_id == "local"
     assert config.compute.nodes == ()
     assert config.compute.jobs == ()
     assert config.compute.snapshot_ttl_seconds == 30
@@ -20,6 +21,7 @@ def test_compute_nodes_and_catalog_entries_load_as_typed_toml(tmp_path) -> None:
         """
 [compute]
 allow_remote = true
+node_id = "controller"
 snapshot_ttl_seconds = 45
 
 [[compute.nodes]]
@@ -43,6 +45,7 @@ workspace_mappings = ["sonder"]
     )
     config = load_config(path, env={})
     assert config.compute.allow_remote is True
+    assert config.compute.node_id == "controller"
     assert config.compute.snapshot_ttl_seconds == 45
     assert config.compute.nodes[0].node_id == "linux-node"
     assert config.compute.nodes[0].workloads == ("build", "test", "render")
@@ -125,6 +128,7 @@ def test_redacted_dump_serializes_nested_compute_configuration() -> None:
     dumped = load_config(env={}).as_redacted_dict()
     assert dumped["compute"] == {
         "allow_remote": False,
+        "node_id": "local",
         "snapshot_ttl_seconds": 30,
         "probe_timeout_ms": 2000,
         "nodes": [],

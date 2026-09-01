@@ -155,6 +155,7 @@ class ComputeJobConfig:
 @dataclass(frozen=True)
 class ComputeConfig:
     allow_remote: bool = False
+    node_id: str = "local"
     snapshot_ttl_seconds: int = 30
     probe_timeout_ms: int = 2_000
     nodes: tuple[ComputeNodeConfig, ...] = ()
@@ -260,6 +261,7 @@ class SonderConfig:
             }
         out["compute"] = {
             "allow_remote": self.compute.allow_remote,
+            "node_id": self.compute.node_id,
             "snapshot_ttl_seconds": self.compute.snapshot_ttl_seconds,
             "probe_timeout_ms": self.compute.probe_timeout_ms,
             "nodes": [
@@ -394,7 +396,10 @@ def _apply_compute_section(
     raw: dict,
     errors: list[str],
 ) -> ComputeConfig:
-    known = {"allow_remote", "snapshot_ttl_seconds", "probe_timeout_ms", "nodes", "jobs"}
+    known = {
+        "allow_remote", "node_id", "snapshot_ttl_seconds", "probe_timeout_ms",
+        "nodes", "jobs",
+    }
     for key in raw:
         if key not in known:
             errors.append(f"unknown key [compute].{key}")
@@ -403,6 +408,10 @@ def _apply_compute_section(
     if not isinstance(allow_remote, bool):
         errors.append("[compute].allow_remote must be a boolean")
         allow_remote = current.allow_remote
+    local_node_id = raw.get("node_id", current.node_id)
+    if not isinstance(local_node_id, str):
+        errors.append("[compute].node_id must be a string")
+        local_node_id = current.node_id
     snapshot_ttl = raw.get("snapshot_ttl_seconds", current.snapshot_ttl_seconds)
     if not isinstance(snapshot_ttl, int) or isinstance(snapshot_ttl, bool):
         errors.append("[compute].snapshot_ttl_seconds must be an integer")
@@ -426,11 +435,11 @@ def _apply_compute_section(
             for key in item:
                 if key not in node_keys:
                     errors.append(f"unknown key {where}.{key}")
-            node_id = item.get("id", "")
+            remote_node_id = item.get("id", "")
             origin = item.get("origin", "")
-            if not isinstance(node_id, str):
+            if not isinstance(remote_node_id, str):
                 errors.append(f"{where}.id must be a string")
-                node_id = ""
+                remote_node_id = ""
             if not isinstance(origin, str):
                 errors.append(f"{where}.origin must be a string")
                 origin = ""
@@ -439,7 +448,7 @@ def _apply_compute_section(
                 errors.append(f"{where}.preference_weight must be a number")
                 weight = 0.0
             nodes.append(ComputeNodeConfig(
-                node_id=node_id,
+                node_id=remote_node_id,
                 origin=origin,
                 workloads=_string_list(item, "workloads", where, errors),
                 capabilities=_string_list(item, "capabilities", where, errors),
@@ -488,6 +497,7 @@ def _apply_compute_section(
             ))
     return ComputeConfig(
         allow_remote=allow_remote,
+        node_id=local_node_id,
         snapshot_ttl_seconds=snapshot_ttl,
         probe_timeout_ms=probe_timeout,
         nodes=tuple(nodes),
@@ -509,6 +519,8 @@ def _apply_environment(
     state = config.state
     ollama = config.ollama
     compute = config.compute
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", compute.node_id):
+        errors.append("[compute].node_id must be a bounded stable identity")
     features = config.features
     secrets = config.secrets
 
@@ -866,6 +878,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     if len(compute.nodes) > 15:
         errors.append("[compute].nodes supports at most 15 remote nodes")
     node_ids = [node.node_id for node in compute.nodes]
+    if compute.node_id in node_ids:
+        errors.append("[compute].node_id must differ from remote node identities")
     if len(node_ids) != len(set(node_ids)):
         errors.append("[compute].nodes contains duplicate node identities")
     for index, node in enumerate(compute.nodes):
