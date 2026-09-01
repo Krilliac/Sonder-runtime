@@ -84,3 +84,26 @@ def test_definitions_are_bounded_and_repeated_transitions_are_rejected():
             manager.delete("stable")
     finally:
         manager.close()
+
+
+def test_delete_retries_a_transient_directory_handle_race(monkeypatch):
+    import sonder_runtime.application.extensions.experiments as experiments
+
+    manager = _manager()
+    real_rmtree = experiments.shutil.rmtree
+    calls = 0
+
+    def transient(path, *, ignore_errors=False):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError("transient child directory handle")
+        return real_rmtree(path, ignore_errors=ignore_errors)
+
+    monkeypatch.setattr(experiments.shutil, "rmtree", transient)
+    try:
+        manager.define("retry-delete", [sys.executable, "-c", READY])
+        assert manager.delete("retry-delete").state == ExperimentState.DELETED
+        assert calls == 2
+    finally:
+        manager.close()

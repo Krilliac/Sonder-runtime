@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -73,6 +74,18 @@ _MAX_ARGV = 32
 _MAX_ARG_LENGTH = 512
 _MAX_ENV_ITEMS = 32
 _MAX_TEXT_LENGTH = 512
+
+
+def _remove_experiment_tree(path: Path) -> None:
+    """Remove one stopped experiment after bounded handle-release retries."""
+    for attempt in range(8):
+        try:
+            shutil.rmtree(path, ignore_errors=False)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(min(0.02 * (2 ** attempt), 0.2))
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +249,7 @@ class EphemeralExperimentManager:
             raise ExperimentInvalidTransition("stop the experiment before deleting it")
         if experiment.state == ExperimentState.DELETED:
             raise ExperimentInvalidTransition("experiment is already deleted")
-        shutil.rmtree(experiment.directory, ignore_errors=False)
+        _remove_experiment_tree(experiment.directory)
         experiment.state = ExperimentState.DELETED
         return self.inspect(experiment_id)
 
