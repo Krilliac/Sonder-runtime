@@ -296,6 +296,7 @@ class WorkloadRequest:
     min_free_vram_bytes: int = 0
     max_load_fraction: float | None = None
     local_only: bool = False
+    allow_remote: bool = False
     allow_local_fallback: bool = False
     preferred_node_ids: frozenset[str] = frozenset()
     avoided_node_ids: frozenset[str] = frozenset()
@@ -337,10 +338,15 @@ class WorkloadRequest:
             raise ValueError("required_model must be bounded")
         if not all(isinstance(value, bool) for value in (
             self.local_only,
+            self.allow_remote,
             self.allow_local_fallback,
             self.idempotent,
         )):
             raise ValueError("workload flags must be boolean")
+        if self.local_only and self.allow_remote:
+            raise ValueError("local_only and allow_remote cannot both be enabled")
+        if self.allow_local_fallback and not self.allow_remote:
+            raise ValueError("local fallback only applies to remote-enabled workloads")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -354,6 +360,7 @@ class WorkloadRequest:
             "min_free_vram_bytes": self.min_free_vram_bytes,
             "max_load_fraction": self.max_load_fraction,
             "local_only": self.local_only,
+            "allow_remote": self.allow_remote,
             "allow_local_fallback": self.allow_local_fallback,
             "preferred_node_ids": sorted(self.preferred_node_ids),
             "avoided_node_ids": sorted(self.avoided_node_ids),
@@ -457,6 +464,8 @@ class ComputePlacementScheduler:
             return reject("workload_not_allowed")
         if request.local_only and not node.local:
             return reject("local_only")
+        if not node.local and not request.allow_remote:
+            return reject("remote_not_allowed")
         if not request.required_capabilities <= snapshot.effective_capabilities:
             return reject("missing_capability")
         if request.any_capabilities and not (

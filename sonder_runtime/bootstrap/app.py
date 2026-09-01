@@ -103,9 +103,16 @@ from ..domain.compute_fabric import (
     ComputeNode,
     ComputePlacementScheduler,
     NodeSnapshot,
+    NodeHealth,
     WorkloadKind,
 )
+from ..application.compute_fabric.jobs import (
+    ArgumentPolicy,
+    ComputeJobWorker,
+    JobCatalogEntry,
+)
 from ..application.compute_fabric.registry import ComputeNodeRegistry
+from ..application.compute_fabric.service import ComputeFabricService
 from ..application.ports.web import WebProvider
 from ..application.ports.session_repository import SessionRepository
 from ..application.ports.jobs import JobRegistry
@@ -172,6 +179,8 @@ class Application:
     compute_registry: Callable[[], ComputeNodeRegistry] | None = None
     compute_snapshot: Callable[[], NodeSnapshot] | None = None
     compute_scheduler: ComputePlacementScheduler | None = None
+    compute_job_worker: Callable[[], ComputeJobWorker] | None = None
+    compute_service: Callable[[], ComputeFabricService] | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -380,6 +389,10 @@ def build_application(
     selfmod_service: GuardedLegacySelfmodService | None = None
     compute_registry: ComputeNodeRegistry | None = None
     compute_snapshot_source = None
+    compute_job_worker: ComputeJobWorker | None = None
+    compute_service: ComputeFabricService | None = None
+    compute_remote_snapshot_source = None
+    compute_remote_transport = None
     effective_config = config or SonderConfig()
     compute_scheduler = ComputePlacementScheduler(
         snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
@@ -534,6 +547,105 @@ def build_application(
             now=datetime.now(timezone.utc),
         )
         return registry.observe(snapshot)
+
+    def get_compute_job_worker() -> ComputeJobWorker:
+        nonlocal compute_job_worker
+        if compute_job_worker is None:
+            catalog = {
+                job.job_id: JobCatalogEntry(
+                    entry_id=job.job_id,
+                    workload=WorkloadKind(job.workload),
+                    program=job.program,
+                    fixed_args=job.fixed_args,
+                    argument_policy=ArgumentPolicy(job.argument_policy),
+                    environment_allowlist=frozenset(job.environment_allowlist),
+                    workspace_mappings=frozenset(job.workspace_mappings),
+                )
+                for job in effective_config.compute.jobs
+            }
+            roots: dict[str, Path] = {}
+            for raw_root in effective_config.state.workspace_roots:
+                root = Path(raw_root).resolve()
+                if root.name in roots:
+                    raise ValueError(
+                        "compute workspace root basenames must be unique"
+                    )
+                roots[root.name] = root
+            roots["default"] = (
+                Path(effective_config.state.workspace_roots[0]).resolve()
+                if effective_config.state.workspace_roots
+                else Path.cwd().resolve()
+            )
+            compute_job_worker = ComputeJobWorker(
+                worker_id=effective_config.compute.node_id,
+                catalog=catalog,
+                workspace_mappings=roots,
+                provider=get_process_job_provider(),
+            )
+        return compute_job_worker
+
+    def refresh_compute_snapshots() -> None:
+        nonlocal compute_remote_snapshot_source
+        get_compute_snapshot()
+        if not effective_config.compute.nodes:
+            return
+        if not effective_config.compute.allow_remote:
+            return
+        if not effective_config.secrets.api_key:
+            raise ValueError("remote compute requires SONDER_API_KEY")
+        if compute_remote_snapshot_source is None:
+            from ..adapters.compute_fabric.http_client import (
+                HttpsComputeSnapshotSource,
+            )
+
+            compute_remote_snapshot_source = HttpsComputeSnapshotSource(
+                api_key=effective_config.secrets.api_key,
+                timeout_seconds=effective_config.compute.probe_timeout_ms / 1000.0,
+            )
+        registry = get_compute_registry()
+        for node in registry.configured_nodes():
+            if node.local:
+                continue
+            observed_at = datetime.now(timezone.utc)
+            try:
+                snapshot = compute_remote_snapshot_source.snapshot(
+                    node, now=observed_at
+                )
+            except Exception as exc:
+                registry.observe(NodeSnapshot(
+                    node=node,
+                    observed_at=observed_at,
+                    health=NodeHealth.UNHEALTHY,
+                    evidence_ref=f"probe-failed:{type(exc).__name__}",
+                ))
+            else:
+                registry.observe(snapshot)
+
+    def get_compute_service() -> ComputeFabricService:
+        nonlocal compute_service, compute_remote_transport
+        if compute_service is None:
+            if effective_config.compute.nodes and not effective_config.secrets.api_key:
+                raise ValueError("remote compute requires SONDER_API_KEY")
+            if compute_remote_transport is None:
+                from ..adapters.compute_fabric.http_client import (
+                    HttpsComputeJobTransport,
+                )
+
+                compute_remote_transport = HttpsComputeJobTransport(
+                    api_key=(
+                        effective_config.secrets.api_key
+                        or "local-compute-only"
+                    ),
+                )
+            compute_service = ComputeFabricService(
+                registry=get_compute_registry(),
+                scheduler=compute_scheduler,
+                transport=compute_remote_transport,
+                local_worker=get_compute_job_worker(),
+                now=lambda: datetime.now(timezone.utc),
+                refresh=refresh_compute_snapshots,
+            )
+        return compute_service
 
     def recover_jobs(**kwargs: object) -> JobRecoveryReport:
         """Reconcile durable process jobs through the typed tree supervisor."""
@@ -945,6 +1057,8 @@ def build_application(
         compute_registry=get_compute_registry,
         compute_snapshot=get_compute_snapshot,
         compute_scheduler=compute_scheduler,
+        compute_job_worker=get_compute_job_worker,
+        compute_service=get_compute_service,
     )
 
 

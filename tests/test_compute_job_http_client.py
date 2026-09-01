@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from sonder_runtime.adapters.compute_fabric.http_client import HttpsComputeJobTransport
+from sonder_runtime.application.compute_fabric.jobs import RemoteJobEnvelope
+from sonder_runtime.domain.common.errors import DependencyUnavailable
+from sonder_runtime.domain.compute_fabric import ComputeNode, WorkloadKind
+
+
+class _Response:
+    def __init__(self, status: int, body: bytes):
+        self.status = status
+        self._body = body
+
+    def read(self, limit: int) -> bytes:
+        return self._body[:limit]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _node() -> ComputeNode:
+    return ComputeNode(
+        node_id="linux-node",
+        origin="https://linux-node.example:8443",
+        local=False,
+        allowed_workloads=frozenset({WorkloadKind.BUILD}),
+    )
+
+
+def _envelope() -> RemoteJobEnvelope:
+    return RemoteJobEnvelope.create(
+        controller_job_id="controller-job",
+        idempotency_key="idem-1",
+        workload=WorkloadKind.BUILD,
+        catalog_entry_id="cmake-build",
+        workspace_mapping="sonder",
+        deadline_seconds=60,
+        idempotent=True,
+    )
+
+
+def _receipt_body() -> bytes:
+    envelope = _envelope()
+    return json.dumps({
+        "object": "compute_job",
+        "job": {
+            "worker_id": "linux-node",
+            "remote_job_id": "remote-1",
+            "controller_job_id": "controller-job",
+            "idempotency_key": "idem-1",
+            "request_sha256": envelope.request_sha256,
+            "state": "running",
+            "process_id": 42,
+            "artifacts": [],
+        },
+    }).encode()
+
+
+def test_job_client_submits_digest_bound_envelope_without_redirects() -> None:
+    captured = {}
+
+    def opener(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["authorization"] = request.headers["Authorization"]
+        captured["body"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return _Response(202, _receipt_body())
+
+    transport = HttpsComputeJobTransport(api_key="secret", opener=opener)
+    receipt = transport.submit(_node(), _envelope())
+    assert receipt.remote_job_id == "remote-1"
+    assert captured["url"] == "https://linux-node.example:8443/v1/compute/jobs"
+    assert captured["method"] == "POST"
+    assert captured["authorization"] == "Bearer secret"
+    assert captured["body"]["request_sha256"] == _envelope().request_sha256
+    assert captured["timeout"] == 5.0
+
+
+def test_job_client_rejects_worker_identity_mismatch_and_oversize() -> None:
+    body = json.loads(_receipt_body())
+    body["job"]["worker_id"] = "different"
+    transport = HttpsComputeJobTransport(
+        api_key="secret", opener=lambda *_args, **_kwargs: _Response(202, json.dumps(body).encode())
+    )
+    with pytest.raises(DependencyUnavailable, match="identity"):
+        transport.submit(_node(), _envelope())
+
+    transport = HttpsComputeJobTransport(
+        api_key="secret",
+        max_response_bytes=1024,
+        opener=lambda *_args, **_kwargs: _Response(202, b"x" * 1025),
+    )
+    with pytest.raises(DependencyUnavailable, match="size"):
+        transport.submit(_node(), _envelope())
+
+
+def test_job_client_status_lookup_and_cancel_use_exact_paths() -> None:
+    seen = []
+
+    def opener(request, *, timeout):
+        seen.append((request.method, request.full_url, request.data, timeout))
+        if request.full_url.endswith("/by-idempotency/missing"):
+            return _Response(404, b"")
+        return _Response(200, _receipt_body())
+
+    transport = HttpsComputeJobTransport(api_key="secret", opener=opener)
+    assert transport.status(_node(), "remote-1").remote_job_id == "remote-1"
+    assert transport.by_idempotency(_node(), "idem-1").idempotency_key == "idem-1"
+    assert transport.by_idempotency(_node(), "missing") is None
+    assert transport.cancel(
+        _node(), "remote-1", reason="operator requested"
+    ).remote_job_id == "remote-1"
+
+    assert [item[0:2] for item in seen] == [
+        ("GET", "https://linux-node.example:8443/v1/compute/jobs/remote-1"),
+        ("GET", "https://linux-node.example:8443/v1/compute/jobs/by-idempotency/idem-1"),
+        ("GET", "https://linux-node.example:8443/v1/compute/jobs/by-idempotency/missing"),
+        ("POST", "https://linux-node.example:8443/v1/compute/jobs/remote-1/cancel"),
+    ]
+    assert json.loads(seen[-1][2]) == {"reason": "operator requested"}

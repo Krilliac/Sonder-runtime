@@ -27,6 +27,10 @@ class ComputeRemoteJobTransport(Protocol):
 
     def status(self, node: ComputeNode, remote_job_id: str) -> "RemoteJobReceipt": ...
 
+    def by_idempotency(
+        self, node: ComputeNode, idempotency_key: str
+    ) -> "RemoteJobReceipt | None": ...
+
     def cancel(
         self, node: ComputeNode, remote_job_id: str, *, reason: str
     ) -> "RemoteJobReceipt": ...

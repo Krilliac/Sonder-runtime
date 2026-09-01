@@ -1,8 +1,10 @@
-"""Bounded provider-neutral wire projection for compute snapshots."""
+"""Bounded provider-neutral wire projections for the compute fabric."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
+
+from .jobs import RemoteArtifactReceipt, RemoteJobEnvelope, RemoteJobReceipt
 
 from ...domain.compute_fabric import (
     ComputeCapability,
@@ -36,6 +38,30 @@ _RESOURCE_FIELDS = {
     "load_fraction",
     "gpu_utilization_fraction",
 }
+_JOB_ENVELOPE_FIELDS = {
+    "controller_job_id",
+    "idempotency_key",
+    "workload",
+    "catalog_entry_id",
+    "workspace_mapping",
+    "relative_cwd",
+    "arguments",
+    "environment",
+    "deadline_seconds",
+    "idempotent",
+    "request_sha256",
+}
+_JOB_RECEIPT_FIELDS = {
+    "worker_id",
+    "remote_job_id",
+    "controller_job_id",
+    "idempotency_key",
+    "request_sha256",
+    "state",
+    "process_id",
+    "artifacts",
+}
+_ARTIFACT_FIELDS = {"name", "size_bytes", "mime_type", "sha256"}
 
 
 def snapshot_to_wire(snapshot: NodeSnapshot) -> dict[str, Any]:
@@ -138,4 +164,96 @@ def snapshot_from_wire(
     )
 
 
-__all__ = ["snapshot_from_wire", "snapshot_to_wire"]
+def job_envelope_to_wire(envelope: RemoteJobEnvelope) -> dict[str, Any]:
+    envelope.verify()
+    return {
+        **envelope.canonical(),
+        "request_sha256": envelope.request_sha256,
+    }
+
+
+def job_envelope_from_wire(payload: Mapping[str, Any]) -> RemoteJobEnvelope:
+    if not isinstance(payload, Mapping) or set(payload) != _JOB_ENVELOPE_FIELDS:
+        raise ValueError("compute job fields do not match the bounded schema")
+    arguments = payload["arguments"]
+    environment = payload["environment"]
+    if not isinstance(arguments, list):
+        raise ValueError("compute job arguments must be an array")
+    if not isinstance(environment, list) or any(
+        not isinstance(pair, list) or len(pair) != 2 for pair in environment
+    ):
+        raise ValueError("compute job environment must be a key/value array")
+    try:
+        workload = WorkloadKind(payload["workload"])
+        return RemoteJobEnvelope(
+            controller_job_id=payload["controller_job_id"],
+            idempotency_key=payload["idempotency_key"],
+            workload=workload,
+            catalog_entry_id=payload["catalog_entry_id"],
+            workspace_mapping=payload["workspace_mapping"],
+            relative_cwd=payload["relative_cwd"],
+            arguments=tuple(arguments),
+            environment=tuple(tuple(pair) for pair in environment),
+            deadline_seconds=payload["deadline_seconds"],
+            idempotent=payload["idempotent"],
+            request_sha256=payload["request_sha256"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"compute job envelope is invalid: {exc}") from exc
+
+
+def job_receipt_to_wire(receipt: RemoteJobReceipt) -> dict[str, Any]:
+    return {
+        "worker_id": receipt.worker_id,
+        "remote_job_id": receipt.remote_job_id,
+        "controller_job_id": receipt.controller_job_id,
+        "idempotency_key": receipt.idempotency_key,
+        "request_sha256": receipt.request_sha256,
+        "state": receipt.state,
+        "process_id": receipt.process_id,
+        "artifacts": [
+            {
+                "name": artifact.name,
+                "size_bytes": artifact.size_bytes,
+                "mime_type": artifact.mime_type,
+                "sha256": artifact.sha256,
+            }
+            for artifact in receipt.artifacts
+        ],
+    }
+
+
+def job_receipt_from_wire(payload: Mapping[str, Any]) -> RemoteJobReceipt:
+    if not isinstance(payload, Mapping) or set(payload) != _JOB_RECEIPT_FIELDS:
+        raise ValueError("compute job receipt fields do not match the bounded schema")
+    raw_artifacts = payload["artifacts"]
+    if not isinstance(raw_artifacts, list) or len(raw_artifacts) > 256:
+        raise ValueError("compute job artifacts must be a bounded array")
+    artifacts: list[RemoteArtifactReceipt] = []
+    for raw in raw_artifacts:
+        if not isinstance(raw, Mapping) or set(raw) != _ARTIFACT_FIELDS:
+            raise ValueError("compute artifact fields do not match the bounded schema")
+        artifacts.append(RemoteArtifactReceipt(**dict(raw)))
+    try:
+        return RemoteJobReceipt(
+            worker_id=payload["worker_id"],
+            remote_job_id=payload["remote_job_id"],
+            controller_job_id=payload["controller_job_id"],
+            idempotency_key=payload["idempotency_key"],
+            request_sha256=payload["request_sha256"],
+            state=payload["state"],
+            process_id=payload["process_id"],
+            artifacts=tuple(artifacts),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"compute job receipt is invalid: {exc}") from exc
+
+
+__all__ = [
+    "job_envelope_from_wire",
+    "job_envelope_to_wire",
+    "job_receipt_from_wire",
+    "job_receipt_to_wire",
+    "snapshot_from_wire",
+    "snapshot_to_wire",
+]

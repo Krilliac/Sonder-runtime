@@ -11,8 +11,8 @@ from sonder_runtime.application.compute_fabric.jobs import (
     JobCatalogEntry,
     RemoteJobEnvelope,
 )
-from sonder_runtime.application.execution.process_jobs import ProcessJobStart
-from sonder_runtime.application.ports.jobs import JobRecord, JobStatus
+from sonder_runtime.application.execution.process_jobs import ProcessJobStart, ProcessJobWait
+from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 from sonder_runtime.domain.common.errors import Conflict, InvalidInput
 from sonder_runtime.domain.compute_fabric import WorkloadKind
 
@@ -122,3 +122,34 @@ def test_worker_revalidates_digest_even_if_constructed_unsafely(tmp_path: Path) 
     object.__setattr__(envelope, "request_sha256", "0" * 64)
     with pytest.raises(InvalidInput, match="digest"):
         worker.submit(envelope)
+
+
+def test_worker_status_refreshes_terminal_state_and_cancel_reports_cleanup_truth(
+    tmp_path: Path,
+) -> None:
+    class CompletedProvider(CapturingProvider):
+        def wait(self, job_id, *, timeout=None):
+            assert timeout == 0
+            return ProcessJobWait(
+                JobRecord(
+                    JobIdentity(
+                        job_id,
+                        kind="compute-test",
+                        operation_id="controller-job",
+                        idempotency_key="idem-1",
+                    ),
+                    status=JobStatus.SUCCEEDED,
+                ),
+                exit_code=0,
+            )
+
+    provider = CompletedProvider()
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=provider,
+    )
+    started = worker.submit(_envelope())
+    assert worker.status(started.remote_job_id).state == "succeeded"
+    assert worker.cancel(started.remote_job_id, reason="done").state == "cancelled"
