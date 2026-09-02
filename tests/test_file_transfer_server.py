@@ -49,7 +49,7 @@ def test_direct_copy_and_move_record_tool_and_file_activity(monkeypatch, tmp_pat
     assert moves == [("move_source", str(tmp_path / "copy.bin"))]
 
 
-def test_agent_dispatch_routes_transfer_arguments(monkeypatch):
+def test_agent_dispatch_routes_transfer_arguments(unattended_effects_allowed, monkeypatch):
     calls = []
     monkeypatch.setattr(
         server,

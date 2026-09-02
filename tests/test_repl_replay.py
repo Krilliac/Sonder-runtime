@@ -21,7 +21,7 @@ def _drive(monkeypatch, lines):
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(feed))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(
         sonder_repl.server, "sonder",
         lambda *_a, **_k: pytest.fail("replay must not run a model turn"),

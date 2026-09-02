@@ -331,7 +331,7 @@ def test_no_expression_execution_or_network_surface():
         assert forbidden not in source
 
 
-def test_server_project_activity_mutation_validation_and_autopilot(project):
+def test_server_project_activity_mutation_validation_and_autopilot(unattended_effects_allowed, project):
     source = project / "input.json"
     source.write_text('[{"id":1,"name":"alpha"}]', encoding="utf-8")
     activity_tracker.reset_for_tests()

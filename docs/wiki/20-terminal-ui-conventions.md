@@ -13,7 +13,7 @@ answer):
 
 | Question | Function | Meaning |
 |---|---|---|
-| stdin is a tty | `_console_has_operator()` | A person is present to answer a permission prompt. Piped stdin means nobody is asked and `ask` degrades exactly as it does for non-interactive callers. |
+| stdin is a tty | `_console_has_operator()` | A person is present to answer a permission prompt. Piped stdin means nobody is asked, and a piped console is answered exactly like any other unattended caller: file changes, host programs, and destructive tools are refused with the remedies named, while ask-class tools proceed and are recorded. |
 | stdout is a tty | `_stdout_is_interactive()` | Terminal chrome (panels, colors, hints, spinner) may be drawn. `sonder > out.txt` with a human at the keyboard still prompts, but the redirected output stays plain. |
 
 ## Color and layout

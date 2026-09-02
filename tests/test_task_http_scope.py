@@ -36,7 +36,7 @@ def test_served_todos_are_account_scoped_but_local_mcp_stays_global(tmp_path, mo
     assert "local global task" in server.task_list()
 
 
-def test_catalogued_task_and_checklist_tools_cannot_cross_account_or_leak_latest(tmp_path, monkeypatch):
+def test_catalogued_task_and_checklist_tools_cannot_cross_account_or_leak_latest(every_tool_allowed_by_rule, tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "memory.db"))
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
 

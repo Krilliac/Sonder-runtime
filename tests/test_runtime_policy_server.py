@@ -157,7 +157,7 @@ def test_guarded_update_rejects_nonvision_model_for_vision_tier(
     assert runtime_policy.load()["local_models"]["vision"] != "text-model:latest"
 
 
-def test_runtime_slash_parses_models_and_routes(isolated_runtime_policy, monkeypatch):
+def test_runtime_slash_parses_models_and_routes(every_tool_allowed_by_rule, isolated_runtime_policy, monkeypatch):
     calls = []
     monkeypatch.setattr(
         server,
@@ -178,7 +178,7 @@ def test_runtime_slash_parses_models_and_routes(isolated_runtime_policy, monkeyp
     assert calls[-1] == {"reset": True}
 
 
-def test_runtime_embedding_binding_is_capability_checked_and_does_not_rewrite_vectors(
+def test_runtime_embedding_binding_is_capability_checked_and_does_not_rewrite_vectors(every_tool_allowed_by_rule, 
     isolated_runtime_policy, monkeypatch,
 ):
     calls = []
@@ -233,7 +233,7 @@ def test_runtime_embedding_binding_uses_show_when_tags_omit_capabilities(
     ]
 
 
-def test_runtime_slash_applies_embedding_with_other_bindings(monkeypatch):
+def test_runtime_slash_applies_embedding_with_other_bindings(every_tool_allowed_by_rule, monkeypatch):
     calls = []
     monkeypatch.setattr(
         server, "runtime_policy_update", lambda **kwargs: calls.append(kwargs) or "updated",

@@ -28,6 +28,7 @@ from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
 from ..adapters.unit_of_work import UnitOfWorkAdapter
 from ..adapters.operations_event_sink import OperationsEventSink
+from ..adapters.security import permission_receipts
 from ..adapters.evaluation_history_reader import EvaluationHistoryReaderAdapter
 from ..adapters.inspection_executor import InspectionExecutorAdapter
 from ..adapters.backup_gateway import LegacyBackupGateway
@@ -1017,6 +1018,14 @@ def build_application(
         "compute_fabric": compute_fabric_section,
     })
 
+    # Bounded process-local counters/recent events decorate the durable
+    # operations.db sink; they never replace its audit authority. Unattended
+    # permission decisions leave their content-free receipts on this same
+    # sink, replacing the default the legacy module installs when it loads
+    # before a graph exists.
+    events = LocalObservabilitySink(OperationsEventSink())
+    permission_receipts.install(lambda: events)
+
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
@@ -1042,9 +1051,7 @@ def build_application(
         unit_of_work=UnitOfWorkAdapter,
         tool_executor=ToolExecutorAdapter(),
         process_probe=ProcessProbeAdapter(),
-        # Bounded process-local counters/recent events decorate the durable
-        # operations.db sink; they never replace its audit authority.
-        events=LocalObservabilitySink(OperationsEventSink()),
+        events=events,
         clock=SystemClock(),
         backup=BackupService(LegacyBackupGateway()),
         inspections=InspectionService(InspectionExecutorAdapter()),

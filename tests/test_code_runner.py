@@ -437,7 +437,7 @@ def test_server_loop_rejects_bad_json():
     assert server.loop("{not json").startswith("ERROR: actions_json is not valid JSON")
 
 
-def test_server_loop_runs_code_action():
+def test_server_loop_runs_code_action(unattended_effects_allowed):
     import server
 
     actions = json.dumps([{

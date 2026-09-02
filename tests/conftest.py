@@ -109,6 +109,47 @@ def _legacy_model_target(server, tier, strict):
 
 
 @pytest.fixture
+def unattended_effects_allowed():
+    """``auto`` for one test that drives an unattended surface through an effect.
+
+    With nobody to ask, ``permission_modes`` refuses file changes and host
+    programs under the default ``manual`` instead of assuming the answer, so a
+    test that exercises where a tool call goes -- dispatch, routing, argument
+    plumbing -- and not whether the gate lets it needs the one mode that
+    answers those classes for an unattended caller. Which decisions the gate
+    makes is owned by ``tests/test_permission_*.py``; use this only in tests
+    about something else. The previous mode is put back afterwards.
+    """
+    import permission_modes
+
+    before = permission_modes.current_mode()
+    permission_modes.set_mode(permission_modes.AUTO)
+    try:
+        yield
+    finally:
+        permission_modes.set_mode(before)
+
+
+@pytest.fixture
+def every_tool_allowed_by_rule(monkeypatch):
+    """A written allow rule for every tool, for one test.
+
+    An explicit allow satisfies the mode's ask in every mode, including for
+    the ``dangerous`` class that no mode answers for an unattended caller. It
+    also lifts the shipped ``file_delete`` deny, so a test that relies on that
+    rule must not use this. As above: for tests about routing, never about
+    the gate.
+    """
+    import permission_modes
+
+    monkeypatch.setattr(
+        permission_modes, "_rule_lookup",
+        lambda tool: {"pattern": tool, "action": permission_modes.ALLOW, "note": "test"},
+    )
+    yield
+
+
+@pytest.fixture
 def without_standing():
     """Drop the calibration standing an agent end report may now carry.
 

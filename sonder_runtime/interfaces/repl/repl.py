@@ -408,20 +408,24 @@ def _gate_tools(tools, label):
 
     ``interactive`` is therefore ``_console_has_operator()`` and not a
     hardcoded ``True``. A piped session (`sonder < script.txt`) has nobody to
-    ask, so it degrades to allow exactly like every other non-interactive
-    caller: `manual` refuses nothing there that it did not refuse before this
-    gate existed, while a ``deny`` rule and ``plan`` still refuse. Asking
-    anyway was worse than useless -- ``input()`` read the next line of the
-    script as the answer, so one unseen prompt both denied the command and
+    ask, so it is answered exactly like every other non-interactive caller:
+    file changes, host programs and destructive tools are refused with the
+    remedies named, ask-class tools proceed on the record, and a ``deny`` rule
+    and ``plan`` still refuse. Asking anyway was worse than useless --
+    ``input()`` read the next line of the script as the answer, so one unseen
+    prompt both denied the command and
     swallowed the one after it.
 
     A named command can front several tools (``/todo`` reaches everything from
     ``task_list`` to ``task_delete``), and which one runs depends on an
-    argument this gate has not parsed. It therefore decides on the *strictest*
-    member: a deny anywhere refuses, otherwise the highest-risk ``ask`` is the
-    one the operator is asked about, once. Rounding the other way -- gating a
-    command that can delete at the risk of its most harmless sibling -- would
-    be under-enforcement, which is the failure this whole change exists to fix.
+    argument this gate does not parse. ``_named_command_gate`` narrows the
+    read forms the argument grammar recognises first (a bare ``/todo`` lists;
+    ``/todo list`` is a read); whatever the argument could not rule out
+    arrives here, and this gate decides on the *strictest* member: a deny
+    anywhere refuses, otherwise the highest-risk ``ask`` is the one the
+    operator is asked about, once. Rounding the other way -- gating a command
+    that can delete at the risk of its most harmless sibling -- would be
+    under-enforcement, which is the failure this whole change exists to fix.
     """
     interactive = _console_has_operator()
     worst = None
@@ -431,7 +435,7 @@ def _gate_tools(tools, label):
         # exemptions that kind of caller carries. Four surfaces kept their own
         # copy of the check and the fifth was written without it.
         decision = permission_policy.decide_for_caller(
-            tool, interactive=interactive, gate_control_exempt=True,
+            tool, interactive=interactive, gate_control_exempt=True, surface="repl",
         )
         if decision is None:
             continue
@@ -455,7 +459,7 @@ def _permission_gate(tool):
     return _gate_tools((tool,), "/" + tool)
 
 
-def _named_command_gate(cmd):
+def _named_command_gate(cmd, argument=""):
     """Gate a hand-written console branch (``/write``, ``/delete``, ``/mkdir``).
 
     ``_run_catalogued`` is only the *fallback* path: roughly fifty named
@@ -490,6 +494,12 @@ def _named_command_gate(cmd):
     # mutation in the same single choke-point gate as every other command.
     if cmd in ("/workspace-create", "/workspacecreate"):
         tools = tuple(tools) + ("directory_create",)
+    # A command that fronts several tools is graded by its strictest member,
+    # but the recognised read forms (``/selfmod status``, ``/todo list``) reach
+    # only the member the argument names; narrowing before the gate keeps a
+    # read from being prompted for -- or, piped, refused for -- a write it
+    # cannot perform.
+    tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
     return _gate_tools(tools, cmd)
 
 
@@ -2157,7 +2167,7 @@ def main(*, machine_output=False):
             # One choke point for every hand-written branch below, including
             # the ones forwarded to server.control_command. Commands handled by
             # _run_catalogued (the `else`) are gated there instead.
-            may_run, refusal = _named_command_gate(cmd)
+            may_run, refusal = _named_command_gate(cmd, arg)
             if not may_run:
                 print(refusal)
                 # Terminal-only garnish; piped refusal text stays byte-stable.
@@ -2387,10 +2397,14 @@ def main(*, machine_output=False):
                 # so this branch reports whether anybody was in fact asked.
                 # Reaching here means ``_named_command_gate`` passed; combined
                 # with an operator actually being attached, that is a person
-                # having answered its prompt, because ``/selfmod`` is graded
-                # ``dangerous`` and so always prompts outside ``plan``. With a
-                # piped stdin the gate degraded rather than asked, nobody said
-                # yes, and this is False -- which is the whole point.
+                # having answered its prompt, because the source-writing forms
+                # of ``/selfmod`` keep its ``dangerous`` grade and so always
+                # prompt outside ``plan`` (the read forms are narrowed to the
+                # read they are and never prompt, and ``_selfmod_command``
+                # consults this flag only for ``deploy`` and ``rollback``).
+                # With a piped stdin the gate refused rather than asked,
+                # nobody said yes, and this is False -- which is the whole
+                # point.
                 print(server.control_command(
                     line, session=session_id, project=project,
                     operator_approved=_console_has_operator(),

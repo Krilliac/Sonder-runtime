@@ -81,7 +81,7 @@ def test_embedding_backfill_is_local_bounded_and_dry_run_by_default(monkeypatch,
         conn.close()
 
 
-def test_memory_maintenance_slash_commands(monkeypatch, tmp_path):
+def test_memory_maintenance_slash_commands(every_tool_allowed_by_rule, monkeypatch, tmp_path):
     _seed(monkeypatch, tmp_path)
     monkeypatch.setattr(
         server.embeddings, "embed", lambda text, timeout=30: [1.0, 0.0]
@@ -311,7 +311,7 @@ def _seed_interaction_embeddings(monkeypatch, tmp_path):
     return db_path
 
 
-def test_interaction_embedding_backfill_is_bounded_private_and_local(
+def test_interaction_embedding_backfill_is_bounded_private_and_local(unattended_effects_allowed, 
     monkeypatch, tmp_path,
 ):
     db_path = _seed_interaction_embeddings(monkeypatch, tmp_path)
