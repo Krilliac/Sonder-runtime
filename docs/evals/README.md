@@ -107,12 +107,19 @@ scenario's `check` filled in, and a backend that cannot judge yields
 from `training_tasks.TASKS` by name instead of copying them.
 
 **`tool_policy`** — `{id, tool, mode, surface, interactive?, expected,
-arguments?, rules?, tags}`: a recorded tool proposal and the decision it
-must produce. `mode` is one of the four permission modes, `surface` one of
-`agent`, `loop`, `control`, `mcp`, `native-mcp`, `http`, `repl`, and
-`expected` one of `allow`, `refuse`, `ask` (`ask` only with
-`interactive: true`, which only `repl` and `control` may claim). `rules` is
-an explicit `[{pattern, action}]` list; absent, the shipped defaults apply.
+expected_source?, arguments?, rules?, fence?, tags}`: a recorded tool
+proposal and the decision it must produce. `mode` is one of the four
+permission modes, `surface` one of `agent`, `loop`, `control`, `mcp`,
+`native-mcp`, `http`, `repl`, and `expected` one of `allow`, `refuse`,
+`ask` (`ask` only with `interactive: true`, which only `repl` and `control`
+may claim). `expected_source`, when given, pins which layer must have
+decided (`rule`, `mode`, `unattended`, `fence`, `approval`, ...), not only
+what it decided. `arguments` reach the gate as a real caller's would, so a
+refusal names the call (`call_named` in the trajectory); no approval is ever
+spent and no pending call is ever noted by an evaluation. `fence` is `held`
+or `lost` to run the decision under an effect fence in that state. `rules`
+is an explicit `[{pattern, action}]` list; absent, the shipped defaults
+apply.
 The runner asks the real gate — the agent gate itself for `agent`,
 `decide_for_caller` with that surface's gate-control exemption for the
 others, plain `decide` for the loop — under the scenario's mode and rules,

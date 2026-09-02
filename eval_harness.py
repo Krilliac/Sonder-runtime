@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
@@ -85,6 +86,15 @@ TOOL_POLICY_SURFACES = ("agent", "loop", "control", "mcp", "native-mcp", "http",
 # by construction and a scenario claiming otherwise is rejected at load.
 TOOL_POLICY_ATTENDABLE = frozenset({"repl", "control"})
 TOOL_POLICY_EXPECTATIONS = ("allow", "refuse", "ask")
+# An effect fence a scenario may declare around the decision: none, one that
+# holds, or one that reports itself lost.
+TOOL_POLICY_FENCES = ("", "held", "lost")
+# The layers ``permission_modes.Decision.source`` can name; a scenario may pin
+# which one must have decided, not only what it decided.
+TOOL_POLICY_SOURCES = (
+    "rule", "mode", "privilege", "unattended", "non-interactive", "unclassified",
+    "durable-authority", "approval", "fence", "exempt",
+)
 
 MAX_ATTEMPTS_LIMIT = 5
 MAX_TRIALS = 10
@@ -215,6 +225,14 @@ def _normalize_tool_policy(raw, scenario_id, tags, source):
         _canonical(arguments)
     except (TypeError, ValueError):
         raise HarnessError("scenario %r arguments must be JSON values" % scenario_id)
+    fence = raw.get("fence", "")
+    if fence not in TOOL_POLICY_FENCES:
+        raise HarnessError("scenario %r fence must be one of %s"
+                           % (scenario_id, ", ".join(repr(f) for f in TOOL_POLICY_FENCES)))
+    expected_source = raw.get("expected_source", "")
+    if expected_source not in ("",) + TOOL_POLICY_SOURCES:
+        raise HarnessError("scenario %r expected_source must be one of %s"
+                           % (scenario_id, ", ".join(TOOL_POLICY_SOURCES)))
     rules = raw.get("rules")
     if rules is not None:
         if not isinstance(rules, list):
@@ -250,6 +268,8 @@ def _normalize_tool_policy(raw, scenario_id, tags, source):
         "interactive": interactive,
         "expected": expected,
         "rules": rules,
+        "fence": fence,
+        "expected_source": expected_source,
     }
 
 
@@ -408,6 +428,11 @@ def _hashed_view(scenario):
     view = {key: scenario[key] for key in _HASHED_KEYS}
     if scenario["kind"] == "tool_policy":
         view.update({key: scenario[key] for key in _HASHED_POLICY_KEYS})
+        # Only when set, so every policy scenario recorded before fences and
+        # source expectations existed keeps the hash its history carries.
+        for key in ("fence", "expected_source"):
+            if scenario.get(key):
+                view[key] = scenario[key]
     elif scenario.get("verifier"):
         view["verifier"] = scenario["verifier"]
         view["verifier_spec"] = scenario["verifier_spec"]
@@ -697,20 +722,27 @@ def decide_tool_policy(scenario):
     gate-control exemption, or ``decide`` for the loop, which has none).
     """
     import permission_modes
+    from sonder_runtime.adapters.execution import effect_fence
 
     tool = scenario["tool"]
     mode = scenario["mode"]
     surface = scenario["surface"]
     rule_lookup = _policy_rule_lookup(scenario["rules"])
+    # The arguments reach the gate as a real caller's would, so a refusal
+    # names the call; ``record=False`` means no approval is ever spent and no
+    # pending call is ever noted by an evaluation.
+    arguments = scenario["arguments"] or None
+    fence = _scenario_fence(scenario)
     if surface == "agent":
         import server
 
         name = server._canonical_agent_tool_name(tool)
-        refusal = server._agent_permission_gate_error(
-            name, mode=mode, rule_lookup=rule_lookup, record=False)
+        with _fenced(fence):
+            refusal = server._agent_permission_gate_error(
+                name, arguments, mode=mode, rule_lookup=rule_lookup, record=False)
         decision = permission_modes.decide(
             name, interactive=False, mode=mode, rule_lookup=rule_lookup,
-            surface="agent", record=False)
+            surface="agent", record=False, arguments=arguments, fence=fence)
         if bool(refusal) != (not decision.allowed):
             raise HarnessError("the agent gate and the decider disagree about %r"
                                % name)
@@ -718,11 +750,12 @@ def decide_tool_policy(scenario):
     if surface == "loop":
         return permission_modes.decide(
             tool, interactive=False, mode=mode, rule_lookup=rule_lookup,
-            surface="loop", record=False)
+            surface="loop", record=False, arguments=arguments, fence=fence)
     decision = permission_modes.decide_for_caller(
         tool, interactive=scenario["interactive"],
         gate_control_exempt=surface != "native-mcp", surface=surface,
-        record=False, mode=mode, rule_lookup=rule_lookup)
+        record=False, mode=mode, rule_lookup=rule_lookup, arguments=arguments,
+        fence=fence)
     if decision is None:
         return permission_modes.Decision(
             action=permission_modes.ALLOW, mode=mode,
@@ -731,6 +764,30 @@ def decide_tool_policy(scenario):
                    % (tool, surface),
             tool=tool, source="exempt")
     return decision
+
+
+def _scenario_fence(scenario):
+    """The effect fence a scenario declares, or None."""
+    from sonder_runtime.adapters.execution import effect_fence
+
+    kind = scenario.get("fence", "")
+    if kind == "held":
+        return effect_fence.Fence("eval:held", lambda: "")
+    if kind == "lost":
+        return effect_fence.Fence(
+            "eval:lost", lambda: "the evaluation declared this worker's lease lost")
+    return None
+
+
+@contextlib.contextmanager
+def _fenced(fence):
+    from sonder_runtime.adapters.execution import effect_fence
+
+    if fence is None:
+        yield
+        return
+    with effect_fence.held(fence):
+        yield
 
 
 def _observed_outcome(decision):
@@ -750,21 +807,37 @@ def _run_tool_policy_case(scenario, clock=time.monotonic, decide_fn=None):
         "mode": scenario["mode"], "surface": scenario["surface"],
         "interactive": scenario["interactive"],
         "arguments_sha256": _digest_of(scenario["arguments"]),
+        "fence": scenario.get("fence", ""),
     }
     try:
         decision = (decide_fn or decide_tool_policy)(scenario)
         observed = _observed_outcome(decision)
         step_output = {"action": decision.action, "risk": decision.risk,
-                       "source": decision.source}
+                       "source": decision.source,
+                       # Whether the decision named the call (a digest, never
+                       # the arguments): the shape an operator approves by.
+                       "call_named": bool(getattr(decision, "call_id", ""))}
         events.append(dict(step_input, event="decide", reason=decision.reason,
                            **step_output))
-        passed = observed == scenario["expected"]
+        wanted_source = scenario.get("expected_source", "")
+        passed = observed == scenario["expected"] and (
+            not wanted_source or decision.source == wanted_source)
         status = outcomes.PASS if passed else outcomes.FAIL
-        failure = None if passed else {
-            "kind": "policy_mismatch",
-            "message": "expected %s, got %s: %s" % (
-                scenario["expected"], observed, decision.reason)[:OUTPUT_EXCERPT_CHARS],
-        }
+        if passed:
+            failure = None
+        elif observed != scenario["expected"]:
+            failure = {
+                "kind": "policy_mismatch",
+                "message": "expected %s, got %s: %s" % (
+                    scenario["expected"], observed, decision.reason)[:OUTPUT_EXCERPT_CHARS],
+            }
+        else:
+            failure = {
+                "kind": "policy_source_mismatch",
+                "message": "expected %s decided by %s, got %s decided by %s: %s" % (
+                    scenario["expected"], wanted_source, observed, decision.source,
+                    decision.reason)[:OUTPUT_EXCERPT_CHARS],
+            }
     except Exception as exc:
         passed = False
         status = outcomes.UNKNOWN

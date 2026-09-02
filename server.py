@@ -2523,13 +2523,17 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
             "change permissions, install dependencies, invoke selfmod, or touch the live repository."
             % (run["objective"], "; ".join(run["evidence"]), "; ".join(run["criteria"]), ", ".join(run["files"]), workspace)
         )
-        output = _agent_impl(
-            prompt, tier="code", max_steps=min(run["budgets"]["max_tool_calls"], run["budgets"]["max_model_calls"], 20),
-            allow_web=False, require_file_evidence=True, read_only=False,
-            include_evidence=True, auto_checklist=True,
-            tool_allowlist={"workspace_inventory", "directory_tree", "text_search", "file_read", "file_read_range", "file_write", "file_edit", "file_delete"},
-            tool_policy=_selfmod_agent_policy(run),
-        )
+        # The run's lease already fences its record; this fences the editing
+        # agent's effects on the same lease, so a worker that lost the run
+        # stops writing into the workspace at its next tool call.
+        with effect_fence.held(effect_fence.selfmod_fence(run_id, owner)):
+            output = _agent_impl(
+                prompt, tier="code", max_steps=min(run["budgets"]["max_tool_calls"], run["budgets"]["max_model_calls"], 20),
+                allow_web=False, require_file_evidence=True, read_only=False,
+                include_evidence=True, auto_checklist=True,
+                tool_allowlist={"workspace_inventory", "directory_tree", "text_search", "file_read", "file_read_range", "file_write", "file_edit", "file_delete"},
+                tool_policy=_selfmod_agent_policy(run),
+            )
         diff = selfmod.inspect_diff(run_id)
         if not diff["changed_files"]:
             selfmod.reject(run_id, "editing agent produced no scoped diff")

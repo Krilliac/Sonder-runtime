@@ -17,6 +17,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
+import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import fleet_provenance
 
@@ -1102,10 +1103,19 @@ def worker_transient_retries() -> int:
 
 @contextlib.contextmanager
 def _bind_worker_agent(agent_id: str):
+    """Bind the worker thread to its agent row, and fence its effects on it.
+
+    The row is already fenced for writes (every ``fleet_store`` update is
+    conditional on ``owner_id``). The fence carries that to the tools the
+    worker runs: once the owner's heartbeat expires, the agent is reassigned
+    or cancelled, the permission gate refuses every effect-class tool on this
+    thread at the next call instead of at the next row write.
+    """
     previous_agent_id = getattr(_WORKER_LOCAL, "agent_id", None)
     _WORKER_LOCAL.agent_id = agent_id
     try:
-        yield
+        with effect_fence.held(effect_fence.fleet_fence(agent_id, _OWNER_ID)):
+            yield
     finally:
         _WORKER_LOCAL.agent_id = previous_agent_id
 

@@ -137,7 +137,8 @@ def test_the_trajectory_carries_the_decision_and_never_its_prose():
     case = eh.run_case(_policy(), eh.PolicyProvider(),
                        decide_fn=lambda s: _decision("deny"))
     step = case["trajectory"]["steps"][0]
-    assert step["output"] == {"action": "deny", "risk": "mutation", "source": "mode"}
+    assert step["output"] == {"action": "deny", "risk": "mutation", "source": "mode",
+                              "call_named": False}
     assert step["input"]["tool"] == "file_write" and step["input"]["mode"] == "manual"
     assert "because" not in json.dumps(step)
 
@@ -217,14 +218,15 @@ def test_the_agent_surface_uses_the_agent_gate_itself(monkeypatch):
     calls = []
     real = server._agent_permission_gate_error
 
-    def spy(name, **kwargs):
-        calls.append((name, kwargs))
-        return real(name, **kwargs)
+    def spy(name, args=None, **kwargs):
+        calls.append((name, args, kwargs))
+        return real(name, args, **kwargs)
 
     monkeypatch.setattr(server, "_agent_permission_gate_error", spy)
     eh.decide_tool_policy(_policy(mode="manual"))
-    assert calls == [("file_write", {"mode": "manual", "rule_lookup": calls[0][1]["rule_lookup"],
-                                     "record": False})]
+    assert calls == [("file_write", None,
+                      {"mode": "manual", "rule_lookup": calls[0][2]["rule_lookup"],
+                       "record": False})]
 
 
 def test_the_real_gate_leaves_no_receipt():
@@ -346,3 +348,80 @@ def test_verify_replay_holds_for_a_suite_that_calls_no_model():
 
 def test_record_refuses_a_suite_that_calls_no_model():
     assert eh.main(["record", "--suite", SUITE, "--model", "any", "--live"]) == 2
+
+
+# --- fences and decision sources -----------------------------------------------
+
+
+def test_a_fence_and_an_expected_source_are_optional_and_hash_only_when_set():
+    plain = _policy()
+    assert plain["fence"] == "" and plain["expected_source"] == ""
+    view = eh._hashed_view(plain)
+    assert "fence" not in view and "expected_source" not in view
+
+    fenced = _policy(fence="lost", expected_source="fence", mode="auto")
+    view = eh._hashed_view(fenced)
+    assert view["fence"] == "lost" and view["expected_source"] == "fence"
+    assert eh._hashed_view(plain) != view
+
+
+@pytest.mark.parametrize("overrides", [
+    {"fence": "broken"},
+    {"fence": True},
+    {"expected_source": "gremlins"},
+])
+def test_a_bad_fence_or_source_is_rejected_at_load(overrides):
+    with pytest.raises(eh.HarnessError):
+        _policy(**overrides)
+
+
+def test_the_expected_source_is_graded_as_well_as_the_outcome():
+    scenario = _policy(expected="refuse", expected_source="fence")
+    right = eh.run_case(scenario, eh.PolicyProvider(),
+                        decide_fn=lambda s: _decision("deny", source="fence"))
+    assert right["status"] == "pass"
+    wrong_layer = eh.run_case(scenario, eh.PolicyProvider(),
+                              decide_fn=lambda s: _decision("deny", source="unattended"))
+    assert wrong_layer["status"] == "fail"
+    assert wrong_layer["failure"]["kind"] == "policy_source_mismatch"
+    assert "decided by fence" in wrong_layer["failure"]["message"]
+    assert wrong_layer["events"][0]["call_named"] is False
+
+
+def test_a_lost_fence_refuses_effects_and_leaves_reads_alone_through_the_real_gate(monkeypatch):
+    monkeypatch.setattr(pm, "_approval_ledger", lambda: None)
+    lost = eh.decide_tool_policy(_policy(mode="auto", fence="lost"))
+    assert lost.action == pm.DENY and lost.source == "fence"
+    held = eh.decide_tool_policy(_policy(mode="auto", fence="held"))
+    assert held.action == pm.ALLOW and held.source == "mode"
+    read = eh.decide_tool_policy(_policy(tool="file_read", mode="auto", fence="lost"))
+    assert read.action == pm.ALLOW
+    loop = eh.decide_tool_policy(_policy(tool="workspace_run", mode="auto",
+                                         surface="loop", fence="lost"))
+    assert loop.source == "fence"
+    assert eh._scenario_fence(_policy()) is None
+
+
+def test_arguments_name_the_call_without_spending_or_noting_anything(monkeypatch):
+    class _Ledger:
+        consumed = 0
+        pending = 0
+
+        def consume(self, *args, **kwargs):
+            self.consumed += 1
+            return None
+
+        def record_pending(self, *args, **kwargs):
+            self.pending += 1
+
+    ledger = _Ledger()
+    monkeypatch.setattr(pm, "_approval_ledger", lambda: ledger)
+    scenario = _policy(arguments={"path": "notes.txt", "content": "hello"},
+                       expected_source="unattended")
+    decision = eh.decide_tool_policy(scenario)
+    assert decision.source == "unattended" and decision.call_id
+    assert (ledger.consumed, ledger.pending) == (0, 0), "a preflight touches no ledger"
+    case = eh.run_case(scenario, eh.PolicyProvider())
+    assert case["status"] == "pass" and case["events"][0]["call_named"] is True
+    assert "notes.txt" not in json.dumps(case["trajectory"])
+
