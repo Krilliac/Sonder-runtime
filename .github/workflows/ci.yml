@@ -43,6 +43,20 @@ jobs:
         run: python scripts/check_history_privacy.py --json
       - name: Check operator/developer doc links
         run: python scripts/check_doc_links.py
+      # The golden evaluation lane is a gate, not a report: exit 1 is a
+      # baseline violation (a graded regression or infrastructure trouble
+      # in the fixtures), exit 2 a harness error. Both are offline -- the
+      # smoke suite replays a checked-in cassette and the policy suite
+      # consults the runtime's own permission gate -- and neither touches the
+      # runner's durable evaluation history.
+      - name: Run the golden evaluation lane (replay cassette, baseline ratchet)
+        run: >-
+          python eval_harness.py run --suite smoke_python --check-baseline
+          --no-record-history --out eval_runs/ci/smoke_python
+      - name: Run the tool-policy evaluation lane (real permission gate, baseline ratchet)
+        run: >-
+          python eval_harness.py run --suite tool_policy_gates --check-baseline
+          --no-record-history --out eval_runs/ci/tool_policy_gates
       - name: Run test suite
         # network/model-marked tests are skipped unless --run-network /
         # --run-model is passed (see conftest.py); CI intentionally does not
@@ -58,4 +72,12 @@ jobs:
           name: pytest-report
           path: pytest-report.xml
           if-no-files-found: error
+          retention-days: 14
+      - name: Upload evaluation-lane run directories
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: eval-runs
+          path: eval_runs/ci
+          if-no-files-found: ignore
           retention-days: 14

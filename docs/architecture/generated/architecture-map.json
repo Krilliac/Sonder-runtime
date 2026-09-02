@@ -271,7 +271,7 @@
       ]
     },
     {
-      "file_count": 268,
+      "file_count": 269,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -328,6 +328,7 @@
         "sonder_runtime/application/evaluation/case_manifest.py",
         "sonder_runtime/application/evaluation/corpus_inventory.py",
         "sonder_runtime/application/evaluation/durable_lifecycle.py",
+        "sonder_runtime/application/evaluation/harness_outcomes.py",
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
         "sonder_runtime/application/evaluation/reproducible.py",
         "sonder_runtime/application/evaluation/service.py",

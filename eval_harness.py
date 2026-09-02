@@ -10,10 +10,14 @@ score. This module is the shared machinery underneath that family:
   * a **provider matrix** — the same suite runs against a deterministic
     replay cassette (offline, the default), or any local Ollama model
     (explicit ``--live`` opt-in; nothing here talks to the network otherwise);
-  * **structured per-case outcomes** — pass / fail / error / timeout are
-    never merged: an infrastructure failure (cassette miss, dead provider,
-    harness timeout) cannot masquerade as a graded zero, following the
-    outcome-class discipline of scripts/benchmark_schema_offload.py;
+    a suite that calls no model (``tool_policy`` scenarios) runs against the
+    runtime's own permission policy;
+  * **structured per-case outcomes** — pass / fail are graded; error /
+    timeout / verifier_unavailable / unknown / abandoned are infrastructure
+    and are never merged with them: an outage, an absent verifier tool or a
+    harness crash cannot masquerade as a graded zero, following the
+    outcome-class discipline of scripts/benchmark_schema_offload.py (the
+    vocabulary lives in ``sonder_runtime.application.evaluation.harness_outcomes``);
   * **replayable traces** — every case writes a JSONL trace holding the exact
     prompts, responses, and execution results, plus a
     ``sonder.evaluation-trajectory.v1`` record so two runs can be proved
@@ -21,15 +25,23 @@ score. This module is the shared machinery underneath that family:
   * a **regression baseline** — a checked-in JSON ratchet
     (``eval_scenarios/eval_baseline.json``) in the style of
     scripts/error_signal_baseline.json: pass-rate floors and required-pass
-    scenario pins that fail the run loudly when violated.
+    scenario pins that fail the run loudly when violated;
+  * a **run comparison** (``compare``) that joins two runs by scenario id,
+    names every regressed case, and reuses the trajectory comparator for
+    step-level divergence;
+  * **trials** (``--trials k``) that repeat each case and report pass@1 and
+    pass@k as separate fields, for live providers.
 
 What this module does NOT do: it never promotes, demotes, or reconfigures
 models (promotion stays with promotion_eval.promotion_decision); it does not
-own persisted history (that is evaluation_history_store — ``--record-history``
-delegates to it); and a green replay run proves the harness, scenarios, and
-graders are healthy, not that any model is good. Grading executes model code
-in a subprocess via grounding.run_code; that is failure isolation, not a
-security sandbox — the same posture as the rest of the runtime.
+own persisted history (that is evaluation_history_store — history is recorded
+through it, by default only when the provider carries a real content digest);
+and a green replay run proves the harness, scenarios, and graders are healthy,
+not that any model is good. Grading executes model code in a subprocess via
+grounding.run_code; that is failure isolation, not a security sandbox — the
+same posture as the rest of the runtime. A ``tool_policy`` scenario consults
+the runtime's real permission gate with an explicit mode and rule set and
+never touches the operator's own mode or rules.
 """
 from __future__ import annotations
 
@@ -45,6 +57,7 @@ import time
 
 import grounding
 import solver
+from sonder_runtime.application.evaluation import harness_outcomes as outcomes
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -53,20 +66,40 @@ CASSETTE_SCHEMA = "sonder.eval-harness.cassette/v1"
 RUN_SCHEMA = "sonder.eval-harness.run/v1"
 TRACE_SCHEMA = "sonder.eval-harness.trace/v1"
 BASELINE_SCHEMA = "sonder.eval-harness.baseline/v1"
-HARNESS_VERSION = 1
+COMPARISON_SCHEMA = outcomes.COMPARISON_SCHEMA
+HARNESS_VERSION = 2
 
 DEFAULT_SCENARIO_DIR = os.path.join(REPO_ROOT, "eval_scenarios")
 DEFAULT_CASSETTE_DIR = os.path.join(DEFAULT_SCENARIO_DIR, "cassettes")
 DEFAULT_BASELINE_PATH = os.path.join(DEFAULT_SCENARIO_DIR, "eval_baseline.json")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "eval_runs")
 
-# The only scenario kind implemented today. The field exists so future kinds
-# (tool-call scenarios, retrieval scenarios) extend the registry instead of
-# forking it; validation rejects unknown kinds rather than half-running them.
-SUPPORTED_KINDS = ("python_function",)
+# ``python_function``: the model writes code, a check executes it, the repair
+# loop feeds failures back. ``tool_policy``: no model at all; a recorded tool
+# proposal is sent through the runtime's real permission gate and graded
+# against the decision it should produce. Validation rejects unknown kinds
+# rather than half-running them.
+SUPPORTED_KINDS = ("python_function", "tool_policy")
+TOOL_POLICY_SURFACES = ("agent", "loop", "control", "mcp", "native-mcp", "http", "repl")
+# Surfaces that can have a person attached; every other surface is unattended
+# by construction and a scenario claiming otherwise is rejected at load.
+TOOL_POLICY_ATTENDABLE = frozenset({"repl", "control"})
+TOOL_POLICY_EXPECTATIONS = ("allow", "refuse", "ask")
 
 MAX_ATTEMPTS_LIMIT = 5
+MAX_TRIALS = 10
 OUTPUT_EXCERPT_CHARS = 2000
+
+# Files whose content is the "model" a tool_policy suite evaluates: the
+# decision table and the shipped rules. Their digest is the policy provider's
+# identity, so history recorded for a policy suite is pinned to the policy
+# that produced it, the way a model run is pinned to a manifest digest.
+POLICY_SOURCE_FILES = (
+    "permission_modes.py",
+    "permission_rules.py",
+    os.path.join("sonder_runtime", "domain", "execution", "policy.py"),
+    os.path.join("sonder_runtime", "adapters", "command_catalog.py"),
+)
 
 
 class HarnessError(ValueError):
@@ -111,6 +144,17 @@ def _atomic_write_json(path, payload):
         raise
 
 
+def honest_digest(value):
+    """Whether ``value`` is a 64-hex content digest history may be pinned to."""
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
 # --- scenario registry -------------------------------------------------------
 
 def _require_text(value, name, scenario_id=None):
@@ -118,6 +162,95 @@ def _require_text(value, name, scenario_id=None):
     if not isinstance(value, str) or not value.strip():
         raise HarnessError("%s must be a non-empty string%s" % (name, where))
     return value
+
+
+def _verifier_names():
+    import verifiers
+    return sorted(verifiers.REGISTRY)
+
+
+def _normalize_tags(raw, scenario_id):
+    tags = raw.get("tags", [])
+    if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
+        raise HarnessError("scenario %r tags must be a list of strings"
+                           % scenario_id)
+    return sorted(tags)
+
+
+def _normalize_tool_policy(raw, scenario_id, tags, source):
+    """Validate a ``tool_policy`` scenario: a proposal and the decision it should get."""
+    import permission_modes
+    from sonder_runtime.domain.execution import policy as execution_policy
+
+    tool = _require_text(raw.get("tool"), "tool", scenario_id).strip()
+    mode = raw.get("mode", permission_modes.DEFAULT_MODE)
+    if mode not in permission_modes.MODES:
+        raise HarnessError("scenario %r mode %r is not one of %s"
+                           % (scenario_id, mode, ", ".join(permission_modes.MODES)))
+    surface = raw.get("surface", "agent")
+    if surface not in TOOL_POLICY_SURFACES:
+        raise HarnessError("scenario %r surface %r is not one of %s"
+                           % (scenario_id, surface, ", ".join(TOOL_POLICY_SURFACES)))
+    interactive = raw.get("interactive", False)
+    if type(interactive) is not bool:
+        raise HarnessError("scenario %r interactive must be a bool" % scenario_id)
+    if interactive and surface not in TOOL_POLICY_ATTENDABLE:
+        raise HarnessError(
+            "scenario %r: surface %r never has a person attached; only %s can "
+            "be interactive" % (scenario_id, surface,
+                                ", ".join(sorted(TOOL_POLICY_ATTENDABLE))))
+    expected = raw.get("expected")
+    if expected not in TOOL_POLICY_EXPECTATIONS:
+        raise HarnessError("scenario %r expected must be one of %s"
+                           % (scenario_id, ", ".join(TOOL_POLICY_EXPECTATIONS)))
+    if expected == "ask" and not interactive:
+        raise HarnessError("scenario %r expects 'ask' but nobody is attached; "
+                           "an unattended ask is answered, never returned"
+                           % scenario_id)
+    arguments = raw.get("arguments", {})
+    if not isinstance(arguments, dict) or any(not isinstance(k, str) for k in arguments):
+        raise HarnessError("scenario %r arguments must be an object with string keys"
+                           % scenario_id)
+    try:
+        _canonical(arguments)
+    except (TypeError, ValueError):
+        raise HarnessError("scenario %r arguments must be JSON values" % scenario_id)
+    rules = raw.get("rules")
+    if rules is not None:
+        if not isinstance(rules, list):
+            raise HarnessError("scenario %r rules must be a list or absent" % scenario_id)
+        normalized = []
+        for entry in rules:
+            if (not isinstance(entry, dict) or not isinstance(entry.get("pattern"), str)
+                    or not entry["pattern"].strip()
+                    or not execution_policy.is_valid_action(entry.get("action", ""))):
+                raise HarnessError(
+                    "scenario %r rules entries must be {pattern, action} with "
+                    "action in %s" % (scenario_id,
+                                      ", ".join(sorted(execution_policy.VALID_ACTIONS))))
+            normalized.append({
+                "pattern": entry["pattern"].strip(),
+                "action": execution_policy.normalize_action(entry["action"]),
+                "note": str(entry.get("note", "")),
+            })
+        rules = normalized
+    return {
+        "id": scenario_id,
+        "kind": "tool_policy",
+        "prompt": "",
+        "check": "",
+        "timeout_s": 1,
+        "max_attempts": 1,
+        "tags": tags,
+        "source": source,
+        "tool": tool,
+        "arguments": arguments,
+        "mode": mode,
+        "surface": surface,
+        "interactive": interactive,
+        "expected": expected,
+        "rules": rules,
+    }
 
 
 def normalize_scenario(raw, source):
@@ -130,6 +263,9 @@ def normalize_scenario(raw, source):
         raise HarnessError(
             "scenario %r has unsupported kind %r (supported: %s)"
             % (scenario_id, kind, ", ".join(SUPPORTED_KINDS)))
+    tags = _normalize_tags(raw, scenario_id)
+    if kind == "tool_policy":
+        return _normalize_tool_policy(raw, scenario_id, tags, source)
     timeout_s = raw.get("timeout_s", grounding.DEFAULT_TIMEOUT)
     if type(timeout_s) is not int or timeout_s < 1:
         raise HarnessError("scenario %r timeout_s must be a positive int"
@@ -138,10 +274,19 @@ def normalize_scenario(raw, source):
     if type(max_attempts) is not int or not 1 <= max_attempts <= MAX_ATTEMPTS_LIMIT:
         raise HarnessError("scenario %r max_attempts must be an int in 1..%d"
                            % (scenario_id, MAX_ATTEMPTS_LIMIT))
-    tags = raw.get("tags", [])
-    if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
-        raise HarnessError("scenario %r tags must be a list of strings"
-                           % scenario_id)
+    verifier = raw.get("verifier")
+    if verifier is not None:
+        names = _verifier_names()
+        if not isinstance(verifier, str) or verifier not in names:
+            raise HarnessError("scenario %r names unknown verifier %r (known: %s)"
+                               % (scenario_id, verifier, ", ".join(names)))
+    verifier_spec = raw.get("verifier_spec", {})
+    if not isinstance(verifier_spec, dict):
+        raise HarnessError("scenario %r verifier_spec must be an object" % scenario_id)
+    try:
+        _canonical(verifier_spec)
+    except (TypeError, ValueError):
+        raise HarnessError("scenario %r verifier_spec must be JSON values" % scenario_id)
     return {
         "id": scenario_id,
         "kind": kind,
@@ -149,8 +294,10 @@ def normalize_scenario(raw, source):
         "check": _require_text(raw.get("check"), "check", scenario_id),
         "timeout_s": timeout_s,
         "max_attempts": max_attempts,
-        "tags": sorted(tags),
+        "tags": tags,
         "source": source,
+        "verifier": verifier,
+        "verifier_spec": verifier_spec,
     }
 
 
@@ -246,19 +393,40 @@ def select_scenarios(suite, only=None, start=0, count=None):
     return narrowed
 
 
+_HASHED_KEYS = ("id", "kind", "prompt", "check", "timeout_s", "max_attempts")
+_HASHED_POLICY_KEYS = ("tool", "arguments", "mode", "surface", "interactive",
+                       "expected", "rules")
+
+
+def _hashed_view(scenario):
+    """The fields that define what a scenario measures, and only those.
+
+    A ``python_function`` scenario without a verifier hashes exactly as it did
+    before verifiers and policy scenarios existed, so every baseline pinned
+    against such a suite keeps holding.
+    """
+    view = {key: scenario[key] for key in _HASHED_KEYS}
+    if scenario["kind"] == "tool_policy":
+        view.update({key: scenario[key] for key in _HASHED_POLICY_KEYS})
+    elif scenario.get("verifier"):
+        view["verifier"] = scenario["verifier"]
+        view["verifier_spec"] = scenario["verifier_spec"]
+    return view
+
+
 def suite_hash(suite):
     """Canonical digest over everything that defines what the suite measures."""
     return _digest_of({
         "schema": SUITE_SCHEMA,
         "suite": suite["suite"],
         "version": suite["version"],
-        "scenarios": [
-            {key: scenario[key]
-             for key in ("id", "kind", "prompt", "check", "timeout_s",
-                         "max_attempts")}
-            for scenario in suite["scenarios"]
-        ],
+        "scenarios": [_hashed_view(scenario) for scenario in suite["scenarios"]],
     })
+
+
+def model_driven(suite):
+    """Whether any scenario in ``suite`` needs a model provider."""
+    return any(s["kind"] != "tool_policy" for s in suite["scenarios"])
 
 
 def discover_suites(scenario_dir=DEFAULT_SCENARIO_DIR):
@@ -400,6 +568,42 @@ class CallableProvider:
         return self._fn(prompt)
 
 
+class PolicyProvider:
+    """The runtime's own permission policy, for suites that call no model.
+
+    A ``tool_policy`` scenario never generates anything; the thing under test
+    is the decision table, so this provider's digest is the content of the
+    policy sources. History recorded for a policy suite is therefore pinned
+    to the policy that produced it, the way a model run is pinned to its
+    manifest digest.
+    """
+
+    kind = "policy"
+    deterministic = True
+    name = "policy"
+
+    def __init__(self, repo_root=REPO_ROOT):
+        self._root = repo_root
+
+    def digest(self):
+        digest = hashlib.sha256()
+        for relative in POLICY_SOURCE_FILES:
+            path = os.path.join(self._root, relative)
+            with open(path, "rb") as handle:
+                digest.update(relative.replace(os.sep, "/").encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(handle.read())
+                digest.update(b"\0")
+        return digest.hexdigest()
+
+    def begin_case(self, scenario_id):
+        del scenario_id
+
+    def generate(self, prompt, history=None):
+        raise HarnessError("the policy provider generates nothing; a scenario "
+                           "that needs a model cannot run against it")
+
+
 class OllamaProvider:
     """Live local-model provider. Constructed only under an explicit --live.
 
@@ -430,8 +634,23 @@ class OllamaProvider:
 
 
 def parse_provider_spec(spec, suite, live=False, cassette_path=None):
-    """Turn a CLI provider spec into a provider instance."""
+    """Turn a CLI provider spec into a provider instance.
+
+    A suite that calls no model (every scenario is ``tool_policy``) runs
+    against the policy provider whatever ``replay`` would otherwise mean, so
+    the default command line works for both kinds of suite; naming the policy
+    provider for a suite that does need a model is refused rather than left to
+    fail one case at a time.
+    """
+    needs_model = model_driven(suite)
+    if spec == "policy":
+        if needs_model:
+            raise HarnessError("suite %r has scenarios that need a model; the "
+                               "policy provider cannot run them" % suite["suite"])
+        return PolicyProvider()
     if spec == "replay":
+        if not needs_model:
+            return PolicyProvider()
         path = cassette_path or default_cassette_path(suite["suite"])
         return ReplayProvider(path)
     if spec.startswith("ollama:"):
@@ -440,12 +659,134 @@ def parse_provider_spec(spec, suite, live=False, cassette_path=None):
                 "provider %r requires --live (live model access is an "
                 "explicit opt-in; the default run is offline replay)" % spec)
         return OllamaProvider(spec.split(":", 1)[1])
-    raise HarnessError("unknown provider spec %r (use 'replay' or "
+    raise HarnessError("unknown provider spec %r (use 'replay', 'policy' or "
                        "'ollama:<model>')" % spec)
 
 
 def default_cassette_path(suite_name, cassette_dir=DEFAULT_CASSETTE_DIR):
     return os.path.join(cassette_dir, suite_name + ".cassette.json")
+
+
+# --- tool-policy cases -------------------------------------------------------
+
+def _policy_rule_lookup(rules):
+    """A ``decide()`` rule lookup over an explicit rule list, or the shipped defaults."""
+    from sonder_runtime.domain.execution import policy as execution_policy
+
+    if rules is None:
+        rules = execution_policy.default_rules()
+    no_match = dict(execution_policy.NO_MATCH_RULE)
+
+    def lookup(tool_name):
+        rule = execution_policy.evaluate(rules, tool_name)
+        return None if rule == no_match else rule
+
+    return lookup
+
+
+def decide_tool_policy(scenario):
+    """One decision from the runtime's real gate for a ``tool_policy`` scenario.
+
+    The mode and rules come from the scenario, never from the operator's own
+    state, and nothing is recorded: an evaluation must not flip the mode a
+    person is running under, and must not leave receipts that read as real
+    unattended activity. The agent surface goes through the agent gate itself
+    (``server._agent_permission_gate_error``) and its decision is cross-checked
+    against the decider it wraps; every other surface asks for a decision the
+    way that surface does (``decide_for_caller`` with that surface's
+    gate-control exemption, or ``decide`` for the loop, which has none).
+    """
+    import permission_modes
+
+    tool = scenario["tool"]
+    mode = scenario["mode"]
+    surface = scenario["surface"]
+    rule_lookup = _policy_rule_lookup(scenario["rules"])
+    if surface == "agent":
+        import server
+
+        name = server._canonical_agent_tool_name(tool)
+        refusal = server._agent_permission_gate_error(
+            name, mode=mode, rule_lookup=rule_lookup, record=False)
+        decision = permission_modes.decide(
+            name, interactive=False, mode=mode, rule_lookup=rule_lookup,
+            surface="agent", record=False)
+        if bool(refusal) != (not decision.allowed):
+            raise HarnessError("the agent gate and the decider disagree about %r"
+                               % name)
+        return decision
+    if surface == "loop":
+        return permission_modes.decide(
+            tool, interactive=False, mode=mode, rule_lookup=rule_lookup,
+            surface="loop", record=False)
+    decision = permission_modes.decide_for_caller(
+        tool, interactive=scenario["interactive"],
+        gate_control_exempt=surface != "native-mcp", surface=surface,
+        record=False, mode=mode, rule_lookup=rule_lookup)
+    if decision is None:
+        return permission_modes.Decision(
+            action=permission_modes.ALLOW, mode=mode,
+            risk=permission_modes.risk_of(tool),
+            reason="%s is a gate-control tool and is exempt at the %s surface"
+                   % (tool, surface),
+            tool=tool, source="exempt")
+    return decision
+
+
+def _observed_outcome(decision):
+    if decision.action == "allow":
+        return "allow"
+    if decision.action == "ask":
+        return "ask"
+    return "refuse"
+
+
+def _run_tool_policy_case(scenario, clock=time.monotonic, decide_fn=None):
+    """Grade one recorded proposal against the decision the gate makes for it."""
+    started = clock()
+    events = []
+    step_input = {
+        "scenario": scenario["id"], "tool": scenario["tool"],
+        "mode": scenario["mode"], "surface": scenario["surface"],
+        "interactive": scenario["interactive"],
+        "arguments_sha256": _digest_of(scenario["arguments"]),
+    }
+    try:
+        decision = (decide_fn or decide_tool_policy)(scenario)
+        observed = _observed_outcome(decision)
+        step_output = {"action": decision.action, "risk": decision.risk,
+                       "source": decision.source}
+        events.append(dict(step_input, event="decide", reason=decision.reason,
+                           **step_output))
+        passed = observed == scenario["expected"]
+        status = outcomes.PASS if passed else outcomes.FAIL
+        failure = None if passed else {
+            "kind": "policy_mismatch",
+            "message": "expected %s, got %s: %s" % (
+                scenario["expected"], observed, decision.reason)[:OUTPUT_EXCERPT_CHARS],
+        }
+    except Exception as exc:
+        passed = False
+        status = outcomes.UNKNOWN
+        failure = {"kind": "harness_crash",
+                   "message": repr(exc)[:OUTPUT_EXCERPT_CHARS]}
+        step_output = {"action": None, "risk": None, "source": None,
+                       "error": type(exc).__name__}
+        events.append(dict(step_input, event="decide", error=repr(exc)))
+    latency_s = round(clock() - started, 6)
+    events.append({"event": "outcome", "status": status, "attempts": 1,
+                   "latency_s": latency_s, "failure": failure})
+    return {
+        "scenario": scenario["id"],
+        "status": status,
+        "passed": passed,
+        "attempts": 1,
+        "latency_s": latency_s,
+        "failure": failure,
+        "events": events,
+        "trajectory": _trajectory_from_steps(scenario["id"],
+                                             [(step_input, step_output)]),
+    }
 
 
 # --- case runner -------------------------------------------------------------
@@ -459,11 +800,11 @@ def _classify_failure(result, misses, generate_errors):
     """
     transcript = result["transcript"]
     if misses:
-        return "error", {"kind": "cassette_miss", "message": misses[0]}
+        return outcomes.ERROR, {"kind": "cassette_miss", "message": misses[0]}
     if transcript and len(generate_errors) >= len(transcript) and all(
             entry["code"] is None for entry in transcript):
-        return "error", {"kind": "provider_error",
-                         "message": generate_errors[0]}
+        return outcomes.ERROR, {"kind": "provider_error",
+                                "message": generate_errors[0]}
     last = transcript[-1] if transcript else {"code": None, "output": ""}
     output = last.get("output") or ""
     if last.get("code") is None:
@@ -474,18 +815,46 @@ def _classify_failure(result, misses, generate_errors):
         kind = "assertion"
     else:
         kind = "execution"
-    return "fail", {"kind": kind,
-                    "message": output[:OUTPUT_EXCERPT_CHARS] or "(no output)"}
+    return outcomes.FAIL, {"kind": kind,
+                           "message": output[:OUTPUT_EXCERPT_CHARS] or "(no output)"}
+
+
+def _classify_crash(exc, misses, generate_errors):
+    """Status for an exception that escaped the solver.
+
+    ``solve`` never raises for an ordinary failure, but ``solve_verified``
+    lets a provider error and a ``VerifierUnavailable`` propagate, and the
+    harness itself can crash. Each is its own class.
+    """
+    import verifiers
+
+    if isinstance(exc, CassetteMiss) or misses:
+        return outcomes.ERROR, {"kind": "cassette_miss",
+                                "message": misses[0] if misses else str(exc)}
+    if isinstance(exc, verifiers.VerifierUnavailable):
+        return outcomes.VERIFIER_UNAVAILABLE, {
+            "kind": "verifier_unavailable",
+            "message": str(exc)[:OUTPUT_EXCERPT_CHARS] or "verifier unavailable"}
+    if generate_errors and repr(exc) == generate_errors[-1]:
+        return outcomes.ERROR, {"kind": "provider_error",
+                                "message": generate_errors[-1]}
+    return outcomes.UNKNOWN, {"kind": "harness_crash",
+                              "message": repr(exc)[:OUTPUT_EXCERPT_CHARS]}
 
 
 def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
-             clock=time.monotonic):
+             clock=time.monotonic, decide_fn=None):
     """Run one scenario against one provider; never raises for case trouble.
 
     Returns {"scenario", "status", "passed", "attempts", "latency_s",
     "failure", "events", "trajectory"} where status is one of
-    pass | fail | error | timeout and events is the full replayable trace.
+    ``harness_outcomes.STATUSES`` and events is the full replayable trace.
+    ``decide_fn`` replaces the real permission gate for ``tool_policy``
+    scenarios (tests only).
     """
+    if scenario["kind"] == "tool_policy":
+        return _run_tool_policy_case(scenario, clock=clock, decide_fn=decide_fn)
+
     events = []
     misses = []
     generate_errors = []
@@ -530,9 +899,36 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
         return ok, output
 
     def execute():
-        return solver.solve(scenario["prompt"], scenario["check"], generate_fn,
-                            run_code_fn=grading_run,
-                            max_attempts=scenario["max_attempts"])
+        verifier = scenario.get("verifier")
+        if not verifier:
+            return solver.solve(scenario["prompt"], scenario["check"], generate_fn,
+                                run_code_fn=grading_run,
+                                max_attempts=scenario["max_attempts"])
+        import verifiers
+
+        spec = dict(scenario["verifier_spec"])
+        spec.setdefault("check", scenario["check"])
+        if verifier == "python_exec":
+            # The named verifier is the same subprocess grader; route it
+            # through the injected runner so tests and timeouts apply.
+            def verify_fn(code):
+                ok, output = grading_run(code, spec["check"])
+                return verifiers.Verdict(ok, "passed" if ok else "failed", output)
+        else:
+            def verify_fn(code):
+                verdict = verifiers.verify(verifier, code, spec)
+                events.append({
+                    "event": "verify",
+                    "attempt": attempt_counter["n"],
+                    "verifier": verifier,
+                    "code_sha256": _sha256(code),
+                    "ok": bool(verdict.passed),
+                    "output": (verdict.detail or verdict.reason or "")[:OUTPUT_EXCERPT_CHARS],
+                })
+                return verdict
+        return solver.solve_verified(
+            scenario["prompt"], generate_fn, verifier, spec=spec,
+            max_attempts=scenario["max_attempts"], verify_fn=verify_fn)
 
     started = clock()
     if case_timeout is None:
@@ -543,6 +939,7 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
     provider.begin_case(scenario["id"])
     timed_out = False
     result = None
+    crash = None
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         future = executor.submit(execute)
@@ -551,24 +948,36 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
         except concurrent.futures.TimeoutError:
             timed_out = True
             future.cancel()
+        except Exception as exc:
+            crash = exc
     finally:
         executor.shutdown(wait=not timed_out)
     latency_s = round(clock() - started, 6)
 
+    attempts = attempt_counter["n"]
+    passed = False
     if timed_out:
-        status = "timeout"
-        failure = {"kind": "case_timeout",
-                   "message": "case exceeded %ss wall clock" % case_timeout}
-        attempts = attempt_counter["n"]
-        passed = False
+        # A live provider that got at least one attempt in was abandoned, not
+        # merely slow to start; a deterministic one cannot be, so it stays a
+        # plain timeout.
+        if attempts >= 1 and not getattr(provider, "deterministic", True):
+            status = outcomes.ABANDONED
+            failure = {"kind": "abandoned",
+                       "message": "case exceeded %ss wall clock after %d attempt(s)"
+                                  % (case_timeout, attempts)}
+        else:
+            status = outcomes.TIMEOUT
+            failure = {"kind": "case_timeout",
+                       "message": "case exceeded %ss wall clock" % case_timeout}
+    elif crash is not None:
+        status, failure = _classify_crash(crash, misses, generate_errors)
     elif result["passed"]:
-        status, failure = "pass", None
+        status, failure = outcomes.PASS, None
         attempts = result["attempts"]
         passed = True
     else:
         status, failure = _classify_failure(result, misses, generate_errors)
         attempts = result["attempts"]
-        passed = False
 
     events.append({
         "event": "outcome",
@@ -589,6 +998,17 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
     }
 
 
+def _trajectory_from_steps(scenario_id, steps):
+    from sonder_runtime.application.evaluation import trajectory_replay
+
+    record = trajectory_replay.TrajectoryRecord.from_steps(
+        "eval-harness:%s" % scenario_id,
+        [trajectory_replay.TrajectoryStep(i, step_input, step_output)
+         for i, (step_input, step_output) in enumerate(steps)],
+    )
+    return record.as_dict()
+
+
 def _trajectory_record(scenario_id, events):
     """Project trace events onto sonder.evaluation-trajectory.v1.
 
@@ -597,31 +1017,23 @@ def _trajectory_record(scenario_id, events):
     look divergent. Two runs of the same cassette and suite therefore yield
     identical trajectory digests iff generation and grading behaved the same.
     """
-    from sonder_runtime.application.evaluation import trajectory_replay
-
     steps = []
     pending = None
     for event in events:
         if event["event"] == "generate":
             if pending is not None:
                 steps.append(pending)
-            pending = {
-                "input": {"scenario": scenario_id,
-                          "attempt": event["attempt"]},
-                "output": {"response_sha256": event["response_sha256"],
-                           "provider_error": bool(event["error"]),
-                           "exec_ok": None},
-            }
-        elif event["event"] == "exec" and pending is not None:
-            pending["output"]["exec_ok"] = event["ok"]
+            pending = (
+                {"scenario": scenario_id, "attempt": event["attempt"]},
+                {"response_sha256": event["response_sha256"],
+                 "provider_error": bool(event["error"]),
+                 "exec_ok": None},
+            )
+        elif event["event"] in ("exec", "verify") and pending is not None:
+            pending[1]["exec_ok"] = event["ok"]
     if pending is not None:
         steps.append(pending)
-    record = trajectory_replay.TrajectoryRecord.from_steps(
-        "eval-harness:%s" % scenario_id,
-        [trajectory_replay.TrajectoryStep(i, s["input"], s["output"])
-         for i, s in enumerate(steps)],
-    )
-    return record.as_dict()
+    return _trajectory_from_steps(scenario_id, steps)
 
 
 # --- suite runner ------------------------------------------------------------
@@ -644,13 +1056,18 @@ def _provider_digest(provider):
 
 
 def run_suite(suite, provider, out_dir=None, ts=None, case_timeout=None,
-              run_code_fn=None):
+              run_code_fn=None, trials=1, decide_fn=None):
     """Run every scenario in `suite` against `provider`.
 
     Returns the run summary. When out_dir is given, also writes
     results.jsonl, traces/<scenario>.jsonl, and summary.json under
-    out_dir/<provider-safe-name>/.
+    out_dir/<provider-safe-name>/. With ``trials`` above one every case is
+    run that many times; its status is the first trial's, every trial's
+    status is kept, and pass@k is reported beside pass@1. The trace written is
+    the first trial's.
     """
+    if type(trials) is not int or not 1 <= trials <= MAX_TRIALS:
+        raise HarnessError("trials must be an int in 1..%d" % MAX_TRIALS)
     ts = time.time() if ts is None else ts
     cases = []
     provider_dir = None
@@ -659,13 +1076,21 @@ def run_suite(suite, provider, out_dir=None, ts=None, case_timeout=None,
         os.makedirs(os.path.join(provider_dir, "traces"), exist_ok=True)
 
     for scenario in suite["scenarios"]:
-        case = run_case(scenario, provider, run_code_fn=run_code_fn,
-                        case_timeout=case_timeout)
+        runs = [
+            run_case(scenario, provider, run_code_fn=run_code_fn,
+                     case_timeout=case_timeout, decide_fn=decide_fn)
+            for _ in range(trials)
+        ]
+        folded = outcomes.aggregate_trials([run["status"] for run in runs])
+        case = dict(runs[0], trials=folded["trials"],
+                    pass_at_1=folded["pass_at_1"], pass_at_k=folded["pass_at_k"])
         cases.append(case)
         if provider_dir is not None:
             _write_trace(provider_dir, suite, provider, case, ts)
 
-    totals = _totals(cases)
+    totals = outcomes.totals(case["status"] for case in cases)
+    totals["trials"] = trials
+    totals["pass_at_k"] = sum(1 for case in cases if case["pass_at_k"])
     totals["cassette_drift"] = len(getattr(provider, "drift", []))
     summary = {
         "schema": RUN_SCHEMA,
@@ -682,11 +1107,13 @@ def run_suite(suite, provider, out_dir=None, ts=None, case_timeout=None,
         },
         "ts": ts,
         "git_rev": _git_rev(),
+        "trials": trials,
         "totals": totals,
         "cases": [
             {"scenario": case["scenario"], "status": case["status"],
              "attempts": case["attempts"], "latency_s": case["latency_s"],
              "failure_kind": (case["failure"] or {}).get("kind"),
+             "trials": case["trials"], "pass_at_k": case["pass_at_k"],
              "trajectory_digest": case["trajectory"]["trajectory_digest"]}
             for case in cases
         ],
@@ -699,7 +1126,7 @@ def run_suite(suite, provider, out_dir=None, ts=None, case_timeout=None,
             for case in cases:
                 row = {key: case[key] for key in
                        ("scenario", "status", "passed", "attempts",
-                        "latency_s", "failure")}
+                        "latency_s", "failure", "trials", "pass_at_k")}
                 handle.write(_canonical(row) + "\n")
         _atomic_write_json(os.path.join(provider_dir, "summary.json"), summary)
     summary["_cases_full"] = cases  # in-memory only, for reports/replay checks
@@ -730,16 +1157,8 @@ def _write_trace(provider_dir, suite, provider, case, ts):
 
 
 def _totals(cases):
-    counts = {"cases": len(cases), "pass": 0, "fail": 0, "error": 0,
-              "timeout": 0}
-    for case in cases:
-        counts[case["status"]] += 1
-    graded = counts["pass"] + counts["fail"]
-    counts["graded"] = graded
-    # pass_rate is over GRADED cases only; infra trouble (error/timeout) is
-    # reported separately and gated by forbid_infra, never averaged away.
-    counts["pass_rate"] = (counts["pass"] / graded) if graded else None
-    return counts
+    """Totals over in-memory case dicts (kept for callers of the old name)."""
+    return outcomes.totals(case["status"] for case in cases)
 
 
 # --- regression baseline -----------------------------------------------------
@@ -756,6 +1175,14 @@ def load_baseline(path=DEFAULT_BASELINE_PATH):
         raise HarnessError("baseline %s must declare schema %r"
                            % (path, BASELINE_SCHEMA))
     return baseline
+
+
+def _infra_breakdown(totals):
+    """``"1 error, 2 timeout"`` over the non-zero infrastructure counts."""
+    parts = ["%d %s" % (totals.get(status, 0), status)
+             for status in outcomes.STATUSES
+             if status in outcomes.INFRASTRUCTURE and totals.get(status, 0)]
+    return ", ".join(parts)
 
 
 def check_baseline(summary, baseline):
@@ -784,11 +1211,11 @@ def check_baseline(summary, baseline):
 
     totals = summary["totals"]
     if expectations.get("forbid_infra", True):
-        if totals["error"] or totals["timeout"]:
+        breakdown = _infra_breakdown(totals)
+        if breakdown:
             violations.append(
-                "infra_failure: %d error, %d timeout cases (infrastructure "
-                "trouble is never a graded result)"
-                % (totals["error"], totals["timeout"]))
+                "infra_failure: %s (infrastructure trouble is never a graded "
+                "result)" % breakdown)
 
     min_pass_rate = expectations.get("min_pass_rate")
     if min_pass_rate is not None:
@@ -802,7 +1229,7 @@ def check_baseline(summary, baseline):
     statuses = {case["scenario"]: case["status"] for case in summary["cases"]}
     for required in expectations.get("required_pass", []):
         status = statuses.get(required)
-        if status != "pass":
+        if status != outcomes.PASS:
             violations.append("required_pass: scenario %r is %s"
                               % (required, status or "missing from run"))
     return violations
@@ -819,7 +1246,7 @@ def update_baseline(baseline, summary, pin_suite_hash=True):
     entry = {
         "min_pass_rate": totals["pass_rate"] if totals["pass_rate"] is not None else 0.0,
         "required_pass": sorted(case["scenario"] for case in summary["cases"]
-                                if case["status"] == "pass"),
+                                if case["status"] == outcomes.PASS),
         "forbid_infra": True,
     }
     if pin_suite_hash:
@@ -838,6 +1265,10 @@ def update_baseline(baseline, summary, pin_suite_hash=True):
 
 # --- failure report ----------------------------------------------------------
 
+def _rate_text(rate):
+    return "%.1f%%" % (100 * rate) if rate is not None else "n/a"
+
+
 def render_report(summaries, baseline_violations=None):
     """Render one Markdown failure report over a provider matrix of runs.
 
@@ -855,18 +1286,29 @@ def render_report(summaries, baseline_violations=None):
         "- git: `%s`" % (first["git_rev"] or "unknown"),
         "- schema: `%s`" % RUN_SCHEMA,
         "",
-        "| provider | pass | fail | error | timeout | pass rate | drift |",
+        "| provider | pass | fail | infra | pass rate | pass@k | drift |",
         "|---|---|---|---|---|---|---|",
     ]
     for summary in summaries:
         totals = summary["totals"]
-        rate = ("%.1f%%" % (100 * totals["pass_rate"])
-                if totals["pass_rate"] is not None else "n/a")
-        lines.append("| `%s` | %d | %d | %d | %d | %s | %d |" % (
+        trials = totals.get("trials", 1)
+        pass_at_k = ("%d/%d (k=%d)" % (totals.get("pass_at_k", totals["pass"]),
+                                       totals["cases"], trials)
+                     if trials > 1 else "same as pass (k=1)")
+        if summary["provider"].get("deterministic", True) and trials > 1:
+            pass_at_k += ", deterministic"
+        lines.append("| `%s` | %d | %d | %d | %s | %s | %d |" % (
             summary["provider"]["name"], totals["pass"], totals["fail"],
-            totals["error"], totals["timeout"], rate,
+            totals.get("infra", 0), _rate_text(totals["pass_rate"]), pass_at_k,
             totals.get("cassette_drift", 0)))
     lines.append("")
+    for summary in summaries:
+        breakdown = _infra_breakdown(summary["totals"])
+        if breakdown:
+            lines.append("- infrastructure (`%s`): %s"
+                         % (summary["provider"]["name"], breakdown))
+    if any(_infra_breakdown(s["totals"]) for s in summaries):
+        lines.append("")
 
     if baseline_violations:
         lines += ["## Baseline violations", ""]
@@ -875,7 +1317,7 @@ def render_report(summaries, baseline_violations=None):
 
     for summary in summaries:
         failing = [case for case in summary.get("_cases_full", [])
-                   if case["status"] != "pass"]
+                   if case["status"] != outcomes.PASS]
         if not failing:
             continue
         lines += ["## Failures — `%s`" % summary["provider"]["name"], ""]
@@ -888,6 +1330,10 @@ def render_report(summaries, baseline_violations=None):
                 "- attempts: %d, latency: %.2fs" % (case["attempts"],
                                                     case["latency_s"]),
                 "- trace: `traces/%s.jsonl`" % _safe_name(case["scenario"]),
+            ]
+            if len(case.get("trials", ())) > 1:
+                lines.append("- trials: %s" % ", ".join(case["trials"]))
+            lines += [
                 "",
                 "```",
                 (failure.get("message") or "").strip()[:OUTPUT_EXCERPT_CHARS],
@@ -904,7 +1350,7 @@ def failures_json(summaries):
     failures = []
     for summary in summaries:
         for case in summary.get("_cases_full", []):
-            if case["status"] == "pass":
+            if case["status"] == outcomes.PASS:
                 continue
             failures.append({
                 "suite": summary["suite"],
@@ -913,6 +1359,7 @@ def failures_json(summaries):
                 "status": case["status"],
                 "failure": case["failure"],
                 "attempts": case["attempts"],
+                "trials": case.get("trials", [case["status"]]),
                 "trajectory_digest": case["trajectory"]["trajectory_digest"],
             })
     return {"schema": RUN_SCHEMA + "+failures", "failures": failures}
@@ -926,11 +1373,12 @@ def verify_replay(suite, cassette_path, run_code_fn=None):
     Proves the harness end to end: deterministic fixtures + deterministic
     grading must produce step-identical trajectory records. Divergence means
     nondeterminism has crept into scenarios, graders, or the runner itself.
+    A suite that calls no model is run against the policy provider twice.
     """
     from sonder_runtime.application.evaluation import trajectory_replay
 
     def one_run():
-        provider = ReplayProvider(cassette_path)
+        provider = parse_provider_spec("replay", suite, cassette_path=cassette_path)
         return run_suite(suite, provider, out_dir=None,
                          run_code_fn=run_code_fn)
 
@@ -962,6 +1410,97 @@ def _record_from_dict(trajectory_replay, payload):
     )
 
 
+# --- run comparison ----------------------------------------------------------
+
+def load_run_summary(run_dir, provider="replay"):
+    """The ``summary.json`` a ``run`` wrote for ``provider`` under ``run_dir``."""
+    path = os.path.join(run_dir, _safe_name(provider), "summary.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            summary = json.load(handle)
+    except OSError as exc:
+        raise HarnessError("cannot read %s: %s" % (path, exc))
+    except ValueError as exc:
+        raise HarnessError("%s is not valid JSON: %s" % (path, exc))
+    if not isinstance(summary, dict) or summary.get("schema") != RUN_SCHEMA:
+        raise HarnessError("%s must declare schema %r" % (path, RUN_SCHEMA))
+    for key in ("suite", "suite_hash", "report_id", "totals", "cases"):
+        if key not in summary:
+            raise HarnessError("%s is missing %r" % (path, key))
+    return summary
+
+
+def _trace_trajectory(run_dir, provider, scenario_id):
+    """The trajectory record a trace file ends with, or None when absent."""
+    path = os.path.join(run_dir, _safe_name(provider), "traces",
+                        _safe_name(scenario_id) + ".jsonl")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = [line for line in handle if line.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    try:
+        last = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(last, dict) or last.get("event") != "trajectory":
+        return None
+    return last.get("record")
+
+
+def compare_runs(before_dir, after_dir, provider="replay"):
+    """Join two run directories by scenario id and classify every case.
+
+    Statuses come from each run's ``summary.json``; where both runs wrote a
+    trace for a scenario the trajectory comparator decides step-level
+    divergence, otherwise the trajectory digests do. The result reuses the
+    ``RegressionAssessment`` shape of the reproducible-evaluation lane.
+    """
+    from sonder_runtime.application.evaluation import trajectory_replay
+
+    before = load_run_summary(before_dir, provider)
+    after = load_run_summary(after_dir, provider)
+    if before["suite"] != after["suite"]:
+        raise HarnessError("runs are of different suites (%r vs %r)"
+                           % (before["suite"], after["suite"]))
+    before_cases = {case["scenario"]: case for case in before["cases"]}
+    after_cases = {case["scenario"]: case for case in after["cases"]}
+    divergences = {}
+    for scenario_id in set(before_cases) & set(after_cases):
+        record_a = _trace_trajectory(before_dir, provider, scenario_id)
+        record_b = _trace_trajectory(after_dir, provider, scenario_id)
+        if record_a is None or record_b is None:
+            continue
+        report = trajectory_replay.compare_trajectories(
+            _record_from_dict(trajectory_replay, record_a),
+            _record_from_dict(trajectory_replay, record_b))
+        divergences[scenario_id] = [
+            {"index": item.index, "field": item.field}
+            for item in report.divergences
+        ]
+    comparison = outcomes.compare_cases(
+        before_cases, after_cases,
+        before_run_id=before["report_id"], after_run_id=after["report_id"],
+        before_suite_hash=before["suite_hash"], after_suite_hash=after["suite_hash"],
+        before_pass_rate=before["totals"].get("pass_rate"),
+        trajectory_divergences=divergences)
+    comparison.update({
+        "suite": after["suite"],
+        "provider": provider,
+        "before": {"run_dir": os.path.abspath(before_dir),
+                   "report_id": before["report_id"],
+                   "git_rev": before.get("git_rev"),
+                   "suite_hash": before["suite_hash"]},
+        "after": {"run_dir": os.path.abspath(after_dir),
+                  "report_id": after["report_id"],
+                  "git_rev": after.get("git_rev"),
+                  "suite_hash": after["suite_hash"]},
+    })
+    return comparison
+
+
 # --- history integration -----------------------------------------------------
 
 def record_history(summary, history_path=None):
@@ -978,7 +1517,7 @@ def record_history(summary, history_path=None):
     if not totals["graded"]:
         raise HarnessError("refusing to record a run with zero graded cases")
     digest = summary["provider"]["digest"]
-    if not isinstance(digest, str) or len(digest) != 64:
+    if not honest_digest(digest):
         raise HarnessError(
             "provider digest %r is not a 64-hex content digest; cannot "
             "record identity-bound history" % (digest,))
@@ -995,6 +1534,28 @@ def record_history(summary, history_path=None):
     )
 
 
+def history_disposition(summary, requested=None):
+    """``(record, note)`` for one run under the history policy.
+
+    ``requested`` is True for an explicit ``--record-history``, False for
+    ``--no-record-history``, None for the default: record where honest --
+    the provider carries a real content digest and the run graded something
+    -- and say why not otherwise. An explicit request never skips silently;
+    ``record_history`` raises for it instead.
+    """
+    name = summary["provider"]["name"]
+    if requested is False:
+        return False, "history: skipped for %s (--no-record-history)" % name
+    if requested is True:
+        return True, "history: recorded for %s" % name
+    if not honest_digest(summary["provider"]["digest"]):
+        return False, ("history: skipped for %s (no content digest to pin it "
+                       "to; pass --record-history to insist)" % name)
+    if not summary["totals"]["graded"]:
+        return False, "history: skipped for %s (zero graded cases)" % name
+    return True, "history: recorded for %s" % name
+
+
 # --- CLI ---------------------------------------------------------------------
 
 def _cmd_list(args):
@@ -1004,9 +1565,10 @@ def _cmd_list(args):
         return 0
     for name in sorted(suites):
         suite = load_suite(suites[name])
-        print("%-24s v%-3d %2d scenarios  hash %s  %s"
+        kinds = sorted({scenario["kind"] for scenario in suite["scenarios"]})
+        print("%-24s v%-3d %2d scenarios  hash %s  [%s] %s"
               % (name, suite["version"], len(suite["scenarios"]),
-                 suite["suite_hash"][:12], suite["description"]))
+                 suite["suite_hash"][:12], ",".join(kinds), suite["description"]))
     return 0
 
 
@@ -1023,7 +1585,8 @@ def _cmd_run(args):
     for spec in providers:
         provider = parse_provider_spec(spec, suite, live=args.live,
                                        cassette_path=args.cassette)
-        summaries.append(run_suite(suite, provider, out_dir=out_dir, ts=ts))
+        summaries.append(run_suite(suite, provider, out_dir=out_dir, ts=ts,
+                                   trials=args.trials))
 
     violations = []
     if args.check_baseline:
@@ -1039,27 +1602,42 @@ def _cmd_run(args):
     _atomic_write_json(os.path.join(out_dir, "failures.json"),
                        failures_json(summaries))
 
-    history_error = None
+    requested = None
     if args.record_history:
-        for summary in summaries:
+        requested = True
+    elif args.no_record_history:
+        requested = False
+    history_error = None
+    history_notes = []
+    for summary in summaries:
+        record, note = history_disposition(summary, requested)
+        if record:
             try:
                 record_history(summary, args.history_path)
             except Exception as exc:
                 history_error = str(exc)
+                note = "history: NOT recorded for %s (%s)" % (
+                    summary["provider"]["name"], exc)
+        history_notes.append(note)
 
     for summary in summaries:
         totals = summary["totals"]
-        rate = ("%.1f%%" % (100 * totals["pass_rate"])
-                if totals["pass_rate"] is not None else "n/a")
-        print("%s  %s: %d pass / %d fail / %d error / %d timeout  (%s)"
-              % (summary["suite"], summary["provider"]["name"],
-                 totals["pass"], totals["fail"], totals["error"],
-                 totals["timeout"], rate))
+        line = "%s  %s: %d pass / %d fail / %d infra  (%s)" % (
+            summary["suite"], summary["provider"]["name"], totals["pass"],
+            totals["fail"], totals["infra"], _rate_text(totals["pass_rate"]))
+        if totals.get("trials", 1) > 1:
+            line += "  pass@%d: %d/%d" % (totals["trials"], totals["pass_at_k"],
+                                          totals["cases"])
+        breakdown = _infra_breakdown(totals)
+        if breakdown:
+            line += "  [%s]" % breakdown
+        print(line)
     for violation in violations:
         print("BASELINE VIOLATION: %s" % violation)
+    for note in history_notes:
+        print(note)
     print("run dir: %s" % out_dir)
     if history_error:
-        print("history error: %s" % history_error)
         return 2
     if violations:
         return 1
@@ -1072,6 +1650,9 @@ def _cmd_run(args):
 
 def _cmd_record(args):
     suite = resolve_suite(args.suite, args.scenario_dir)
+    if not model_driven(suite):
+        raise HarnessError("suite %r calls no model; there is nothing to record"
+                           % suite["suite"])
     if not args.live:
         raise HarnessError("record requires --live: recording a cassette "
                            "contacts the local model server")
@@ -1083,7 +1664,7 @@ def _cmd_record(args):
     totals = summary["totals"]
     print("recorded %d scenarios (%d pass / %d fail) -> %s"
           % (totals["cases"], totals["pass"], totals["fail"], cassette_path))
-    if totals["fail"] or totals["error"] or totals["timeout"]:
+    if totals["fail"] or totals["infra"]:
         print("note: cassette contains non-passing runs; replays will "
               "reproduce them exactly (that may be what you want)")
     return 0
@@ -1103,14 +1684,30 @@ def _cmd_verify_replay(args):
     return 1
 
 
+def _cmd_compare(args):
+    if len(args.run) != 2:
+        raise HarnessError("compare takes exactly two --run directories "
+                           "(before, then after)")
+    before_dir, after_dir = args.run
+    comparison = compare_runs(before_dir, after_dir, provider=args.provider)
+    out_path = args.out or os.path.join(after_dir, "comparison.json")
+    _atomic_write_json(out_path, comparison)
+    print("%s  %s: %d regressed / %d improved / %d infra / %d cases  (%s)" % (
+        comparison["suite"], args.provider, len(comparison["regressed"]),
+        len(comparison["improved"]), len(comparison["infra"]),
+        len(comparison["cases"]),
+        "no regression" if comparison["passed"] else "REGRESSED"))
+    for scenario_id in comparison["regressed"]:
+        case = next(c for c in comparison["cases"] if c["scenario"] == scenario_id)
+        print("  regressed: %s (%s -> %s)" % (scenario_id, case["before"], case["after"]))
+    if comparison["reason_codes"]:
+        print("reason codes: %s" % ", ".join(comparison["reason_codes"]))
+    print("comparison: %s" % out_path)
+    return 0 if comparison["passed"] else 1
+
+
 def _cmd_baseline_update(args):
-    summary_path = os.path.join(args.run, _safe_name(args.provider),
-                                "summary.json")
-    try:
-        with open(summary_path, "r", encoding="utf-8") as handle:
-            summary = json.load(handle)
-    except OSError as exc:
-        raise HarnessError("cannot read %s: %s" % (summary_path, exc))
+    summary = load_run_summary(args.run, args.provider)
     try:
         baseline = load_baseline(args.baseline)
     except HarnessError:
@@ -1135,7 +1732,7 @@ def main(argv=None):
     run_parser = sub.add_parser("run", help="run a suite over providers")
     run_parser.add_argument("--suite", required=True)
     run_parser.add_argument("--provider", action="append",
-                            help="repeatable: replay | ollama:<model>")
+                            help="repeatable: replay | policy | ollama:<model>")
     run_parser.add_argument("--cassette", default=None)
     run_parser.add_argument("--only", action="append", metavar="SCENARIO_ID",
                             help="repeatable: run only these scenarios")
@@ -1143,6 +1740,9 @@ def main(argv=None):
                             help="chunk-resume offset (eval_retrieval style)")
     run_parser.add_argument("--count", type=int, default=None,
                             help="chunk size from --start")
+    run_parser.add_argument("--trials", type=int, default=1,
+                            help="run every case k times and report pass@1 "
+                                 "and pass@k (1..%d)" % MAX_TRIALS)
     run_parser.add_argument("--out", default=None)
     run_parser.add_argument("--live", action="store_true",
                             help="allow providers that contact the local "
@@ -1151,9 +1751,13 @@ def main(argv=None):
     run_parser.add_argument("--baseline", default=DEFAULT_BASELINE_PATH)
     run_parser.add_argument("--strict", action="store_true",
                             help="exit 1 unless every case passed")
-    run_parser.add_argument("--record-history", action="store_true",
-                            help="append aggregates to the durable "
-                                 "evaluation history")
+    history = run_parser.add_mutually_exclusive_group()
+    history.add_argument("--record-history", action="store_true",
+                         help="insist on appending aggregates to the durable "
+                              "evaluation history (exit 2 when the provider "
+                              "has no content digest)")
+    history.add_argument("--no-record-history", action="store_true",
+                         help="never touch the durable evaluation history")
     run_parser.add_argument("--history-path", default=None)
 
     record_parser = sub.add_parser(
@@ -1167,6 +1771,16 @@ def main(argv=None):
         "verify-replay", help="prove two replay runs are step-equivalent")
     verify_parser.add_argument("--suite", required=True)
     verify_parser.add_argument("--cassette", default=None)
+
+    compare_parser = sub.add_parser(
+        "compare", help="classify every case between two run directories")
+    compare_parser.add_argument("--run", action="append", required=True,
+                                metavar="RUN_DIR",
+                                help="twice: the run before, then the run after")
+    compare_parser.add_argument("--provider", default="replay")
+    compare_parser.add_argument("--out", default=None,
+                                help="where to write comparison.json "
+                                     "(default: inside the second run)")
 
     baseline_parser = sub.add_parser("baseline", help="baseline maintenance")
     baseline_sub = baseline_parser.add_subparsers(dest="baseline_command",
@@ -1184,6 +1798,7 @@ def main(argv=None):
         "run": _cmd_run,
         "record": _cmd_record,
         "verify-replay": _cmd_verify_replay,
+        "compare": _cmd_compare,
         "baseline": _cmd_baseline_update,
     }
     try:

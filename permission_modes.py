@@ -870,11 +870,17 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
 
 def decide_for_caller(tool_name: str, *, interactive: bool,
                       gate_control_exempt: bool, surface: str = "",
-                      record: bool = True):
+                      record: bool = True, mode: str | None = None,
+                      rule_lookup=None):
     """``decide()`` plus the one exemption, for callers that share both.
 
     Returns ``None`` when the tool is exempt and there is therefore nothing to
     decide; otherwise the ``Decision``.
+
+    ``mode`` and ``rule_lookup`` are the same per-call overrides ``decide()``
+    takes; the evaluation lane passes them so a ``tool_policy`` scenario can
+    ask what this kind of caller would get under a stated mode and rule set
+    without touching the operator's own.
 
     The exemption existed as six identical lines at four call sites, and this
     round it drifted at the fifth: the gate added to
@@ -894,7 +900,8 @@ def decide_for_caller(tool_name: str, *, interactive: bool,
     """
     if gate_control_exempt and str(tool_name or "").strip().lstrip("/") in GATE_CONTROL_TOOLS:
         return None
-    return decide(tool_name, interactive=interactive, surface=surface, record=record)
+    return decide(tool_name, interactive=interactive, mode=mode,
+                  rule_lookup=rule_lookup, surface=surface, record=record)
 
 
 def decide(tool_name: str, *, interactive: bool = True,
