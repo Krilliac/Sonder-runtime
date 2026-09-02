@@ -97,7 +97,13 @@ def test_protocol_requires_ready_handshake_and_matching_response_id():
         bad_ready.start()
     bad_ready.close()
 
-    mismatched = _host(READY + 'print("{\\"id\\":99}", flush=True)')
+    # The mock stays alive after the mismatched response (it blocks on stdin)
+    # so the host reads the bad id from a running process; a mock that exited
+    # right after printing raced the host's liveness check under load and
+    # surfaced as a crash instead of the protocol error under test.
+    mismatched = _host(
+        READY + 'print("{\\"id\\":99}", flush=True)\nfor line in sys.stdin:\n pass'
+    )
     try:
         with pytest.raises(ExtensionHostProtocolError, match="response id"):
             mismatched.call("m")
