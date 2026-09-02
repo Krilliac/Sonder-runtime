@@ -336,3 +336,20 @@ candidate targets, not safe candidates today.
 4. Re-run this audit and the formal evidence checker before changing any
    checkbox. A checked item must be changed in the same reviewed change that
    adds its verified evidence.
+
+## Addendum — 2026-09-02 evidence documents
+
+Direct contract evidence added since this audit, none of which edits a formal
+checkbox or promotes a ledger record (the ledger remains 204 `planned`, 0
+`verified`):
+
+- `evidence/TOOL-READ-FAMILY-TYPED-GATEWAY-2026-09-02.md` — the read-only
+  workbench family through the typed tool gateway on both surfaces, with
+  terminal-state receipts and a rotating durable audit (SEAM-002, TOOL-004/007
+  direct evidence; not end-to-end proof of either requirement).
+- `ARCHITECTURE-HANDOFF-REVIEW-2026-09-02.md` §13 — the implemented status of
+  the unattended-authority contract (`permission_modes` "Unattended callers"),
+  the evaluation lane as a CI gate (`eval_scenarios/tool_policy_gates.json`),
+  and the defects closed with them.
+- `docs/evals/README.md` — the outcome vocabulary, the policy scenario kind and
+  the comparison record the evaluation lane now carries.

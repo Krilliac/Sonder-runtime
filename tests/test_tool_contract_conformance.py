@@ -359,24 +359,30 @@ def test_tool_contract_ships_in_the_packaged_payload():
     assert "tool_contract.py" in package.REQUIRED_FILES
 
 
-def test_tool_contract_is_reloaded_with_the_served_authority_gate(monkeypatch):
-    """A deployed authority-policy edit must replace the HTTP process module."""
+def test_the_served_authority_gate_keeps_the_typed_contract_across_live_reloads(monkeypatch):
+    """The served gate binds the typed ``authority_contract``; a root
+    ``tool_contract`` reload must not rebind it.
+
+    The served module and the root module answer the same question with
+    different call shapes (the typed one takes the declarations explicitly).
+    Rebinding the served name to a reloaded root module -- which this process
+    once did -- left two contracts live and the HTTP gate calling one with the
+    other's arguments. The root module still reloads in ``server``, which is
+    the process that binds it.
+    """
     import sonder_runtime.interfaces.http.serve as sonder_serve
+    from sonder_runtime.interfaces.http import authority_contract
 
     original = sonder_serve.tool_contract
-    replacement = object()
     monkeypatch.setattr(
         sonder_serve.live_reload,
         "reload_changed_modules",
-        lambda names: {"tool_contract": replacement},
+        lambda names: {"tool_contract": object()},
     )
-    try:
-        sonder_serve._maybe_live_reload()
-        assert sonder_serve.tool_contract is replacement
-        assert "tool_contract" in sonder_serve.LIVE_RELOAD_MODULES
-        assert "tool_contract" in server.LIVE_RELOAD_MODULES
-    finally:
-        sonder_serve.tool_contract = original
+    sonder_serve._maybe_live_reload()
+    assert sonder_serve.tool_contract is original is authority_contract
+    assert "tool_contract" not in sonder_serve.LIVE_RELOAD_MODULES
+    assert "tool_contract" in server.LIVE_RELOAD_MODULES
 
 
 def test_diagnostics_reports_contract_drift_without_enforcement():

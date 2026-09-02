@@ -1,6 +1,7 @@
 """Provider-neutral tool application boundary."""
 
 from .facade import (
+    ChainedPermissionEvaluator,
     DenyApprovalGate,
     FailClosedToolExecutor,
     IdentityRedactor,
@@ -11,6 +12,6 @@ from .facade import (
 )
 
 __all__ = [
-    "DenyApprovalGate", "FailClosedToolExecutor", "IdentityRedactor", "ReceiptStore",
+    "ChainedPermissionEvaluator", "DenyApprovalGate", "FailClosedToolExecutor", "IdentityRedactor", "ReceiptStore",
     "ResourcePolicyEvaluator", "ToolApplicationFacade", "ToolGraph",
 ]

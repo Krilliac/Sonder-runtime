@@ -1285,7 +1285,12 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "command_registry",
     "permission_rules",
-    "tool_contract",
+    # ``tool_contract`` is deliberately absent: this module binds the typed
+    # ``authority_contract`` under that name (pure, explicit inputs), and the
+    # root ``tool_contract`` module has a different call shape. Reloading the
+    # root module here once rebound the served gate to it mid-process, so an
+    # authority edit could leave two contracts live and the gate calling one
+    # with the other's arguments. The root module still reloads in ``server``.
     "debug_dump",
 ]
 
@@ -1739,7 +1744,7 @@ def _record_chat(role, content, kind="message", state=None):
 
 
 def _maybe_live_reload():
-    global grounding, training_tasks, intents, feedback, admin_auth, debug_dump, tool_contract
+    global grounding, training_tasks, intents, feedback, admin_auth, debug_dump
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     if "server" in modules:
         configure_legacy_runtime(modules["server"])
@@ -1749,7 +1754,6 @@ def _maybe_live_reload():
     feedback = modules.get("feedback", feedback)
     admin_auth = modules.get("admin_auth", admin_auth)
     debug_dump = modules.get("debug_dump", debug_dump)
-    tool_contract = modules.get("tool_contract", tool_contract)
 
 
 def _on_off(arg, current):
@@ -2929,6 +2933,10 @@ def _run_prompt(
             context_size=context_size, session=session, project=project,
             raise_model_errors=True, target_observer=record_target, augment=augment,
             cache_scope=cache_scope, cache_observer=record_cache,
+            # This surface captures the turn itself (``_capture_live_session_turn``)
+            # under its own correlation id and fails the request closed when
+            # it cannot; the legacy path must not capture the same turn again.
+            capture_session=False,
         )
         outcome = "error" if out.startswith("ERROR") else "ok"
     finally:

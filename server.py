@@ -1561,6 +1561,78 @@ def _application():
         return _APP_GRAPH
 
 
+def _typed_read_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
+    """Run one read-only workbench tool through the typed tool gateway.
+
+    The seven read tools (``directory_tree``, ``file_find``, ``file_read``,
+    ``file_read_range``, ``text_search``, ``script_search`` and
+    ``program_search``) no longer call the guarded primitives themselves: the
+    application graph's typed gateway does, behind schema validation, the
+    resource policy, the runtime's permission modes, deadline and
+    cancellation, output redaction and one durable receipt whatever the
+    outcome. The handler keeps everything that is the legacy surface's own
+    business -- live reload, the include_ignored policy text, activity
+    records, grounded-outcome feeding and the exact output format -- and
+    receives the same data dict the primitive used to return.
+
+    The guard knobs travel as arguments: ``extra_roots`` as given,
+    ``bypass`` from the token/approval check, and developer authorization as
+    the scope's auth level (and, for the two primitives that take it, as an
+    argument). Which knobs each primitive accepts is declared once, in
+    ``sonder_runtime.bootstrap.typed_tools.GUARD_KNOBS``.
+
+    ``source`` is the best the legacy chain can say about its caller: a call
+    inside an agent or autopilot dispatch is Sonder driving itself
+    (``worker``); anything else is a person-facing surface and is recorded
+    as ``repl``, because the console, the served API and the legacy MCP
+    server all reach this one function. The native MCP surface carries its
+    real source.
+    """
+    import uuid as _uuid
+
+    from sonder_runtime.application.context import LOCAL_OWNER
+    from sonder_runtime.application.tools.gateway_contract import (
+        ToolGatewayRequest, ToolPermission, ToolScope,
+    )
+    from sonder_runtime.bootstrap.typed_tools import GUARD_KNOBS, LEGACY_TO_CANONICAL
+
+    canonical = LEGACY_TO_CANONICAL.get(tool_name, tool_name)
+    developer = _file_developer_allowed(token)
+    knobs = GUARD_KNOBS[canonical]
+    args = dict(arguments)
+    if "extra_roots" in knobs:
+        args["extra_roots"] = extra_roots
+    if "bypass" in knobs:
+        args["bypass"] = _file_bypass_allowed(token, approval)
+    if "developer_authorized" in knobs:
+        args["developer_authorized"] = developer
+    request = ToolGatewayRequest(
+        request_id="tool-%s" % _uuid.uuid4().hex,
+        tool_name=canonical,
+        arguments=args,
+        scope=ToolScope(
+            principal_id=LOCAL_OWNER,
+            workspace_roots=(str(file_ops.workspace_root()),),
+            source="worker" if activity_tracker.inside_tool_call() else "repl",
+            auth_level="developer" if developer else "local",
+        ),
+        permission=ToolPermission(),
+        execution_world="local",
+    )
+    receipt = _application().tools.execute(request)
+    if not receipt.success:
+        raise RuntimeError(receipt.error or receipt.error_code or "tool call failed")
+    if canonical == "read_file":
+        evidence = dict(receipt.evidence)
+        return {
+            "path": evidence.get("path", ""),
+            "bytes": evidence.get("bytes", 0),
+            "truncated": bool(evidence.get("truncated")),
+            "text": receipt.output,
+        }
+    return json.loads(receipt.output)
+
+
 def _capture_durable_session_turn(
     session_id, prompt, history, model, system, tier, response, request_id=None,
 ):
@@ -5598,6 +5670,7 @@ def _answer_with_history_impl(
     augment=True,
     cache_scope="",
     cache_observer=None,
+    capture_session=True,
 ):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
@@ -5783,10 +5856,15 @@ def _answer_with_history_impl(
     response, _code_verified, code_repaired = _apply_code_gate(
         response, interaction_id=iid, regenerate=_code_repair,
     )
-    _capture_durable_session_turn(
-        session_id, prompt, history, model, effective_system, tier_label,
-        response, request_id=iid,
-    )
+    if capture_session:
+        # The served chat route captures its own turn (with its correlation
+        # id, failing the request closed when it cannot) and passes
+        # ``capture_session=False``; capturing here as well recorded one HTTP
+        # turn twice under two request ids.
+        _capture_durable_session_turn(
+            session_id, prompt, history, model, effective_system, tier_label,
+            response, request_id=iid,
+        )
     footer_iid = iid
     if code_repaired and not _persist_verified_code_repair(
         iid, interaction_snapshot, response, repair_usage,
@@ -5827,6 +5905,7 @@ def answer_with_history(
     augment=True,
     cache_scope="",
     cache_observer=None,
+    capture_session=True,
 ):
     label = "chat:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
@@ -5851,6 +5930,7 @@ def answer_with_history(
             augment=augment,
             cache_scope=cache_scope,
             cache_observer=cache_observer,
+            capture_session=capture_session,
         )
     return _append_activity(result, response=response, replace=True)
 
@@ -9906,13 +9986,11 @@ def file_find(
     if policy_error:
         return policy_error
     try:
-        data = file_ops.find_files(
-            query=query,
-            root=root,
-            max_results=max_results,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            include_ignored=include_ignored,
+        data = _typed_read_tool(
+            "file_find",
+            {"query": query, "root": root, "max_results": max_results,
+             "include_ignored": include_ignored},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as e:
         _record_direct_tool("file_find", {"query": query, "root": root}, ok=False, started=started, summary=str(e))
@@ -10002,12 +10080,9 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
     _maybe_live_reload()
     started = time.time()
     try:
-        data = file_ops.read_file(
-            path,
-            max_bytes=max_bytes,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_read_tool(
+            "file_read", {"path": path, "max_bytes": max_bytes},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as e:
         _record_direct_tool("file_read", {"path": path}, ok=False, started=started, summary=str(e))
@@ -11229,11 +11304,11 @@ def directory_tree(
         return policy_error
     args = {"path": path, "depth": depth, "max_entries": max_entries}
     try:
-        data = workbench.directory_tree(
-            path, depth=depth, max_entries=max_entries,
-            include_hidden=include_hidden, include_ignored=include_ignored,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
+        data = _typed_read_tool(
+            "directory_tree",
+            {"path": path, "depth": depth, "max_entries": max_entries,
+             "include_hidden": include_hidden, "include_ignored": include_ignored},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as exc:
         _record_direct_tool("directory_tree", args, ok=False, started=started, summary=str(exc))
@@ -11299,16 +11374,13 @@ def file_read_range(
     started = time.time()
     args = {"path": path, "start_line": start_line, "end_line": end_line}
     try:
-        # read_line_range lives in workbench; apply the same secret/control-plane
-        # read guard the in-module read tools now enforce, before touching it.
-        file_ops.require_read_access(
-            path, extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
-        )
-        data = workbench.read_line_range(
-            path, start_line=start_line, end_line=end_line,
-            extra_roots=extra_roots, bypass=_file_bypass_allowed(token, approval),
+        # The secret/control-plane read guard now sits in the packaged
+        # executor behind the typed gateway, so the native surface enforces
+        # it too instead of only this handler.
+        data = _typed_read_tool(
+            "file_read_range",
+            {"path": path, "start_line": start_line, "end_line": end_line},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as exc:
         _record_direct_tool("file_read_range", args, ok=False, started=started, summary=str(exc))
@@ -11366,12 +11438,13 @@ def text_search(
         "max_entries": max_entries, "timeout_seconds": timeout_seconds,
     }
     try:
-        data = workbench.text_search(
-            query, root=root, glob=glob, regex=regex,
-            case_sensitive=case_sensitive, max_results=max_results,
-            max_entries=max_entries, timeout_seconds=timeout_seconds,
-            include_hidden=include_hidden, include_ignored=include_ignored,
-            extra_roots=extra_roots, bypass=_file_bypass_allowed(token, approval),
+        data = _typed_read_tool(
+            "text_search",
+            {"query": query, "root": root, "glob": glob, "regex": regex,
+             "case_sensitive": case_sensitive, "max_results": max_results,
+             "max_entries": max_entries, "timeout_seconds": timeout_seconds,
+             "include_hidden": include_hidden, "include_ignored": include_ignored},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as exc:
         _record_direct_tool("text_search", args, ok=False, started=started, summary=str(exc))
@@ -11420,11 +11493,12 @@ def script_search(
         "timeout_seconds": timeout_seconds,
     }
     try:
-        data = workbench.script_search(
-            query, root=root, max_results=max_results, extra_roots=extra_roots,
-            max_entries=max_entries, timeout_seconds=timeout_seconds,
-            include_hidden=include_hidden, include_ignored=include_ignored,
-            bypass=_file_bypass_allowed(token, approval),
+        data = _typed_read_tool(
+            "script_search",
+            {"query": query, "root": root, "max_results": max_results,
+             "max_entries": max_entries, "timeout_seconds": timeout_seconds,
+             "include_hidden": include_hidden, "include_ignored": include_ignored},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as exc:
         _record_direct_tool("script_search", args, ok=False, started=started, summary=str(exc))
@@ -11450,7 +11524,9 @@ def program_search(query: str = "*", max_results: int = 100) -> str:
     started = time.time()
     args = {"query": query, "max_results": max_results}
     try:
-        data = workbench.program_search(query, max_results=max_results)
+        data = _typed_read_tool(
+            "program_search", {"query": query, "max_results": max_results},
+        )
     except Exception as exc:
         _record_direct_tool("program_search", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc

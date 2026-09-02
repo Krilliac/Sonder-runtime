@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 222,
+      "file_count": 224,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -237,6 +237,7 @@
         "sonder_runtime/adapters/security/__init__.py",
         "sonder_runtime/adapters/security/account_auth.py",
         "sonder_runtime/adapters/security/credential_provider.py",
+        "sonder_runtime/adapters/security/permission_evaluator.py",
         "sonder_runtime/adapters/security/permission_policy.py",
         "sonder_runtime/adapters/security/permission_receipts.py",
         "sonder_runtime/adapters/security/recovery_evidence.py",
@@ -250,6 +251,7 @@
         "sonder_runtime/adapters/task_store.py",
         "sonder_runtime/adapters/tool_executor.py",
         "sonder_runtime/adapters/training/__init__.py",
+        "sonder_runtime/adapters/typed_tool_executor.py",
         "sonder_runtime/adapters/unit_of_work.py",
         "sonder_runtime/adapters/updates/__init__.py",
         "sonder_runtime/adapters/updates/activation_journal.py",
@@ -546,7 +548,7 @@
       ]
     },
     {
-      "file_count": 16,
+      "file_count": 17,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -564,7 +566,8 @@
         "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
-        "sonder_runtime/bootstrap/subprocess_mcp.py"
+        "sonder_runtime/bootstrap/subprocess_mcp.py",
+        "sonder_runtime/bootstrap/typed_tools.py"
       ]
     },
     {

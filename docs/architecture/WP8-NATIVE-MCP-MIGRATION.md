@@ -66,9 +66,11 @@ legacy server surface.
 
 The historical server MCP catalog remains the default compatibility path until
 catalog parity and complete application-service coverage are proven. The
-legacy catalog currently contains 204 registered tools; the native catalog
-therefore covers 45 names and does not claim full parity, API-003, or TOOL-001
-completion.
+legacy catalog currently contains 206 registered tools; the native catalog
+covers 50 names (the read-only workbench family among them now runs through
+the typed tool gateway on both surfaces, see
+`evidence/TOOL-READ-FAMILY-TYPED-GATEWAY-2026-09-02.md`) and does not claim
+full parity, API-003, or TOOL-001 completion.
 
 ## Evidence
 

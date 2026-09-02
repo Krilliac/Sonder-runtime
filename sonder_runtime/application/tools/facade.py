@@ -39,7 +39,7 @@ class ResourcePolicyEvaluator:
         self.policy = policy
         self.registry = registry
 
-    def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> None:
+    def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> str:
         requested_effects = frozenset(permission.effects)
         if self.registry is not None:
             descriptor = self.registry.get(tool_name)
@@ -55,6 +55,7 @@ class ResourcePolicyEvaluator:
         # single arbitrary set iteration previously allowed a read rule to
         # authorize a tool that also wrote files or used the network.
         effects = tuple(sorted(requested_effects)) or ("",)
+        matched = []
         for effect in effects:
             result = self.policy.evaluate(ResourceRequest(
                 request_id=f"policy:{tool_name}:{effect or 'pure'}",
@@ -63,9 +64,34 @@ class ResourcePolicyEvaluator:
                 side_effect_class=effect,
             ))
             if not result.allowed:
-                raise Forbidden(f"tool policy denied {tool_name!r}: {result.receipt.reason}")
+                error = Forbidden(f"tool policy denied {tool_name!r}: {result.receipt.reason}")
+                error.policy_match = "resource:%s" % result.receipt.matched_rule_id
+                raise error
             if result.approval_required and permission.approval.value == "not_required":
                 raise Forbidden(f"tool policy requires approval for {tool_name!r}")
+            matched.append(result.receipt.matched_rule_id)
+        return "resource:%s" % ",".join(sorted(set(matched)))
+
+
+class ChainedPermissionEvaluator:
+    """Every evaluator must admit the call; the receipt names each match.
+
+    The resource policy says what the graph admits at all; a second evaluator
+    (the runtime's permission modes, adapted) says what the operator's
+    standing policy allows right now. Both have to agree, and the receipt's
+    ``policy_match`` records what each of them matched.
+    """
+
+    def __init__(self, *evaluators: PermissionEvaluator) -> None:
+        self._evaluators = tuple(evaluators)
+
+    def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> str:
+        matches = []
+        for evaluator in self._evaluators:
+            match = evaluator.authorize(tool_name, scope, permission)
+            if isinstance(match, str) and match:
+                matches.append(match)
+        return ";".join(matches)
 
 
 class DenyApprovalGate:
@@ -183,17 +209,34 @@ class ToolApplicationFacade:
         redactor: OutputRedactor | None = None,
         receipts: ReceiptStore | None = None,
         commands: tuple[Any, ...] = (),
+        audit: Any = None,
+        permissions: tuple[PermissionEvaluator, ...] = (),
+        context_factory: Any = None,
     ) -> "ToolApplicationFacade":
+        """Compose the graph.
+
+        ``audit`` is the durable audit repository the gateway publishes every
+        receipt to before the process-local store sees it; ``permissions``
+        are evaluators consulted after the resource policy, in order;
+        ``context_factory`` builds the operation context an executor runs
+        under from the request (the default carries the request scope's
+        source and privilege).
+        """
         policy = policy or ResourcePolicy()
         receipts = receipts or ReceiptStore()
+        evaluator: PermissionEvaluator = ResourcePolicyEvaluator(policy, registry)
+        if permissions:
+            evaluator = ChainedPermissionEvaluator(evaluator, *permissions)
         gateway = ToolGateway.from_typed_ports(
             registry,
             _FailClosedTypedPolicy(),
             executor or FailClosedToolExecutor(),
-            ResourcePolicyEvaluator(policy, registry),
+            evaluator,
             approvals or DenyApprovalGate(),
             redactor or IdentityRedactor(),
             receipts,
+            audit=audit,
+            context_factory=context_factory,
         )
         catalogs = GeneratedCatalogs.generate(registry, commands=commands)
         return cls(ToolGraph(registry, policy, gateway, catalogs, receipts))
@@ -210,7 +253,7 @@ class _FailClosedTypedPolicy:
 
 
 __all__ = [
-    "DenyApprovalGate", "FailClosedToolExecutor", "IdentityRedactor",
-    "PatternOutputRedactor", "ReceiptStore",
+    "ChainedPermissionEvaluator", "DenyApprovalGate", "FailClosedToolExecutor",
+    "IdentityRedactor", "PatternOutputRedactor", "ReceiptStore",
     "ResourcePolicyEvaluator", "ToolApplicationFacade", "ToolGraph",
 ]
