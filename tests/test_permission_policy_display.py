@@ -385,6 +385,9 @@ def test_every_decide_return_site_names_its_source():
         requires_elevation=True).source == "privilege"
     assert pm.decide(
         "file_write", mode=pm.MANUAL, rule_lookup=none,
+        interactive=False).source == "unattended"
+    assert pm.decide(
+        "task_create", mode=pm.MANUAL, rule_lookup=none,
         interactive=False).source == "non-interactive"
     assert pm.decide(
         "file_write", mode=pm.MANUAL, rule_lookup=none).source == "mode"
@@ -417,9 +420,9 @@ def test_the_ask_caveat_is_printed_on_every_render(tmp_path):
 def test_the_caveat_states_the_rule_it_has_to_state(tmp_path):
     """Not just "a line is present" -- the two facts a reader needs.
 
-    A caller with nobody to ask proceeds instead of being asked, and `plan` is
-    the exception. Both are behaviour, so both are measured here rather than
-    read off the sentence.
+    A caller with nobody to ask is refused for a file change and proceeds on
+    the record for the ask class, and `plan` denies. All three are behaviour,
+    so all three are measured here rather than read off the sentence.
     """
     _write_policy(tmp_path, [{"pattern": "status", "action": "allow"}])
     pm.set_mode(pm.MANUAL)
@@ -430,6 +433,9 @@ def test_the_caveat_states_the_rule_it_has_to_state(tmp_path):
     ).action == pm.ASK
     assert pm.decide(
         "file_write", interactive=False, mode=pm.MANUAL, rule_lookup=lookup,
+    ).action == pm.DENY
+    assert pm.decide(
+        "task_create", interactive=False, mode=pm.MANUAL, rule_lookup=lookup,
     ).action == pm.ALLOW
     assert pm.decide(
         "file_write", interactive=False, mode=pm.PLAN, rule_lookup=lookup,
@@ -437,7 +443,9 @@ def test_the_caveat_states_the_rule_it_has_to_state(tmp_path):
 
     out = server.permission_policy()
     assert "nobody to ask" in out
-    assert "except under plan" in out
+    assert "refused" in out and "recorded" in out
+    assert "plan denies" in out
+    assert "unattended decisions since start" in out
 
 
 # --- an `ask` row says whose answer it is ---------------------------------
@@ -451,14 +459,20 @@ def test_an_ask_row_shows_both_callers_answers(tmp_path):
     rows where they differ upgrades this output from disclosure to truth,
     without plumbing a caller flag through the renderer.
     """
-    _write_policy(tmp_path, [{"pattern": "file_write", "action": "ask",
-                              "note": "workspace writes"}])
+    _write_policy(tmp_path, [
+        {"pattern": "file_write", "action": "ask", "note": "workspace writes"},
+        {"pattern": "task_create", "action": "ask", "note": "task rows"},
+    ])
     pm.set_mode(pm.MANUAL)
 
     single = server.permission_policy("file_write")
-    assert "  effective: ask (console) / allow (non-interactive)" in single
+    assert "  effective: ask (console) / refused (unattended)" in single
+    assert "  effective: ask (console) / allow (non-interactive)" in (
+        server.permission_policy("task_create")
+    )
 
     listing = server.permission_policy()
+    assert "-> ask (mode) / refused (unattended)" in listing
     assert "-> ask (mode) / allow (non-interactive)" in listing
 
 

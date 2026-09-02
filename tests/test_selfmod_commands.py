@@ -32,7 +32,7 @@ def test_hosted_selfmod_reads_are_safe_but_mutations_need_developer():
     assert sonder_serve._dangerous_http_slash("/selfmod rollback selfmod-1")
 
 
-def test_selfmod_relative_tool_path_dispatches_only_to_candidate(monkeypatch, tmp_path):
+def test_selfmod_relative_tool_path_dispatches_only_to_candidate(unattended_effects_allowed, monkeypatch, tmp_path):
     state = tmp_path / "state"
     repo = tmp_path / "repo"
     target = repo / "docs" / "note.txt"

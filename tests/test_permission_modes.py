@@ -420,11 +420,57 @@ def test_accept_edits_and_auto_differ_on_execution_only():
 # --- decide() semantics ---------------------------------------------------
 
 
-def test_ask_degrades_to_allow_when_not_interactive():
+def test_ask_is_refused_for_the_effect_classes_when_not_interactive():
+    """A prompt nobody answered is not a yes: a file change is refused unattended."""
     decision = pm.decide("file_write", mode=pm.MANUAL, interactive=False)
-    assert decision.action == pm.ALLOW
-    assert "no interactive prompt available" in decision.reason
+    assert decision.action == pm.DENY
+    assert decision.source == "unattended"
+    for remedy in ("allow rule", "acceptEdits", "console"):
+        assert remedy in decision.reason, remedy
     assert pm.decide("file_write", mode=pm.MANUAL, interactive=True).action == pm.ASK
+
+
+def test_the_ask_class_proceeds_on_the_record_when_not_interactive():
+    """The chat and task entry points keep working unattended, and say so."""
+    decision = pm.decide("task_create", mode=pm.MANUAL, interactive=False)
+    assert decision.risk == "ask"
+    assert decision.action == pm.ALLOW
+    assert decision.source == "non-interactive"
+    assert "recorded" in decision.reason
+
+
+@pytest.mark.parametrize("tool, risk", [
+    ("file_write", "mutation"), ("run_code", "execution"), ("git_merge", "dangerous"),
+])
+def test_every_effect_class_is_refused_unattended_in_manual(tool, risk):
+    decision = pm.decide(
+        tool, mode=pm.MANUAL, interactive=False, rule_lookup=lambda _t: None,
+    )
+    assert decision.risk == risk
+    assert decision.action == pm.DENY
+    assert decision.source == "unattended"
+
+
+def test_a_mode_that_allows_the_class_answers_the_unattended_caller():
+    """The refusal is a gate, not a wall: the mode dial still means something."""
+    none = lambda _t: None  # noqa: E731
+    decide = lambda tool, mode: pm.decide(  # noqa: E731
+        tool, mode=mode, interactive=False, rule_lookup=none,
+    ).action
+    assert decide("file_write", pm.ACCEPT_EDITS) == pm.ALLOW
+    assert decide("run_code", pm.ACCEPT_EDITS) == pm.DENY
+    assert decide("run_code", pm.AUTO) == pm.ALLOW
+    assert decide("git_merge", pm.AUTO) == pm.DENY
+
+
+def test_an_unattended_refusal_names_only_modes_that_would_allow_it():
+    none = lambda _t: None  # noqa: E731
+    execution = pm.decide("run_code", mode=pm.MANUAL, interactive=False, rule_lookup=none)
+    assert "switch to auto" in execution.reason
+    assert "acceptEdits" not in execution.reason
+    dangerous = pm.decide("git_merge", mode=pm.AUTO, interactive=False, rule_lookup=none)
+    assert "switch to" not in dangerous.reason
+    assert "allow rule" in dangerous.reason and "console" in dangerous.reason
 
 
 def test_non_interactive_degradation_does_not_apply_under_plan():
@@ -1172,7 +1218,7 @@ def test_elevate_parses_a_natural_console_line():
 # being restated with no caveat on four surfaces.
 
 
-def test_the_dangerous_guarantee_is_conditional_and_the_condition_is_measured():
+def test_the_dangerous_guarantee_holds_unattended_by_refusing():
     """The fact the surfaces below have to state, pinned once, from behaviour."""
     assert pm.risk_of("git_merge") == "dangerous"
     assert pm._MATRIX[pm.AUTO]["dangerous"] == pm.ASK
@@ -1183,10 +1229,11 @@ def test_the_dangerous_guarantee_is_conditional_and_the_condition_is_measured():
         "git_merge", interactive=False, mode=pm.AUTO, rule_lookup=lambda _t: None)
 
     assert with_operator.action == pm.ASK
-    assert without.action == pm.ALLOW, (
-        "if this ever stops degrading, the caveat below can go -- but the "
-        "unqualified claim must not come back while it does"
+    assert without.action == pm.DENY, (
+        "a dangerous tool must never run for a caller nobody can ask; the "
+        "caveat below names that refusal, not a degrade"
     )
+    assert without.source == "unattended"
     # ...and `plan` is the exception the caveat names.
     assert pm.decide(
         "git_merge", interactive=False, mode=pm.PLAN, rule_lookup=lambda _t: None,
@@ -1196,7 +1243,9 @@ def test_the_dangerous_guarantee_is_conditional_and_the_condition_is_measured():
 def test_the_ask_caveat_has_one_definition():
     """One sentence, one home. Two copies is how one of them goes stale."""
     assert "nobody to ask" in pm.ASK_CAVEAT
-    assert "except under plan" in pm.ASK_CAVEAT
+    assert "refused" in pm.ASK_CAVEAT
+    assert "recorded" in pm.ASK_CAVEAT
+    assert "plan denies" in pm.ASK_CAVEAT
 
 
 @pytest.mark.parametrize("mode", pm.MODES)

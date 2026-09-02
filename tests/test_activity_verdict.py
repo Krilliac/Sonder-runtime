@@ -82,7 +82,7 @@ def _failing_pytest_project(tmp_path):
 
 
 @pytest.mark.integration
-def test_failing_pytest_is_not_recorded_as_ok(tmp_path):
+def test_failing_pytest_is_not_recorded_as_ok(unattended_effects_allowed, tmp_path):
     """The case from the docstring, end to end through the real path."""
     import harness_tools
 

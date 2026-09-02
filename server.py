@@ -298,6 +298,12 @@ import sonder_runtime.adapters.artifact_risk as artifact_risk_module
 import sonder_runtime.adapters.artifact_fetch as artifact_fetch_module
 import sonder_runtime.adapters.process_risk as process_risk_module
 from sonder_runtime.adapters.security import unsafe_lab
+from sonder_runtime.adapters.security import permission_receipts as _permission_receipts
+
+# Unattended permission decisions leave a durable, content-free receipt from
+# the moment this module loads; the composition root re-routes them to the
+# application's own sink once a graph exists (``permission_receipts.install``).
+_permission_receipts.install_default()
 
 
 def _running_source_commit_at_import():
@@ -2693,22 +2699,30 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
         return "ERROR: %s" % exc
 
 
-def _control_tool_refusal(tools, label):
+def _control_tool_refusal(tools, label, *, operator_approved=False):
     """The permission gate for ``control_command``: "" to proceed, else a refusal.
+
+    ``operator_approved`` is the console saying it already asked and got a
+    yes (``sonder_repl._named_command_gate``); the decision is then made as
+    an attended one, so a mode's ``ask`` is satisfied rather than refused a
+    second time. It is never set by a protocol caller: ``control_command`` is
+    not a registered tool, and only the REPL passes the keyword.
 
     ``interactive=False``: nothing that reaches this function has a console
     attached. The console prompts at ``sonder_repl._named_command_gate``
     *before* forwarding here, and the other two callers -- the app's slash
-    chain and ``answer_with_history`` -- have nobody to ask. So ``ask``
-    degrades to allow and only a ``deny`` rule and ``plan`` refuse, which is
-    what "preserve current behaviour" requires of a path this widely reached.
+    chain and ``answer_with_history`` -- have nobody to ask. So a mode's
+    ``ask`` is answered by the tool's class: file changes, host programs and
+    destructive tools are refused with the remedies named, ask-class tools
+    proceed on the record, and a ``deny`` rule and ``plan`` refuse as before.
 
     The exemption comes from ``decide_for_caller`` rather than being repeated
     here. This surface is one a person drives, so it carries it.
     """
     for tool in tools:
         decision = permission_modes.decide_for_caller(
-            tool, interactive=False, gate_control_exempt=True,
+            tool, interactive=bool(operator_approved), gate_control_exempt=True,
+            surface="control",
         )
         if decision is None:
             continue
@@ -2735,8 +2749,15 @@ def control_command(prompt: str, history=None, session="", project="",
     one an MCP client reaches through the ``sonder`` tool -- passes the user's
     raw prompt straight in, so all 97 branches here were reachable ungated from
     it. Re-deciding on the two paths that already gated is free and cannot
-    double-prompt: nothing here prompts, and a caller with nobody to ask gets
-    ``allow`` for anything the mode merely asks about.
+    double-prompt: nothing here prompts, and a caller with nobody to ask is
+    answered exactly as at the surface that forwarded here -- refused for file
+    changes, host programs and destructive tools, allowed on the record for
+    the ask class. The chain grades a command by the strictest tool it can
+    front, so the recognised read forms (``/selfmod status``, ``/todo list``)
+    are narrowed to the member they reach before the gate decides, and a
+    console that already asked and was answered says so with
+    ``operator_approved``, which the chain gate honours as an attended
+    decision rather than re-refusing the person who approved.
 
     ``operator_approved`` is the one place that last sentence stops being
     harmless. ``/selfmod deploy`` refuses to take "nobody to ask" for yes (see
@@ -2759,7 +2780,10 @@ def control_command(prompt: str, history=None, session="", project="",
         chain_tools = command_catalog.console_tools().get(cmd, ())
     except command_catalog.CatalogUnavailable as exc:
         return "refused %s: %s" % (cmd, exc)
-    refusal = _control_tool_refusal(chain_tools, cmd)
+    chain_tools = command_catalog.narrow_branch_tools(cmd, arg, chain_tools)
+    refusal = _control_tool_refusal(
+        chain_tools, cmd, operator_approved=bool(operator_approved),
+    )
     if refusal:
         return refusal
     if cmd == "/":
@@ -3012,7 +3036,9 @@ def control_command(prompt: str, history=None, session="", project="",
         tool, kwargs = parsed
         handler = globals().get(tool)
         if callable(handler):
-            refusal = _control_tool_refusal((tool,), "/" + tool)
+            refusal = _control_tool_refusal(
+                (tool,), "/" + tool, operator_approved=bool(operator_approved),
+            )
             if refusal:
                 return refusal
             try:
@@ -7609,7 +7635,9 @@ def _permission_policy_text(tool_name: str = "") -> str:
     table = permission_rules.format_policy(
         home, tool_name, decide=decide, snapshot=(rules, report),
     )
-    return "%s\n\n%s" % (table, _permission_mode_context(mode))
+    return "%s\n\n%s\n  %s" % (
+        table, _permission_mode_context(mode), permission_modes.unattended_summary(),
+    )
 
 
 @mcp.tool()
@@ -7643,6 +7671,7 @@ def policy_explain(tool_name: str) -> str:
     # explain the governing policy and could carry sensitive prose).
     decision = permission_modes.decide_for_caller(
         name, interactive=False, gate_control_exempt=True,
+        surface="preflight", record=False,
     )
     if decision is None:
         return "\n".join([
@@ -7661,7 +7690,8 @@ def policy_explain(tool_name: str) -> str:
         "privilege": "elevation is required and is currently off",
         "unclassified": "the tool could not be classified for an unattended caller",
         "durable-authority": "unattended durable authority is refused without an explicit rule",
-        "non-interactive": "the non-interactive caller policy governs this result",
+        "unattended": "the unattended-caller rule refuses this class with nobody to ask",
+        "non-interactive": "the ask class proceeds on the record for a caller with nobody to ask",
     }.get(decision.source, "the active permission policy governs this result")
     return "\n".join([
         "policy preflight: %s" % name,
@@ -13455,9 +13485,10 @@ def _loop_permission_refusal(action_type):
     `loop` and `workflow_run` tools execute actions the model authored,
     including `file_delete`, `workspace_run` and `self_heal_repair`. That is
     the same threat model as `_agent_dispatch`, not "a client calling a tool
-    directly", so it takes the same `interactive=False` gate: `manual` refuses
-    nothing it refused yesterday, while `plan` and an explicit per-tool `deny`
-    rule stop the action before it runs.
+    directly", so it takes the same `interactive=False` gate: file changes,
+    host programs and destructive actions are refused unattended unless a
+    rule or the mode allows them, while `plan` and an explicit per-tool
+    `deny` rule stop the action before it runs.
     """
     # Unknown action types are rejected by `_loop_dispatch` with the canonical
     # vocabulary below.  Do not turn that helpful contract error into a policy
@@ -13465,7 +13496,7 @@ def _loop_permission_refusal(action_type):
     if str(action_type or "").strip().lower() not in _LOOP_ACTION_TYPES:
         return None
     tool = _loop_action_tool(action_type)
-    decision = permission_modes.decide(tool, interactive=False)
+    decision = permission_modes.decide(tool, interactive=False, surface="loop")
     if decision.allowed:
         return None
     return {
@@ -16767,10 +16798,12 @@ def _agent_permission_gate_error(tool_name):
     is to hold still) and an explicit per-tool ``deny`` rule. Both are a
     deliberate, written-down operator decision.
 
-    Because ``decide()`` never returns ``ask`` when ``interactive=False``,
-    the "what should ``ask`` mean with no human attached?" question does not
-    arise on this path. Were it ever to, the answer would have to be refusal,
-    not silent self-approval by the loop.
+    ``decide()`` never returns ``ask`` when ``interactive=False``: with no
+    human attached, file changes, host programs and destructive tools are
+    refused unless a rule or the mode allows them, and ask-class tools
+    proceed on the record. The answer to "what should ``ask`` mean with no
+    human attached?" is therefore refusal, never silent self-approval by the
+    loop.
 
     This gate is additional to -- never a replacement for -- the read-only
     filter, the project-bound tool set and the cloud/host policies below it.
@@ -16779,7 +16812,7 @@ def _agent_permission_gate_error(tool_name):
     told to change course rather than retry.
     """
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
-    decision = permission_modes.decide(name, interactive=False)
+    decision = permission_modes.decide(name, interactive=False, surface="agent")
     if decision.allowed:
         return ""
     # Assigned rather than returned as a literal: scripts/check_error_signals.py

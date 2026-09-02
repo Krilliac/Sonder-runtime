@@ -81,7 +81,7 @@ def test_invalid_workflow_name_rejected():
         raise AssertionError("expected ValueError")
 
 
-def test_server_workflow_save_and_run(monkeypatch, tmp_path):
+def test_server_workflow_save_and_run(unattended_effects_allowed, monkeypatch, tmp_path):
     import server
 
     monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))

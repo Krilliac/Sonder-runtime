@@ -1859,7 +1859,7 @@ def test_control_command_routes_persisted_agent_retry(monkeypatch):
     ) == "retry:master-old:general"
 
 
-def test_control_command_routes_targeted_game_campaign(monkeypatch):
+def test_control_command_routes_targeted_game_campaign(unattended_effects_allowed, monkeypatch):
     calls = []
     monkeypatch.setattr(
         server,
@@ -1944,7 +1944,7 @@ def test_control_command_dump_never_appends_another_projects_turns(
     assert "PRIVATE_A" not in text
 
 
-def test_control_command_run_uses_history(monkeypatch):
+def test_control_command_run_uses_history(unattended_effects_allowed, monkeypatch):
     seen = {}
 
     def fake_run(code, language="python", timeout=8):

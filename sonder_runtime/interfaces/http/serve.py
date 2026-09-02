@@ -2065,11 +2065,12 @@ def _http_slash_refusal(cmd, argument="", context=None):
     port" (see `_deployment_gating_summary`). It has nothing to say about
     which mode is in force or which rules an operator wrote.
 
-    `interactive=False`, like every other caller with nobody to prompt: `ask`
-    degrades to `allow`, so this surface refuses nothing today that it did not
-    refuse before, while a `deny` rule and `plan` refuse. Only a `deny` can
-    come back from `decide()` here, which is why this is a flat loop rather
-    than a copy of the console's ask-and-rank gate.
+    `interactive=False`, like every other caller with nobody to prompt: file
+    changes, host programs and destructive tools are refused with the
+    remedies named, ask-class tools proceed on the record, and a `deny` rule
+    and `plan` refuse. Only a `deny` can come back from `decide()` here,
+    which is why this is a flat loop rather than a copy of the console's
+    ask-and-rank gate.
 
     The gate's own control is exempt for the reason it is everywhere else --
     though the app's real way back out of `plan` is the `/v1/permission-mode`
@@ -2090,26 +2091,9 @@ def _http_slash_refusal(cmd, argument="", context=None):
     # applying the mutation's admin gate to `/emotion status` or `/prefer
     # status` would accidentally turn a read-only request into an admin-only
     # operation.  Narrow only after the command's own grammar has established
-    # that it will take the read-only branch.
-    read_only_argument = str(argument or "").strip().lower()
-    if cmd in ("/emotion", "/emotions", "/vectors", "/mood") and (
-        not read_only_argument or read_only_argument in ("status", "list", "show")
-    ):
-        tools = ("emotion_vector_status",)
-    elif cmd in ("/prefer", "/preference", "/preferences") and (
-        not read_only_argument or read_only_argument in ("status", "list", "show")
-    ):
-        tools = ("preferences_status",)
-    elif cmd in ("/contextsize", "/ctxsize") and not read_only_argument:
-        tools = ("context_policy_status",)
-    elif cmd in ("/runtime", "/models") and (
-        not read_only_argument or read_only_argument == "status"
-    ):
-        tools = ("runtime_policy_status",)
-    elif cmd in ("/stash", "/runtime-stash") and (
-        not read_only_argument or read_only_argument in ("status", "list")
-    ):
-        tools = ("runtime_source_stash_status",)
+    # that it will take the read-only branch; the rules live in the catalog so
+    # this chain and `server.control_command` cannot disagree about a read.
+    tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
     return _http_tool_refusal(tools, cmd, context=context)
 
 
@@ -2204,7 +2188,7 @@ def _http_tool_refusal(tools, label, context=None):
                 if authority_error:
                     return "refused %s: %s" % (label, authority_error)
         decision = permission_policy.decide_for_caller(
-            tool, interactive=False, gate_control_exempt=True,
+            tool, interactive=False, gate_control_exempt=True, surface="http",
         )
         if decision is None:
             continue

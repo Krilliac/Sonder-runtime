@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 
 
+
 def test_history_from_messages_excludes_last_user_turn():
     messages = [
         {"role": "user", "content": "first question"},
@@ -81,7 +82,7 @@ def test_do_run_returns_structured_error_for_input_program():
     assert "[exited with error]" in out
 
 
-def test_run_accepts_optional_timeout():
+def test_run_accepts_optional_timeout(unattended_effects_allowed):
     ts.LAST_RESPONSE = "```python\nprint('slow smoke')\n```"
     ts.LAST_RUN_SOURCE = None
     out = ts._handle_slash("/run 12")
@@ -90,7 +91,7 @@ def test_run_accepts_optional_timeout():
     assert "slow smoke" in out
 
 
-def test_run_uses_answer_source_not_trace(monkeypatch):
+def test_run_uses_answer_source_not_trace(monkeypatch, unattended_effects_allowed):
     seen = {}
     ts.LAST_RESPONSE = (
         "```python\nprint('answer')\n```\n"
@@ -112,7 +113,7 @@ def test_run_uses_answer_source_not_trace(monkeypatch):
     assert seen["code"] == "print('answer')"
 
 
-def test_run_falls_back_to_prior_assistant_message(monkeypatch):
+def test_run_falls_back_to_prior_assistant_message(monkeypatch, unattended_effects_allowed):
     seen = {}
     ts.LAST_RESPONSE = "dumped chat/debug log to dump.txt"
     ts.LAST_RUN_SOURCE = "dumped chat/debug log to dump.txt"
@@ -138,7 +139,7 @@ def test_run_falls_back_to_prior_assistant_message(monkeypatch):
     assert seen == {"code": "int main(){return 0;}", "language": "cpp"}
 
 
-def test_runwindow_uses_prior_runnable_block(monkeypatch):
+def test_runwindow_uses_prior_runnable_block(monkeypatch, unattended_effects_allowed):
     seen = {}
     ts.LAST_RESPONSE = "```cpp\nint main(){return 0;}\n```"
     ts.LAST_RUN_SOURCE = None
@@ -169,7 +170,7 @@ def test_runwindow_uses_prior_runnable_block(monkeypatch):
     assert seen == {"code": "int main(){return 0;}", "language": "cpp", "timeout": 7}
 
 
-def test_run_rejects_invalid_timeout():
+def test_run_rejects_invalid_timeout(unattended_effects_allowed):
     out = ts._handle_slash("/run python pong.py")
 
     assert out.startswith("usage: /run [seconds]")
@@ -519,10 +520,15 @@ def test_file_slash_commands_route_to_server(monkeypatch):
     """The routing, with the shipped `file_delete: deny` rule out of the way.
 
     `/delete` reaches `file_delete`, which ships a default `deny` rule, and the
-    app's slash chain now enforces it -- see the next test. Neutralising the
-    lookup here keeps this test about routing, which is what it is named for.
+    app's slash chain now enforces it -- see the next test. An explicit allow
+    rule for every tool keeps this test about routing, which is what it is
+    named for: a written allow satisfies the ask in every mode, and nothing
+    else lets a destructive tool through to a caller with nobody to ask.
     """
-    monkeypatch.setattr(permission_modes, "_rule_lookup", lambda _tool: None)
+    monkeypatch.setattr(
+        permission_modes, "_rule_lookup",
+        lambda tool: {"pattern": tool, "action": permission_modes.ALLOW, "note": "test"},
+    )
     monkeypatch.setattr(ts.server, "file_find", lambda **kwargs: "found")
     monkeypatch.setattr(ts.server, "file_read", lambda **kwargs: "read")
     monkeypatch.setattr(ts.server, "file_delete", lambda **kwargs: "dry delete")
@@ -550,7 +556,7 @@ def test_the_shipped_delete_rule_binds_on_this_surface(monkeypatch):
     assert "rule denies this tool" in reply
 
 
-def test_artifact_and_game_slash_commands_route_to_server(monkeypatch):
+def test_artifact_and_game_slash_commands_route_to_server(monkeypatch, unattended_effects_allowed):
     calls = []
     monkeypatch.setattr(
         ts.server,
@@ -603,7 +609,7 @@ def test_artifact_and_game_slash_commands_route_to_server(monkeypatch):
     ]
 
 
-def test_write_slash_requires_path_and_text():
+def test_write_slash_requires_path_and_text(unattended_effects_allowed):
     assert ts._handle_slash("/write onlypath").startswith("usage:")
 
 
@@ -819,7 +825,7 @@ def test_concurrent_turn_results_keep_iids_request_local(monkeypatch):
     )["id"] == "chatcmpl-bbb222"
 
 
-def test_state_run_never_uses_legacy_global_response(monkeypatch):
+def test_state_run_never_uses_legacy_global_response(monkeypatch, unattended_effects_allowed):
     monkeypatch.setattr(
         ts, "LAST_RUN_SOURCE", "```python\nprint('wrong-global')\n```"
     )

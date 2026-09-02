@@ -458,7 +458,7 @@ def test_an_unbound_durable_tool_keeps_its_actionable_refusal():
     assert "console" in refusal or "allow rule" in refusal, refusal
 
 
-def test_a_binding_deleted_at_runtime_fails_closed_for_served_accounts(monkeypatch):
+def test_a_binding_deleted_at_runtime_fails_closed_for_served_accounts(every_tool_allowed_by_rule, monkeypatch):
     """The deny-by-default rule at the real boundary, proven by deleting a
     binding: the tool stays declared (agent operator set) but unbound, and a
     served non-admin caller is refused rather than passed to the mode gate's

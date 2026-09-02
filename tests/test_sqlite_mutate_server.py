@@ -51,7 +51,7 @@ def test_preview_token_is_returned_but_not_written_to_activity(monkeypatch, tmp_
     assert "<redacted>" in recorded[-1][1]["output"]
 
 
-def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, tmp_path):
+def test_agent_project_mutation_validation_and_autopilot_exclusion(every_tool_allowed_by_rule, monkeypatch, tmp_path):
     assert "sqlite_mutate" in server.tool_manifest()
     assert "- sqlite_mutate:" in server._agent_tool_help()
     assert "sqlite_mutate" in server._PROJECT_SCOPED_PATH_TOOLS
@@ -83,7 +83,7 @@ def test_agent_project_mutation_validation_and_autopilot_exclusion(monkeypatch, 
     assert records[0]["path"] == server._agent_normalized_path(str(path))
 
 
-def test_project_bound_sqlite_mutation_cannot_escape_with_trusted_approval(tmp_path):
+def test_project_bound_sqlite_mutation_cannot_escape_with_trusted_approval(every_tool_allowed_by_rule, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     outside = tmp_path / "outside"

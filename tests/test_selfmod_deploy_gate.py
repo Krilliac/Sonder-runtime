@@ -11,11 +11,15 @@ and then let it through anyway:
     deploy   manual  control_command    REACHED-TOOL
     deploy   auto    http _handle_slash REACHED-TOOL
 
-That degrade is deliberate and must stay for ordinary tools -- it is what
-"preserve current behaviour outside the console" means. This file is the
-argument that self-modification is the one exception. ``selfmod.deploy``
-``os.replace``s Sonder's own source tree, including ``selfmod.py`` itself, so
-a wrong ``allow`` here is not recoverable by the mechanism that would normally
+That degrade is gone for every effect class -- with nobody to ask,
+``permission_modes`` now refuses file changes, host programs and destructive
+tools outright ("Unattended callers" there) -- and this file keeps the
+guarantee that predates it and never leaned on the mode table:
+``_selfmod_command`` refuses its two source-writing actions itself unless a
+console operator approved or a written rule allows, so a later mode or rule
+change cannot quietly reopen this. ``selfmod.deploy`` ``os.replace``s
+Sonder's own source tree, including ``selfmod.py`` itself, so a wrong
+``allow`` here is not recoverable by the mechanism that would normally
 recover it. Every other ``dangerous`` tool can be undone by running Sonder;
 this one can overwrite the Sonder that would do the undoing.
 
@@ -149,22 +153,22 @@ def test_the_refusal_says_what_would_make_it_run():
 # --- what must keep working ----------------------------------------------
 
 
-@pytest.mark.parametrize("mode", UNATTENDED_MODES)
-def test_reading_selfmod_state_is_never_blocked_by_this(mode):
+@pytest.mark.parametrize("mode", ("plan",) + UNATTENDED_MODES)
+@pytest.mark.parametrize("form", ("/selfmod", "/selfmod status"))
+def test_reading_selfmod_state_is_never_blocked_by_this(mode, form):
     """The refusal is scoped to the two write actions, not to ``/selfmod``.
 
     Letting the new refusal reach ``status`` would be the over-refusal this
     gate is explicitly built to avoid, so this pins the scope of *this* change.
 
-    ``plan`` is deliberately not parametrized here. ``plan`` already refuses
-    ``/selfmod status``, because the chain gate grades a named command by the
-    strictest tool it can front (``sonder_repl._gate_tools``) and ``/selfmod``
-    can deploy. That is pre-existing, deliberate, and settled; asserting the
-    opposite here would re-litigate the grading rule under cover of testing
-    this fix, and would have made this file demand a change nobody asked for.
+    ``plan`` is included. The chain gate grades a named command by the
+    strictest tool it can front, but ``command_catalog.narrow_branch_tools``
+    first narrows the read forms the branch grammar recognises -- the bare
+    form shows status -- to the read they are, so the mode that only reads
+    reads this too.
     """
     pm.set_mode(mode)
-    out = server.control_command("/selfmod status")
+    out = server.control_command(form)
     assert not out.startswith("refused"), out
 
 

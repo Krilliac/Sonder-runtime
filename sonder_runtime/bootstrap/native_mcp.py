@@ -599,6 +599,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     canonical_name,
                     interactive=False,
                     gate_control_exempt=False,
+                    surface="native-mcp",
                 )
                 if (
                     decision is not None

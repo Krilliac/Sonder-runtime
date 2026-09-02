@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -63,7 +64,10 @@ def test_sh_smoke_check_passes_on_this_development_checkout_with_explicit_python
         if not python:
             pytest.skip("no non-alias SONDER_PYTHON configured for Git Bash on Windows")
     else:
-        python = ""
+        # The interpreter running this test is the one the checkout supports;
+        # the script's own discovery would take whichever ``python3`` is first
+        # on PATH, which on a host with an older system Python is not it.
+        python = sys.executable
     environment = os.environ.copy()
     if python:
         environment["SONDER_PYTHON"] = python

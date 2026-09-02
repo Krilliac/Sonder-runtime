@@ -896,7 +896,7 @@ def test_admin_drain_idempotency_key_is_scoped_to_authenticated_principal(monkey
     assert all(key.startswith("hi-") and "same-key" not in key for key in keys)
 
 
-def test_served_source_update_requires_admin_but_check_remains_read_only(monkeypatch):
+def test_served_source_update_requires_admin_but_check_remains_read_only(every_tool_allowed_by_rule, monkeypatch):
     developer = {
         "mode": "account", "authorized": True, "api_key": False,
         "account": {"username": "developer", "role": "developer"},
@@ -916,7 +916,7 @@ def test_served_source_update_requires_admin_but_check_remains_read_only(monkeyp
     assert ts._handle_slash("/updatecheck", context=developer).startswith("ran ")
 
 
-def test_served_runtime_stash_aliases_delegate_after_action_sensitive_gates(monkeypatch):
+def test_served_runtime_stash_aliases_delegate_after_action_sensitive_gates(every_tool_allowed_by_rule, monkeypatch):
     developer = {
         "mode": "account", "authorized": True, "api_key": False,
         "account": {"username": "developer", "role": "developer"},

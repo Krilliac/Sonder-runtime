@@ -60,7 +60,7 @@ def test_native_clear_command_uses_terminal_clear_without_a_model_turn(monkeypat
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_clear_terminal_scrollback", lambda: calls.append("clear"))
     monkeypatch.setattr(sonder_repl.server, "sonder", lambda *_args, **_kwargs: pytest.fail("chat should not run"))
 
@@ -75,7 +75,7 @@ def test_cloud_command_changes_runtime_consent_without_a_model_turn(monkeypatch,
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(
         sonder_repl.server,
         "cloud_opt_in",
@@ -96,7 +96,7 @@ def test_refactor_apply_prompt_never_reads_piped_stdin(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: False)
     monkeypatch.setattr(
         sonder_repl.server.file_ops,
@@ -702,7 +702,7 @@ def test_model_tag_selection_pins_the_next_chat_without_leaving_code_route(monke
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -735,7 +735,7 @@ def test_resume_clears_previous_sessions_composer_turn_metrics(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_read_input", _read)
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_composer_context", lambda *_args: None)
     monkeypatch.setattr(sonder_repl, "_composer_frame_width", lambda: 160)
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args: None)
@@ -763,7 +763,7 @@ def test_model_selection_refuses_unverified_tag_when_catalog_is_unavailable(monk
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -787,7 +787,7 @@ def test_model_selection_refuses_tag_when_verified_catalog_is_empty(monkeypatch,
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
 
     sonder_repl.main()
 
@@ -825,7 +825,7 @@ def _repl_with_cloud_tier(monkeypatch, lines, *, cloud_allowed, seen=None):
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_a, **_k: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_a, **_k: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_a, **_k: None)
@@ -919,7 +919,7 @@ def test_route_still_recommends_a_cloud_tier_when_cloud_is_enabled(monkeypatch, 
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_a, **_k: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
 
     sonder_repl.main()
 
@@ -944,7 +944,7 @@ def test_explicit_web_search_bypasses_repl_workbench_route(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -970,7 +970,7 @@ def test_mixed_web_search_and_workspace_action_stays_in_repl_workbench(monkeypat
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -1000,7 +1000,7 @@ def test_mixed_web_search_destination_actions_stay_in_repl_workbench(monkeypatch
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -1024,7 +1024,7 @@ def test_repl_never_passes_a_login_password_to_session_recall(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_read_input", _read)
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -1048,7 +1048,7 @@ def test_interactive_login_reads_password_outside_the_composer(monkeypatch):
     )
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -1072,7 +1072,7 @@ def test_model_selection_resolves_tiers_and_installed_tags_case_insensitively(mo
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -1107,7 +1107,7 @@ def test_model_selection_rejects_known_embedding_only_tag_before_next_chat(monke
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)
@@ -1135,7 +1135,7 @@ def test_model_tag_selection_is_used_by_consult(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl.consult_flow, "default_tiers", lambda: ["code", "reasoning"])
     monkeypatch.setattr(
         sonder_repl.consult_flow, "consult",
@@ -1157,7 +1157,7 @@ def test_model_near_miss_suggestion_matches_case_insensitively(monkeypatch, caps
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
 
     sonder_repl.main()
 
@@ -1177,7 +1177,7 @@ def test_model_bare_tag_argument_does_not_suggest_every_installed_model(monkeypa
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
 
     sonder_repl.main()
 
@@ -1191,7 +1191,7 @@ def _drive_workspace_repl(monkeypatch, lines, seen):
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_permission_gate", lambda _tool: (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
@@ -1292,7 +1292,7 @@ def test_workspace_create_obeys_directory_create_permission(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(
         sonder_repl, "_named_command_gate",
-        lambda command: (False, "refused /workspace-create")
+        lambda command, _argument="": (False, "refused /workspace-create")
         if command == "/workspace-create" else (True, ""),
     )
     monkeypatch.setattr(
@@ -1343,7 +1343,7 @@ def _drive_work_turn(monkeypatch, lines):
     monkeypatch.setattr(sonder_repl, "_read_input", lambda *_args, **_kwargs: next(lines))
     monkeypatch.setattr(sonder_repl, "_startup_banner", lambda *_args: "")
     monkeypatch.setattr(sonder_repl, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd: (True, ""))
+    monkeypatch.setattr(sonder_repl, "_named_command_gate", lambda _cmd, _argument="": (True, ""))
     monkeypatch.setattr(sonder_repl, "_begin_chat_turn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_print_chat_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sonder_repl, "_latest_repl_turn_metrics", lambda *_args, **_kwargs: None)

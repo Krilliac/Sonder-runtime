@@ -166,12 +166,10 @@ def test_a_deny_rule_binds_at_the_app_surface_in_every_mode(monkeypatch):
 # --- and nothing that worked yesterday starts failing ---------------------
 
 
-def test_manual_refuses_nothing_at_the_app_surface(monkeypatch):
-    """An HTTP caller has nobody to prompt, so ``ask`` degrades to ``allow``.
-
-    This is the "preserve current behaviour" half. If gating this chain made
-    the default mode start refusing app requests, the fix would be worse than
-    the defect.
+def test_manual_refuses_a_write_at_the_app_surface_and_accept_edits_runs_it(monkeypatch):
+    """An HTTP caller has nobody to prompt, so a file change is refused in the
+    default mode -- with the remedies named -- and runs once the mode answers
+    for it. The refusal is the point; a silent allow was the defect.
     """
     written = []
     monkeypatch.setattr(
@@ -179,7 +177,12 @@ def test_manual_refuses_nothing_at_the_app_surface(monkeypatch):
         lambda **kwargs: written.append(kwargs) or "wrote it",
     )
     pm.set_mode(pm.MANUAL)
+    reply = ts._handle_slash("/write notes.txt hello")
+    assert reply.startswith("refused /write:")
+    assert "nobody is here" in reply
+    assert written == []
 
+    pm.set_mode(pm.ACCEPT_EDITS)
     assert ts._handle_slash("/write notes.txt hello") == "wrote it"
     assert len(written) == 1
 
@@ -194,7 +197,9 @@ def test_the_app_surface_never_prompts(monkeypatch):
     )
     monkeypatch.setattr(server, "file_write", lambda **_k: "wrote it")
     pm.set_mode(pm.MANUAL)
+    assert ts._handle_slash("/write notes.txt hello").startswith("refused /write:")
 
+    pm.set_mode(pm.ACCEPT_EDITS)
     assert ts._handle_slash("/write notes.txt hello") == "wrote it"
 
 
@@ -372,34 +377,44 @@ def test_both_spellings_of_one_tool_get_the_same_answer(monkeypatch):
     mode -- rather than either half is what survives someone adding a third
     way to reach the same tool.
 
-    Note that agreement is not the same as refusal: with no rule in play,
-    `acceptEdits` and `auto` let a `dangerous` tool through for a caller with
-    nobody to ask, and both spellings must agree about *that* too. A version
-    of this test that asserted "both refuse" would have been asserting the
-    over-correction instead of the property.
+    Note that agreement is not the same as refusal: with no rule in play a
+    `dangerous` tool is refused for a caller with nobody to ask in every
+    mode, and with an explicit `allow` rule it runs wherever the mode asks;
+    both spellings must agree about each of those, which is why the property
+    is measured twice. A version of this test that asserted "both refuse"
+    would have been asserting the over-correction instead of the property.
     """
     ran = []
     monkeypatch.setattr(
         server, "file_delete", lambda **kwargs: ran.append(kwargs) or "deleted",
     )
 
-    for mode in pm.MODES:
-        pm.set_mode(mode)
-        before = len(ran)
-        named = ts._handle_slash("/delete notes.txt")
-        middle = len(ran)
-        by_tool = ts._handle_slash("/file_delete path=notes.txt")
-        after = len(ran)
+    def agree():
+        for mode in pm.MODES:
+            pm.set_mode(mode)
+            before = len(ran)
+            named = ts._handle_slash("/delete notes.txt")
+            middle = len(ran)
+            by_tool = ts._handle_slash("/file_delete path=notes.txt")
+            after = len(ran)
 
-        assert named.startswith("refused") == by_tool.startswith("refused"), (
-            "%s: /delete says %r and /file_delete says %r" % (mode, named, by_tool)
-        )
-        assert (middle - before) == (after - middle), (
-            "%s: one spelling reached the tool and the other did not" % mode
-        )
+            assert named.startswith("refused") == by_tool.startswith("refused"), (
+                "%s: /delete says %r and /file_delete says %r" % (mode, named, by_tool)
+            )
+            assert (middle - before) == (after - middle), (
+                "%s: one spelling reached the tool and the other did not" % mode
+            )
 
-    # ...and the guard against both halves being vacuously permissive: at
-    # least one mode must actually have refused, and one must have run it.
+    agree()
+    assert not ran, "a dangerous tool ran with nobody to ask and no rule"
+
+    monkeypatch.setattr(
+        pm, "_rule_lookup",
+        lambda tool: {"pattern": tool, "action": pm.ALLOW} if tool == "file_delete" else None,
+    )
+    agree()
+    # ...and the guard against both halves being vacuously permissive: with
+    # the written grant, at least one mode must actually have run it.
     assert ran, "no mode ran the tool -- the agreement is vacuous"
 
 
