@@ -911,3 +911,29 @@ Uncertainty, leases, compute: `test_autopilot_stale_lease.py`, `test_autopilot_s
 `test_wp9_reconciliation.py`, `test_startup_reconciliation_order.py`, `test_failure_injection.py`,
 `test_compute_placement_service.py`, `test_compute_fabric_*.py`, `test_execution_world_port.py`,
 `test_remaining_execution_world*.py`, `test_seam004_execution_world_integration.py`.
+
+## 13. Status after implementation (2026-09-02, same day)
+
+Nathan approved the design with one amendment: `auto` keeps executing tools
+unattended (decision 4 resolved as "keep"; the `dangerous` class is still
+refused unattended, matching the mode's blurb). Everything below landed on
+`claude/sonder-runtime-commit-6d6e4v`; each commit's message carries the
+detail.
+
+| Part | State | Where |
+|---|---|---|
+| A0 receipts | done | `permission_modes` decision observers; `adapters/security/permission_receipts.py` routes every unattended refusal, and every unattended allow of anything but a safe read, to `operations.db` through the application event sink (`permission.unattended_refusal` / `permission.unattended_allow`) |
+| A1 fail-closed | done | unattended `ask` is refused for `mutation`, `execution`, `dangerous` (`source="unattended"`, remedies named); `ask`-class proceeds on the record; `non_degrading` removed; copy, `/permissions` display and `policy_explain` updated; chain gates narrow a slash command to the member its argument reaches (`command_catalog.narrow_branch_tools`, bare forms included) so a read is never refused for a write it cannot perform; the console tells the control chain when an operator answered (`operator_approved`) |
+| B evaluation lane | done | two suites gate CI (`smoke_python`, `tool_policy_gates`); statuses `verifier_unavailable`, `unknown`, `abandoned`; `tool_policy` scenario kind through the real gate with the scenario's own mode and rules; `compare --run A --run B`; `--trials k` with pass@1 / pass@k; history recorded by default only where the provider digest is honest; `harness_outcomes.py` owns the vocabulary and reuses `RegressionAssessment` |
+| C typed read family | done | the seven reads run through `Application.tools` on both surfaces (`bootstrap/typed_tools.py`, `adapters/security/permission_evaluator.py`, `adapters/typed_tool_executor.py`); receipts carry `terminal`, `policy_match`, `evidence`, `source`/`auth_level`; early exits publish receipts; the durable audit rotates; the native line-range read gained the secret guard; see `evidence/TOOL-READ-FAMILY-TYPED-GATEWAY-2026-09-02.md` |
+| Defects 1–7 | closed | 1 (`non_degrading`), 2–5 (receipt fields, context factory, early-exit receipts, `compose(audit=)`), 6 (the served turn is captured once: `answer_with_history(capture_session=False)` from `sonder_serve._run_prompt`), 7 (`sonder_serve` no longer live-reloads the root `tool_contract` under the typed contract's name) |
+| Defect 8 | closed as far as honest | WP8 counts corrected (206 / 50); `migration-inventory.json` annotated as the historical 2026-08-21 snapshot it is (WP0-BASELINE already said so; no generator exists to regenerate it); `REQUIREMENT-AUDIT-NEXT.md` gained a dated addendum pointing at the new evidence, with the formal ledger untouched (204 `planned`, 0 `verified`) |
+| Branch cleanup | integrated; deletion blocked | every remote branch classified in `RETIRED-BRANCHES-2026-09-02.md`; `claude/fable-skill-forge` and `docs/architecture-handoff` merged here; the remote refuses branch deletion from this session's credential, so the deletions are listed for the owner to run |
+
+Not done, deliberately:
+
+- `eval_solver.py`, `eval_duel.py` and `eval_retrieval.py` do not share the
+  harness today, so they did not gain the history flag through it; wiring
+  them through `eval_harness` is its own change.
+- Slice 2 (the mutating file family, one-shot approvals, effect fencing) is
+  the next commit on this branch, not this one; its design in §8 stands.

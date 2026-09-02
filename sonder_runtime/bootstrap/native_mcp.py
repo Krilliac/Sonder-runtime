@@ -420,6 +420,14 @@ _VISION_NAMES = frozenset({"vision_analyze"})
 _COMPUTE_NAMES = frozenset(item.name for item in _COMPUTE_TOOLS)
 
 
+# The read-only workbench family runs through the typed tool gateway when the
+# application graph composed one (bootstrap/typed_tools.py); every other tool
+# still reaches the packaged executor directly.
+_TYPED_READ_NAMES = frozenset({
+    "directory_tree", "file_find", "file_read_range", "program_search",
+    "read_file", "script_search", "text_search",
+})
+
 _LEGACY_ALIASES = {
     "directory_tree": "directory_tree",
     "directory_create": "make_directory",
@@ -568,6 +576,60 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             },
         }
 
+    def typed_result(tools, canonical_name: str, arguments: dict, context) -> dict:
+        """Run one read-only workbench tool through the typed gateway.
+
+        The gateway is the single seam: schema, resource policy, the
+        runtime's permission modes (as an unattended native-MCP caller),
+        deadline and cancellation, the packaged guards, redaction, and one
+        durable receipt whatever the outcome. The envelope keeps its shape.
+        """
+        from ..application.tools.gateway_contract import (
+            ToolGatewayRequest, ToolPermission, ToolScope,
+        )
+        from ..domain.common.errors import Cancelled, DeadlineExceeded, Forbidden
+
+        request = ToolGatewayRequest(
+            request_id=context.correlation_id,
+            tool_name=canonical_name,
+            arguments=arguments,
+            scope=ToolScope(
+                principal_id=context.principal_id,
+                workspace_roots=tuple(str(root) for root in roots),
+                source="mcp",
+                auth_level=context.auth_level,
+            ),
+            permission=ToolPermission(),
+            deadline_monotonic=context.deadline_monotonic,
+            cancellation=context.cancellation,
+            execution_world="local",
+        )
+        try:
+            receipt = tools.execute(request)
+        except Forbidden as exc:
+            return {
+                "output": str(exc), "isError": True, "error": "permission_denied",
+                "evidence": {"tool": canonical_name, **dict(getattr(exc, "decision", {}) or {})},
+            }
+        except (Cancelled, DeadlineExceeded) as exc:
+            return {
+                "output": str(exc), "isError": True,
+                "error": type(exc).__name__, "evidence": {"tool": canonical_name},
+            }
+        evidence = dict(receipt.evidence)
+        evidence.update({
+            "request_id": receipt.request_id,
+            "argument_digest": receipt.argument_digest,
+            "result_digest": receipt.result_digest,
+            "terminal": receipt.terminal,
+        })
+        return {
+            "output": receipt.output,
+            "isError": not receipt.success,
+            "error": receipt.error_code or None,
+            "evidence": evidence,
+        }
+
     def execute(name: str, arguments: dict) -> dict:
         descriptor = registry.get(name)
         if descriptor is None:
@@ -645,6 +707,9 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 "error": None,
                 "evidence": {"model": vision.model, "tier": vision.tier},
             }
+        typed_tools = getattr(application, "tools", None)
+        if canonical_name in _TYPED_READ_NAMES and typed_tools is not None:
+            return typed_result(typed_tools, canonical_name, canonical_arguments, context)
         if canonical_name in _INSPECTION_NAMES:
             result = application.inspections.inspect(
                 canonical_name, canonical_arguments, context

@@ -26,6 +26,11 @@ from ..adapters.execution.process_jobs import SubprocessJobProvider
 from ..adapters.execution.durable_output import DurableExecutionOutput, SQLiteSpillStore
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
+from ..adapters.typed_tool_executor import PackagedToolExecutor
+from ..adapters.persistence.tool_audit import DurableToolAuditRepository, ToolAuditLimits
+from ..adapters.security.permission_evaluator import PermissionModesEvaluator
+from ..application.tools.facade import PatternOutputRedactor, ReceiptStore, ToolApplicationFacade
+from .typed_tools import POLICY_NAMES, read_only_policy, typed_tool_registry
 from ..adapters.unit_of_work import UnitOfWorkAdapter
 from ..adapters.operations_event_sink import OperationsEventSink
 from ..adapters.security import permission_receipts
@@ -182,6 +187,10 @@ class Application:
     compute_scheduler: ComputePlacementScheduler | None = None
     compute_job_worker: Callable[[], ComputeJobWorker] | None = None
     compute_service: Callable[[], ComputeFabricService] | None = None
+    # The typed tool boundary: the read-only workbench family runs through it
+    # on every surface, with the runtime's permission modes as its evaluator
+    # and operations-grade durable receipts (see bootstrap/typed_tools.py).
+    tools: ToolApplicationFacade | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -1026,6 +1035,27 @@ def build_application(
     events = LocalObservabilitySink(OperationsEventSink())
     permission_receipts.install(lambda: events)
 
+    # The typed tool boundary for the read-only workbench family. The
+    # resource policy admits exactly that family; the permission-modes
+    # evaluator makes the operator's standing policy the second gate on
+    # every typed call; every receipt is durable before it is visible.
+    from ..platform.logging import Redactor as _Redactor
+
+    tools = ToolApplicationFacade.compose(
+        typed_tool_registry(),
+        PackagedToolExecutor(),
+        policy=read_only_policy(),
+        redactor=PatternOutputRedactor(_Redactor().redact),
+        receipts=ReceiptStore(),
+        audit=DurableToolAuditRepository(
+            runtime_paths.state_path(
+                os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT",
+            ),
+            limits=ToolAuditLimits(),
+        ),
+        permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
+    )
+
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
@@ -1050,6 +1080,7 @@ def build_application(
         # a singleton; each call opens and owns its own connection scope.
         unit_of_work=UnitOfWorkAdapter,
         tool_executor=ToolExecutorAdapter(),
+        tools=tools,
         process_probe=ProcessProbeAdapter(),
         events=events,
         clock=SystemClock(),
