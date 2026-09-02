@@ -16782,8 +16782,15 @@ def _agent_negative_claim_review(
     }
 
 
-def _agent_permission_gate_error(tool_name):
+def _agent_permission_gate_error(tool_name, *, mode=None, rule_lookup=None,
+                                 record=True):
     """Refusal text when the operator's permission gate forbids this dispatch.
+
+    ``mode``, ``rule_lookup`` and ``record`` are per-call overrides for the
+    evaluation lane (``eval_harness`` ``tool_policy`` scenarios), which asks
+    this gate what an agent would get under a stated mode and rule set
+    without changing the operator's own and without leaving a receipt. The
+    agent loop never passes them.
 
     ``permission_modes.decide()`` was written as a pure function that call
     sites opt into, and until now nothing did: the mode matrix and the
@@ -16812,7 +16819,9 @@ def _agent_permission_gate_error(tool_name):
     told to change course rather than retry.
     """
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
-    decision = permission_modes.decide(name, interactive=False, surface="agent")
+    decision = permission_modes.decide(
+        name, interactive=False, mode=mode, rule_lookup=rule_lookup,
+        surface="agent", record=record)
     if decision.allowed:
         return ""
     # Assigned rather than returned as a literal: scripts/check_error_signals.py

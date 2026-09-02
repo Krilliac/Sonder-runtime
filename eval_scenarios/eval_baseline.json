@@ -13,6 +13,41 @@
         ],
         "suite_hash": "fa483ba8f93d2b051b50ab265af44a02a04c6d20a70a7b37ef7f7babd5d490fa"
       }
+    },
+    "tool_policy_gates": {
+      "policy": {
+        "forbid_infra": true,
+        "min_pass_rate": 1.0,
+        "required_pass": [
+          "a_deny_rule_outranks_auto_for_run_code",
+          "admin_register_refused_unattended_in_auto",
+          "an_allow_rule_answers_the_ask_for_file_write_in_manual",
+          "an_unclassified_tool_is_refused_in_auto",
+          "file_delete_refused_by_rule_in_acceptedits",
+          "file_delete_refused_by_rule_in_auto",
+          "file_delete_refused_by_rule_in_manual",
+          "file_delete_refused_by_rule_in_plan",
+          "file_read_allowed_over_http_in_manual",
+          "file_write_allowed_in_acceptedits",
+          "file_write_allowed_in_auto",
+          "file_write_asks_at_an_attended_console_in_manual",
+          "file_write_refused_in_plan",
+          "file_write_unattended_is_refused_in_manual",
+          "permission_mode_is_exempt_at_the_console_in_plan",
+          "permission_mode_is_not_exempt_over_native_mcp_in_plan",
+          "run_code_allowed_in_auto",
+          "run_code_unattended_is_refused_in_acceptedits",
+          "run_code_unattended_is_refused_in_manual",
+          "runtime_policy_update_refused_unattended_in_auto_over_mcp",
+          "selfmod_refused_unattended_in_auto_on_the_control_chain",
+          "selfmod_status_read_allowed_in_plan_on_the_control_chain",
+          "task_create_proceeds_unattended_in_manual",
+          "task_list_allowed_in_plan",
+          "workspace_run_allowed_in_the_loop_in_auto",
+          "workspace_run_refused_in_the_loop_in_acceptedits"
+        ],
+        "suite_hash": "1b1d17017219dbbc90e63a3713917e1074a17ac5ec1ab191efbea9792fc0e1f3"
+      }
     }
   }
 }
