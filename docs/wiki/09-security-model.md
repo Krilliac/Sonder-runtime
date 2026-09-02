@@ -45,7 +45,11 @@ of the model — an uncensored or "abliterated" model changes what it will
   `plan`, an explicit `deny`, or the durable-authority class —
   `permission_approve` is itself in that class, so no unattended caller can
   approve its own next call. The ledger stores digests and a bounded,
-  redacted preview, never arguments.
+  redacted preview, never arguments. A spent approval also carries exactly
+  the reach the operator approved: the call's own `extra_roots` are honoured
+  for that call alone, with containment still checked against them. The
+  shared `SONDER_FILE_APPROVAL_CODE` is retired (it warns once when set); a
+  model's string `token` or `approval` is dropped from every agent proposal.
 - **A worker whose lease is gone may look but not touch.** The autopilot
   controller installs an effect fence for each task
   (`sonder_runtime/adapters/execution/effect_fence.py`); the permission gate

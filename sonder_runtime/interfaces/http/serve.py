@@ -2633,6 +2633,14 @@ def _dispatch_catalogued_tool(line, state, context=None):
     handler = getattr(server, tool_name, None)
     if not callable(handler):
         return "%s is catalogued but not callable here." % tool_name
+    with server.approved_call_reach(tool_name, kwargs):
+        return _run_catalogued_tool_gated(
+            line, tool_name, kwargs, handler, state=state, context=context,
+        )
+
+
+def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, context):
+    """The gated ``/<tool>`` dispatch, run inside the call's reach scope."""
     refusal = _http_tool_refusal(
         (tool_name,), "/" + tool_name, context=context, arguments=kwargs,
     )

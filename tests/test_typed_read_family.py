@@ -455,3 +455,9 @@ def test_the_family_is_declared_once_and_matches_the_native_route():
         assert graded in pm.UNATTENDED_REFUSED_RISKS, (name, graded)
     legacy = {typed_tools.POLICY_NAMES.get(name, name) for name in typed_tools.TYPED_TOOLS}
     assert legacy == LEGACY_HANDLERS
+    # The native surface grades an approved call by the same name the typed
+    # evaluator decides on; it derives that map from its alias table rather
+    # than importing the declared one, so the two are pinned together here.
+    derived = {name: graded for name, graded in native_mcp._GRADED_NAMES.items()
+               if name in typed_tools.TYPED_TOOLS}
+    assert derived == typed_tools.POLICY_NAMES

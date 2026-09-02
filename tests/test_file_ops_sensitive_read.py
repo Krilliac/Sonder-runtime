@@ -150,12 +150,12 @@ def test_server_file_read_refuses_secret_without_token(workspace):
     assert "API_KEY" not in out
 
 
-def test_server_file_read_allows_secret_with_approval_bypass(workspace, monkeypatch):
+def test_server_file_read_no_longer_honours_the_shared_approval_code(workspace, monkeypatch):
     monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "let-me")
     (workspace / ".env").write_text("API_KEY=abc", encoding="utf-8")
     out = server.file_read(".env", approval="let-me")
-    assert not out.startswith("ERROR:")
-    assert "API_KEY=abc" in out
+    assert out.startswith("ERROR:")
+    assert "API_KEY=abc" not in out
 
 
 def test_server_data_inspect_refuses_memory_db_without_token(workspace):

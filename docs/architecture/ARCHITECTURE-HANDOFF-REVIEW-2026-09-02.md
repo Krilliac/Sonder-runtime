@@ -931,6 +931,7 @@ detail.
 | Branch cleanup | integrated; deletion blocked | every remote branch classified in `RETIRED-BRANCHES-2026-09-02.md`; `claude/fable-skill-forge` and `docs/architecture-handoff` merged here; the remote refuses branch deletion from this session's credential, so the deletions are listed for the owner to run |
 | Slice 2: mutating family | done | the nine mutating file tools run through `Application.tools` on both surfaces, legacy formats and structured refusals unchanged; `ToolScope.gate` makes the permission decision exactly once per call (the gateway for native, the surface's own gate for a legacy forward, recorded as `permission:surface`); the native canonical `write_file`/`make_directory`/`read_file` descriptors gained bounded schemas; see `evidence/TOOL-MUTATING-FAMILY-APPROVALS-FENCING-2026-09-02.md` |
 | Slice 2: one-shot approvals | done | `call_digest`/`Decision.call_id`; `adapters/security/approval_ledger.py` (`approvals.db`); `decide()` spends an approval for exactly the refused call at step 5c or notes it pending and names `/approve <call id>`; every surface that has arguments passes them (legacy MCP, agent, control, served, native); `permission_approve` (dangerous, durable-authority, admin-bound, operator-only) and `permission_approvals`; matched by digest, so no nonce travels in any call (a deliberate departure from the §10 sketch) |
+| Decision 3: the shared file approval code | retired | `SONDER_FILE_APPROVAL_CODE` no longer grants anything (warns once when set); a spent one-shot approval carries exactly the reach the operator approved (`file_ops.reach_scope`, installed by every deciding surface and the native surface, roots honoured with containment still checked); every agent path strips a model's string `token`/`approval` |
 | Slice 2: effect fences | done | `adapters/execution/effect_fence.py`; the autopilot worker (per task), every fleet worker thread (while bound to its agent row) and the selfmod editing agent fence their effects on their leases; `decide()` refuses effect classes on a lost fence before any policy (`source="fence"`, receipt); reads unfenced; the `tool_policy` evaluation lane pins fences, named refusals and decision sources |
 
 Not done, deliberately:
@@ -938,9 +939,8 @@ Not done, deliberately:
 - `eval_solver.py`, `eval_duel.py` and `eval_retrieval.py` do not share the
   harness today, so they did not gain the history flag through it; wiring
   them through `eval_harness` is its own change.
-- The legacy `approval` parameter and `SONDER_FILE_APPROVAL_CODE` are
-  unchanged beside the new per-call approvals (decision 3 stays with Nathan,
-  now with both mechanisms in hand); `ResourcePolicy.Decision.ALLOW_ONCE` is
-  still unused; the compute job worker is not fenced (its claim is the job
-  record and cancellation already reaches the process; the permission gate
-  decides nothing there).
+- `SONDER_ISOLATED_APPROVAL_CODE` has the same shape as the retired file
+  approval code and is left for its own change;
+  `ResourcePolicy.Decision.ALLOW_ONCE` is still unused; the compute job
+  worker is not fenced (its claim is the job record and cancellation already
+  reaches the process; the permission gate decides nothing there).

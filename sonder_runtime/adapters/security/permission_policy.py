@@ -36,6 +36,12 @@ class PermissionPolicyProvider:
     def call_digest(self, tool_name: str, arguments) -> str:
         return _engine().call_digest(tool_name, arguments)
 
+    def approval_spent_for(self, tool_name: str, arguments) -> bool:
+        return _engine().approval_spent_for(tool_name, arguments)
+
+    def forget_spent_approval(self) -> None:
+        _engine().forget_spent_approval()
+
     def approval_ledger(self):
         return _engine().approval_ledger()
 

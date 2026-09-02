@@ -2991,13 +2991,17 @@ def test_file_tools_allow_extra_root_with_approval(monkeypatch, tmp_path):
     monkeypatch.setattr(server.file_ops, "workspace_root", lambda: root)
     monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "let-me")
 
+    # The shared code is retired: it was a static secret in a model-visible
+    # argument that switched containment off. Reach beyond the roots now comes
+    # from the roots configuration, a developer token, or a one-shot approval
+    # of one exact call (tests/test_permission_approvals.py).
     out = server.file_read(
         str(target),
         approval="let-me",
         extra_roots=str(outside),
     )
 
-    assert "ok" in out
+    assert out.startswith("ERROR:") and "outside allowed roots" in out
 
 
 def test_parallel_run_code_reports_mixed_results():

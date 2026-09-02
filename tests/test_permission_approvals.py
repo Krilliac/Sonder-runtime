@@ -402,3 +402,110 @@ def test_the_approval_tools_are_operator_only_and_graded_dangerous():
     console = command_catalog.console_tools()
     assert console["/approve"] == ("permission_approve",)
     assert console["/approvals"] == ("permission_approvals",)
+
+
+# --- the reach an approval carries ------------------------------------------------
+
+
+@pytest.fixture
+def outside(tmp_path, monkeypatch):
+    """A workspace, and a directory outside every configured root."""
+    root = tmp_path / "ws"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(server.file_ops, "workspace_root", lambda: root)
+    monkeypatch.setattr(server.file_ops.runtime_paths, "default_home", lambda: tmp_path / "home")
+    monkeypatch.delenv("SONDER_FILE_ROOTS", raising=False)
+    monkeypatch.delenv("SONDER_FILE_BYPASS", raising=False)
+    monkeypatch.delenv("SONDER_FILE_APPROVAL_CODE", raising=False)
+    from sonder_runtime.platform import paths as runtime_paths
+    from sonder_runtime.bootstrap import app as bootstrap_app
+
+    previous = runtime_paths._configured_home()
+    runtime_paths.configure_home(tmp_path / "home")
+    monkeypatch.setattr(server, "_APP_GRAPH", bootstrap_app.build_application())
+    try:
+        yield elsewhere
+    finally:
+        if previous is None:
+            runtime_paths.reset_home()
+        else:
+            runtime_paths.configure_home(previous)
+
+
+def test_a_spent_approval_carries_exactly_the_reach_the_operator_approved(ledger, outside):
+    target = outside / "note.txt"
+    line = "/file_write path=%s content=hello extra_roots=%s" % (target, outside)
+
+    refused = server.control_command(line)
+    assert refused.startswith("refused /file_write")
+    assert not target.exists()
+    pending = ledger.pending()
+    assert len(pending) == 1
+    assert "extra_roots=" in pending[0].preview
+
+    ledger.issue("file_write", pending[0].digest, approver="console operator")
+    written = server.control_command(line)
+    assert written.startswith("file write"), written
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert pm.approval_spent_for("file_write", {}) is False, "the note is cleared after the call"
+
+    again = server.control_command(line)
+    assert again.startswith("refused /file_write")
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
+def test_the_reach_is_the_approved_roots_and_containment_still_holds(ledger, outside, tmp_path):
+    beyond = tmp_path / "beyond"
+    beyond.mkdir()
+    target = beyond / "note.txt"
+    # Approved with extra_roots naming a different directory: the call still
+    # cannot reach outside the roots it named.
+    line = "/file_write path=%s content=hello extra_roots=%s" % (target, outside)
+    server.control_command(line)
+    ledger.issue("file_write", ledger.pending()[0].digest, approver="console operator")
+    out = server.control_command(line)
+    assert out.startswith("ERROR:") and "outside allowed roots" in out
+    assert not target.exists()
+
+
+def test_reach_never_leaks_past_the_call(ledger, outside):
+    target = outside / "note.txt"
+    line = "/file_write path=%s content=hello extra_roots=%s" % (target, outside)
+    server.control_command(line)
+    ledger.issue("file_write", ledger.pending()[0].digest, approver="console operator")
+    assert server.control_command(line).startswith("file write")
+    # Nothing installed a reach scope for a plain internal call afterwards.
+    assert server.file_ops._CALL_REACH.get() == ()
+    assert server.file_write(str(outside / "other.txt"), "x", extra_roots=str(outside)).startswith("ERROR:")
+
+
+def test_a_model_never_holds_a_credential(monkeypatch, ledger):
+    seen = {}
+
+    def spy(tool_name, args=None, **kwargs):
+        seen["args"] = dict(args or {})
+        return "ERROR: HOST POLICY: stop here"
+
+    monkeypatch.setattr(server, "_agent_permission_gate_error", spy)
+    server._agent_dispatch("file_write", {"path": "a.txt", "content": "x", "token": "t",
+                                          "approval": "code"})
+    assert "token" not in seen["args"] and "approval" not in seen["args"]
+    sentinel = server._TRUSTED_REPOSITORY_APPROVAL
+    server._agent_dispatch("file_write", {"path": "a.txt", "content": "x", "approval": sentinel})
+    assert seen["args"]["approval"] is sentinel, "the host's in-process sentinel is not a credential string"
+
+
+def test_the_retired_code_warns_once_and_grants_nothing(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("SONDER_FILE_APPROVAL_CODE", "let-me")
+    server._RETIRED_APPROVAL_CODE_WARNED.clear()
+    with caplog.at_level(logging.WARNING, logger="sonder.server"):
+        assert server._file_bypass_allowed("", "let-me") is False
+        assert server._file_bypass_allowed("", "let-me") is False
+    warnings = [record for record in caplog.records if "no longer honoured" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "let-me" not in warnings[0].getMessage()
+

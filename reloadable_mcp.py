@@ -558,8 +558,14 @@ class ReloadableMCPServer(MCPServer):
 
     async def call_tool(self, name: str, arguments: dict, context=None):
         self.refresh_if_changed()
-        _refuse_if_gated(name, arguments)
-        return await super().call_tool(name, arguments, context)
+        # The reach scope wraps the gate and the call: the roots a one-shot
+        # approval covered appear only once the gate has spent it for exactly
+        # this call, and vanish when the call is over.
+        import server
+
+        with server.approved_call_reach(name, arguments):
+            _refuse_if_gated(name, arguments)
+            return await super().call_tool(name, arguments, context)
 
     async def list_resources(self):
         self.refresh_if_changed()
