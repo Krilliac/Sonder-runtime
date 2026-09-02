@@ -167,3 +167,122 @@ def test_the_worker_installs_the_fence_around_its_task(monkeypatch, autopilot_db
     assert seen["fence"].label == "autopilot:%s" % run["id"]
     assert effect_fence.reason_lost(seen["fence"]) == ""
     assert effect_fence.current() is None
+
+
+# --- the fleet and selfmod fences ---------------------------------------------------
+
+
+def _fleet_row(agent_id):
+    return {"id": agent_id, "role": "agent", "task": "work", "status": "queued",
+            "activity": "queued", "started_ts": 100.0, "updated_ts": 100.0,
+            "files": []}
+
+
+@pytest.fixture
+def fleet_db(monkeypatch, tmp_path):
+    import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+
+    monkeypatch.setenv("SONDER_FLEET_DB", str(tmp_path / "fleet.db"))
+    fleet_store.reset_schema_cache_for_tests()
+    fleet_store.clear_all()
+    yield fleet_store
+    fleet_store.reset_schema_cache_for_tests()
+
+
+def test_the_fleet_fence_holds_for_the_owner_and_breaks_on_reassignment_or_cancel(fleet_db):
+    fleet_db.register_owner("owner-a", 101, 100.0)
+    fleet_db.create_agent(_fleet_row("agent-1"), "owner-a", 101)
+    fleet_db.start_agent("agent-1", "owner-a", "running", in_model_call=False, tool_calls=0)
+
+    fence = effect_fence.fleet_fence("agent-1", "owner-a")
+    assert fence.label == "fleet:agent-1"
+    assert effect_fence.reason_lost(fence) == ""
+    assert "no longer owned" in effect_fence.reason_lost(
+        effect_fence.fleet_fence("agent-1", "owner-b"))
+    assert "no longer owned" in effect_fence.reason_lost(
+        effect_fence.fleet_fence("agent-missing", "owner-a"))
+
+    fleet_db.cancel_agents("agent-1")
+    assert "cancelled" in effect_fence.reason_lost(fence)
+
+
+def test_the_fleet_fence_breaks_when_the_owner_heartbeat_expires(fleet_db):
+    fleet_db.register_owner("owner-a", 101, 100.0)
+    fleet_db.create_agent(_fleet_row("agent-2"), "owner-a", 101)
+    fleet_db.start_agent("agent-2", "owner-a", "running", in_model_call=False, tool_calls=0)
+    fence = effect_fence.fleet_fence("agent-2", "owner-a")
+    assert effect_fence.reason_lost(fence) == ""
+    # Reconcile as if every heartbeat is ancient: the agent is interrupted.
+    fleet_db.reconcile_stale_owners(now=time.time() + 100_000)
+    fleet_db.reconcile_stale_owners(now=time.time() + 200_000)
+    assert effect_fence.reason_lost(fence) != ""
+
+
+def test_the_fleet_worker_thread_is_fenced_while_bound(fleet_db, monkeypatch):
+    import master_orchestrator
+
+    monkeypatch.setattr(master_orchestrator, "_OWNER_ID", "owner-a")
+    fleet_db.register_owner("owner-a", 101, 100.0)
+    fleet_db.create_agent(_fleet_row("agent-3"), "owner-a", 101)
+    with master_orchestrator._bind_worker_agent("agent-3"):
+        fence = effect_fence.current()
+        assert fence is not None and fence.label == "fleet:agent-3"
+        assert effect_fence.reason_lost(fence) == ""
+    assert effect_fence.current() is None
+
+
+def test_the_selfmod_fence_follows_the_run_lease(monkeypatch):
+    import sys
+    import types
+
+    runs = {}
+    fake = types.ModuleType("selfmod")
+
+    def get_run(run_id):
+        try:
+            return runs[run_id]
+        except KeyError:
+            raise KeyError("unknown selfmod run %s" % run_id)
+
+    fake.get_run = get_run
+    monkeypatch.setitem(sys.modules, "selfmod", fake)
+    fence = effect_fence.selfmod_fence("run-1", "owner-a")
+    assert fence.label == "selfmod:run-1"
+    assert "no longer exists" in effect_fence.reason_lost(fence)
+
+    runs["run-1"] = {"owner_id": "owner-a", "lease_until": time.time() + 600, "phase": "editing"}
+    assert effect_fence.reason_lost(fence) == ""
+    runs["run-1"]["lease_until"] = time.time() - 1
+    assert "expired" in effect_fence.reason_lost(fence)
+    runs["run-1"]["lease_until"] = time.time() + 600
+    runs["run-1"]["owner_id"] = "owner-b"
+    assert "no longer owned" in effect_fence.reason_lost(fence)
+    runs["run-1"]["owner_id"] = "owner-a"
+    runs["run-1"]["phase"] = "rejected"
+    assert "is rejected" in effect_fence.reason_lost(fence)
+
+
+def test_the_selfmod_editor_runs_under_the_run_fence(monkeypatch):
+    seen = {}
+
+    def fake_agent(prompt, **kwargs):
+        seen["fence"] = effect_fence.current()
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(server, "_agent_impl", fake_agent)
+    monkeypatch.setattr(server.selfmod, "get_run", lambda run_id: {
+        "phase": "editing", "workspace_path": "/tmp/nowhere", "objective": "o",
+        "evidence": [], "criteria": [], "files": [],
+        "budgets": {"max_tool_calls": 3, "max_model_calls": 3},
+    })
+    monkeypatch.setattr(server.selfmod, "claim", lambda run_id: "owner-x")
+    monkeypatch.setattr(server.selfmod, "heartbeat", lambda run_id, owner: True)
+    monkeypatch.setattr(server.selfmod, "release", lambda run_id, owner: None)
+    monkeypatch.setattr(server.selfmod, "record_reproducer_before", lambda run_id, cmd: None)
+    monkeypatch.setattr(server.selfmod, "reject", lambda run_id, reason: None)
+    monkeypatch.setattr(server, "_selfmod_test_commands", lambda run, explicit: [("a", ["x"]), ("b", ["y"])])
+    monkeypatch.setattr(server, "_selfmod_agent_policy", lambda run: None)
+    out = server._execute_selfmod_run("run-9")
+    assert out.startswith("ERROR: selfmod run failed closed: stop here")
+    assert seen["fence"].label == "selfmod:run-9"
+    assert effect_fence.current() is None

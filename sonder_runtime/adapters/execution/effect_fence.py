@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import importlib
+import time
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
@@ -86,4 +88,52 @@ def autopilot_fence(run_id: str, owner_id: str) -> Fence:
     return Fence("autopilot:%s" % run_id, check)
 
 
-__all__ = ["Fence", "autopilot_fence", "current", "held", "reason_lost"]
+def fleet_fence(agent_id: str, owner_id: str) -> Fence:
+    """The fence for one fleet worker: the agent row it runs stays its owner's."""
+    from ..persistence import fleet_store
+
+    agent_id = str(agent_id or "")
+    owner_id = str(owner_id or "")
+
+    def check() -> str:
+        row = fleet_store.get_agent(agent_id)
+        if row is None or str(row.get("owner_id") or "") != owner_id:
+            return (
+                "fleet agent %s is no longer owned by this worker "
+                "(owner heartbeat expired or the agent was reassigned)" % agent_id
+            )
+        if row.get("cancel_requested") or row.get("status") in ("cancelled", "interrupted"):
+            return "fleet agent %s was cancelled" % agent_id
+        if row.get("status") not in ("queued", "running"):
+            return "fleet agent %s is %s" % (agent_id, row.get("status"))
+        return ""
+
+    return Fence("fleet:%s" % agent_id, check)
+
+
+def selfmod_fence(run_id: str, owner_id: str) -> Fence:
+    """The fence for the selfmod editing worker: its lease on the run."""
+    run_id = str(run_id or "")
+    owner_id = str(owner_id or "")
+
+    def check() -> str:
+        selfmod = importlib.import_module("selfmod")  # root module, resolved lazily
+        try:
+            run = selfmod.get_run(run_id)
+        except KeyError:
+            return "selfmod run %s no longer exists" % run_id
+        if str(run.get("owner_id") or "") != owner_id:
+            return "selfmod run %s is no longer owned by this worker" % run_id
+        if float(run.get("lease_until") or 0) < time.time():
+            return "the lease on selfmod run %s expired" % run_id
+        if run.get("phase") not in ("editing", "testing", "reviewing"):
+            return "selfmod run %s is %s" % (run_id, run.get("phase"))
+        return ""
+
+    return Fence("selfmod:%s" % run_id, check)
+
+
+__all__ = [
+    "Fence", "autopilot_fence", "current", "fleet_fence", "held", "reason_lost",
+    "selfmod_fence",
+]

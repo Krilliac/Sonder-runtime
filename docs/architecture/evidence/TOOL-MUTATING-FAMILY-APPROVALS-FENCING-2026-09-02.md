@@ -90,14 +90,34 @@ allow rule, a mode that allows the class and the console prompt:
 ### Effect fences
 
 `adapters/execution/effect_fence.py` carries a lease to the effects it
-guards. The autopilot worker installs `autopilot_fence(run_id, owner_id)`
-around each task; `decide()` consults the current fence before any
-effect-class decision on that thread (step 0, before rules and mode) and
-refuses with `source="fence"` and a receipt once the run's lease is lost or
-the run is cancelled; a check that raises counts as lost. Reads are never
-fenced. The agent loop's refusal text tells the model its authority is gone
-and not to retry. The typed evaluator consults the same fence, so a native
-call made on a fenced thread would be refused too.
+guards. `decide()` consults the current fence before any effect-class
+decision on that thread (step 0, before rules and mode) and refuses with
+`source="fence"` and a receipt once the fence reports itself lost; a check
+that raises counts as lost. Reads are never fenced. The agent loop's refusal
+text tells the model its authority is gone and not to retry. The typed
+evaluator consults the same fence, so a native call made on a fenced thread
+would be refused too. Three lease holders install one:
+
+- the autopilot worker, `autopilot_fence(run_id, owner_id)` around each
+  task (lost when the run's lease is gone or the run is cancelled);
+- every fleet worker thread, `fleet_fence(agent_id, owner_id)` for as long
+  as it is bound to its agent row (`master_orchestrator._bind_worker_agent`;
+  lost when the owner heartbeat expires, the agent is reassigned or
+  cancelled);
+- the selfmod editing agent, `selfmod_fence(run_id, owner_id)` around the
+  edit (`server._execute_selfmod_run`; lost when the run's lease expires,
+  the run changes hands or leaves the editing phases).
+
+### The evaluation lane
+
+`tool_policy` scenarios gained `arguments` that reach the gate (a refusal
+then names the call; `call_named` in the trajectory), a `fence` field
+(`held` / `lost`) and an `expected_source` that pins which layer decided.
+Seven shipped cases pin the new shapes (a named refusal on the agent and
+MCP surfaces; a lost fence refusing an effect in `auto`, in the loop, and
+over an allow rule; a held fence and a read left alone). A preflight never
+spends an approval or notes a pending call, so the lane leaves the ledger
+untouched.
 
 ## Verification
 
@@ -112,7 +132,12 @@ call made on a fenced thread would be refused too.
   resolution, redaction and home; the decider's consumption, pending record,
   preflight, and the untouched `plan`/deny/durable cases; the legacy MCP,
   agent and control surfaces; the operator's tools and their gating).
-- `python -m pytest -q tests/test_effect_fence.py` — 9 passed.
+- `python -m pytest -q tests/test_effect_fence.py` — 14 passed (the fence
+  itself, the decider, the agent gate, and the autopilot, fleet and selfmod
+  holders).
+- `python eval_harness.py run --suite tool_policy_gates --provider policy
+  --check-baseline --no-record-history` — 33 pass / 0 fail; the baseline is
+  re-pinned to the extended suite.
 - `python -m pytest -q tests/test_typed_read_family.py
   tests/test_permission_modes.py tests/test_permission_durable_authority.py
   tests/test_permission_gate_dispatch.py tests/test_tool_contract_conformance.py
@@ -127,6 +152,7 @@ call made on a fenced thread would be refused too.
 The legacy `approval` parameter and `SONDER_FILE_APPROVAL_CODE` are
 unchanged; per-call approvals exist beside them (review decision 3 can now be
 taken with both in hand). `ResourcePolicy.Decision.ALLOW_ONCE` remains
-unused: the permission ledger is the one-shot mechanism. Fences for compute
-jobs, fleets and remote workers are not in this slice; the fence type is
-generic and the autopilot controller is its first holder.
+unused: the permission ledger is the one-shot mechanism. The compute job
+worker is not fenced: its effect is the job it launches for a controller,
+its claim is the job record itself, and cancellation already reaches the
+process; a fence there would guard nothing the permission gate decides.
