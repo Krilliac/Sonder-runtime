@@ -1212,6 +1212,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /hardware          detect RAM, GPU runtime, VRAM, and offload support
   /training ...      plan/start/status/deploy/rollback attended weight training
   /selfmod ...       inspect/plan/test/approve/deploy/rollback isolated improvements
+  /approvals         list calls refused unattended and the one-shot approvals issued
+  /approve <call id> approve exactly one refused call once (/approve revoke <nonce>)
   /mcp ...           audit/refresh atomic MCP source and tool convergence
   /learning          show grounded outcomes, lesson sources, and memory hygiene
   /report            show the latest grounded end report and action transcript
@@ -2392,6 +2394,7 @@ def main(*, machine_output=False):
                 "/selfmod", "/selfmodify",
                 "/learning", "/learnhealth", "/metrics",
                 "/goal", "/goals", "/ensemble",
+                "/approve", "/approvals",
             ):
                 # ``/selfmod deploy`` will not accept "nobody to ask" as a yes,
                 # so this branch reports whether anybody was in fact asked.

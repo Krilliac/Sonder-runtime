@@ -316,9 +316,12 @@ def _is_protected_mutation_path(path: Path) -> bool:
 
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
     if _is_protected_mutation_path(path) and not developer_authorized:
+        # The path goes before the phrase: "token: <path>" reads as a
+        # credential to the output redactor, and this message is shown and
+        # audited through it on every surface.
         raise PermissionError(
-            "refusing to mutate protected Sonder control-plane path "
-            "without an authenticated developer token: %s" % path
+            "refusing to mutate protected Sonder control-plane path %s "
+            "without an authenticated developer token" % path
         )
 
 
@@ -358,8 +361,8 @@ def _require_read_access(path: Path, authorized: bool) -> None:
     """
     if _is_protected_read_path(path) and not authorized:
         raise PermissionError(
-            "refusing to read protected Sonder secret/control-plane path "
-            "without an authenticated developer token or bypass: %s" % path
+            "refusing to read protected Sonder secret/control-plane path %s "
+            "without an authenticated developer token or bypass" % path
         )
 
 
@@ -569,12 +572,12 @@ def _require_safe_recursive_delete(
                 if entry.is_symlink() or _is_reparse_point(child):
                     raise PermissionError(
                         "refusing recursive deletion of a tree containing a symlink "
-                        "or junction without an authenticated developer token: %s" % child
+                        "or junction (%s) without an authenticated developer token" % child
                     )
                 if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
                     raise PermissionError(
                         "refusing recursive deletion of a tree containing protected "
-                        "control state without an authenticated developer token: %s" % child
+                        "control state (%s) without an authenticated developer token" % child
                     )
                 if entry.is_dir(follow_symlinks=False):
                     pending.append(child)

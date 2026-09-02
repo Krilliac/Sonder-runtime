@@ -4,10 +4,14 @@
 ``text_search``, ``script_search`` and ``program_search`` reach the guarded
 primitives only through ``application.tools`` -- from the native MCP surface
 directly, and from the seven legacy ``server`` handlers through
-``server._typed_read_tool``. One pipeline (schema, resource policy, the
+``server._typed_tool``. One pipeline (schema, resource policy, the
 runtime's permission modes, deadline and cancellation, the packaged guards,
 redaction) and one durable, hash-chained receipt per call whatever the
 outcome, with the receipt naming how the call ended and where it came from.
+
+The permission decision is made once per call: by the gateway for the native
+surface, and by the legacy surface's own gate (console, MCP, HTTP, agent) for
+a legacy forward, which the gateway records as ``permission:surface``.
 """
 from __future__ import annotations
 
@@ -198,21 +202,31 @@ def test_the_native_surface_now_enforces_the_secret_read_guard_on_line_ranges(
 def test_permission_modes_governs_the_typed_path_on_both_surfaces(
     application, tmp_path, monkeypatch,
 ):
+    """Native: the gateway decides. Legacy: the surface decided, the gateway records it."""
     monkeypatch.setattr(
         pm, "_rule_lookup",
         lambda tool: ({"pattern": tool, "action": pm.DENY, "note": "test"}
                       if tool == "file_find" else None),
     )
     native = _native(application, "file_find", {"query": "notes.txt"})
-    legacy = server.file_find(query="notes.txt")
-
     assert native["isError"] is True and native["error"] == "permission_denied"
     assert native["evidence"]["source"] == "rule"
-    assert legacy.startswith("ERROR: permission gate refused file_find")
-    records = _audit(tmp_path).read()
-    assert [record["terminal"] for record in records] == ["policy_denied", "policy_denied"]
-    assert all(record["policy_match"] == "permission:rule" for record in records)
-    assert all(record["output"] == "" for record in records)
+    record = _audit(tmp_path).read()[-1]
+    assert record["terminal"] == "policy_denied"
+    assert record["policy_match"] == "permission:rule" and record["output"] == ""
+
+    # The legacy chain gates at its entry point, before the handler runs...
+    refused = server.control_command("/file_find query=notes.txt")
+    assert refused.startswith("refused /file_find")
+    assert len(_audit(tmp_path).read()) == 1, "a refused legacy call never reached the gateway"
+    # ...and a legacy forward that does run is not decided a second time: an
+    # internal Python call is deliberately ungated, and a console call an
+    # operator answered yes to must not be refused by an unattended re-decision.
+    out = server.file_find(query="notes.txt")
+    assert not out.startswith("ERROR")
+    record = _audit(tmp_path).read()[-1]
+    assert record["source"] == "repl"
+    assert record["policy_match"].endswith("permission:surface")
 
 
 def test_plan_mode_still_reads_because_the_family_is_safe(application, monkeypatch):
@@ -243,7 +257,7 @@ def _facade(tmp_path, *, policy=None, permissions=()):
     audit = DurableToolAuditRepository(tmp_path / "gateway-audit.jsonl")
     return ToolApplicationFacade.compose(
         typed_tools.typed_tool_registry(), PackagedToolExecutor(),
-        policy=policy if policy is not None else typed_tools.read_only_policy(),
+        policy=policy if policy is not None else typed_tools.typed_tool_policy(),
         receipts=ReceiptStore(), audit=audit, permissions=permissions,
     ), audit
 
@@ -290,7 +304,7 @@ def test_every_early_exit_leaves_a_receipt_that_names_how_it_ended(tmp_path, wor
 def test_a_tool_outside_the_family_is_unknown_to_the_typed_registry(tmp_path, workspace):
     facade, _audit_repo = _facade(tmp_path)
     with pytest.raises(InvalidInput):
-        facade.execute(_request("write_file", {"path": "x", "content": "y"}))
+        facade.execute(_request("run_program", {"program": "python", "args_json": "[]"}))
     assert facade.receipts == ()
 
 
@@ -397,26 +411,33 @@ def test_audit_records_carry_the_new_fields_redacted(tmp_path):
 # --- the ratchet: no handler reaches a guard on its own ------------------------
 
 
-def test_the_seven_legacy_handlers_reach_the_guards_only_through_the_gateway():
+LEGACY_HANDLERS = {
+    "directory_tree", "file_find", "file_read", "file_read_range",
+    "text_search", "script_search", "program_search",
+    "file_write", "file_edit", "directory_create", "file_copy", "file_move",
+    "file_batch_write", "json_patch", "text_patch", "file_delete",
+}
+
+
+def test_the_legacy_handlers_reach_the_guards_only_through_the_gateway():
     source = pathlib.Path(server.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
     handlers = {
         node.name: node for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name in {
-            "directory_tree", "file_find", "file_read", "file_read_range",
-            "text_search", "script_search", "program_search"}
+        if isinstance(node, ast.FunctionDef) and node.name in LEGACY_HANDLERS
     }
-    assert len(handlers) == 7
+    assert len(handlers) == len(LEGACY_HANDLERS)
     for name, node in handlers.items():
         forwarded = False
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
             func = call.func
-            if isinstance(func, ast.Name) and func.id == "_typed_read_tool":
+            if isinstance(func, ast.Name) and func.id == "_typed_tool":
                 forwarded = True
             if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-                    and func.value.id in {"file_ops", "workbench"}):
+                    and func.value.id in {"file_ops", "workbench", "json_patch_tool",
+                                          "text_patch_ops"}):
                 pytest.fail("%s still calls %s.%s directly" % (name, func.value.id, func.attr))
         assert forwarded, "%s does not forward through the typed gateway" % name
 
@@ -424,8 +445,13 @@ def test_the_seven_legacy_handlers_reach_the_guards_only_through_the_gateway():
 def test_the_family_is_declared_once_and_matches_the_native_route():
     from sonder_runtime.bootstrap import native_mcp
 
-    assert set(typed_tools.READ_ONLY_TOOLS) == set(native_mcp._TYPED_READ_NAMES)
+    assert set(typed_tools.TYPED_TOOLS) == set(native_mcp._TYPED_TOOL_NAMES)
     registry = typed_tools.typed_tool_registry()
-    assert {item.name for item in registry.list_all()} == set(typed_tools.READ_ONLY_TOOLS)
+    assert {item.name for item in registry.list_all()} == set(typed_tools.TYPED_TOOLS)
     for name in typed_tools.READ_ONLY_TOOLS:
         assert pm.risk_of(typed_tools.POLICY_NAMES.get(name, name)) == "safe", name
+    for name in typed_tools.MUTATING_TOOLS:
+        graded = pm.risk_of(typed_tools.POLICY_NAMES.get(name, name))
+        assert graded in pm.UNATTENDED_REFUSED_RISKS, (name, graded)
+    legacy = {typed_tools.POLICY_NAMES.get(name, name) for name in typed_tools.TYPED_TOOLS}
+    assert legacy == LEGACY_HANDLERS

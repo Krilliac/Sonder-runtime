@@ -933,6 +933,8 @@ from sonder_runtime.adapters.command_parsing import (
 from sonder_runtime.adapters.memory_lesson_ids import _parse_lesson_ids
 from sonder_runtime.adapters.admin_formatting import _format_account
 from sonder_runtime.adapters.inspection_executor import _format_file_result
+import sonder_runtime.adapters.execution.effect_fence as effect_fence
+import sonder_runtime.adapters.security.approval_ledger as approval_ledger_module
 from sonder_runtime.adapters.task_formatting import _format_checklist, _format_task
 from sonder_runtime.adapters.observability.health_formatting import (
     format_context_health,
@@ -1561,25 +1563,55 @@ def _application():
         return _APP_GRAPH
 
 
-def _typed_read_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
-    """Run one read-only workbench tool through the typed tool gateway.
+class _TypedToolError(RuntimeError):
+    """A typed tool call that failed, with the primitive's structured report if it left one.
 
-    The seven read tools (``directory_tree``, ``file_find``, ``file_read``,
-    ``file_read_range``, ``text_search``, ``script_search`` and
-    ``program_search``) no longer call the guarded primitives themselves: the
-    application graph's typed gateway does, behind schema validation, the
-    resource policy, the runtime's permission modes, deadline and
-    cancellation, output redaction and one durable receipt whatever the
-    outcome. The handler keeps everything that is the legacy surface's own
-    business -- live reload, the include_ignored policy text, activity
-    records, grounded-outcome feeding and the exact output format -- and
-    receives the same data dict the primitive used to return.
+    The transactional primitives (batch write, JSON patch, text patch) refuse
+    with a report the legacy handlers have always rendered verbatim; the
+    packaged executor carries it as the failure's output and this carries it
+    back to the handler. ``str(exc)`` is the primitive's own message, so a
+    handler's ordinary ``"ERROR: %s"`` path prints exactly what it used to.
+    """
 
-    The guard knobs travel as arguments: ``extra_roots`` as given,
-    ``bypass`` from the token/approval check, and developer authorization as
-    the scope's auth level (and, for the two primitives that take it, as an
-    argument). Which knobs each primitive accepts is declared once, in
-    ``sonder_runtime.bootstrap.typed_tools.GUARD_KNOBS``.
+    def __init__(self, message, *, error_code="", report=None):
+        super().__init__(message)
+        self.error_code = error_code
+        self.report = report
+
+
+_REPORTED_FAILURES = frozenset({"BatchWriteError", "JsonPatchError", "TextPatchError"})
+
+
+def _typed_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
+    """Run one workbench file tool through the typed tool gateway.
+
+    The read family (``directory_tree``, ``file_find``, ``file_read``,
+    ``file_read_range``, ``text_search``, ``script_search``,
+    ``program_search``) and the mutating family (``file_write``,
+    ``file_edit``, ``directory_create``, ``file_copy``, ``file_move``,
+    ``file_batch_write``, ``json_patch``, ``text_patch``, ``file_delete``)
+    no longer call the guarded primitives themselves: the application graph's
+    typed gateway does, behind schema validation, the resource policy,
+    deadline and cancellation, output redaction and one durable receipt
+    whatever the outcome. The handler keeps everything that is the legacy
+    surface's own business -- live reload, policy text, activity records,
+    grounded-outcome feeding and the exact output format -- and receives the
+    same data dict the primitive used to return.
+
+    The permission decision is NOT made again here. Every legacy surface
+    gates before it calls a handler (the console after its prompt, the legacy
+    MCP and HTTP gates, the agent gate), and an internal Python call is
+    deliberately ungated (see ``permission_modes``); the request therefore
+    says ``gate="surface"`` and the gateway records that instead of refusing
+    the call an operator just answered yes to. The native MCP surface builds
+    its own requests and is decided by the gateway.
+
+    The guard knobs travel as arguments: ``extra_roots`` as given (for
+    ``text_patch`` only when the caller could bypass, as its handler always
+    required), ``bypass`` from the token/approval check, and developer
+    authorization as the scope's auth level (and, for the primitives that
+    take it, as an argument). Which knobs each primitive accepts is declared
+    once, in ``sonder_runtime.bootstrap.typed_tools.GUARD_KNOBS``.
 
     ``source`` is the best the legacy chain can say about its caller: a call
     inside an agent or autopilot dispatch is Sonder driving itself
@@ -1598,12 +1630,13 @@ def _typed_read_tool(tool_name, arguments, *, token="", approval="", extra_roots
 
     canonical = LEGACY_TO_CANONICAL.get(tool_name, tool_name)
     developer = _file_developer_allowed(token)
+    bypass = _file_bypass_allowed(token, approval)
     knobs = GUARD_KNOBS[canonical]
     args = dict(arguments)
     if "extra_roots" in knobs:
-        args["extra_roots"] = extra_roots
+        args["extra_roots"] = extra_roots if (canonical != "text_patch" or bypass) else ""
     if "bypass" in knobs:
-        args["bypass"] = _file_bypass_allowed(token, approval)
+        args["bypass"] = bypass
     if "developer_authorized" in knobs:
         args["developer_authorized"] = developer
     request = ToolGatewayRequest(
@@ -1615,13 +1648,23 @@ def _typed_read_tool(tool_name, arguments, *, token="", approval="", extra_roots
             workspace_roots=(str(file_ops.workspace_root()),),
             source="worker" if activity_tracker.inside_tool_call() else "repl",
             auth_level="developer" if developer else "local",
+            gate="surface",
         ),
         permission=ToolPermission(),
         execution_world="local",
     )
     receipt = _application().tools.execute(request)
     if not receipt.success:
-        raise RuntimeError(receipt.error or receipt.error_code or "tool call failed")
+        report = None
+        if receipt.error_code in _REPORTED_FAILURES and receipt.output:
+            try:
+                report = json.loads(receipt.output)
+            except (TypeError, ValueError):
+                report = None
+        raise _TypedToolError(
+            receipt.error or receipt.error_code or "tool call failed",
+            error_code=receipt.error_code, report=report if isinstance(report, dict) else None,
+        )
     if canonical == "read_file":
         evidence = dict(receipt.evidence)
         return {
@@ -2771,8 +2814,13 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
         return "ERROR: %s" % exc
 
 
-def _control_tool_refusal(tools, label, *, operator_approved=False):
+def _control_tool_refusal(tools, label, *, operator_approved=False, arguments=None):
     """The permission gate for ``control_command``: "" to proceed, else a refusal.
+
+    ``arguments`` are meaningful for a single tool only (the ``/<tool>``
+    fall-through passes its parsed keywords): an unattended refusal then
+    names the call so an operator can approve exactly it once, and such an
+    approval answers the retry.
 
     ``operator_approved`` is the console saying it already asked and got a
     yes (``sonder_repl._named_command_gate``); the decision is then made as
@@ -2795,6 +2843,7 @@ def _control_tool_refusal(tools, label, *, operator_approved=False):
         decision = permission_modes.decide_for_caller(
             tool, interactive=bool(operator_approved), gate_control_exempt=True,
             surface="control",
+            arguments=arguments if (len(tools) == 1 and isinstance(arguments, dict)) else None,
         )
         if decision is None:
             continue
@@ -2901,6 +2950,10 @@ def control_command(prompt: str, history=None, session="", project="",
         return _training_command(arg)
     if cmd in ("/selfmod", "/selfmodify"):
         return _selfmod_command(arg, operator_approved=operator_approved)
+    if cmd == "/approvals":
+        return permission_approvals(limit=_approvals_limit(arg))
+    if cmd == "/approve":
+        return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
         return _goal_command(arg)
     if cmd in ("/ensemble",):
@@ -3110,6 +3163,7 @@ def control_command(prompt: str, history=None, session="", project="",
         if callable(handler):
             refusal = _control_tool_refusal(
                 (tool,), "/" + tool, operator_approved=bool(operator_approved),
+                arguments=kwargs,
             )
             if refusal:
                 return refusal
@@ -7815,6 +7869,174 @@ def permission_rule_set(
     return _permission_policy_text()
 
 
+# An in-process identity, never a string a protocol caller could send: the
+# control chain passes it as ``token`` when the console operator answered the
+# gate's prompt for ``/approve``, exactly as ``_TRUSTED_REPOSITORY_APPROVAL``
+# stands in for a host-selected project root.
+_OPERATOR_ATTENDED = object()
+
+
+def _approval_authority(token) -> tuple[str, str]:
+    """``(approver, "")`` when this caller may issue approvals, else ``("", why not)``."""
+    if token is _OPERATOR_ATTENDED:
+        return "console operator", ""
+    if isinstance(token, str) and token:
+        account = _admin_account_from_token(token)
+        ok, _ = admin_auth.require(account, "developer")
+        if ok:
+            username = ""
+            if isinstance(account, dict):
+                username = str(account.get("username") or "")
+            else:
+                username = str(getattr(account, "username", "") or "")
+            return "developer:%s" % (username or "token"), ""
+    env_ok = os.environ.get("SONDER_ALLOW_PERMISSION_EDITS", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if env_ok:
+        return "env:SONDER_ALLOW_PERMISSION_EDITS", ""
+    return "", (
+        "one-shot approvals need the console (/approve, after answering its "
+        "prompt), a developer token, or SONDER_ALLOW_PERMISSION_EDITS=1."
+    )
+
+
+def _approvals_limit(arg: str) -> int:
+    text = str(arg or "").strip()
+    if not text:
+        return 20
+    try:
+        return max(1, min(int(text), 200))
+    except ValueError:
+        return 20
+
+
+def _approve_command(arg: str, *, operator_approved: bool = False) -> str:
+    """``/approve <call id> [ttl]`` | ``/approve revoke <nonce>`` | ``/approve call <tool> <json>``."""
+    usage = (
+        "usage: /approve <call id> [ttl seconds]   approve one pending call once (see /approvals)\n"
+        "       /approve revoke <nonce>            withdraw an open approval\n"
+        "       /approve call <tool> <json>        approve one exact call before it is made"
+    )
+    text = str(arg or "").strip()
+    if not text:
+        return usage
+    token = _OPERATOR_ATTENDED if operator_approved else ""
+    parts = text.split(None, 2)
+    head = parts[0].lower()
+    if head == "revoke":
+        if len(parts) != 2:
+            return usage
+        return permission_approve(revoke=parts[1], token=token)
+    if head == "call":
+        if len(parts) != 3:
+            return usage
+        return permission_approve(tool=parts[1], arguments_json=parts[2], token=token)
+    ttl = approval_ledger_module.DEFAULT_TTL_SECONDS
+    if len(parts) >= 2:
+        try:
+            ttl = int(parts[1])
+        except ValueError:
+            return usage
+    return permission_approve(call_id=head, ttl_seconds=ttl, token=token)
+
+
+@mcp.tool()
+def permission_approve(
+    call_id: str = "",
+    tool: str = "",
+    arguments_json: str = "",
+    ttl_seconds: int = 900,
+    revoke: str = "",
+    token: str = "",
+) -> str:
+    """Approve exactly one refused call once (by call id, or tool + arguments JSON), or revoke one."""
+    _maybe_live_reload()
+    started = time.time()
+    approver, why_not = _approval_authority(token)
+    if not approver:
+        # Assigned, not returned as a literal: scripts/check_error_signals.py
+        # ratchets literal-prefixed ``ERROR:`` returns in new scopes.
+        error = "ERROR: %s" % why_not
+        return error
+    ledger = permission_modes.approval_ledger()
+    if ledger is None:
+        error = "ERROR: one-shot approvals are not available in this process."
+        return error
+    surface = "console" if token is _OPERATOR_ATTENDED else "tool"
+    if revoke:
+        approval = ledger.revoke(revoke)
+        if approval is None:
+            error = (
+                "ERROR: no open approval %s (it may be spent, expired, already "
+                "revoked, or mistyped; see /approvals)." % revoke
+            )
+            return error
+        _record_direct_tool(
+            "permission_approve", {"revoke": approval.nonce}, ok=True, started=started,
+            summary="revoked %s call %s" % (approval.tool, approval.call_id),
+        )
+        return "revoked %s (%s call %s)." % (approval.nonce, approval.tool, approval.call_id)
+    try:
+        if call_id:
+            pending = ledger.resolve_call(call_id)
+            target, digest, preview = pending.tool, pending.digest, pending.preview
+        elif tool and arguments_json:
+            try:
+                arguments = json.loads(arguments_json)
+            except ValueError as exc:
+                raise approval_ledger_module.ApprovalLedgerError(
+                    "arguments_json must be a JSON object: %s" % exc
+                )
+            if not isinstance(arguments, dict):
+                raise approval_ledger_module.ApprovalLedgerError(
+                    "arguments_json must be a JSON object"
+                )
+            target = str(tool or "").strip().lstrip("/")
+            digest = permission_modes.call_digest(target, arguments)
+            preview = permission_modes.argument_preview(arguments)
+            if not digest:
+                raise approval_ledger_module.ApprovalLedgerError(
+                    "that call has no canonical form and cannot be approved"
+                )
+        else:
+            raise approval_ledger_module.ApprovalLedgerError(
+                "give a call id from /approvals, or a tool with its arguments_json"
+            )
+        approval = ledger.issue(
+            target, digest, approver=approver, surface=surface,
+            ttl_seconds=ttl_seconds, preview=preview,
+        )
+    except approval_ledger_module.ApprovalLedgerError as exc:
+        error = "ERROR: %s" % exc
+        return error
+    _record_direct_tool(
+        "permission_approve",
+        {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds)},
+        ok=True, started=started, summary=approval.nonce,
+    )
+    return (
+        "approved %s call %s once: nonce %s, by %s, expires %s.\n"
+        "  the next unchanged %s call from any surface runs once and spends it; "
+        "/approvals shows it; /approve revoke %s withdraws it."
+        % (
+            approval.tool, approval.call_id, approval.nonce, approval.approver,
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(approval.expires_ts)),
+            approval.tool, approval.nonce,
+        )
+    )
+
+
+@mcp.tool()
+def permission_approvals(limit: int = 20) -> str:
+    """List calls refused unattended (approvable by call id) and the one-shot approvals issued."""
+    _maybe_live_reload()
+    ledger = permission_modes.approval_ledger()
+    if ledger is None:
+        return "one-shot approvals are not available in this process."
+    return ledger.format_status(_safe_limit_policy(limit, 20, 200))
+
+
 @mcp.tool()
 def memory_quality_report(sample_limit: int = 5) -> str:
     """Audit lesson quality: duplicates, long/vague rows, embeddings, and FTS health."""
@@ -9986,7 +10208,7 @@ def file_find(
     if policy_error:
         return policy_error
     try:
-        data = _typed_read_tool(
+        data = _typed_tool(
             "file_find",
             {"query": query, "root": root, "max_results": max_results,
              "include_ignored": include_ignored},
@@ -10080,7 +10302,7 @@ def file_read(path: str, max_bytes: int = 256000, token: str = "", approval: str
     _maybe_live_reload()
     started = time.time()
     try:
-        data = _typed_read_tool(
+        data = _typed_tool(
             "file_read", {"path": path, "max_bytes": max_bytes},
             token=token, approval=approval, extra_roots=extra_roots,
         )
@@ -10756,13 +10978,9 @@ def file_write(
     _maybe_live_reload()
     started = time.time()
     try:
-        data = file_ops.write_file(
-            path,
-            content,
-            mode=mode,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_tool(
+            "file_write", {"path": path, "content": content, "mode": mode},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as e:
         _record_direct_tool("file_write", {"path": path, "mode": mode}, ok=False, started=started, summary=str(e))
@@ -10795,13 +11013,9 @@ def file_copy(
     try:
         if type(overwrite) is not bool:
             raise ValueError("overwrite must be a boolean")
-        data = file_ops.copy_file(
-            source,
-            destination,
-            overwrite=overwrite,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_tool(
+            "file_copy", {"source": source, "destination": destination, "overwrite": overwrite},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as exc:
         _record_direct_tool(
@@ -10835,13 +11049,9 @@ def file_move(
     try:
         if type(overwrite) is not bool:
             raise ValueError("overwrite must be a boolean")
-        data = file_ops.move_file(
-            source,
-            destination,
-            overwrite=overwrite,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_tool(
+            "file_move", {"source": source, "destination": destination, "overwrite": overwrite},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as exc:
         _record_direct_tool(
@@ -10872,19 +11082,19 @@ def file_batch_write(
     started = time.time()
     args = {"input_chars": len(operations_json) if isinstance(operations_json, str) else 0}
     try:
-        data = file_ops.batch_write_files(
-            operations_json,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
+        data = _typed_tool(
+            "file_batch_write", {"operations_json": operations_json},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
-    except file_ops.BatchWriteError as exc:
-        output = json.dumps(exc.report, indent=2, sort_keys=True)
-        _record_direct_tool(
-            "file_batch_write", args, ok=False, started=started,
-            summary=str(exc), output=output,
-        )
-        return "ERROR: %s" % output
     except Exception as exc:
+        report = getattr(exc, "report", None)
+        if report is not None:
+            output = json.dumps(report, indent=2, sort_keys=True)
+            _record_direct_tool(
+                "file_batch_write", args, ok=False, started=started,
+                summary=str(exc), output=output,
+            )
+            return "ERROR: %s" % output
         _record_direct_tool(
             "file_batch_write", args, ok=False, started=started,
             summary=str(exc),
@@ -10922,18 +11132,19 @@ def json_patch(
         "input_chars": len(operations_json) if isinstance(operations_json, str) else 0,
     }
     try:
-        data = json_patch_tool.patch_json(
-            path, operations_json, mode=mode, extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
+        data = _typed_tool(
+            "json_patch", {"path": path, "operations_json": operations_json, "mode": mode},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
-    except json_patch_tool.JsonPatchError as exc:
-        output = json.dumps(exc.report, indent=2, sort_keys=True, ensure_ascii=False)
-        _record_direct_tool(
-            "json_patch", args, ok=False, started=started,
-            summary=str(exc), output=output,
-        )
-        return "ERROR: %s" % output
     except Exception as exc:
+        report = getattr(exc, "report", None)
+        if report is not None:
+            output = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False)
+            _record_direct_tool(
+                "json_patch", args, ok=False, started=started,
+                summary=str(exc), output=output,
+            )
+            return "ERROR: %s" % output
         _record_direct_tool(
             "json_patch", args, ok=False, started=started, summary=str(exc),
         )
@@ -10967,16 +11178,16 @@ def text_patch(
     args = {"root": root, "patch_bytes": len(patch.encode("utf-8")) if isinstance(patch, str) else 0,
             "apply": bool(apply)}
     try:
-        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) else ""
-        data = text_patch_ops.text_patch(
-            root, patch, apply=bool(apply), extra_roots=trusted_roots,
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_tool(
+            "text_patch", {"root": root, "patch": patch, "apply": bool(apply)},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
-    except text_patch_ops.TextPatchError as exc:
-        output = json.dumps(exc.report, indent=2, sort_keys=True)
-        _record_direct_tool("text_patch", args, ok=False, started=started, summary=str(exc), output=output)
-        return "ERROR: %s" % output
     except Exception as exc:
+        report = getattr(exc, "report", None)
+        if report is not None:
+            output = json.dumps(report, indent=2, sort_keys=True)
+            _record_direct_tool("text_patch", args, ok=False, started=started, summary=str(exc), output=output)
+            return "ERROR: %s" % output
         _record_direct_tool("text_patch", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     output = json.dumps(data, indent=2, sort_keys=True)
@@ -11009,14 +11220,9 @@ def file_edit(
     _maybe_live_reload()
     started = time.time()
     try:
-        data = file_ops.edit_file(
-            path,
-            old,
-            new,
-            count=count,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_tool(
+            "file_edit", {"path": path, "old": old, "new": new, "count": count},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as e:
         _record_direct_tool("file_edit", {"path": path, "count": count}, ok=False, started=started, summary=str(e))
@@ -11045,14 +11251,10 @@ def file_delete(
     dry_run = dry_run is not False
     started = time.time()
     try:
-        data = file_ops.delete_path(
-            path,
-            recursive=recursive,
-            dry_run=dry_run,
-            confirm=confirm,
-            extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_tool(
+            "file_delete",
+            {"path": path, "recursive": recursive, "dry_run": dry_run, "confirm": confirm},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as e:
         _record_direct_tool("file_delete", {"path": path, "dry_run": dry_run}, ok=False, started=started, summary=str(e))
@@ -11304,7 +11506,7 @@ def directory_tree(
         return policy_error
     args = {"path": path, "depth": depth, "max_entries": max_entries}
     try:
-        data = _typed_read_tool(
+        data = _typed_tool(
             "directory_tree",
             {"path": path, "depth": depth, "max_entries": max_entries,
              "include_hidden": include_hidden, "include_ignored": include_ignored},
@@ -11342,10 +11544,9 @@ def directory_create(
     started = time.time()
     args = {"path": path, "parents": parents}
     try:
-        data = file_ops.make_directory(
-            path, parents=parents, exist_ok=True, extra_roots=extra_roots,
-            bypass=_file_bypass_allowed(token, approval),
-            developer_authorized=_file_developer_allowed(token),
+        data = _typed_tool(
+            "directory_create", {"path": path, "parents": parents},
+            token=token, approval=approval, extra_roots=extra_roots,
         )
     except Exception as exc:
         _record_direct_tool("directory_create", args, ok=False, started=started, summary=str(exc))
@@ -11377,7 +11578,7 @@ def file_read_range(
         # The secret/control-plane read guard now sits in the packaged
         # executor behind the typed gateway, so the native surface enforces
         # it too instead of only this handler.
-        data = _typed_read_tool(
+        data = _typed_tool(
             "file_read_range",
             {"path": path, "start_line": start_line, "end_line": end_line},
             token=token, approval=approval, extra_roots=extra_roots,
@@ -11438,7 +11639,7 @@ def text_search(
         "max_entries": max_entries, "timeout_seconds": timeout_seconds,
     }
     try:
-        data = _typed_read_tool(
+        data = _typed_tool(
             "text_search",
             {"query": query, "root": root, "glob": glob, "regex": regex,
              "case_sensitive": case_sensitive, "max_results": max_results,
@@ -11493,7 +11694,7 @@ def script_search(
         "timeout_seconds": timeout_seconds,
     }
     try:
-        data = _typed_read_tool(
+        data = _typed_tool(
             "script_search",
             {"query": query, "root": root, "max_results": max_results,
              "max_entries": max_entries, "timeout_seconds": timeout_seconds,
@@ -11524,7 +11725,7 @@ def program_search(query: str = "*", max_results: int = 100) -> str:
     started = time.time()
     args = {"query": query, "max_results": max_results}
     try:
-        data = _typed_read_tool(
+        data = _typed_tool(
             "program_search", {"query": query, "max_results": max_results},
         )
     except Exception as exc:
@@ -15462,7 +15663,7 @@ def tool_manifest() -> str:
         "command_registry_list": "Inspect available slash commands by category, name, or risk.",
         "tool_manifest/tool_capability_manifest/access_request_preview": "Inspect the human-readable MCP tool catalog, fingerprint the live registered capability schemas, or preview a non-authorizing scoped filesystem access request.",
         "activity_status": "Inspect active/latest response activity, tool calls, and file changes.",
-        "permission_policy/permission_rule_set": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- or guarded-edit a rule.",
+        "permission_policy/permission_rule_set/permission_approve/permission_approvals": "Inspect the effective permission decision -- the rule, the active mode, and which one governs -- guarded-edit a rule, or approve exactly one refused call once and list what asked.",
         "context_compaction_plan": "Preview when to summarize, split sessions, or reduce live context.",
         "run_code": "Run a bounded snippet: Python, JS/TypeScript, Bash, Ruby, Perl, PHP, Lua, R, Go, Java, Rust, PowerShell, C++, C#.",
         "isolated_run": "Direct MCP-only, explicitly enabled and developer-authorized Docker/Podman execution with approved roots, separate writable approval, and a fixed resource-capped isolation policy.",
@@ -16858,9 +17059,16 @@ def _agent_negative_claim_review(
     }
 
 
-def _agent_permission_gate_error(tool_name, *, mode=None, rule_lookup=None,
+def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup=None,
                                  record=True):
     """Refusal text when the operator's permission gate forbids this dispatch.
+
+    ``args`` are the proposed call's own arguments. They reach the decider
+    and are never stored: an unattended refusal of an effect class names the
+    call (a call id an operator can approve exactly once with ``/approve``),
+    and such an approval answers the next unchanged proposal. The current
+    effect fence, if this thread is an autopilot worker's, is consulted too:
+    a worker whose lease is gone is refused every effect, whatever the mode.
 
     ``mode``, ``rule_lookup`` and ``record`` are per-call overrides for the
     evaluation lane (``eval_harness`` ``tool_policy`` scenarios), which asks
@@ -16897,18 +17105,35 @@ def _agent_permission_gate_error(tool_name, *, mode=None, rule_lookup=None,
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
     decision = permission_modes.decide(
         name, interactive=False, mode=mode, rule_lookup=rule_lookup,
-        surface="agent", record=record)
+        surface="agent", record=record,
+        arguments=args if isinstance(args, dict) else None,
+        fence=effect_fence.current())
     if decision.allowed:
         return ""
     # Assigned rather than returned as a literal: scripts/check_error_signals.py
     # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
     # own policy chain builds its HOST POLICY strings the same way.
+    if decision.source == "fence":
+        refusal = (
+            "ERROR: HOST POLICY: tool '%s' is refused because this worker's "
+            "authority to produce effects is gone (%s). Stop and report what "
+            "was and was not done; do not retry."
+            % (name, decision.reason)
+        )
+        return refusal
+    remedy = ""
+    if decision.call_id and decision.source == "unattended":
+        remedy = (
+            " This exact call is recorded as pending call %s; an operator can "
+            "approve it once at the console (/approve %s), after which one "
+            "unchanged retry runs." % (decision.call_id, decision.call_id)
+        )
     refusal = (
         "ERROR: HOST POLICY: tool '%s' is refused by the active permission "
         "gate (%s, mode=%s, risk=%s). This is the host's standing policy, not "
         "a transient failure: retrying it unchanged will be refused again. "
-        "Choose a different tool or finalize with what you have."
-        % (name, decision.reason, decision.mode, decision.risk)
+        "Choose a different tool or finalize with what you have.%s"
+        % (name, decision.reason, decision.mode, decision.risk, remedy)
     )
     return refusal
 
@@ -16961,7 +17186,7 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
 
 _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
-    "elevate", "permission_mode", "permission_rule_set",
+    "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "update_system_profile",
     "runtime_source_update", "runtime_source_stash",
     "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
@@ -17013,7 +17238,7 @@ def _agent_dispatch(
             "host-selected project root."
         )
         return refusal
-    gate_error = _agent_permission_gate_error(tool_name)
+    gate_error = _agent_permission_gate_error(tool_name, args)
     if gate_error:
         return gate_error
     root_refusal = _agent_project_root_refusal(
@@ -21487,21 +21712,29 @@ def _autopilot_work_model(
         prior=prior or "(none yet)",
     )
     unsafe = unsafe_lab.active()
-    output = _agent_impl(
-        prompt,
-        tier=run.get("tier", "code"),
-        max_steps=12,
-        allow_web=bool(run.get("allow_web")),
-        require_file_evidence=False,
-        read_only=(run.get("policy") == "observe" and not unsafe),
-        include_evidence=True,
-        auto_checklist=True,
-        project=run.get("project", ""),
-        allow_location=False,
-        tool_allowlist=allowed,
-        tool_policy=_autopilot_tool_policy(run),
-        return_host_receipt=True,
-    )
+    # The run record is already fenced by the lease (every progress write is
+    # conditional on ownership); this fences the task's *effects* the same
+    # way. The permission gate consults it before every file change, host
+    # program or destructive tool on this thread, so a worker whose lease
+    # expired or was taken over mid-task stops changing anything at the next
+    # tool call instead of at the next checkpoint.
+    fence = effect_fence.autopilot_fence(run.get("id", ""), run.get("owner_id", ""))
+    with effect_fence.held(fence):
+        output = _agent_impl(
+            prompt,
+            tier=run.get("tier", "code"),
+            max_steps=12,
+            allow_web=bool(run.get("allow_web")),
+            require_file_evidence=False,
+            read_only=(run.get("policy") == "observe" and not unsafe),
+            include_evidence=True,
+            auto_checklist=True,
+            project=run.get("project", ""),
+            allow_location=False,
+            tool_allowlist=allowed,
+            tool_policy=_autopilot_tool_policy(run),
+            return_host_receipt=True,
+        )
     return output
 
 

@@ -93,6 +93,19 @@ class ChainedPermissionEvaluator:
                 matches.append(match)
         return ";".join(matches)
 
+    def authorize_request(self, request: ToolGatewayRequest) -> str:
+        """Give each evaluator the whole request when it can take one."""
+        matches = []
+        for evaluator in self._evaluators:
+            whole = getattr(evaluator, "authorize_request", None)
+            if callable(whole):
+                match = whole(request)
+            else:
+                match = evaluator.authorize(request.tool_name, request.scope, request.permission)
+            if isinstance(match, str) and match:
+                matches.append(match)
+        return ";".join(matches)
+
 
 class DenyApprovalGate:
     """Safe default for a graph with no interactive approval authority."""

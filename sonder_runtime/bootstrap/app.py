@@ -30,7 +30,7 @@ from ..adapters.typed_tool_executor import PackagedToolExecutor
 from ..adapters.persistence.tool_audit import DurableToolAuditRepository, ToolAuditLimits
 from ..adapters.security.permission_evaluator import PermissionModesEvaluator
 from ..application.tools.facade import PatternOutputRedactor, ReceiptStore, ToolApplicationFacade
-from .typed_tools import POLICY_NAMES, read_only_policy, typed_tool_registry
+from .typed_tools import POLICY_NAMES, typed_tool_policy, typed_tool_registry
 from ..adapters.unit_of_work import UnitOfWorkAdapter
 from ..adapters.operations_event_sink import OperationsEventSink
 from ..adapters.security import permission_receipts
@@ -1035,16 +1035,17 @@ def build_application(
     events = LocalObservabilitySink(OperationsEventSink())
     permission_receipts.install(lambda: events)
 
-    # The typed tool boundary for the read-only workbench family. The
-    # resource policy admits exactly that family; the permission-modes
-    # evaluator makes the operator's standing policy the second gate on
-    # every typed call; every receipt is durable before it is visible.
+    # The typed tool boundary for the workbench file families (the reads and
+    # the mutations). The resource policy admits exactly those families; the
+    # permission-modes evaluator makes the operator's standing policy the
+    # second gate on every typed call that was not already decided by the
+    # surface forwarding it; every receipt is durable before it is visible.
     from ..platform.logging import Redactor as _Redactor
 
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
         PackagedToolExecutor(),
-        policy=read_only_policy(),
+        policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(_Redactor().redact),
         receipts=ReceiptStore(),
         audit=DurableToolAuditRepository(

@@ -20,7 +20,7 @@ class PermissionPolicyProvider:
     def decide_for_caller(self, tool_name: str, *, interactive: bool,
                           gate_control_exempt: bool, surface: str = "",
                           record: bool = True, mode: str | None = None,
-                          rule_lookup=None):
+                          rule_lookup=None, arguments=None, fence=None):
         return _engine().decide_for_caller(
             tool_name,
             interactive=interactive,
@@ -29,7 +29,15 @@ class PermissionPolicyProvider:
             record=record,
             mode=mode,
             rule_lookup=rule_lookup,
+            arguments=arguments,
+            fence=fence,
         )
+
+    def call_digest(self, tool_name: str, arguments) -> str:
+        return _engine().call_digest(tool_name, arguments)
+
+    def approval_ledger(self):
+        return _engine().approval_ledger()
 
     def unattended_summary(self) -> str:
         return _engine().unattended_summary()
