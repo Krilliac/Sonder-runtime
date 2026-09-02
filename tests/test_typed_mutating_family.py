@@ -330,3 +330,31 @@ def test_plan_mode_refuses_every_mutation_on_the_native_surface(application, mon
     monkeypatch.setitem(pm._STATE, "mode", pm.PLAN)
     refused = _native(application, "file_write", {"path": "p.txt", "content": "x"})
     assert refused["isError"] is True and refused["evidence"]["source"] == "mode"
+
+
+def test_an_approved_native_call_reaches_exactly_the_roots_it_named(application, tmp_path, monkeypatch):
+    ledger = ledger_module.ApprovalLedger(tmp_path / "approvals.db")
+    monkeypatch.setattr(pm, "_approval_ledger", lambda: ledger)
+    monkeypatch.setitem(pm._STATE, "mode", pm.MANUAL)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = elsewhere / "note.txt"
+    arguments = {"path": str(target), "content": "hi", "mode": "create",
+                 "extra_roots": str(elsewhere)}
+
+    refused = _native(application, "file_write", arguments)
+    assert refused["isError"] is True and refused["error"] == "permission_denied"
+    ledger.issue("file_write", ledger.pending()[0].digest, approver="console operator")
+
+    allowed = _native(application, "file_write", arguments)
+    assert allowed["isError"] is False, allowed
+    assert target.read_text(encoding="utf-8") == "hi"
+    assert _audit(tmp_path).read()[-1]["policy_match"].endswith("permission:approval")
+
+    # Spent: the same call is refused again and, in a mode that allows writes,
+    # extra_roots alone still reach nothing beyond the configured roots.
+    assert _native(application, "file_write", arguments)["evidence"]["source"] == "unattended"
+    monkeypatch.setitem(pm._STATE, "mode", pm.AUTO)
+    plain = _native(application, "file_write", {**arguments, "path": str(elsewhere / "two.txt")})
+    assert plain["isError"] is True and "outside allowed roots" in plain["output"]
+

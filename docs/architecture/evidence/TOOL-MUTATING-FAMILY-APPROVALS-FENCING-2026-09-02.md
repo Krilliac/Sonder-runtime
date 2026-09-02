@@ -87,6 +87,36 @@ allow rule, a mode that allows the class and the console prompt:
   `SONDER_ALLOW_PERMISSION_EDITS=1`. `permission_approvals` (`/approvals`)
   is the read-only listing.
 
+### The reach an approval carries, and the shared code's retirement
+
+Decision 3 of the review is taken: the shared `SONDER_FILE_APPROVAL_CODE` is
+retired. It was a static secret pasted into the model-visible `approval`
+argument, reusable, unrecorded per use, and it switched containment off
+entirely (`resolve_path` returned without a root check under `bypass`).
+The variable is still scrubbed from child environments and logs, and a
+process that has it set warns once that it no longer does anything.
+
+In its place a spent one-shot approval carries exactly the reach the
+operator approved. The digest binds the call's `extra_roots`; every surface
+that decides a call installs `file_ops.reach_scope` around its gate and
+handler (`server.approved_call_reach`: the legacy MCP `call_tool`, the
+control chain's `/<tool>` path, the served `/<tool>` path, the observed
+agent dispatch) and the native surface installs it around the gateway
+call. The scope's provider is consulted at resolution time, so the roots
+appear only after the gate has spent an approval for exactly this call
+(`permission_modes.approval_spent_for`), are honoured through
+`allowed_roots` with containment still checked against them, and vanish
+when the call is over. A call approved with `extra_roots=/a` still cannot
+write under `/b`. Reads are never approval-backed (the gate never refuses
+them), so reach for a read outside the roots stays with the roots
+configuration and the developer token.
+
+Every agent path now drops a string `token` or `approval` from a model's
+proposal before anything reads it (`server._agent_dispatch`); only the
+host's in-process project-root sentinel survives, because it is not a
+string. Autopilot and selfmod already refused or stripped them; the general
+agent loop passed them through.
+
 ### Effect fences
 
 `adapters/execution/effect_fence.py` carries a lease to the effects it
@@ -132,6 +162,11 @@ untouched.
   resolution, redaction and home; the decider's consumption, pending record,
   preflight, and the untouched `plan`/deny/durable cases; the legacy MCP,
   agent and control surfaces; the operator's tools and their gating).
+- `python -m pytest -q tests/test_permission_approvals.py` also covers the
+  reach: approved roots honoured once, containment still checked against
+  them, no leak past the call, model credentials stripped, the retired code
+  inert and warning once; `tests/test_typed_mutating_family.py` covers the
+  native surface.
 - `python -m pytest -q tests/test_effect_fence.py` — 14 passed (the fence
   itself, the decider, the agent gate, and the autopilot, fleet and selfmod
   holders).
@@ -149,9 +184,10 @@ untouched.
 
 ## Scope guard
 
-The legacy `approval` parameter and `SONDER_FILE_APPROVAL_CODE` are
-unchanged; per-call approvals exist beside them (review decision 3 can now be
-taken with both in hand). `ResourcePolicy.Decision.ALLOW_ONCE` remains
+The legacy `approval` parameter stays on the handlers' signatures: it still
+carries the host's in-process project-root sentinel, and a protocol caller's
+string in it is inert. `SONDER_ISOLATED_APPROVAL_CODE` has the same shape as
+the retired code and should follow. `ResourcePolicy.Decision.ALLOW_ONCE` remains
 unused: the permission ledger is the one-shot mechanism. The compute job
 worker is not fenced: its effect is the job it launches for a controller,
 its claim is the job record itself, and cancellation already reaches the

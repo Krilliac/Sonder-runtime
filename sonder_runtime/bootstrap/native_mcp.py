@@ -456,6 +456,15 @@ _LEGACY_ALIASES = {
     "workspace_run": "run_program",
 }
 
+# Canonical name -> the legacy name the permission catalog grades, derived
+# from the alias table so this module does not import ``typed_tools`` (which
+# derives its descriptors from this one). ``typed_tools.POLICY_NAMES`` is the
+# declared map; a drift test pins the two together for the typed family.
+_GRADED_NAMES = {
+    canonical: legacy for legacy, canonical in _LEGACY_ALIASES.items()
+    if legacy != canonical
+}
+
 
 def native_tool_registry() -> InMemoryToolRegistry:
     """Return the immutable-at-composition catalog for native MCP tools."""
@@ -620,8 +629,23 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             cancellation=context.cancellation,
             execution_world="local",
         )
+        # The roots a one-shot approval covered are honoured for this call
+        # alone, and only once the gateway's evaluator has spent it: the
+        # provider is consulted at resolution time, after the decision.
+        from ..adapters.filesystem import file_ops
+        from ..adapters.security.permission_policy import permission_policy
+
+        graded = _GRADED_NAMES.get(canonical_name, canonical_name)
+
+        def granted() -> str:
+            if not permission_policy.approval_spent_for(graded, arguments):
+                return ""
+            roots = arguments.get("extra_roots", "")
+            return roots if isinstance(roots, str) else ""
+
         try:
-            receipt = tools.execute(request)
+            with file_ops.reach_scope(granted):
+                receipt = tools.execute(request)
         except Forbidden as exc:
             return {
                 "output": str(exc), "isError": True, "error": "permission_denied",
@@ -632,6 +656,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 "output": str(exc), "isError": True,
                 "error": type(exc).__name__, "evidence": {"tool": canonical_name},
             }
+        finally:
+            permission_policy.forget_spent_approval()
         evidence = dict(receipt.evidence)
         evidence.update({
             "request_id": receipt.request_id,

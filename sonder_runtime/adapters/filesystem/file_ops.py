@@ -7,6 +7,8 @@ server layer.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import fnmatch
 import hashlib
 import json
@@ -167,11 +169,50 @@ def _roots_from_file() -> list[Path]:
     return roots
 
 
+# Reach granted to the call in flight on this context: providers that answer
+# with the extra roots a one-shot approval covered (see ``reach_scope``).
+# Every root resolution goes through ``allowed_roots``, so a provider's roots
+# are honoured everywhere and containment is still checked against them; no
+# provider ever switches the check off the way ``bypass`` does.
+_CALL_REACH: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "sonder_call_reach", default=(),
+)
+
+
+@contextlib.contextmanager
+def reach_scope(provider):
+    """Honour ``provider()``'s roots for the calls inside the body.
+
+    ``provider`` is called at resolution time, not at entry, so a surface can
+    install the scope around a whole call -- gate and handler -- and the
+    roots appear only once the gate has actually spent an approval for the
+    call. Installed by the surfaces that decide a call and by the native MCP
+    surface; nothing a caller sends can install one.
+    """
+    token = _CALL_REACH.set(_CALL_REACH.get() + (provider,))
+    try:
+        yield
+    finally:
+        _CALL_REACH.reset(token)
+
+
+def _reach_roots() -> list[Path]:
+    roots: list[Path] = []
+    for provider in _CALL_REACH.get():
+        try:
+            granted = provider()
+        except Exception:
+            continue
+        roots.extend(_split_roots(granted if isinstance(granted, str) else ""))
+    return roots
+
+
 def allowed_roots(extra_roots: str = "") -> list[Path]:
     roots = [workspace_root(), Path(runtime_paths.default_home())]
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     roots.extend(_split_roots(extra_roots))
+    roots.extend(_reach_roots())
     out = []
     for root in roots:
         try:
@@ -678,7 +719,7 @@ def policy_text(*, bypass: bool = False, extra_roots: str = "") -> str:
     lines.extend([
         "  hot roots file: %s" % roots_file_path(),
         "  env bypass: SONDER_FILE_BYPASS=1",
-        "  approval code: SONDER_FILE_APPROVAL_CODE plus approval=<code>",
+        "  one call beyond the roots: /approve <call id> (the approved call's extra_roots are honoured once)",
         "  env extra roots: SONDER_FILE_ROOTS=<path%spath>" % os.pathsep,
     ])
     return "\n".join(lines)

@@ -144,6 +144,14 @@ rule, and it never touches ``plan``'s denials, an explicit ``deny`` rule, the
 unclassified grade or the durable-authority class. A preflight
 (``record=False``) never spends one.
 
+A spent approval also carries the *reach* the operator approved: the digest
+binds the call's ``extra_roots``, so the surface that spent it may honour
+exactly those roots for exactly that call (``approval_spent_for``, consulted
+by the filesystem adapter's reach scope). That is the only way a call gains
+roots it was not configured with, now that the shared
+``SONDER_FILE_APPROVAL_CODE`` is retired: a static secret in a model-visible
+argument that switched containment off entirely.
+
 Effect fences
 -------------
 A worker that holds a lease -- the autopilot controller -- installs an effect
@@ -269,6 +277,7 @@ reason -- so this module keeps importing on its own with no cycle.
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -991,6 +1000,31 @@ def _default_approval_ledger():
 # (anything with ``consume`` and ``record_pending``), or None to consult none.
 _approval_ledger = _default_approval_ledger
 
+# The approval the most recent live decision on this context spent, as
+# ``(tool, digest)``. It exists so the surface that made the decision can
+# honour the reach the operator approved for exactly that call; it is
+# replaced by the next live decision on the same context and cleared by the
+# surface when the call is over (``forget_spent_approval``). Per context, so
+# two concurrent protocol calls never see each other's.
+_SPENT_APPROVAL: contextvars.ContextVar = contextvars.ContextVar(
+    "sonder_spent_approval", default=None,
+)
+
+
+def approval_spent_for(tool_name: str, arguments) -> bool:
+    """Whether the last live decision on this context spent an approval for exactly this call."""
+    spent = _SPENT_APPROVAL.get()
+    if spent is None:
+        return False
+    name = str(tool_name or "").strip().lstrip("/")
+    digest = call_digest(name, arguments)
+    return bool(digest) and spent == (name, digest)
+
+
+def forget_spent_approval() -> None:
+    """Clear the spent-approval note once the call it was for is over."""
+    _SPENT_APPROVAL.set(None)
+
 
 def approval_ledger():
     """The one-shot approval ledger the gate consults, or None when there is none.
@@ -1192,6 +1226,10 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
     name = str(tool_name or "").lstrip("/")
     digest = call_digest(name, arguments)
     call = call_id(digest)
+    if live:
+        # A live decision starts a new call on this context; whatever the
+        # previous one spent is not this one's.
+        _SPENT_APPROVAL.set(None)
 
     # 0. The fence on this thread's effects, before any policy is read. A
     #    worker whose lease is gone produces no effect whatever the mode or
@@ -1297,6 +1335,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                 except Exception:
                     approval = None
                 if approval is not None:
+                    _SPENT_APPROVAL.set((name, digest))
                     return Decision(
                         ALLOW, active, risk,
                         "one-shot approval %s by %s covers exactly this call "

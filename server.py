@@ -21,6 +21,7 @@ Tiers (escalation ladder, cheapest first):
 import collections
 import base64
 import contextlib
+import logging
 import datetime
 import functools
 import hashlib
@@ -3165,18 +3166,19 @@ def control_command(prompt: str, history=None, session="", project="",
         tool, kwargs = parsed
         handler = globals().get(tool)
         if callable(handler):
-            refusal = _control_tool_refusal(
-                (tool,), "/" + tool, operator_approved=bool(operator_approved),
-                arguments=kwargs,
-            )
-            if refusal:
-                return refusal
-            try:
-                return str(handler(**kwargs))
-            except TypeError as exc:
-                return "%s: %s\n\n%s" % (
-                    cmd, exc, command_catalog.help_command(cmd),
+            with approved_call_reach(tool, kwargs):
+                refusal = _control_tool_refusal(
+                    (tool,), "/" + tool, operator_approved=bool(operator_approved),
+                    arguments=kwargs,
                 )
+                if refusal:
+                    return refusal
+                try:
+                    return str(handler(**kwargs))
+                except TypeError as exc:
+                    return "%s: %s\n\n%s" % (
+                        cmd, exc, command_catalog.help_command(cmd),
+                    )
     return None
 
 
@@ -9593,8 +9595,36 @@ def _file_developer_allowed(token: str = "") -> bool:
 
 _TRUSTED_REPOSITORY_APPROVAL = object()
 
+_RETIRED_APPROVAL_CODE_WARNED = threading.Event()
+
+
+def _warn_retired_approval_code() -> None:
+    """Say once per process that the shared file approval code no longer does anything."""
+    if _RETIRED_APPROVAL_CODE_WARNED.is_set():
+        return
+    _RETIRED_APPROVAL_CODE_WARNED.set()
+    logging.getLogger("sonder.server").warning(
+        "SONDER_FILE_APPROVAL_CODE is set but no longer honoured: it was a shared "
+        "secret in a model-visible argument that switched containment off. Approve "
+        "one exact call with /approve <call id> (its extra_roots are honoured "
+        "once), configure roots with SONDER_FILE_ROOTS or the roots file, or use a "
+        "developer token."
+    )
+
 
 def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
+    """Whether this call may resolve paths with containment switched off.
+
+    Three things can say yes: the unsafe-lab acknowledgement (the whole
+    process), the in-process project-root sentinel a repository agent is
+    handed by the host, and a developer token. The shared
+    ``SONDER_FILE_APPROVAL_CODE`` used to be a fourth -- a static secret that a
+    caller pasted into the model-visible ``approval`` argument -- and is
+    retired: a call that needs to reach beyond the configured roots once is
+    approved exactly once at the console (``/approve``), and the reach the
+    operator approved is honoured for that call alone with containment still
+    checked (``approved_call_reach``).
+    """
     if unsafe_lab.active():
         # The exact acknowledgement substitutes for every model-visible file
         # approval only in this deliberately unrestricted process.
@@ -9607,10 +9637,36 @@ def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
         return True
     if file_ops.bypass_enabled():
         return True
-    expected = os.environ.get("SONDER_FILE_APPROVAL_CODE", "").strip()
-    if expected and approval and approval == expected:
-        return True
+    if os.environ.get("SONDER_FILE_APPROVAL_CODE", "").strip():
+        _warn_retired_approval_code()
     return _file_developer_allowed(token)
+
+
+@contextlib.contextmanager
+def approved_call_reach(tool_name, arguments):
+    """Honour the roots a spent one-shot approval covered, for this call only.
+
+    Installed by a surface around the whole call -- its gate and the handler
+    -- so the roots appear only once the gate has actually spent an approval
+    for exactly this call (``permission_modes.approval_spent_for`` matches the
+    tool and the argument digest, which binds ``extra_roots``). Containment
+    is still checked against those roots; nothing here is a bypass. The
+    spent-approval note is cleared when the call is over.
+    """
+    name = str(tool_name or "").strip().lstrip("/")
+    args = arguments if isinstance(arguments, dict) else {}
+
+    def granted() -> str:
+        if not permission_modes.approval_spent_for(name, args):
+            return ""
+        roots = args.get("extra_roots", "")
+        return roots if isinstance(roots, str) else ""
+
+    try:
+        with file_ops.reach_scope(granted):
+            yield
+    finally:
+        permission_modes.forget_spent_approval()
 
 
 _GIT_IGNORE_DISCOVERY_TOOLS = frozenset({
@@ -17221,6 +17277,15 @@ def _agent_dispatch(
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
+    # A model never holds a credential. A string ``token`` or ``approval`` in
+    # a proposal is dropped before anything reads it, on every agent path and
+    # not only the autonomous ones; the in-process objects the host injects
+    # (the project-root sentinel) are not strings and survive.
+    if any(isinstance(args.get(name), str) and args.get(name) for name in ("token", "approval")):
+        args = {
+            key: value for key, value in args.items()
+            if not (key in ("token", "approval") and isinstance(value, str))
+        }
     # A model can propose these calls after reading hostile page text, but it
     # is never an operator.  Unsafe-lab relaxes experimentation policy for
     # ordinary host tools; it does not turn prompt text into account, runtime
@@ -18821,7 +18886,9 @@ def _agent_dispatch_observed(
         dispatch_args = dict(args)
         dispatch_args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
     try:
-        with activity_tracker.tool_dispatch_context(tool_name):
+        with activity_tracker.tool_dispatch_context(tool_name), approved_call_reach(
+            _canonical_agent_tool_name(str(tool_name or "").strip()), args,
+        ):
             dispatch_options = {"allow_web": allow_web}
             if allow_location:
                 dispatch_options["allow_location"] = True
