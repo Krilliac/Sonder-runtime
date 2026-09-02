@@ -536,7 +536,7 @@ def test_decision_reason_names_the_mode_and_the_risk():
     assert decision.to_dict() == {
         "action": decision.action, "mode": decision.mode, "risk": decision.risk,
         "reason": decision.reason, "tool": decision.tool,
-        "source": decision.source,
+        "source": decision.source, "call_id": decision.call_id,
     }
 
 

@@ -65,7 +65,7 @@ def test_dispatch_rebases_to_host_project_and_refuses_rootless_calls(monkeypatch
     assert "host-selected project root" in refused
 
     called = {}
-    monkeypatch.setattr(server, "_agent_permission_gate_error", lambda _name: "")
+    monkeypatch.setattr(server, "_agent_permission_gate_error", lambda _name, _args=None: "")
     monkeypatch.setattr(
         server, "codegen_build_loop",
         lambda **kwargs: called.update(kwargs) or "ok",

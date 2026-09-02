@@ -47,6 +47,11 @@ def emit(sink, decision, surface: str) -> None:
         "source": decision.source,
         "action": decision.action,
     }
+    call = str(getattr(decision, "call_id", "") or "")
+    if call:
+        # The short digest of the call, never an argument: it is what an
+        # operator types into ``/approve`` to answer exactly this refusal.
+        detail["call_id"] = call
     sink.emit(
         REFUSAL_EVENT if refused else ALLOW_EVENT,
         summary="%s %s via %s (mode=%s, risk=%s, source=%s)" % (

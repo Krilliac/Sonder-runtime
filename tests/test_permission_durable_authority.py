@@ -68,7 +68,7 @@ NON_INTERACTIVE_MODES = (pm.MANUAL, pm.ACCEPT_EDITS, pm.AUTO)
 def test_the_class_is_declared_and_names_the_authority_granting_tools():
     assert pm.DURABLE_AUTHORITY_TOOLS == frozenset({
         "admin_login", "admin_register", "admin_set_account",
-        "elevate", "permission_rule_set",
+        "elevate", "permission_rule_set", "permission_approve",
     })
 
 
@@ -85,6 +85,7 @@ def test_every_member_is_a_real_registered_tool():
 # non-interactive modes -- so the degrade branch is reached and the class binds.
 GRADED_DANGEROUS = sorted({
     "admin_register", "admin_set_account", "elevate", "permission_rule_set",
+    "permission_approve",
 })
 
 

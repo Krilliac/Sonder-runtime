@@ -312,6 +312,11 @@ _AUTHORITY_GRAMMAR_VERIFIED_EXEMPT = {
         "explicit allow rule for its own name (docs/wiki/09-security-model)"
     ),
     "permission_policy": "formats the on-disk rule policy; read-only",
+    "permission_approvals": (
+        "read-only: lists pending call ids (argument digests) and issued "
+        "approvals; a nonce identifies a row for /approve revoke, which "
+        "needs the same authority as issuing one"
+    ),
     "permission_mode": "bound: permission_mode_change",  # here for the dead-entry sweep
     "runtime_policy_status": "formats the runtime policy; read-only",
     "autopilot_status": "read-only progress report",

@@ -174,6 +174,8 @@ class ToolExecutorAdapter:
             if call.tool == "file_batch_write":
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
+                if "operations_json" in args and "operations" not in args:
+                    args["operations"] = args.pop("operations_json")
                 res = file_ops.batch_write_files(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "file_delete":
@@ -258,27 +260,12 @@ class ToolExecutorAdapter:
                         "truncated": bool(typed.truncated),
                     },
                 )
-            if call.tool == "write_file":
+            if call.tool in {"write_file", "edit_file", "make_directory"}:
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
-                res = file_ops.write_file(**args)
-                return ToolResult(
-                    ok=True,
-                    evidence=res if isinstance(res, dict) else {"result": res},
-                )
-            if call.tool == "edit_file":
-                import sonder_runtime.adapters.filesystem.file_ops as file_ops
-
-                res = file_ops.edit_file(**args)
-                return ToolResult(
-                    ok=True,
-                    evidence=res if isinstance(res, dict) else {"result": res},
-                )
-            if call.tool == "make_directory":
-                import sonder_runtime.adapters.filesystem.file_ops as file_ops
-
-                res = file_ops.make_directory(**args)
-                return ToolResult(ok=True, evidence=res)
+                res = getattr(file_ops, call.tool)(**args)
+                data = res if isinstance(res, dict) else {"result": res}
+                return ToolResult(ok=True, output=json.dumps(data, sort_keys=True), evidence=data)
             return ToolResult(
                 ok=False,
                 error_code="unknown_tool",
@@ -287,4 +274,17 @@ class ToolExecutorAdapter:
         except (PermissionError, ValueError, OSError, KeyError, TypeError) as exc:
             return ToolResult(
                 ok=False, error_code=type(exc).__name__, output=str(exc)
+            )
+        except RuntimeError as exc:
+            # The transactional primitives (batch write, JSON patch, text
+            # patch) refuse with a structured report on their exception. The
+            # report is the failure's output, so a surface can render it as
+            # the primitive's own callers always have; anything else is a
+            # real fault and propagates.
+            report = getattr(exc, "report", None)
+            if not isinstance(report, dict):
+                raise
+            return ToolResult(
+                ok=False, error_code=type(exc).__name__,
+                output=json.dumps(report, sort_keys=True, default=str), evidence=report,
             )

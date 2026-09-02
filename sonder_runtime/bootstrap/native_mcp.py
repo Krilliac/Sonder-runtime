@@ -203,10 +203,16 @@ _NATIVE_TOOLS = (
          "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "make_directory", "Create a directory under an allowed root", {"type": "object"},
+        "make_directory", "Create a directory under an allowed root",
+        {"type": "object", "properties": {
+            "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "read_file", "Read a bounded file", {"type": "object"},
+        "read_file", "Read a bounded file",
+        {"type": "object", "properties": {
+            "path": _PATH, "max_bytes": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "run_program", "Run an argv-based program", {"type": "object"},
@@ -261,7 +267,12 @@ _NATIVE_TOOLS = (
         }, "required": ["program"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "write_file", "Write a file under an allowed root", {"type": "object"},
+        "write_file", "Write a file under an allowed root",
+        {"type": "object", "properties": {
+            "path": _PATH, "content": {"type": "string"},
+            "mode": {"type": "string", "enum": ["create", "overwrite", "append"]},
+            "extra_roots": _ROOT,
+        }, "required": ["path", "content"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "archive_extract", "Extract a bounded archive transactionally without replacing a destination",
@@ -420,12 +431,15 @@ _VISION_NAMES = frozenset({"vision_analyze"})
 _COMPUTE_NAMES = frozenset(item.name for item in _COMPUTE_TOOLS)
 
 
-# The read-only workbench family runs through the typed tool gateway when the
-# application graph composed one (bootstrap/typed_tools.py); every other tool
-# still reaches the packaged executor directly.
-_TYPED_READ_NAMES = frozenset({
+# The read-only workbench family and the mutating file family run through the
+# typed tool gateway when the application graph composed one
+# (bootstrap/typed_tools.py); every other tool still reaches the packaged
+# executor directly.
+_TYPED_TOOL_NAMES = frozenset({
     "directory_tree", "file_find", "file_read_range", "program_search",
     "read_file", "script_search", "text_search",
+    "edit_file", "file_batch_write", "file_copy", "file_delete", "file_move",
+    "json_patch", "make_directory", "text_patch", "write_file",
 })
 
 _LEGACY_ALIASES = {
@@ -577,12 +591,14 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         }
 
     def typed_result(tools, canonical_name: str, arguments: dict, context) -> dict:
-        """Run one read-only workbench tool through the typed gateway.
+        """Run one workbench file tool through the typed gateway.
 
         The gateway is the single seam: schema, resource policy, the
-        runtime's permission modes (as an unattended native-MCP caller),
-        deadline and cancellation, the packaged guards, redaction, and one
-        durable receipt whatever the outcome. The envelope keeps its shape.
+        runtime's permission modes (as an unattended native-MCP caller, with
+        the call's arguments so a one-shot approval of exactly this call can
+        answer), deadline and cancellation, the packaged guards, redaction,
+        and one durable receipt whatever the outcome. The envelope keeps its
+        shape; a permission refusal reports the decision, call id included.
         """
         from ..application.tools.gateway_contract import (
             ToolGatewayRequest, ToolPermission, ToolScope,
@@ -708,7 +724,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 "evidence": {"model": vision.model, "tier": vision.tier},
             }
         typed_tools = getattr(application, "tools", None)
-        if canonical_name in _TYPED_READ_NAMES and typed_tools is not None:
+        if canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None:
             return typed_result(typed_tools, canonical_name, canonical_arguments, context)
         if canonical_name in _INSPECTION_NAMES:
             result = application.inspections.inspect(

@@ -1425,6 +1425,7 @@ SYSTEM_OPERATION_ROLES = {
 SYSTEM_OPERATION_TOOLS = {
     "permission_mode": "permission_mode_change",
     "permission_rule_set": "permission_rule_change",
+    "permission_approve": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
     "runtime_source_update": "selfmod_deploy",
@@ -2150,8 +2151,13 @@ def _loop_global_operation_refusal(actions_json, context=None):
     return ""
 
 
-def _http_tool_refusal(tools, label, context=None):
+def _http_tool_refusal(tools, label, context=None, arguments=None):
     """The decision itself, shared by this surface's two entry points.
+
+    ``arguments`` are meaningful only for a single tool (the dynamic
+    ``/<tool>`` path passes its parsed keywords): they let an unattended
+    refusal name the call so an operator can approve exactly it once, and
+    let such an approval answer the retry.
 
     Only a `deny` can come back under `interactive=False`, so this is a flat
     loop rather than a copy of the console's ask-and-rank gate.
@@ -2193,6 +2199,7 @@ def _http_tool_refusal(tools, label, context=None):
                     return "refused %s: %s" % (label, authority_error)
         decision = permission_policy.decide_for_caller(
             tool, interactive=False, gate_control_exempt=True, surface="http",
+            arguments=arguments if (len(tools) == 1 and isinstance(arguments, dict)) else None,
         )
         if decision is None:
             continue
@@ -2626,7 +2633,9 @@ def _dispatch_catalogued_tool(line, state, context=None):
     handler = getattr(server, tool_name, None)
     if not callable(handler):
         return "%s is catalogued but not callable here." % tool_name
-    refusal = _http_tool_refusal((tool_name,), "/" + tool_name, context=context)
+    refusal = _http_tool_refusal(
+        (tool_name,), "/" + tool_name, context=context, arguments=kwargs,
+    )
     if refusal:
         return refusal
     if tool_name == "loop":

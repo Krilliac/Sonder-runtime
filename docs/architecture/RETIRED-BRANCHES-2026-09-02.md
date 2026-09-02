@@ -58,3 +58,54 @@ worker pool that PR #431 introduced and PR #432 integrated after review;
 `main` carries the per-worker latency EWMA, circuit half-open state, model
 affinity, bounded metric labels, remote-worker consent and origin validation
 they proposed, under the names the review settled on.
+
+## Deletion
+
+Every branch above is integrated, so all 32 are safe to delete. The
+credential this session pushes with is scoped to its own branch: every
+`git push origin --delete <branch>` it tried (2026-09-02, retried after the
+slice-2 commit) was refused by the remote with HTTP 403 before the ref was
+touched, and the GitHub connector exposes no branch-deletion call. The
+owner can run the following from any checkout with push rights; each
+line is independent and idempotent (a branch already gone reports
+`remote ref does not exist`).
+
+```sh
+git push origin --delete agent/selfmod-continuous-runner
+git push origin --delete claude/fable-agent-orchestration
+git push origin --delete claude/fable-context-routing
+git push origin --delete claude/fable-ecosystem-research
+git push origin --delete claude/fable-harness-evals
+git push origin --delete claude/fable-memory-learning
+git push origin --delete claude/fable-security-reliability
+git push origin --delete claude/fable-throughput-performance
+git push origin --delete claude/fable-tools-natural-language
+git push origin --delete claude/fable-ui-observability
+git push origin --delete claude/sonnet-api-extensibility
+git push origin --delete claude/sonnet-ci-test-architecture
+git push origin --delete claude/sonnet-cloud-privacy-boundaries
+git push origin --delete claude/sonnet-compatibility-migrations
+git push origin --delete claude/sonnet-diagnostics-doctor
+git push origin --delete claude/sonnet-docs-operator
+git push origin --delete claude/sonnet-install-config-migrations
+git push origin --delete claude/sonnet-observability-tracing
+git push origin --delete claude/sonnet-packaging-release
+git push origin --delete claude/sonnet-provider-adapters
+git push origin --delete codex/ci-test-fixes
+git push origin --delete codex/sol-agent-state-machine
+git push origin --delete codex/sol-data-integrity
+git push origin --delete codex/sol-developer-sdk
+git push origin --delete codex/sol-distributed-runtime
+git push origin --delete codex/sol-failure-injection
+git push origin --delete codex/sol-performance-profiling
+git push origin --delete codex/sol-reproducible-evals
+git push origin --delete codex/sol-research-frontier
+git push origin --delete codex/sol-web-app-surface
+git push origin --delete claude/fable-skill-forge
+git push origin --delete docs/architecture-handoff
+```
+
+The two branches merged here (`claude/fable-skill-forge`,
+`docs/architecture-handoff`) should be deleted only once
+`claude/sonder-runtime-commit-6d6e4v` has itself been merged, so their
+history stays reachable in the meantime.

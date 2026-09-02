@@ -32,6 +32,16 @@ from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, Inva
 SOURCES = frozenset({"http", "mcp", "repl", "worker", "system"})
 AUTH_LEVELS = frozenset({"local", "user", "developer", "admin"})
 
+# Who made the permission decision for a request. ``gateway``: the gateway's
+# permission evaluator decides (the native MCP surface, any caller with no
+# gate of its own). ``surface``: an in-process surface already decided at its
+# own entry point -- the console after its prompt, the legacy MCP and HTTP
+# gates, the agent gate -- and forwards the call; the gateway then records
+# that fact instead of deciding a second time, which would refuse the very
+# call a person just answered yes to. Only in-process code can build a scope,
+# so a protocol caller cannot claim it.
+GATES = frozenset({"gateway", "surface"})
+
 COMPLETED = "completed"
 FAILED = "failed"
 CANCELLED = "cancelled"
@@ -57,10 +67,13 @@ class ToolScope:
     allowed_effects: frozenset[str] = frozenset()
     source: str = "repl"
     auth_level: str = "local"
+    gate: str = "gateway"
 
     def __post_init__(self) -> None:
         if not self.principal_id.strip():
             raise InvalidInput("tool scope requires a principal")
+        if self.gate not in GATES:
+            raise InvalidInput("tool scope gate must be one of %s" % ", ".join(sorted(GATES)))
         if any(not root.strip() for root in self.workspace_roots):
             raise InvalidInput("tool scope roots must be non-empty")
         if any(not effect.strip() for effect in self.allowed_effects):
@@ -121,7 +134,12 @@ class SchemaValidator(Protocol):
 
 
 class PermissionEvaluator(Protocol):
-    """Admit or refuse a call; may return text naming the policy that matched."""
+    """Admit or refuse a call; may return text naming the policy that matched.
+
+    An evaluator that also defines ``authorize_request(request)`` is given the
+    whole request (arguments included) and is preferred by the gateway; the
+    narrow form stays the protocol's floor.
+    """
 
     def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> Any: ...
 
@@ -212,6 +230,14 @@ def _match_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _authorize(evaluator: Any, request: ToolGatewayRequest) -> Any:
+    """Prefer the request-aware form when an evaluator offers it."""
+    whole = getattr(evaluator, "authorize_request", None)
+    if callable(whole):
+        return whole(request)
+    return evaluator.authorize(request.tool_name, request.scope, request.permission)
+
+
 class ToolGateway:
     """Execute one typed request through the complete cross-cutting seam."""
 
@@ -280,9 +306,7 @@ class ToolGateway:
                     "tool permission exceeds the request scope: %s"
                     % ", ".join(sorted(unscoped_effects))
                 )
-            policy_match = _match_text(
-                self._permissions.authorize(request.tool_name, request.scope, request.permission)
-            )
+            policy_match = _match_text(_authorize(self._permissions, request))
             if request.permission.approval is ApprovalMode.REQUIRED:
                 if not request.approval_token or not self._approvals.approve(request):
                     raise Forbidden("tool approval is required")
@@ -302,6 +326,12 @@ class ToolGateway:
             safe_output, redaction_applied = redacted.value, redacted.applied
         else:
             safe_output, redaction_applied = redacted, True
+        # A failure message is shown and audited exactly like output, so it is
+        # scrubbed the same way; a primitive's refusal can quote a path or a
+        # value the caller sent.
+        safe_error = self._redactor.redact(request.tool_name, result.error) if result.error else ""
+        if isinstance(safe_error, RedactedOutput):
+            safe_error = safe_error.value
         evidence = dict((getattr(result, "metadata", None) or {}).get("evidence") or {})
         safe_evidence = self._redactor.redact(request.tool_name, evidence) if evidence else {}
         if isinstance(safe_evidence, RedactedOutput):
@@ -312,7 +342,7 @@ class ToolGateway:
             success=result.success,
             output=safe_output,
             error_code=result.error_code,
-            error=result.error,
+            error=safe_error if isinstance(safe_error, str) else str(safe_error),
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
             redaction_applied=redaction_applied,
             approval_required=request.permission.approval is ApprovalMode.REQUIRED,

@@ -929,11 +929,18 @@ detail.
 | Defects 1–7 | closed | 1 (`non_degrading`), 2–5 (receipt fields, context factory, early-exit receipts, `compose(audit=)`), 6 (the served turn is captured once: `answer_with_history(capture_session=False)` from `sonder_serve._run_prompt`), 7 (`sonder_serve` no longer live-reloads the root `tool_contract` under the typed contract's name) |
 | Defect 8 | closed as far as honest | WP8 counts corrected (206 / 50); `migration-inventory.json` annotated as the historical 2026-08-21 snapshot it is (WP0-BASELINE already said so; no generator exists to regenerate it); `REQUIREMENT-AUDIT-NEXT.md` gained a dated addendum pointing at the new evidence, with the formal ledger untouched (204 `planned`, 0 `verified`) |
 | Branch cleanup | integrated; deletion blocked | every remote branch classified in `RETIRED-BRANCHES-2026-09-02.md`; `claude/fable-skill-forge` and `docs/architecture-handoff` merged here; the remote refuses branch deletion from this session's credential, so the deletions are listed for the owner to run |
+| Slice 2: mutating family | done | the nine mutating file tools run through `Application.tools` on both surfaces, legacy formats and structured refusals unchanged; `ToolScope.gate` makes the permission decision exactly once per call (the gateway for native, the surface's own gate for a legacy forward, recorded as `permission:surface`); the native canonical `write_file`/`make_directory`/`read_file` descriptors gained bounded schemas; see `evidence/TOOL-MUTATING-FAMILY-APPROVALS-FENCING-2026-09-02.md` |
+| Slice 2: one-shot approvals | done | `call_digest`/`Decision.call_id`; `adapters/security/approval_ledger.py` (`approvals.db`); `decide()` spends an approval for exactly the refused call at step 5c or notes it pending and names `/approve <call id>`; every surface that has arguments passes them (legacy MCP, agent, control, served, native); `permission_approve` (dangerous, durable-authority, admin-bound, operator-only) and `permission_approvals`; matched by digest, so no nonce travels in any call (a deliberate departure from the §10 sketch) |
+| Slice 2: effect fences | done | `adapters/execution/effect_fence.py`; the autopilot worker fences each task's effects on its lease; `decide()` refuses effect classes on a lost fence before any policy (`source="fence"`, receipt); reads unfenced |
 
 Not done, deliberately:
 
 - `eval_solver.py`, `eval_duel.py` and `eval_retrieval.py` do not share the
   harness today, so they did not gain the history flag through it; wiring
   them through `eval_harness` is its own change.
-- Slice 2 (the mutating file family, one-shot approvals, effect fencing) is
-  the next commit on this branch, not this one; its design in §8 stands.
+- The legacy `approval` parameter and `SONDER_FILE_APPROVAL_CODE` are
+  unchanged beside the new per-call approvals (decision 3 stays with Nathan,
+  now with both mechanisms in hand); `ResourcePolicy.Decision.ALLOW_ONCE` is
+  still unused; fences for compute jobs, fleets and remote workers are not
+  wired (the fence type is generic; the autopilot controller is its first
+  holder).

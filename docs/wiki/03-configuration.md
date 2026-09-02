@@ -124,7 +124,9 @@ until expiry). See [rotate-credentials](../runbooks/rotate-credentials.md).
 
 Core paths/identity: `SONDER_HOME`, `SONDER_DB`, `SONDER_AUTOPILOT_DB`,
 `SONDER_FLEET_DB`, `SONDER_OPERATIONS_DB`, `SONDER_UPDATES_DB`,
-`SONDER_RUNTIME_POLICY`, `SONDER_TRAINING_STATE`.
+`SONDER_APPROVALS_DB` (one-shot permission approvals), `SONDER_TOOL_AUDIT`
+(the typed tool gateway's durable receipts), `SONDER_RUNTIME_POLICY`,
+`SONDER_TRAINING_STATE`.
 
 Serving/auth: `SONDER_API_KEY`, `SONDER_HOST`, `SONDER_PORT`,
 `SONDER_AUTH_MODE`, `SONDER_AUTH_SECRET`, `SONDER_MAX_REQUEST_BYTES`,

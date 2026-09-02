@@ -33,8 +33,12 @@ from mcp.shared.subscriptions import (
 )
 
 
-def _refuse_if_gated(name: str) -> None:
+def _refuse_if_gated(name: str, arguments=None) -> None:
     """Apply the operator's permission gate to a direct MCP tool call.
+
+    ``arguments`` are the call's own, passed through to the decider and never
+    stored: they let an unattended refusal name the call (a call id an
+    operator can approve once) and let such an approval answer the retry.
 
     This is the only place an MCP *client* enters; every internal Python call
     to the same function bypasses it, which is exactly the split we want --
@@ -64,6 +68,7 @@ def _refuse_if_gated(name: str) -> None:
     tool = str(name or "")
     decision = permission_modes.decide_for_caller(
         tool, interactive=False, gate_control_exempt=True, surface="mcp",
+        arguments=arguments if isinstance(arguments, dict) else None,
     )
     if decision is None or decision.allowed:
         return
@@ -553,7 +558,7 @@ class ReloadableMCPServer(MCPServer):
 
     async def call_tool(self, name: str, arguments: dict, context=None):
         self.refresh_if_changed()
-        _refuse_if_gated(name)
+        _refuse_if_gated(name, arguments)
         return await super().call_tool(name, arguments, context)
 
     async def list_resources(self):

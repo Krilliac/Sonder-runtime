@@ -312,6 +312,7 @@ _CATEGORY_BY_SLASH = {
     "/trace": "system", "/strict": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
+    "/approve": "security", "/approvals": "security",
     "/goal": "system", "/improve": "system", "/append": "filesystem",
     "/updatecheck": "repo", "/update": "repo", "/updatesource": "repo",
     "/stash": "repo", "/runtime-stash": "repo",
@@ -338,6 +339,9 @@ _DANGEROUS = frozenset({
     # shape of decision -- it widens what every later privileged call is
     # allowed to do -- so it gets the same treatment.
     "runtime_policy_update", "permission_rule_set", "elevate", "cloud_opt_in",
+    # A one-shot approval is authority another caller spends later; issuing
+    # one is graded with the rule-writing tool it stands beside.
+    "permission_approve",
     # Fast-forwarding the source tree changes the bytes enforcing every later
     # request.  The paired status tool is separately marked read-only below.
     "runtime_source_update",
@@ -378,6 +382,7 @@ _READ_ONLY = frozenset({
     "memory_export", "policy_explain",
     "runtime_source_update_status",
     "runtime_source_stash_status",
+    "permission_approvals",
 })
 
 # Branches whose real work is done by module-level functions that front no
