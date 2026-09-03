@@ -2017,7 +2017,8 @@ class _AssistantContent extends StatelessWidget {
 
   static _ParsedActivity _parseActivityBlock(String raw) {
     if (raw.isEmpty) return const _ParsedActivity([], {});
-    final calls = <_ToolCall>[];
+    final actions = <_ToolCall>[];
+    final timedEvents = <_ToolCall>[];
     final stats = <String, int>{};
     for (final line in raw.split('\n')) {
       final trimmed = line.trim();
@@ -2045,14 +2046,14 @@ class _AssistantContent extends StatelessWidget {
         }
       } else if (trimmed.startsWith('• ') || trimmed.startsWith('× ')) {
         final ok = trimmed.startsWith('•');
-        calls.add(_ToolCall(title: trimmed.substring(2).trim(), ok: ok));
+        actions.add(_ToolCall(title: trimmed.substring(2).trim(), ok: ok));
       } else if (trimmed.startsWith('+') && trimmed.contains('ms ')) {
         final parts = trimmed.split(RegExp(r'\s+'));
         if (parts.length >= 3 && parts[1] == 'tool_call') {
           final elapsed = int.tryParse(
             parts[0].replaceAll('+', '').replaceAll('ms', ''),
           );
-          calls.add(_ToolCall(
+          timedEvents.add(_ToolCall(
             title: parts.sublist(2).join(' '),
             ok: true,
             elapsedMs: elapsed,
@@ -2060,7 +2061,23 @@ class _AssistantContent extends StatelessWidget {
         }
       }
     }
-    return _ParsedActivity(calls, stats);
+    if (actions.isNotEmpty) {
+      final merged = <_ToolCall>[];
+      var ti = 0;
+      for (final action in actions) {
+        final elapsed = ti < timedEvents.length
+            ? timedEvents[ti].elapsedMs
+            : null;
+        merged.add(_ToolCall(
+          title: action.title,
+          ok: action.ok,
+          elapsedMs: elapsed,
+        ));
+        ti++;
+      }
+      return _ParsedActivity(merged, stats);
+    }
+    return _ParsedActivity(timedEvents, stats);
   }
 }
 
