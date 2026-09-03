@@ -333,6 +333,7 @@ from sonder_runtime.adapters.bounded_cloud_generation import (
     CLOUD_AGENT_OUTPUT_BUDGET as _CLOUD_AGENT_OUTPUT_BUDGET,
     bounded_cloud_generate as _bounded_cloud_agent_generate,
 )
+from sonder_runtime.adapters.fanout_health import record_health as _fanout_health_policy
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -23285,61 +23286,8 @@ def _fanout_synthesis_generate(model, source_bundle):
 
 
 def _fanout_health(model, exc, prompt):
-    """Record advisory model health and cool down repeatable model failures.
-
-    A fanout is explicitly opt-in, but repeating a target that just timed out,
-    vanished, or returned malformed output makes the next "all models" request
-    slower without adding an answer.  Keep caller/prompt failures eligible: a
-    bad request is not evidence that the local model is unhealthy.  Cloud
-    cooldowns preserve provider retry hints; local failures use a short fixed
-    cooldown because there is no upstream throttle contract to honor.
-    """
-    if exc is None:
-        fanout_store.record_model_health(model, model_class="cloud" if _is_cloud_model_name(model) else "local", success=True)
-        return
-    disabled_until = None
-    availability_failure = False
-    if isinstance(exc, ModelCallError):
-        if _is_cloud_model_name(model) and exc.status in (402, 404, 410):
-            disabled_until = time.time() + 3600
-        elif _is_cloud_model_name(model) and exc.status == 429:
-            disabled_until = time.time() + (exc.retry_after_seconds or 60)
-        elif (
-            _is_cloud_model_name(model)
-            and exc.retry_after_seconds is not None
-            and (exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"})
-        ):
-            # Providers can throttle or shed load with transient statuses other
-            # than 429 (for example 503).  An explicit Retry-After remains
-            # authoritative for every transient cloud failure, not just 429.
-            disabled_until = time.time() + exc.retry_after_seconds
-        elif exc.status in (404, 410):
-            # The tag disappeared from Ollama after the immutable run snapshot
-            # was created. Avoid rediscovering and failing it on every fanout.
-            disabled_until = time.time() + 3600
-            availability_failure = True
-        elif exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
-            # These identify the model/daemon response path, not the prompt.
-            # Back off repeated availability failures instead of making every
-            # frequent all-model request re-probe the same unhealthy local or
-            # cloud target.  A cloud provider's explicit 429 Retry-After above
-            # remains authoritative; this covers unavailable providers that
-            # offer no retry contract.
-            # Cap at an hour so recovery remains automatic without operator
-            # intervention. A successful model call resets the stored count.
-            previous = fanout_store.get_model_health(model)
-            try:
-                failure_count = max(0, int((previous or {}).get("availability_failure_count", 0))) + 1
-            except (TypeError, ValueError):
-                failure_count = 1
-            delay_seconds = min(3600, 300 * (2 ** min(4, failure_count - 1)))
-            disabled_until = time.time() + delay_seconds
-            availability_failure = True
-    fanout_store.record_model_health(
-        model, model_class="cloud" if _is_cloud_model_name(model) else "local",
-        error=_fanout_safe_error(exc, prompt), disabled_until=disabled_until,
-        counts_toward_backoff=availability_failure,
-    )
+    """Record advisory model health and cool down repeatable model failures."""
+    return _fanout_health_policy(model, exc, prompt, is_cloud_model_name=_is_cloud_model_name)
 
 
 def _execute_fanout_run(run_id):
