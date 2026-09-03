@@ -359,6 +359,7 @@ from sonder_runtime.adapters.cloud_fallback import (
     chat_request_with_cloud_fallback as _chat_request_with_cloud_fallback_policy,
     extra_usage_fallback as _extra_usage_fallback_policy,
 )
+from sonder_runtime.domain.fanout_residency import dispatch_residency_reason as _dispatch_residency_reason_policy
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -22339,29 +22340,10 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
 
 
 def _fanout_dispatch_residency_reason(limits, model):
-    """Return a no-load fence refusal for a selected resident-only target.
-
-    A durable fanout may wait in the queue or be explicitly resumed long after
-    planning.  Its original ``/api/ps`` snapshot therefore cannot authorize a
-    later model load.  Recheck immediately before the provider closure exists;
-    a missing or unavailable row is a skipped receipt, never a fallback load.
-    """
-    if limits.get("selection_profile") != "loaded-local-chat":
-        return ""
-    try:
-        payload = _get("/api/ps")
-        rows = payload.get("models", []) if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise ValueError("invalid Ollama /api/ps response")
-        resident = {
-            str(row.get("name") or "").strip().casefold()
-            for row in rows if isinstance(row, dict) and str(row.get("name") or "").strip()
-        }
-    except Exception:
-        return "could not verify model residency at dispatch"
-    if str(model or "").strip().casefold() not in resident:
-        return "model is no longer resident at dispatch"
-    return ""
+    """Return a no-load fence refusal for a selected resident-only target."""
+    return _dispatch_residency_reason_policy(
+        limits, model, fetch_resident=lambda: _get("/api/ps"),
+    )
 
 
 def _fanout_snapshot_allows(run, model):
