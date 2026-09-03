@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0B1117; }
+    a { color: #63D6C8; } a:hover { color: #8EE4D9; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px; line-height: 20px; color: #E7EDF2; }
+    .row { display: flex; align-items: baseline; white-space: pre; }
+    .g { display: inline-block; width: 24px; flex: 0 0 24px; }
+    .m { color: #6F7E8A; } .m2 { color: #A5B2BD; } .k { color: #63D6C8; } .b { font-weight: 600; }
+  </style>
+</helmet>
+<div style="width: 1000px; height: 300px; box-sizing: border-box; background: #0B1117; display: flex; overflow: hidden;">
+  <div class="t" style="flex: 1; padding: 16px 18px; display: flex; flex-direction: column; border-right: 1px solid #1F2C36;">
+    <div class="row" style="margin-bottom: 8px;"><span class="m">interactive · a turn in flight</span></div>
+    <div class="row" style="margin-bottom: 8px;"><span class="k b g">❯</span><span>summarise the surface sweep findings</span></div>
+    <div class="row"><span class="m">◈ Sonder is wo</span><span class="b" style="color: #7FB8F0;">r</span><span class="m">king...</span></div>
+    <div class="row"><span class="m">  one highlight crosses the line; nothing here counts up or claims a percentage</span></div>
+    <div style="flex: 1;"></div>
+    <div class="row"><span class="m">plain colour off (NO_COLOR, or no colour support):</span></div>
+    <div class="row"><span class="m2">◈ Sonder is working...</span></div>
+  </div>
+  <div class="t" style="flex: 1; padding: 16px 18px; display: flex; flex-direction: column;">
+    <div class="row" style="margin-bottom: 8px;"><span class="m">piped · echo /stats | sonder</span></div>
+    <div class="row"><span class="m2">turns 14 · tools 38 · cache hits 9 · model qwen2.5-coder:7b</span></div>
+    <div class="row"><span class="m">[Sonder completed in 1.00s]</span></div>
+    <div class="row" style="margin-top: 10px;"><span class="m">no chrome, no colour, no hints: the answer, then one timing line,</span></div>
+    <div class="row"><span class="m">byte for byte what scripts have always read</span></div>
+    <div style="flex: 1;"></div>
+    <div class="row"><span class="m">SONDER_REPL_NDJSON=1 instead:</span></div>
+    <div class="row"><span class="m2">{"answer":"…","elapsed_ms":1000,"error":false,"schema":"sonder.repl-turn.v1"}</span></div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

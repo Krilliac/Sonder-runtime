@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0B1117; }
+    a { color: #63D6C8; } a:hover { color: #8EE4D9; }
+    .s { font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; color: #E7EDF2; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; color: #A5B2BD; font-size: 12px; line-height: 18px; }
+    .h { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #6F7E8A; }
+    .sw { display: flex; flex-direction: column; gap: 6px; }
+    .chip { height: 44px; border-radius: 8px; border: 1px solid #1F2C36; }
+  </style>
+</helmet>
+<div style="width: 1000px; height: 760px; box-sizing: border-box; background: #0B1117; padding: 28px 32px; display: flex; flex-direction: column; gap: 22px; overflow: hidden;">
+  <div style="display: flex; align-items: baseline; gap: 14px;">
+    <div class="s" style="font-size: 20px; font-weight: 600;">Sonder tokens · quiet instrument</div>
+    <div class="t">dark first · light mirrored · one accent · hairlines, not cards</div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px;">
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div class="s h">Surfaces · dark</div>
+      <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px;">
+        <div class="sw"><div class="chip" style="background: #0B1117;"></div><div class="t">canvas<br>#0B1117</div></div>
+        <div class="sw"><div class="chip" style="background: #0F171E;"></div><div class="t">panel<br>#0F171E</div></div>
+        <div class="sw"><div class="chip" style="background: #141F28;"></div><div class="t">raised<br>#141F28</div></div>
+        <div class="sw"><div class="chip" style="background: #1F2C36;"></div><div class="t">hairline<br>#1F2C36</div></div>
+        <div class="sw"><div class="chip" style="background: #2A3944;"></div><div class="t">hairline+<br>#2A3944</div></div>
+      </div>
+      <div class="s h" style="margin-top: 6px;">Text · dark</div>
+      <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px;">
+        <div class="sw"><div class="chip" style="background: #E7EDF2;"></div><div class="t">text<br>#E7EDF2</div></div>
+        <div class="sw"><div class="chip" style="background: #A5B2BD;"></div><div class="t">text-2<br>#A5B2BD</div></div>
+        <div class="sw"><div class="chip" style="background: #6F7E8A;"></div><div class="t">muted<br>#6F7E8A</div></div>
+        <div class="sw"><div class="chip" style="background: #63D6C8;"></div><div class="t">accent<br>#63D6C8</div></div>
+        <div class="sw"><div class="chip" style="background: rgba(99,214,200,0.14); border-color: rgba(99,214,200,0.35);"></div><div class="t">accent-dim<br>14% tint</div></div>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div class="s h">Surfaces · light</div>
+      <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px;">
+        <div class="sw"><div class="chip" style="background: #F4F7F8;"></div><div class="t">canvas<br>#F4F7F8</div></div>
+        <div class="sw"><div class="chip" style="background: #FFFFFF;"></div><div class="t">panel<br>#FFFFFF</div></div>
+        <div class="sw"><div class="chip" style="background: #EEF3F4;"></div><div class="t">raised<br>#EEF3F4</div></div>
+        <div class="sw"><div class="chip" style="background: #DCE5E8;"></div><div class="t">hairline<br>#DCE5E8</div></div>
+        <div class="sw"><div class="chip" style="background: #C7D3D8;"></div><div class="t">hairline+<br>#C7D3D8</div></div>
+      </div>
+      <div class="s h" style="margin-top: 6px;">Text · light</div>
+      <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px;">
+        <div class="sw"><div class="chip" style="background: #0F1A21;"></div><div class="t">text<br>#0F1A21</div></div>
+        <div class="sw"><div class="chip" style="background: #42525C;"></div><div class="t">text-2<br>#42525C</div></div>
+        <div class="sw"><div class="chip" style="background: #5F6F7A;"></div><div class="t">muted<br>#5F6F7A</div></div>
+        <div class="sw"><div class="chip" style="background: #1FA597;"></div><div class="t">accent<br>#1FA597</div></div>
+        <div class="sw"><div class="chip" style="background: rgba(31,165,151,0.12); border-color: rgba(31,165,151,0.35);"></div><div class="t">accent-dim<br>12% tint</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px;">
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div class="s h">Semantic · risk and mode, dark / light (never by colour alone)</div>
+      <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px;">
+        <div class="sw"><div class="chip" style="background: #79D394;"></div><div class="t">ok · plan<br>#79D394 / #2E8B57</div></div>
+        <div class="sw"><div class="chip" style="background: #7FB8F0;"></div><div class="t">info · manual<br>#7FB8F0 / #2F6FB3</div></div>
+        <div class="sw"><div class="chip" style="background: #F0C36A;"></div><div class="t">warn · ask<br>#F0C36A / #946000</div></div>
+        <div class="sw"><div class="chip" style="background: #F27B7B;"></div><div class="t">danger<br>#F27B7B / #C93C3C</div></div>
+        <div class="sw"><div class="chip" style="background: #D89CF6;"></div><div class="t">auto<br>#D89CF6 / #7A4BB5</div></div>
+      </div>
+      <div class="t" style="margin-top: 4px;">acceptEdits shares warn · mutation #F0A070 · execution #C9A58E · unclassified stays outline · ink on the accent is #062A27 in both themes</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div class="s h">Type · IBM Plex Sans + IBM Plex Mono</div>
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <div class="s" style="font-size: 22px; font-weight: 600; line-height: 28px;">Title 22 / 600 · screen titles</div>
+        <div class="s" style="font-size: 16px; font-weight: 500; line-height: 24px; color: #E7EDF2;">Heading 16 / 500 · section labels, thread titles</div>
+        <div class="s" style="font-size: 14px; line-height: 22px; color: #E7EDF2;">Body 14 / 400 · assistant prose, settings copy, reading column 66ch</div>
+        <div class="s" style="font-size: 12px; font-weight: 500; line-height: 16px; color: #6F7E8A; letter-spacing: 0.08em; text-transform: uppercase;">Label 12 / 500 / +8% tracking</div>
+        <div class="t" style="color: #E7EDF2; font-size: 13px; line-height: 20px;">Mono 13 / 20 · terminal, code, status figures with tabular numerals 12,480 / 32,768</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px;">
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="s h">Radius · 4 / 8 / 12 / 999</div>
+      <div style="display: flex; gap: 10px; align-items: flex-end;">
+        <div style="width: 56px; height: 36px; border-radius: 4px; border: 1px solid #2A3944; background: #141F28;"></div>
+        <div style="width: 56px; height: 36px; border-radius: 8px; border: 1px solid #2A3944; background: #141F28;"></div>
+        <div style="width: 56px; height: 36px; border-radius: 12px; border: 1px solid #2A3944; background: #141F28;"></div>
+        <div style="width: 84px; height: 28px; border-radius: 999px; border: 1px solid #2A3944; background: #141F28;"></div>
+      </div>
+      <div class="t">controls 4 · rows and code 8 · sheets 12 · chips and composer pill</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="s h">Spacing · 4 / 8 / 12 / 16 / 24 / 32</div>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <div style="width: 4px; height: 20px; background: #63D6C8;"></div>
+        <div style="width: 8px; height: 20px; background: #63D6C8;"></div>
+        <div style="width: 12px; height: 20px; background: #63D6C8;"></div>
+        <div style="width: 16px; height: 20px; background: #63D6C8;"></div>
+        <div style="width: 24px; height: 20px; background: #63D6C8;"></div>
+        <div style="width: 32px; height: 20px; background: #63D6C8;"></div>
+      </div>
+      <div class="t">controls 32 / 36 tall · rows 40 · header 44 · status bar 28</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="s h">Glyph gutter · 24px column</div>
+      <div class="t" style="color: #E7EDF2; font-size: 13px; line-height: 20px; white-space: pre;"><span style="color: #63D6C8; font-weight: 600;">❯</span> you      <span style="color: #63D6C8; font-weight: 600;">◈</span> sonder      <span style="color: #6F7E8A;">▸</span> tool
+<span style="color: #F27B7B; font-weight: 600;">⊘</span> refused  <span style="color: #79D394; font-weight: 600;">✓</span> approved    <span style="color: #F0C36A;">!</span> needs you</div>
+      <div class="t">ASCII fallback: &gt; * - x + ! when the console cannot encode them</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

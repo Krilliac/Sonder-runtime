@@ -12,10 +12,17 @@ the verified local `--url` and configured identity rather than re-resolving a
 mutable default at launch time.
 
 The local permission default is `ask`, but metadata is not the authorization
-boundary. Every call must also provide a valid developer token, the secret from
-`SONDER_ISOLATED_APPROVAL_CODE`, and `acknowledge_isolation_limits=true`.
-Writable execution additionally requires the distinct secret configured in
-`SONDER_ISOLATED_WRITE_APPROVAL_CODE`. The tool is deliberately absent from the
+boundary. Every call must also provide a valid developer token and
+`acknowledge_isolation_limits=true`. Writable execution additionally needs a
+person to have approved exactly that call once: the refusal names the call id,
+`/approve <call id>` at the console (or `permission_approve` with a developer
+token) approves it, and the next unchanged call spends the approval, whichever
+surface makes it and whatever the mode. The shared secrets that used to unlock
+the tool, `SONDER_ISOLATED_APPROVAL_CODE` and
+`SONDER_ISOLATED_WRITE_APPROVAL_CODE`, are retired: setting either logs one
+warning and grants nothing, because a static secret carried in a model-visible
+argument is reusable by whatever learns it and leaves no record of who let a
+host directory be written. The tool is deliberately absent from the
 Sonder agent, project-agent, workbench, and autopilot tool lists. This preserves
 a host decision boundary for the only integrity-expanding option:
 `writable_workspace=true`. The exact absolute project directory is the only host

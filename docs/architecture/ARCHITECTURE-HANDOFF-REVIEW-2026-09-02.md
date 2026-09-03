@@ -940,8 +940,9 @@ Not done, deliberately:
 - `eval_solver.py`, `eval_duel.py` and `eval_retrieval.py` do not share the
   harness today, so they did not gain the history flag through it; wiring
   them through `eval_harness` is its own change.
-- `SONDER_ISOLATED_APPROVAL_CODE` has the same shape as the retired file
-  approval code and is left for its own change;
+- `SONDER_ISOLATED_APPROVAL_CODE` and `SONDER_ISOLATED_WRITE_APPROVAL_CODE`
+  followed the file code on 2026-09-03: retired, warn once, grant nothing; a
+  writable isolated workspace needs a one-shot approval of exactly that call;
   `ResourcePolicy.Decision.ALLOW_ONCE` is still unused; the compute job
   worker is not fenced (its claim is the job record and cancellation already
   reaches the process; the permission gate decides nothing there).

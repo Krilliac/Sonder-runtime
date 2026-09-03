@@ -49,7 +49,10 @@ of the model — an uncensored or "abliterated" model changes what it will
   the reach the operator approved: the call's own `extra_roots` are honoured
   for that call alone, with containment still checked against them. The
   shared `SONDER_FILE_APPROVAL_CODE` is retired (it warns once when set); a
-  model's string `token` or `approval` is dropped from every agent proposal.
+  model's string `token` or `approval` is dropped from every agent proposal. The isolated-run secrets
+  (`SONDER_ISOLATED_APPROVAL_CODE`, `SONDER_ISOLATED_WRITE_APPROVAL_CODE`) are
+  retired the same way; a writable isolated workspace needs a one-shot approval
+  of exactly that call.
 - **A worker whose lease is gone may look but not touch.** The autopilot
   controller installs an effect fence for each task
   (`sonder_runtime/adapters/execution/effect_fence.py`); the permission gate

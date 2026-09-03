@@ -187,8 +187,20 @@ class SubprocessJobProvider:
             if self._platform == "posix":
                 process_group_id = process_id
             process_instance_identity = self._process_identity_resolver(process_id)
+            exited_before_fingerprint = False
             if request.deadline_seconds is not None and not process_instance_identity:
-                raise RuntimeError("deadline jobs require a durable process identity")
+                # A live process without a durable identity is refused: a
+                # deadline that fired later could kill whatever recycled its
+                # pid. A child that has already exited (a zombie by the time
+                # the probe reads it, or reaped by a wrapper) is different:
+                # there is nothing left for the deadline to enforce, and its
+                # exit code and output are still the job's result. Refusing
+                # it reported a finished job as a failed launch.
+                poll = getattr(process, "poll", None)
+                if not callable(poll) or poll() is None:
+                    raise RuntimeError("deadline jobs require a durable process identity")
+                exited_before_fingerprint = True
+                process_instance_identity = ""
             if prepared_scope is not None and prepared_scope.post_attach_required:
                 if not callable(apply_process_limits):
                     raise RuntimeError("post-create process containment is not configured")
@@ -219,6 +231,9 @@ class SubprocessJobProvider:
                 metadata={
                     "launch_state": "attached",
                     "process_instance_identity": process_instance_identity,
+                    "process_exited_before_fingerprint": (
+                        "1" if exited_before_fingerprint else "0"
+                    ),
                 },
             )
             if (
