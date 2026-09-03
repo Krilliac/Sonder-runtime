@@ -364,6 +364,9 @@ from sonder_runtime.adapters.session_turn_claims import (
     acquire_session_turn as _acquire_session_turn_policy,
     release_session_turn_claim as _release_session_turn_claim_policy,
 )
+from sonder_runtime.adapters.code_repair_persistence import (
+    persist_verified_code_repair as _persist_verified_code_repair_policy,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -3893,44 +3896,9 @@ def _persist_verified_code_repair(
     interaction_id, expected, repaired_response, repair_usage,
 ):
     """Replace a captured broken response only while its learning state is unchanged."""
-    if not interaction_id or not expected or not isinstance(repair_usage, dict):
-        return False
-    try:
-        repair_tokens_in = int(repair_usage["tokens_in"])
-        repair_tokens_out = int(repair_usage["tokens_out"])
-        original_tokens_in = int(expected.get("tokens_in") or 0)
-        original_tokens_out = int(expected.get("tokens_out") or 0)
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return False
-    if min(
-        repair_tokens_in, repair_tokens_out,
-        original_tokens_in, original_tokens_out,
-    ) < 0:
-        return False
-    original_source = str(expected.get("token_source") or "").strip().lower()
-    repair_source = str(repair_usage.get("token_source") or "").strip().lower()
-    if original_source == repair_source == "ollama":
-        token_source = "ollama+code-repair"
-    elif original_source == repair_source == "estimated":
-        token_source = "estimated+code-repair"
-    else:
-        token_source = "mixed+code-repair"
-    try:
-        conn = _open_db()
-        try:
-            return memory_store.replace_interaction_response_cas(
-                conn,
-                interaction_id,
-                expected=expected,
-                response=repaired_response,
-                tokens_in=original_tokens_in + repair_tokens_in,
-                tokens_out=original_tokens_out + repair_tokens_out,
-                token_source=token_source,
-            )
-        finally:
-            conn.close()
-    except Exception:
-        return False
+    return _persist_verified_code_repair_policy(
+        interaction_id, expected, repaired_response, repair_usage, open_db=_open_db,
+    )
 
 
 def _apply_code_gate(reply, interaction_id=None, regenerate=None):
