@@ -265,6 +265,12 @@ from sonder_runtime.domain.agents.verification_reach import (
     VERIFICATION_TOOLS as _AGENT_VERIFICATION_TOOLS,
     verifier_reachable as _verifier_reachable_policy,
 )
+from sonder_runtime.domain.agents.activity_command import (
+    activity_argv as _activity_argv,
+    activity_command as _agent_activity_command,
+    agent_argv as _agent_argv,
+    batch_operations as _batch_agent_operations,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -18333,79 +18339,6 @@ def _agent_dispatch(
     return "ERROR: unknown tool '%s'." % tool_name
 
 
-def _activity_argv(value):
-    """Normalize JSON-encoded argv before the activity renderer sees it.
-
-    ``workspace_run`` and ``script_run`` accept ``args_json`` as a string.
-    Serializing that string again would turn a secret-bearing argv into a
-    JSON string literal, preventing the activity redactor from recognizing
-    flag/value pairs as separate argv items.
-    """
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except (TypeError, ValueError, RecursionError):
-            decoded = value
-        if isinstance(decoded, list):
-            try:
-                # json.loads can accept a nesting depth that json.dumps cannot
-                # serialize on the activity path.  Keep the original text so
-                # recording the failed tool call never raises from finally.
-                json.dumps(decoded, ensure_ascii=False)
-            except (TypeError, ValueError, RecursionError):
-                return value
-            return decoded
-    return value
-
-
-def _agent_activity_command(tool_name, args):
-    args = args if isinstance(args, dict) else {}
-    if tool_name == "file_batch_write":
-        operations = _batch_agent_operations(args) or []
-        return json.dumps(
-            [item.get("path", "") for item in operations if isinstance(item, dict)],
-            ensure_ascii=False,
-        )
-    if tool_name == "workspace_compare":
-        return "%s | %s" % (args.get("left", ""), args.get("right", ""))
-    if tool_name == "data_convert":
-        return "%s -> %s" % (
-            args.get("input_path", ""), args.get("output_path", ""),
-        )
-    if tool_name == "workspace_run":
-        return "%s %s" % (
-            args.get("program", ""),
-            json.dumps(
-                _activity_argv(args.get("args_json", args.get("args", []))),
-                ensure_ascii=False,
-            ),
-        )
-    if tool_name == "script_run":
-        return "%s %s" % (
-            args.get("path", ""),
-            json.dumps(
-                _activity_argv(args.get("args_json", args.get("args", []))),
-                ensure_ascii=False,
-            ),
-        )
-    if tool_name in {"file_copy", "file_move"}:
-        return "%s -> %s" % (
-            args.get("source", ""), args.get("destination", ""),
-        )
-    if tool_name == "local_service_probe":
-        return "%s %s" % (
-            str(args.get("method", "GET")).upper(), args.get("url", ""),
-        )
-    if tool_name == "process_memory_risk_inspect":
-        return "pid=%s" % args.get("pid", "")
-    if tool_name == "process_list":
-        return "max_processes=%s" % args.get("max_processes", 128)
-    path = args.get("path") or args.get("root") or ""
-    if path:
-        return str(path)
-    if args.get("query"):
-        return "query=%s" % args["query"]
-    return ""
 
 
 _PROJECT_SCOPED_PATH_TOOLS = frozenset({
@@ -18600,15 +18533,6 @@ def _project_scoped_path_key(tool_name):
         return "root"
     return "path"
 
-
-def _batch_agent_operations(args):
-    value = args.get("operations_json", args.get("operations", []))
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except (TypeError, ValueError):
-            return None
-    return value if isinstance(value, list) else None
 
 
 def _project_scope_args(tool_name, args, project):
@@ -19408,15 +19332,6 @@ def _agent_path_within(path, root):
     except (OSError, ValueError):
         return False
 
-
-def _agent_argv(args):
-    argv = args.get("args_json", args.get("args", []))
-    if isinstance(argv, str):
-        try:
-            argv = json.loads(argv)
-        except (TypeError, ValueError):
-            argv = [argv]
-    return [str(item) for item in (argv or [])]
 
 
 def _agent_explicit_command_paths(argv, cwd):
