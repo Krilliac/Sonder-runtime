@@ -465,6 +465,21 @@ from sonder_runtime.domain.cloud_thinking_budget import (
 from sonder_runtime.domain.request_timeout import (
     bound_request_timeout as _bound_request_timeout,
 )
+from sonder_runtime.domain.runtime_update_parsing import (
+    parse_update_object as _runtime_update_object,
+)
+from sonder_runtime.domain.execution_route_formatting import (
+    execution_route_header as _execution_route_header_impl,
+)
+from sonder_runtime.domain.agent_observation_quality import (
+    observation_ok as _agent_observation_ok,
+)
+from sonder_runtime.domain.agent_path_keys import (
+    created_path_key as _agent_created_path_key,
+)
+from sonder_runtime.domain.agent_escalation_identity import (
+    escalation_key as _agent_escalation_key,
+)
 import sonder_speculation
 import consult as consult_flow
 import code_improve
@@ -18490,19 +18505,6 @@ def _agent_end_report_standing_line():
     )
 
 
-def _agent_observation_ok(observation):
-    text = str(observation or "")
-    lowered = text.lower()
-    first = next((line.strip().lower() for line in text.splitlines() if line.strip()), "")
-    return not (
-        text.startswith("ERROR:")
-        or "  ok: false" in lowered
-        or first.endswith(": fail")
-        or first.startswith("validation_failed")
-        or "[fail]" in lowered
-    )
-
-
 def _agent_tool_observation_ok(tool_name, observation):
     """Apply evidence-quality checks that are specific to a tool contract."""
     return _tool_observation_ok_policy(
@@ -18512,15 +18514,6 @@ def _agent_tool_observation_ok(tool_name, observation):
 
 
 
-def _agent_created_path_key(path):
-    """One canonical key per on-disk target for the run-created-paths ledger.
-
-    Case-folded and separator-normalized so "src\\a.h", "src/a.h" and
-    "SRC/a.h" all name the same file on Windows. Not resolved against the
-    CWD: the host-confined view from _project_scope_args is already the
-    consistent form both the create and the retry present.
-    """
-    return os.path.normcase(os.path.normpath(str(path or "")))
 
 
 def _agent_call_signature(tool_name, args):
@@ -18699,11 +18692,6 @@ def _agent_checklist_fail(checklist_id, states, reason, item=1):
 
 _AGENT_MODEL_FAILURE = threading.local()
 
-
-def _agent_escalation_key(tier, prompt):
-    """Identity of one agent run for the failure note: its tier and prompt."""
-    digest = hashlib.sha256(str(prompt or "").encode("utf-8", "replace")).hexdigest()[:16]
-    return "%s:%s" % (str(tier or "").strip().lower(), digest)
 
 
 def _note_agent_model_failure(reason, *, key, step, detail="", vacuous=False):
@@ -20935,26 +20923,10 @@ def _execution_route_header(
     confidence=None,
     tier: str = "",
 ) -> str:
-    labels = {
-        "workbench": "foreground workbench",
-        "autopilot": "persistent Autopilot",
-        "fleet": "hardware-bounded fleet",
-        "deferred": "Autopilot deferred",
-    }
-    lines = [
-        "sonder execution decision",
-        "  mode: %s" % labels.get(mode, mode),
-        "  source: %s" % source,
-        "  reason: %s" % reason,
-    ]
-    if tier in runtime_policy.LOCAL_TIERS:
-        lines.append("  tier: %s -> %s" % (tier, TIERS.get(tier, "(unmapped)")))
-    if confidence is not None:
-        lines.append("  confidence: %.0f%%" % (float(confidence) * 100.0))
-    lines.append(
-        "  boundary: local tiers and existing host permissions, roots, and budgets"
+    return _execution_route_header_impl(
+        mode, source, reason, confidence, tier,
+        tiers_map=TIERS, local_tiers=runtime_policy.LOCAL_TIERS,
     )
-    return "\n".join(lines)
 
 
 def _capability_refined_tier(
@@ -21328,21 +21300,6 @@ def npu_status(probe: bool = False) -> str:
             "  boundary: NPU failure falls back to existing local behavior; "
             "cloud is never a fallback"
         )
-
-
-def _runtime_update_object(value, label):
-    if value in (None, ""):
-        return {}
-    if isinstance(value, dict):
-        payload = value
-    else:
-        try:
-            payload = json.loads(str(value))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("%s must be a JSON object: %s" % (label, exc))
-    if not isinstance(payload, dict):
-        raise ValueError("%s must be a JSON object" % label)
-    return payload
 
 
 @mcp.tool()
