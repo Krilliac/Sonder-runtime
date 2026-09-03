@@ -311,6 +311,7 @@ from sonder_runtime.domain.serve_selection import (
     allow_cloud_fallback_for_target as _allow_cloud_fallback_for_target,
     explicit_serve_selection as _explicit_serve_selection,
 )
+from sonder_runtime.domain.context.compaction_plan_formatting import format_context_compaction_plan
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -7903,29 +7904,6 @@ def context_compaction_plan_data(session: str = "", project: str = "") -> dict:
         })
     return {"context": data, "actions": actions}
 
-
-def format_context_compaction_plan(plan: dict) -> str:
-    ctx = plan.get("context", {})
-    lines = [
-        "sonder context compaction plan",
-        "  session: %s" % ctx.get("session", "none"),
-        "  context: %s%%  ~%s/%s tokens (%s mode)" % (
-            ctx.get("context_percent", 0),
-            ctx.get("estimated_tokens", 0),
-            ctx.get("context_limit", 0),
-            ctx.get("context_mode", "native"),
-        ),
-        "  live turns: %s/%s | summary: ~%s tokens" % (
-            ctx.get("live_turns", 0),
-            ctx.get("max_live_turns", 0),
-            ctx.get("summary_tokens", 0),
-        ),
-        "  recommended actions:",
-    ]
-    for item in plan.get("actions", []):
-        lines.append("    [%s] %s" % (item.get("priority", "info"), item.get("action", "")))
-        lines.append("        -> %s" % item.get("reason", ""))
-    return "\n".join(lines)
 
 
 @mcp.tool()
