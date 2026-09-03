@@ -273,3 +273,4 @@ capture, and distillation always stay on the runtime host.
 | Recall/lessons never fire | `/runtime` | Bind an embedding model; then `/embeddings apply` to refresh stored vectors. |
 | A tier is missing from `/model` | `/runtime` | It is unbound (optional tier) or withheld (cloud without opt-in). |
 | Answers are weak, not broken | `/model` | Model capability, not configuration — see [Model Catalog](18-model-catalog.md). |
+| Agent steps fail with "timed out" on a large CPU-only model | `ollama ps` (no GPU offload) | Each model call is bounded by `SONDER_TIMEOUT` (300 s by default); a 14B on CPU needs minutes per agent step, so raise it or bind a smaller tier. Measured in `../architecture/evidence/MODEL-TRIALS-2026-09-03.md`. |

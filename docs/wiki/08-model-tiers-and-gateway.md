@@ -56,6 +56,43 @@ refuses non-local work unless the caller explicitly supplies cloud consent.
 The scheduler does not move payloads or claim that a provider is installed;
 the owning gateway still performs the actual local capability check.
 
+## Automatic escalation (default route)
+
+The default route escalates on its own, bounded, and only upward. When a
+chat turn (the MCP/REPL tool or the served `model: sonder`) or a workbench
+agent run started on the default route fails on its first model, the runtime
+reruns it on the next *distinct* bound local model of the capability
+router's ladder for that task class, at most `MAX_ESCALATIONS` (2) times,
+the same ceiling the model-gateway escalation policy enforces. The planning
+lives in `sonder_runtime/application/routing/tier_escalation.py`; the loops
+are in `_sonder_impl_serialized`, `_answer_with_history_impl` and
+`_workbench_agent_escalating` (`server.py`).
+
+What counts as a failure is objective: a transport failure that is not a
+cancellation or an exhausted budget, an empty answer, or (for the agent) a
+model that could not produce a parseable tool decision after the format
+repairs. A satisfied answer never spends a stronger model; a finished agent
+run stands however it judged its own work. An empty attempt's captured
+interaction is discarded so it never reaches lessons.
+
+The rungs are distinct by model: two tiers bound to the same alias are one
+rung, so with every tier on one model (the default policy) the plan is a
+single rung and behaviour is exactly what it was. Escalation only moves up
+by role (`fast` is never a rung after a `code` start; `reasoning` sits above
+the working tiers), the vision tier is only a rung for a request carrying an
+image, and cloud tiers are never rungs, so the privacy contract of the
+default route is unchanged. A reasoning-class prompt starts on a bound
+`reasoning` tier when it resolves to a different model, keeping the default
+route as its fall-back. The default route's augmentation (facts, lessons,
+recall) travels with the prompt to every rung.
+
+An explicit tier, an exact model pin, or any explicit OpenAI `model` field is
+a routing contract and never moves. Each escalation is recorded on the
+activity record as a `model_escalation` event (`chat: sonder (a) -> general
+(b): failed`), the served receipt names the target that answered, and an
+escalated agent output carries a `model escalation:` line.
+`SONDER_MODEL_ESCALATION=0` turns the behaviour off.
+
 ## Routing lanes (runtime policy)
 
 The hot-reloadable `runtime_policy.json` maps **lanes** to tiers:
