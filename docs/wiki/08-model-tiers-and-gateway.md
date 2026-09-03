@@ -69,7 +69,9 @@ are in `_sonder_impl_serialized`, `_answer_with_history_impl` and
 `_workbench_agent_escalating` (`server.py`).
 
 What counts as a failure is objective: a transport failure that is not a
-cancellation or an exhausted budget, an empty answer, or (for the agent) a
+cancellation or an exhausted budget, an empty answer, runnable Python in a
+chat answer that still fails the execution-grounded code gate after its
+repair round-trip (the one verifier a chat answer has), or (for the agent) a
 model that could not produce a parseable tool decision after the format
 repairs, or a completion claim that changed nothing and ran no validation
 on a request that asked for a change or a check (decided from the request's

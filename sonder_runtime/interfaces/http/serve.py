@@ -2736,6 +2736,19 @@ def _handle_intent(content, messages=None, state=None):
     return "\n".join(replies)
 
 
+def _work_project_for_request(project, storage_project):
+    """The project routed natural work runs under for one served request.
+
+    Durable state stays namespaced per principal (``storage_project``); the
+    workbench agent needs a directory. A client value that names an existing
+    directory inside the configured file roots is passed through as that
+    directory, which scopes the agent without widening its reach (measured
+    2026-09-03: an agent with no scope resolved the client's relative paths
+    against the package directory). Anything else keeps the namespaced id.
+    """
+    return server.served_work_project(project) or storage_project
+
+
 def _handle_work_intent(content, project="", authorized=False, context=None,
                         idempotency_key=""):
     """Route developer work through the bounded execution-mode chooser."""
@@ -5502,7 +5515,7 @@ class Handler(BaseHTTPRequestHandler):
                     if structured_schema is None and allow_control_routes and reply is None:
                         reply = _handle_work_intent(
                             prompt,
-                            project=storage_project,
+                            project=_work_project_for_request(project, storage_project),
                             authorized=_developer_authorized(context),
                             context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),

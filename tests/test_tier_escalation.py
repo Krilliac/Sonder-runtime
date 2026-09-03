@@ -139,6 +139,13 @@ def test_the_knob_defaults_on_and_reads_the_usual_off_tokens(value, expected):
     assert te.enabled(value) is expected
 
 
+@pytest.mark.parametrize("verified, expected", [
+    (False, "failed"), (True, None), (None, None),
+])
+def test_the_code_gate_verdict_steps_up_only_on_a_verified_failure(verified, expected):
+    assert te.verifier_reason(verified) == expected
+
+
 def test_the_escalation_line_names_both_rungs_and_the_reason():
     step = te.Step(1, "failed", te.Rung("sonder", "m-code"), te.Rung("general", "m-general"))
 
@@ -175,7 +182,7 @@ def _install_chat_fakes(monkeypatch, answers, *, target=("m-code", False, True, 
     monkeypatch.setattr(server, "_maybe_title", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "_should_learn", lambda *args: True)
     monkeypatch.setattr(server, "_apply_code_gate",
-                        lambda response, **kwargs: (response, False, False))
+                        lambda response, **kwargs: (response, None, False))
     monkeypatch.setattr(server, "_capture_durable_session_turn", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "_discard_interaction", discarded.append)
     monkeypatch.setattr(server.memory_store, "session_turn_count", lambda *args: 0)
@@ -253,6 +260,82 @@ def test_mcp_chat_returns_the_last_failure_when_the_ladder_is_spent(monkeypatch)
     assert out.startswith("ERROR")
     assert "third" in out
     assert len(calls) == 1 + te.MAX_ESCALATIONS
+
+
+def _install_code_gate_fake(monkeypatch):
+    """A gate that judges by the answer text: 'code ok' passes, other
+    python blocks fail after the repair, prose is not gated."""
+    def gate(response, **kwargs):
+        if "```python" not in response:
+            return response, None, False
+        return response, "code ok" in response, False
+
+    monkeypatch.setattr(server, "_apply_code_gate", gate)
+
+
+def test_mcp_chat_steps_up_when_runnable_code_still_fails_the_gate(monkeypatch):
+    calls, discarded = _install_chat_fakes(monkeypatch, {
+        "m-code": "```python\nbroken()\n```",
+        "m-general": "```python\ncode ok\n```",
+    })
+    _install_code_gate_fake(monkeypatch)
+
+    with activity_tracker.response_span("chat", CODE_PROMPT, surface="test") as response:
+        out = server._sonder_impl_serialized(CODE_PROMPT, session="none")
+
+    assert "code ok" in out
+    assert [call["model"] for call in calls] == ["m-code", "m-general"]
+    assert discarded == ["iid-m-code"]
+    events = _escalation_events(response)
+    assert events[0]["summary"] == (
+        "chat: sonder (m-code) -> general (m-general): failed "
+        "(runnable code failed verification after a repair)"
+    )
+
+
+def test_mcp_chat_keeps_an_answer_the_gate_cannot_judge(monkeypatch):
+    calls, discarded = _install_chat_fakes(monkeypatch, {"m-code": "plain prose"})
+    _install_code_gate_fake(monkeypatch)
+
+    out = server._sonder_impl_serialized(CODE_PROMPT, session="none")
+
+    assert "plain prose" in out
+    assert [call["model"] for call in calls] == ["m-code"]
+    assert discarded == []
+
+
+def test_mcp_chat_returns_the_last_gated_answer_when_the_ladder_is_spent(monkeypatch):
+    calls, discarded = _install_chat_fakes(monkeypatch, {
+        "m-code": "```python\nbroken()\n```",
+        "m-general": "```python\nstill broken()\n```",
+        "m-reasoning": "```python\nbroken again()\n```",
+    })
+    _install_code_gate_fake(monkeypatch)
+
+    out = server._sonder_impl_serialized(CODE_PROMPT, session="none")
+
+    assert "broken again" in out
+    assert len(calls) == 1 + te.MAX_ESCALATIONS
+    assert discarded == ["iid-m-code", "iid-m-general"]
+
+
+def test_served_chat_steps_up_when_runnable_code_still_fails_the_gate(monkeypatch):
+    calls, discarded = _install_chat_fakes(monkeypatch, {
+        "m-code": "```python\nbroken()\n```",
+        "m-general": "```python\ncode ok\n```",
+    })
+    _install_code_gate_fake(monkeypatch)
+    observed = []
+
+    out = server._answer_with_history_impl(
+        CODE_PROMPT, [], tier="", raise_model_errors=True,
+        target_observer=lambda model, label, cloud: observed.append((model, label, cloud)),
+    )
+
+    assert "code ok" in out
+    assert [call["model"] for call in calls] == ["m-code", "m-general"]
+    assert discarded == ["iid-m-code"]
+    assert observed[-1] == ("m-general", "general", False)
 
 
 def test_a_reasoning_prompt_is_answered_by_the_reasoning_model_first(monkeypatch):

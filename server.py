@@ -910,6 +910,70 @@ def _default_route_plan(prompt, start, *, has_image=False):
         return tier_escalation.single(start)
 
 
+def _gate_answer_code(response, *, iid, prompt, history, model, system,
+                      temperature, num_predict, num_ctx, cloud, tier_label):
+    """Run the code gate on one chat answer with a repair bound to its model.
+
+    Returns ``(response, verified, repaired, repair_usage)`` so the caller can
+    persist a verified repair or, when the code still fails, step to the
+    next rung.
+    """
+    captured = response
+    usage = {}
+
+    def _repair(repair_prompt):
+        gen = _make_generate(
+            model, system, temperature, num_predict, num_ctx, cloud=cloud,
+            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+        )
+        repair_history = list(history or []) + [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": captured},
+        ]
+        repaired = gen(repair_prompt, repair_history)
+        usage.clear()
+        usage.update(getattr(gen, "last_usage", None) or {})
+        return repaired
+
+    gated, verified, repaired = _apply_code_gate(
+        response, interaction_id=iid, regenerate=_repair,
+    )
+    return gated, verified, repaired, usage
+
+
+def served_work_project(project):
+    """The directory a served natural-work request may run in, or ``''``.
+
+    The served route namespaces ``project`` to an opaque per-principal id for
+    durable state; routed workbench work needs the directory itself. Only a
+    path-like value naming an existing directory inside the configured file
+    roots qualifies, so a client value scopes the agent to a directory the
+    deployment already exposes and never widens its reach. A bare name (a
+    memory namespace) or anything else yields ``''`` and the caller keeps
+    the namespaced id.
+    """
+    text = str(project or "").strip()
+    if not text:
+        return ""
+    expanded = os.path.expanduser(text)
+    path_like = (
+        os.path.isabs(expanded)
+        or bool(re.match(r"^[A-Za-z]:", expanded))
+        or expanded.startswith((".", "~"))
+        or "/" in expanded
+        or "\\" in expanded
+    )
+    if not path_like:
+        return ""
+    try:
+        candidate = os.path.realpath(os.path.abspath(expanded))
+    except (OSError, ValueError):
+        return ""
+    if not os.path.isdir(candidate) or not file_ops.inside_allowed_roots(candidate):
+        return ""
+    return candidate
+
+
 def _note_escalation(step, surface):
     """Record one escalation on the activity record; observation only."""
     try:
@@ -5544,6 +5608,9 @@ def _sonder_impl_serialized(
                 internal_generate=internal_generate,
             )
         attempt = 0
+        code_repaired = False
+        repair_usage = {}
+        titled = False
         while True:
             rung = escalation_plan.rungs[attempt]
             tgt_model, cloud, augment, tier_label = (
@@ -5551,6 +5618,7 @@ def _sonder_impl_serialized(
             )
             effective_system, num_ctx_eff = _generation_context(rung)
             following = escalation_plan.next_rung(attempt)
+            detail = ""
             try:
                 response, iid, trace_ctx = _answer(
                     conn, prompt, tgt_model, effective_system, temperature, num_predict,
@@ -5571,21 +5639,43 @@ def _sonder_impl_serialized(
                     if following is not None else None
                 )
                 if reason is None:
-                    break
-                # The empty attempt was captured; it must not reach lessons.
+                    # A new thread is titled from the prompt once, before the
+                    # gate's repair round-trip, as it always was.
+                    if session_id and is_first and not titled:
+                        titled = True
+                        _maybe_title(
+                            conn, session_id, prompt,
+                            internal_generate=internal_generate,
+                        )
+                    # The execution-grounded code gate is the one verifier a
+                    # chat answer has: runnable code that still fails after
+                    # the repair round-trip steps up like a failed call.
+                    response, code_verified, code_repaired, repair_usage = (
+                        _gate_answer_code(
+                            response, iid=iid, prompt=prompt, history=history,
+                            model=tgt_model, system=effective_system,
+                            temperature=temperature, num_predict=num_predict,
+                            num_ctx=num_ctx_eff, cloud=cloud, tier_label=tier_label,
+                        )
+                    )
+                    reason = (
+                        tier_escalation.verifier_reason(code_verified)
+                        if following is not None else None
+                    )
+                    if reason is None:
+                        break
+                    detail = tier_escalation.VERIFIER_DETAIL
+                # The empty or unverified attempt was captured; it must not
+                # reach lessons.
                 _discard_interaction(iid)
             _note_escalation(
-                tier_escalation.Step(attempt + 1, reason, rung, following), "chat",
+                tier_escalation.Step(attempt + 1, reason, rung, following, detail=detail),
+                "chat",
             )
             attempt += 1
         _capture_turn(tgt_model, tier_label, trace_ctx, prompt, response, iid)
         if iid is not None:
             interaction_snapshot = memory_store.get_interaction(conn, iid)
-        if session_id and is_first:
-            _maybe_title(
-                conn, session_id, prompt,
-                internal_generate=internal_generate,
-            )
     except ModelCallError as error:
         return _format_runtime_model_call_error_policy(
             error,
@@ -5618,27 +5708,7 @@ def _sonder_impl_serialized(
         _discard_interaction(iid)
         return _append_activity(response)
 
-    captured_response = response
-    repair_usage = {}
-
-    def _code_repair(repair_prompt):
-        gen = _make_generate(
-            tgt_model, effective_system, temperature, num_predict,
-            num_ctx_eff, cloud=cloud,
-            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
-        )
-        repair_history = list(history or []) + [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": captured_response},
-        ]
-        repaired_response = gen(repair_prompt, repair_history)
-        repair_usage.clear()
-        repair_usage.update(getattr(gen, "last_usage", None) or {})
-        return repaired_response
-
-    response, _code_verified, code_repaired = _apply_code_gate(
-        response, interaction_id=iid, regenerate=_code_repair,
-    )
+    # The code gate already ran on the attempt that stood (inside the loop).
     _capture_durable_session_turn(
         session_id, prompt, history, tgt_model, effective_system, tier_label,
         response, request_id=iid,
@@ -5894,12 +5964,15 @@ def _answer_with_history_impl(
         if session_id:
             memory_store.touch_session(conn, session_id, project_id)
         attempt = 0
+        code_repaired = False
+        repair_usage = {}
         while True:
             rung = escalation_plan.rungs[attempt]
             model, cloud, model_augment, tier_label = (
                 rung.model, rung.cloud, rung.augment, rung.tier,
             )
             following = escalation_plan.next_rung(attempt)
+            detail = ""
             # Every attempt reports its own target, so the receipt names the
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
@@ -6006,11 +6079,28 @@ def _answer_with_history_impl(
                     if following is not None else None
                 )
                 if reason is None:
-                    break
-                # The empty attempt was captured; it must not reach lessons.
+                    # Same verifier as the MCP/REPL path: runnable code that
+                    # still fails after its repair steps up.
+                    response, code_verified, code_repaired, repair_usage = (
+                        _gate_answer_code(
+                            response, iid=iid, prompt=prompt, history=history,
+                            model=model, system=effective_system,
+                            temperature=temperature, num_predict=1024,
+                            num_ctx=req_ctx, cloud=cloud, tier_label=tier_label,
+                        )
+                    )
+                    reason = (
+                        tier_escalation.verifier_reason(code_verified)
+                        if following is not None else None
+                    )
+                    if reason is None:
+                        break
+                    detail = tier_escalation.VERIFIER_DETAIL
+                # The empty or unverified attempt was captured; it must not
+                # reach lessons.
                 _discard_interaction(iid)
             _note_escalation(
-                tier_escalation.Step(attempt + 1, reason, rung, following),
+                tier_escalation.Step(attempt + 1, reason, rung, following, detail=detail),
                 "chat-api",
             )
             attempt += 1
@@ -6040,26 +6130,7 @@ def _answer_with_history_impl(
         _discard_interaction(iid)
         return _append_activity(response)
 
-    captured_response = response
-    repair_usage = {}
-
-    def _code_repair(repair_prompt):
-        gen = _make_generate(
-            model, effective_system, temperature, 1024, req_ctx, cloud=cloud,
-            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
-        )
-        repair_history = list(history or []) + [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": captured_response},
-        ]
-        repaired_response = gen(repair_prompt, repair_history)
-        repair_usage.clear()
-        repair_usage.update(getattr(gen, "last_usage", None) or {})
-        return repaired_response
-
-    response, _code_verified, code_repaired = _apply_code_gate(
-        response, interaction_id=iid, regenerate=_code_repair,
-    )
+    # The code gate already ran on the attempt that stood (inside the loop).
     if capture_session:
         # The served chat route captures its own turn (with its correlation
         # id, failing the request closed when it cannot) and passes
