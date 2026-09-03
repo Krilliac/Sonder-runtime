@@ -286,6 +286,7 @@ from sonder_runtime.domain.runtime_model_binding import (
     model_capability_error as _runtime_model_capability_error,
     model_is_installed as _runtime_model_is_installed,
 )
+from sonder_runtime.domain.updates.stash_formatting import format_stash as _runtime_stash_format
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -23041,28 +23042,6 @@ def runtime_source_update() -> str:
         return "runtime source update refused: %s" % exc
     return _runtime_update_format(result["after"], updated=bool(result["updated"]))
 
-
-def _runtime_stash_format(data, *, action="status"):
-    """Render recovery state without echoing changed paths or stash prose."""
-    if action == "status":
-        return "\n".join((
-            "Sonder source recovery stash:",
-            "  checkout: %s" % ("clean" if data.get("clean") else "dirty"),
-            "  changes: %s" % data.get("change_count", 0),
-            "  recovery stashes: %s" % data.get("stash_count", 0),
-            "  commands: /stash save | /stash save-untracked | /stash pop",
-        ))
-    before = data.get("before") or {}
-    after = data.get("after") or {}
-    if not data.get("changed"):
-        return "runtime source stash: checkout already clean; no stash created"
-    if action.startswith("save"):
-        return "runtime source stash: saved changes; checkout is now %s" % (
-            "clean" if after.get("clean") else "not clean",
-        )
-    return "runtime source stash: restored top recovery stash; checkout is now %s" % (
-        "clean" if after.get("clean") else "dirty",
-    )
 
 
 @mcp.tool()
