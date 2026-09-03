@@ -934,14 +934,16 @@ detail.
 | Decision 3: the shared file approval code | retired | `SONDER_FILE_APPROVAL_CODE` no longer grants anything (warns once when set); a spent one-shot approval carries exactly the reach the operator approved (`file_ops.reach_scope`, installed by every deciding surface and the native surface, roots honoured with containment still checked); every agent path strips a model's string `token`/`approval` |
 | Surface sweep | done | every command on every surface, the router and the CLI, in `manual` and `auto`; five defects found and fixed (fanout transport traceback, native inspection defaults, nine native tools misrouted, unbounded native run schemas, router permuted-name preference); the sweep redirects every module-local file root and fails a run that changes the checkout; `scripts/surface_sweep.py`; see `evidence/SURFACE-SWEEP-2026-09-02.md` |
 | Slice 2: effect fences | done | `adapters/execution/effect_fence.py`; the autopilot worker (per task), every fleet worker thread (while bound to its agent row) and the selfmod editing agent fence their effects on their leases; `decide()` refuses effect classes on a lost fence before any policy (`source="fence"`, receipt); reads unfenced; the `tool_policy` evaluation lane pins fences, named refusals and decision sources |
+| Redesign: terminal and app | done (2026-09-03) | one direction, "quiet instrument", drafted on a design canvas (`docs/design/sonder-redesign-2026-09-03/`) and implemented: the REPL's palette, packed header, gutter prompt and status line (`repl.py`, contracts kept), the app's token theme, bundled Plex faces, gutter transcript, composer, rail, settings and System sections (`app/lib/theme.dart` and screens); see `evidence/REDESIGN-QUIET-INSTRUMENT-2026-09-03.md` |
 
 Not done, deliberately:
 
 - `eval_solver.py`, `eval_duel.py` and `eval_retrieval.py` do not share the
   harness today, so they did not gain the history flag through it; wiring
   them through `eval_harness` is its own change.
-- `SONDER_ISOLATED_APPROVAL_CODE` has the same shape as the retired file
-  approval code and is left for its own change;
+- `SONDER_ISOLATED_APPROVAL_CODE` and `SONDER_ISOLATED_WRITE_APPROVAL_CODE`
+  followed the file code on 2026-09-03: retired, warn once, grant nothing; a
+  writable isolated workspace needs a one-shot approval of exactly that call;
   `ResourcePolicy.Decision.ALLOW_ONCE` is still unused; the compute job
   worker is not fenced (its claim is the job record and cancellation already
   reaches the process; the permission gate decides nothing there).

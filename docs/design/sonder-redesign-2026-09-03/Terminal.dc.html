@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0B1117; }
+    a { color: #63D6C8; } a:hover { color: #8EE4D9; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px; line-height: 20px; color: #E7EDF2; }
+    .row { display: flex; gap: 0; align-items: baseline; white-space: pre; }
+    .g { display: inline-block; width: 24px; flex: 0 0 24px; }
+    .m { color: #6F7E8A; }
+    .m2 { color: #A5B2BD; }
+    .k { color: #63D6C8; }
+    .ok { color: #79D394; }
+    .warn { color: #F0C36A; }
+    .bad { color: #F27B7B; }
+    .b { font-weight: 600; }
+    .path { color: #A5B2BD; }
+  </style>
+</helmet>
+<div style="width: 1000px; height: 660px; box-sizing: border-box; background: #0B1117; display: flex; flex-direction: column; overflow: hidden;">
+
+  <div style="display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 14px; border-bottom: 1px solid #1F2C36; background: #0F171E;">
+    <div style="display: flex; gap: 6px; align-items: center;">
+      <div style="width: 10px; height: 10px; border-radius: 5px; background: #2A3944;"></div>
+      <div style="width: 10px; height: 10px; border-radius: 5px; background: #2A3944;"></div>
+      <div style="width: 10px; height: 10px; border-radius: 5px; background: #2A3944;"></div>
+    </div>
+    <div class="t" style="flex: 1; text-align: center; color: #6F7E8A; font-size: 12px;">sonder repl — ~/src/sonder-runtime</div>
+    <div style="width: 46px;"></div>
+  </div>
+
+  <div class="t" style="flex: 1; padding: 14px 18px 0 18px; display: flex; flex-direction: column; gap: 0;">
+
+    <div class="row"><span class="k b">◈ sonder</span><span class="m">  </span><span class="m2">qwen2.5-coder:7b</span><span class="m"> · code   </span><span class="m">endpoint </span><span class="m2">127.0.0.1:11435</span><span class="m">   project </span><span class="m2">sonder-runtime</span><span class="m">   mode </span><span style="color: #7FB8F0;">manual</span></div>
+    <div class="row"><span class="m">  /help for commands · just start typing · Shift+Tab cycles the mode</span></div>
+    <div style="height: 1px; background: #1F2C36; margin: 10px 0 12px 0;"></div>
+
+    <div class="row" style="margin-bottom: 8px;"><span class="k b g">❯</span><span style="color: #E7EDF2;">read the permission gate and tell me where unattended asks are refused</span></div>
+
+    <div class="row"><span class="m g">▸</span><span class="m2">read   </span><span class="path">permission_modes.py</span><span class="m">                1204–1340   137 lines</span></div>
+    <div class="row"><span class="m g">▸</span><span class="m2">text_search </span><span class="path">"unattended"</span><span class="m">                  3 files   12 matches</span></div>
+    <div class="row"><span class="m g">▸</span><span class="m2">read   </span><span class="path">adapters/security/permission_receipts.py</span><span class="m">   1–88</span></div>
+
+    <div style="height: 10px;"></div>
+    <div class="row"><span class="k b">◈ Sonder · answer</span><span class="m"> ────────────────────────────────────────────────────────</span></div>
+    <div class="row"><span class="g"></span><span>Unattended asks are refused at step 5c of </span><span class="m2">_decide</span><span>. The effect classes</span></div>
+    <div class="row"><span class="g"></span><span>(</span><span class="m2">mutation</span><span>, </span><span class="m2">execution</span><span>, </span><span class="m2">dangerous</span><span>) fail closed when no operator is</span></div>
+    <div class="row"><span class="g"></span><span>attending; </span><span class="m2">ask</span><span>-class reads proceed on the record. Each refusal leaves</span></div>
+    <div class="row"><span class="g"></span><span>a content-free receipt in </span><span class="m2">operations.db</span><span> and names the call it refused,</span></div>
+    <div class="row"><span class="g"></span><span>so </span><span class="k">/approve &lt;call id&gt;</span><span> can let exactly that call run once.</span></div>
+    <div class="row"><span class="m">╰ 1.20s  (/pass or /fail)</span><span class="m">                       route local · cache hit · 3.3k tok</span></div>
+
+    <div style="height: 12px;"></div>
+    <div class="row" style="margin-bottom: 8px;"><span class="k b g">❯</span><span style="color: #E7EDF2;">/write_file notes/gate.md "5c refuses unattended effect classes"</span></div>
+    <div class="row"><span class="bad b g">⊘</span><span class="bad">refused write_file: unattended ask in manual mode</span><span class="m">                  call </span><span class="m2">3f9a12c0</span></div>
+    <div class="row"><span class="g"></span><span class="m">/approve 3f9a12c0 runs it once · /permissions changes the mode · a rule can allow notes/</span></div>
+
+    <div style="flex: 1;"></div>
+
+    <div style="height: 1px; background: #1F2C36; margin: 0 -18px;"></div>
+    <div style="display: flex; align-items: center; height: 44px; background: #0F171E; margin: 0 -18px; padding: 0 18px; gap: 0;">
+      <span class="t k b g">❯</span>
+      <span class="t" style="flex: 1; color: #E7EDF2;">Sonder <span style="display: inline-block; width: 8px; height: 16px; background: #63D6C8; vertical-align: -3px;"></span></span>
+      <span class="t m" style="font-size: 12px;">ctx 12k/32k · tok 3.3k/29 · 1 lane · 1.20s</span>
+    </div>
+    <div class="t" style="height: 28px; display: flex; align-items: center; margin: 0 -18px; padding: 0 18px; color: #6F7E8A; font-size: 12px; background: #0B1117;">Enter send · Tab complete · Ctrl+R search · Ctrl+L clear</div>
+  </div>
+</div>
+</x-dc>
+
+</body>
+</html>

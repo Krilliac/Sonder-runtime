@@ -7,6 +7,7 @@ import 'api.dart';
 import 'local_manager.dart';
 import 'models.dart';
 import 'settings.dart';
+import 'theme.dart';
 
 class SystemScreen extends StatefulWidget {
   final Settings settings;
@@ -1660,7 +1661,7 @@ class _McpRuntimePanel extends StatelessWidget {
             'loaded  ${runtime.loadedShort.isEmpty ? 'unknown' : runtime.loadedShort}\n'
             'current ${runtime.currentShort.isEmpty ? 'unknown' : runtime.currentShort}',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  fontFamily: 'monospace',
+                  fontFamily: SonderTheme.mono,
                 ),
           ),
         ),
@@ -2080,7 +2081,7 @@ class _AutopilotPanel extends StatelessWidget {
           '${run.id} • ${run.phase} • ${run.project.isEmpty ? 'default project' : run.project}',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: colors.onSurfaceVariant,
-                fontFamily: 'monospace',
+                fontFamily: SonderTheme.mono,
               ),
         ),
         const SizedBox(height: 10),
@@ -2518,7 +2519,7 @@ class WorkbenchActivityPanel extends StatelessWidget {
                           action.evidence,
                           style:
                               Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    fontFamily: 'monospace',
+                                    fontFamily: SonderTheme.mono,
                                     height: 1.3,
                                   ),
                         ),
@@ -2692,7 +2693,6 @@ class _ExecutionEventCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final status = event.status;
     final error = status == 'error' || status == 'failed';
     final details = <String>[
@@ -2709,64 +2709,63 @@ class _ExecutionEventCard extends StatelessWidget {
       if (event.bytes > 0) '${event.bytes} bytes',
       if (event.dryRun) 'dry run',
     ];
+    final tokens = SonderTokens.of(context);
+    final tone = error ? tokens.danger : tokens.ok;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(11),
+      padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: error ? cs.error.withValues(alpha: 0.55) : cs.outlineVariant,
-        ),
+        color: tokens.panel,
+        borderRadius: BorderRadius.circular(SonderRadius.row),
+        border: Border.all(color: error ? tokens.danger : tokens.hairline),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(_eventIcon(event.kind),
-                  size: 17, color: error ? cs.error : cs.primary),
-              const SizedBox(width: 7),
               Text(_timestampLabel(event.timestamp),
-                  style: Theme.of(context).textTheme.labelSmall),
-              const SizedBox(width: 7),
+                  style: tokens.mono(11, color: tokens.muted)),
+              const SizedBox(width: 10),
+              Icon(_eventIcon(event.kind), size: 14, color: tone),
+              const SizedBox(width: 6),
               Expanded(
                 child: Text(
                   event.kind,
-                  style: Theme.of(context)
-                      .textTheme
-                      .labelLarge
-                      ?.copyWith(fontWeight: FontWeight.w700),
+                  style: tokens.mono(12, weight: FontWeight.w500),
                 ),
               ),
-              Text(status, style: Theme.of(context).textTheme.labelSmall),
+              Text(status, style: tokens.mono(11, color: tone)),
             ],
           ),
-          const SizedBox(height: 5),
-          Text(event.summary.isNotEmpty
-              ? event.summary
-              : event.title.isNotEmpty
-                  ? event.title
-                  : 'No summary'),
+          const SizedBox(height: 4),
+          Text(
+            event.summary.isNotEmpty
+                ? event.summary
+                : event.title.isNotEmpty
+                    ? event.title
+                    : 'No summary',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: tokens.text,
+                ),
+          ),
           if (details.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(details.join('  •  '),
-                style: Theme.of(context).textTheme.labelSmall),
+            const SizedBox(height: 3),
+            Text(details.join('  ·  '),
+                style: tokens.mono(11, color: tokens.muted)),
           ],
           if (event.deltaLabel.isNotEmpty) ...[
-            const SizedBox(height: 4),
+            const SizedBox(height: 3),
             Text(event.deltaLabel,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: cs.primary,
-                      fontWeight: FontWeight.w600,
-                    )),
+                style: tokens.mono(11, color: tokens.accent,
+                    weight: FontWeight.w500)),
           ],
           if (event.preview.isNotEmpty) ...[
             const SizedBox(height: 7),
             SelectableText(
               event.preview,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    fontFamily: 'monospace',
+                    fontFamily: SonderTheme.mono,
                     height: 1.3,
                   ),
             ),
@@ -2828,30 +2827,37 @@ class _MeterBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
     final value = (percent / 100).clamp(0.0, 1.0).toDouble();
-    final barColor = color ?? Theme.of(context).colorScheme.primary;
+    final barColor = color ?? tokens.accent;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
           children: [
             SizedBox(
               width: 96,
               child: Text(label, style: Theme.of(context).textTheme.labelLarge),
             ),
-            Expanded(child: Text(detail)),
+            Expanded(
+              child: Text(detail, style: tokens.mono(12, color: tokens.text2)),
+            ),
             const SizedBox(width: 8),
-            Text('${percent.toStringAsFixed(1)}%'),
+            Text(
+              '${percent.toStringAsFixed(1)}%',
+              style: tokens.mono(12, weight: FontWeight.w500),
+            ),
           ],
         ),
         const SizedBox(height: 6),
         LinearProgressIndicator(
           value: value,
-          minHeight: 8,
+          minHeight: 4,
           color: barColor,
-          backgroundColor:
-              Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          backgroundColor: tokens.hairline,
+          borderRadius: BorderRadius.circular(2),
         ),
       ],
     );
@@ -2873,32 +2879,39 @@ class _StatusRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = ok
-        ? Theme.of(context).colorScheme.primary
-        : Theme.of(context).colorScheme.error;
+    final tokens = SonderTokens.of(context);
+    final color = ok ? tokens.ok : tokens.danger;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            ok ? Icons.check_circle_outline : Icons.info_outline,
-            color: color,
-            size: 18,
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Container(
+              width: 7,
+              height: 7,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 10),
           SizedBox(
             width: 120,
             child: Text(label, style: Theme.of(context).textTheme.labelLarge),
           ),
           const SizedBox(width: 12),
-          Expanded(child: SelectableText(value)),
+          Expanded(
+            child: SelectableText(value, style: tokens.mono(12)),
+          ),
           if (onCopy != null)
             IconButton(
               tooltip: 'Copy',
               visualDensity: VisualDensity.compact,
               onPressed: onCopy,
-              icon: const Icon(Icons.copy, size: 18),
+              icon: const Icon(Icons.copy, size: 16),
             ),
         ],
       ),
@@ -2999,6 +3012,10 @@ class _SystemCompactNav extends StatelessWidget {
   }
 }
 
+/// One section of the System screen: an eyebrow, a hairline, its content.
+/// Sections are breaks in one column rather than cards, so the screen reads
+/// as a single instrument panel and the anchors the rail scrolls to stay
+/// exactly where they were.
 class _Section extends StatelessWidget {
   final String title;
   final Widget child;
@@ -3007,18 +3024,18 @@ class _Section extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 10),
-            child,
-          ],
-        ),
+    final tokens = SonderTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: Theme.of(context).textTheme.labelSmall),
+          const SizedBox(height: 8),
+          Divider(height: 1, color: tokens.hairline),
+          const SizedBox(height: 12),
+          child,
+        ],
       ),
     );
   }
@@ -3032,12 +3049,13 @@ class _OutputCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final tokens = SonderTokens.of(context);
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
+        color: tokens.panel,
+        borderRadius: BorderRadius.circular(SonderRadius.row),
+        border: Border.all(color: tokens.hairline),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3101,7 +3119,7 @@ class _RuntimeFailureCard extends StatelessWidget {
             result.message,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: cs.onErrorContainer,
-                  fontFamily: 'monospace',
+                  fontFamily: SonderTheme.mono,
                   height: 1.3,
                 ),
           ),
@@ -3133,7 +3151,7 @@ class _OutputText extends StatelessWidget {
     return SelectableText(
       text.isEmpty ? '(empty)' : text,
       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            fontFamily: 'monospace',
+            fontFamily: SonderTheme.mono,
             height: 1.3,
           ),
     );

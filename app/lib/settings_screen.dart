@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'settings.dart';
+import 'theme.dart';
 
 /// Connection settings: server URL, API key, theme, plus a "Test connection"
 /// button that hits /v1/models so the user gets immediate feedback.
@@ -28,7 +29,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _password;
   late final TextEditingController _launcherUrl;
   late final TextEditingController _launcherToken;
-  late bool _dark;
+  late String _themeMode;
   late bool _allowHosted;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
@@ -51,7 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _password = TextEditingController();
     _launcherUrl = TextEditingController(text: widget.settings.launcherUrl);
     _launcherToken = TextEditingController(text: widget.settings.launcherToken);
-    _dark = widget.settings.darkMode;
+    _themeMode = widget.settings.themeMode;
     _allowHosted = widget.settings.allowHosted;
     _keepServerRunning = widget.settings.keepServerRunning;
     _allowApproximateLocation = widget.settings.allowApproximateLocation;
@@ -130,7 +131,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Settings _current() => Settings(
         serverUrl: _server.text,
         apiKey: _key.text,
-        darkMode: _dark,
+        themeMode: _themeMode,
         allowHosted: _allowHosted,
         contextSize: _contextSize.text.trim().isEmpty
             ? '8192'
@@ -366,32 +367,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: ListView(
               padding: const EdgeInsets.all(20),
               children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Runtime architecture',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Sonder Runtime is an orchestration system, not a '
-                    'standalone foundation model. Ollama loads and serves the '
-                    'selected local model weights for inference. Sonder Runtime '
-                    'adds prompts, memory, tools, routing, and policy; adapter '
-                    'training uses PEFT/Hugging Face before validated results '
-                    'are deployed to Ollama.',
-                  ),
-                ],
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Runtime architecture',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
-            ),
+              const SizedBox(height: 6),
+              Text(
+                'Sonder Runtime is an orchestration system, not a '
+                'standalone foundation model. Ollama loads and serves the '
+                'selected local model weights for inference. Sonder Runtime '
+                'adds prompts, memory, tools, routing, and policy; adapter '
+                'training uses PEFT/Hugging Face before validated results '
+                'are deployed to Ollama.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
           ),
-          const SizedBox(height: 20),
-          Text('Connection', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
+          const _GroupLabel('Connection'),
+          const SizedBox(height: 4),
           TextField(
             controller: _server,
             keyboardType: TextInputType.url,
@@ -485,11 +482,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               border: OutlineInputBorder(),
             ),
           ),
-          Text(
-            'Privacy & autonomy',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 4),
+          const _GroupLabel('Privacy & autonomy'),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('Allow hosted/cloud tiers'),
@@ -525,9 +518,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               v,
             ),
           ),
-          const Divider(height: 40),
-          Text('Account', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
+          const _GroupLabel('Account'),
+          const SizedBox(height: 4),
           TextField(
             controller: _username,
             autocorrect: false,
@@ -626,13 +618,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ],
-          const Divider(height: 40),
-          Text('Appearance', style: Theme.of(context).textTheme.titleMedium),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Dark mode'),
-            value: _dark,
-            onChanged: (v) => _changeBool((value) => _dark = value, v),
+          const _GroupLabel('Appearance'),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Theme',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ),
+                SegmentedButton<String>(
+                  key: const Key('settings-theme-mode'),
+                  showSelectedIcon: false,
+                  style: SegmentedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    textStyle: SonderTokens.of(context).mono(12),
+                  ),
+                  segments: const [
+                    ButtonSegment(value: 'light', label: Text('Light')),
+                    ButtonSegment(value: 'dark', label: Text('Dark')),
+                    ButtonSegment(value: 'system', label: Text('System')),
+                  ],
+                  selected: {_themeMode},
+                  onSelectionChanged: (selection) => setState(() {
+                    _themeMode = selection.first;
+                    _dirty = true;
+                  }),
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 24),
           Text(
@@ -662,6 +678,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+
+/// A group's name as an eyebrow over a hairline: the settings read as one
+/// column with quiet section breaks, not a stack of cards.
+class _GroupLabel extends StatelessWidget {
+  final String text;
+  const _GroupLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 28, bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(text, style: Theme.of(context).textTheme.labelSmall),
+          const SizedBox(height: 8),
+          Divider(height: 1, color: tokens.hairline),
         ],
       ),
     );

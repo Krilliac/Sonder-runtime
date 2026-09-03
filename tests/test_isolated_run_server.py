@@ -1,11 +1,13 @@
+import logging
+
 import pytest
 
+import permission_modes
 import server
+from sonder_runtime.adapters.security.approval_ledger import ApprovalLedger
 
 
 def _authorize(monkeypatch):
-    monkeypatch.setenv("SONDER_ISOLATED_APPROVAL_CODE", "execute-secret")
-    monkeypatch.setenv("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "write-secret")
     monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: {"role": "developer"})
     monkeypatch.setattr(server.admin_auth, "require", lambda _account, _role: (True, ""))
 
@@ -13,8 +15,25 @@ def _authorize(monkeypatch):
 def _authorized_args():
     return {
         "token": "developer-token",
-        "approval": "execute-secret",
         "acknowledge_isolation_limits": True,
+    }
+
+
+def _ledger(monkeypatch, tmp_path):
+    store = ApprovalLedger(tmp_path / "approvals.db")
+    monkeypatch.setattr(permission_modes, "_approval_ledger", lambda: store)
+    return store
+
+
+def _served(arguments):
+    """The surface's view of a call: what the gate digests and the handler reads."""
+    return server.approved_call_reach("isolated_run", arguments)
+
+
+def _writable_call(tmp_path):
+    return {
+        "image": "busybox", "argv_json": '["true"]', "project": str(tmp_path),
+        "writable_workspace": True, **_authorized_args(),
     }
 
 
@@ -80,27 +99,45 @@ def test_direct_mcp_call_requires_developer_approval_and_ack(monkeypatch, tmp_pa
     _authorize(monkeypatch)
     denied = server.isolated_run(
         "busybox", '["true"]', str(tmp_path),
-        token="developer-token", approval="execute-secret",
+        token="developer-token",
     )
     assert "acknowledge_isolation_limits=true" in denied
     assert launched == []
 
 
-def test_writable_workspace_requires_separate_host_secret(monkeypatch, tmp_path):
+def test_writable_workspace_needs_a_one_shot_approval_of_exactly_this_call(monkeypatch, tmp_path):
     _authorize(monkeypatch)
+    store = _ledger(monkeypatch, tmp_path)
     launched = []
     monkeypatch.setattr(server.isolated_runner, "run_isolated", lambda **kwargs: launched.append(kwargs))
-    denied = server.isolated_run(
-        "busybox", '["true"]', str(tmp_path), writable_workspace=True,
-        **_authorized_args(),
-    )
-    assert "separate host" in denied
+    arguments = _writable_call(tmp_path)
+    with _served(arguments):
+        denied = server.isolated_run(**arguments)
+    call = permission_modes.call_id(permission_modes.call_digest("isolated_run", arguments))
+    assert "one-shot approval" in denied
+    assert "/approve %s" % call in denied
+    assert launched == []
+    # The refusal is a gate, not a wall: the call is waiting in /approvals.
+    pending = store.pending()
+    assert [row.tool for row in pending] == ["isolated_run"]
+    assert pending[0].call_id == call
+    assert "writable_workspace" in pending[0].preview
+
+
+def test_a_writable_run_outside_any_surface_is_refused(monkeypatch, tmp_path):
+    """A direct Python call has no surface view of its arguments, so nothing
+    could have approved it; the handler fails closed rather than digesting a
+    view of its own that no operator ever saw."""
+    _authorize(monkeypatch)
+    _ledger(monkeypatch, tmp_path)
+    launched = []
+    monkeypatch.setattr(server.isolated_runner, "run_isolated", lambda **kwargs: launched.append(kwargs))
+    denied = server.isolated_run(**_writable_call(tmp_path))
+    assert "only a served call" in denied
     assert launched == []
 
 
-def test_writable_workspace_accepts_only_separate_matching_secret(monkeypatch, tmp_path):
-    _authorize(monkeypatch)
-    seen = {}
+def _launch_ok(monkeypatch, tmp_path, seen):
     monkeypatch.setattr(
         server.isolated_runner, "run_isolated",
         lambda **kwargs: seen.update(kwargs) or {
@@ -109,12 +146,90 @@ def test_writable_workspace_accepts_only_separate_matching_secret(monkeypatch, t
             "writable_workspace": True,
         },
     )
-    output = server.isolated_run(
-        "busybox", '["true"]', str(tmp_path), writable_workspace=True,
-        write_approval="write-secret", **_authorized_args(),
-    )
+
+
+def test_writable_workspace_runs_once_per_approval_when_the_mode_let_it_through(monkeypatch, tmp_path):
+    """``auto``, an allow rule or an attended yes brings the call to the handler
+    without the gate spending anything; the handler spends the operator's
+    approval of exactly this call itself, once."""
+    _authorize(monkeypatch)
+    store = _ledger(monkeypatch, tmp_path)
+    seen = {}
+    _launch_ok(monkeypatch, tmp_path, seen)
+    arguments = _writable_call(tmp_path)
+    digest = permission_modes.call_digest("isolated_run", arguments)
+    store.issue("isolated_run", digest, approver="nathan", surface="console")
+
+    with _served(arguments):
+        output = server.isolated_run(**arguments)
     assert output.startswith("isolated status: ok")
     assert seen["writable_workspace"] is True
+    assert store.approvals() == []  # spent
+
+    seen.clear()
+    with _served(arguments):
+        denied = server.isolated_run(**arguments)
+    assert "one-shot approval" in denied
+    assert seen == {}
+
+
+def test_writable_workspace_honours_the_approval_the_gate_spent(monkeypatch, tmp_path):
+    """In ``manual`` the gate refuses the unattended call, the operator approves
+    it, and the next unchanged call spends the approval at the gate; the
+    handler sees that spend and asks for nothing more."""
+    _authorize(monkeypatch)
+    store = _ledger(monkeypatch, tmp_path)
+    seen = {}
+    _launch_ok(monkeypatch, tmp_path, seen)
+    arguments = _writable_call(tmp_path)
+    digest = permission_modes.call_digest("isolated_run", arguments)
+    store.issue("isolated_run", digest, approver="nathan", surface="console")
+
+    with _served(arguments):
+        decision = permission_modes.decide(
+            "isolated_run", mode="manual", interactive=False, surface="mcp",
+            arguments=arguments, approval_ledger=store,
+        )
+        assert decision.allowed and decision.source == "approval"
+        output = server.isolated_run(**arguments)
+    assert output.startswith("isolated status: ok")
+    assert seen["writable_workspace"] is True
+    assert store.approvals() == []
+
+
+def test_a_different_call_does_not_spend_the_approval(monkeypatch, tmp_path):
+    _authorize(monkeypatch)
+    store = _ledger(monkeypatch, tmp_path)
+    launched = []
+    monkeypatch.setattr(server.isolated_runner, "run_isolated", lambda **kwargs: launched.append(kwargs))
+    approved = _writable_call(tmp_path)
+    store.issue(
+        "isolated_run", permission_modes.call_digest("isolated_run", approved),
+        approver="nathan", surface="console",
+    )
+    other = {**approved, "argv_json": '["sh", "-c", "rm -rf /workspace"]'}
+    with _served(other):
+        denied = server.isolated_run(**other)
+    assert "one-shot approval" in denied
+    assert launched == []
+    assert len(store.approvals()) == 1  # still open, for the call it was for
+
+
+def test_the_retired_isolated_codes_warn_once_and_grant_nothing(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("SONDER_ISOLATED_APPROVAL_CODE", "execute-secret-value")
+    monkeypatch.setenv("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "write-secret-value")
+    server._RETIRED_ISOLATED_CODE_WARNED.clear()
+    launched = []
+    monkeypatch.setattr(server.isolated_runner, "run_isolated", lambda **kwargs: launched.append(kwargs))
+    with caplog.at_level(logging.WARNING, logger="sonder.server"):
+        first = server.isolated_run("busybox", '["true"]', str(tmp_path))
+        second = server.isolated_run("busybox", '["true"]', str(tmp_path))
+    assert "developer token" in first and "developer token" in second
+    assert launched == []
+    warnings = [r for r in caplog.records if "no longer honoured" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "execute-secret-value" not in warnings[0].getMessage()
+    assert "write-secret-value" not in warnings[0].getMessage()
 
 
 def test_every_denial_records_secret_free_direct_tool_audit(monkeypatch, tmp_path):
@@ -125,29 +240,24 @@ def test_every_denial_records_secret_free_direct_tool_audit(monkeypatch, tmp_pat
     )
     server.isolated_run(
         "busybox", '["true"]', str(tmp_path),
-        token="token-secret-value", approval="execute-secret-value",
+        token="token-secret-value",
     )
     _authorize(monkeypatch)
+    _ledger(monkeypatch, tmp_path)
     server.isolated_run(
         "busybox", '["true"]', str(tmp_path),
-        token="developer-token", approval="execute-secret",
+        token="developer-token",
     )
-    server.isolated_run(
-        "busybox", '["true"]', str(tmp_path), writable_workspace=True,
-        token="developer-token", approval="execute-secret",
-        acknowledge_isolation_limits=True,
-        write_approval="wrong-write-secret-value",
-    )
+    arguments = _writable_call(tmp_path)
+    with _served(arguments):
+        server.isolated_run(**arguments)
     assert [row[1]["denial"] for row in records] == [
         "authorization-denied",
         "risk-acknowledgement-denied",
         "writable-authorization-denied",
     ]
     rendered = repr(records)
-    for secret in (
-        "token-secret-value", "execute-secret-value", "developer-token",
-        "execute-secret", "wrong-write-secret-value", "write-secret",
-    ):
+    for secret in ("token-secret-value", "developer-token"):
         assert secret not in rendered
 
 
