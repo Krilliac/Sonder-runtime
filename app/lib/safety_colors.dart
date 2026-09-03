@@ -1,24 +1,31 @@
 import 'package:flutter/material.dart';
 
+import 'theme.dart';
+
 /// Shared safety vocabulary for command and autonomy surfaces.
 ///
 /// These helpers deliberately return a neutral theme outline for values the
 /// server has not published. Unknown policy must never inherit the meaning of
-/// a known safe or permissive value.
+/// a known safe or permissive value. Every colour here is paired with a
+/// label or a glyph by its callers, so meaning is never carried by colour
+/// alone.
 Color riskColor(ColorScheme scheme, String risk) {
+  final tokens = scheme.brightness == Brightness.dark
+      ? SonderTokens.dark
+      : SonderTokens.light;
   switch (risk) {
     case 'safe':
-      return const Color(0xFF4CAF50);
+      return tokens.ok;
     case 'ask':
-      return const Color(0xFFFFC107);
+      return tokens.warn;
     case 'mutation':
-      return const Color(0xFFFF7043);
+      return tokens.mutation;
     case 'execution':
-      return const Color(0xFF8D6E63);
+      return tokens.execution;
     case 'dangerous':
-      return const Color(0xFFE53935);
+      return tokens.danger;
     case 'unclassified':
-      return const Color(0xFF757575);
+      return tokens.muted;
     default:
       return scheme.outline;
   }
@@ -44,18 +51,22 @@ String riskLabel(String risk) {
   }
 }
 
-/// Fill color for an autonomy mode. Green is reserved for the read-only plan
-/// mode; unknown modes remain neutral rather than borrowing another meaning.
+/// The tone of an autonomy mode: the dot beside its label, never a fill
+/// behind white text. Green is reserved for the read-only plan mode; unknown
+/// modes remain neutral rather than borrowing another meaning.
 Color permissionModeColor(ColorScheme scheme, String mode) {
+  final tokens = scheme.brightness == Brightness.dark
+      ? SonderTokens.dark
+      : SonderTokens.light;
   switch (mode) {
     case 'plan':
-      return const Color(0xFF1B5E20);
+      return tokens.ok;
     case 'manual':
-      return const Color(0xFF0D47A1);
+      return tokens.info;
     case 'acceptEdits':
-      return const Color(0xFFBF360C);
+      return tokens.warn;
     case 'auto':
-      return const Color(0xFF6A1B9A);
+      return tokens.auto;
     default:
       return scheme.outline;
   }
