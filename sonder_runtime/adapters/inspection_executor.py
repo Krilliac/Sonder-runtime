@@ -71,8 +71,83 @@ def _failure(exc: Exception, audit_args: dict) -> ToolResult:
     )
 
 
+# The bounds each inspection accepts and their defaults, mirrored from the
+# legacy ``server`` tool signatures (a drift test pins them together). The
+# archive bounds come from the archive module they belong to.
+def inspection_defaults(tool: str) -> dict:
+    """Default arguments for one inspection, as its legacy handler fills them."""
+    if tool == "archive_list":
+        archive_tools = _packaged_module("archive_tools")
+        return {
+            "max_entries": archive_tools.DEFAULT_MAX_ENTRIES,
+            "max_file_bytes": archive_tools.DEFAULT_MAX_FILE_BYTES,
+            "max_total_bytes": archive_tools.DEFAULT_MAX_TOTAL_BYTES,
+            "max_ratio": archive_tools.DEFAULT_MAX_RATIO,
+            "max_path_depth": archive_tools.DEFAULT_MAX_PATH_DEPTH,
+            "max_results": archive_tools.DEFAULT_MAX_RESULTS,
+            "max_seconds": archive_tools.DEFAULT_MAX_SECONDS,
+        }
+    return dict(_INSPECTION_DEFAULTS.get(tool, {}))
+
+
+_INSPECTION_DEFAULTS = {
+    "log_inspect": {
+        "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64_000_000,
+        "max_scan_bytes": 4_000_000, "max_lines": 10_000, "max_line_bytes": 4096,
+        "max_results": 100, "max_output_bytes": 256_000, "timeout": 5.0,
+    },
+    "workspace_compare": {
+        "max_entries": 2000, "max_file_bytes": 64_000_000, "max_total_bytes": 256_000_000,
+        "max_details": 1000, "max_output_bytes": 256_000, "timeout": 5.0,
+    },
+    "project_detect": {
+        "path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2_000_000,
+        "max_file_bytes": 256_000, "max_results": 500,
+    },
+    "file_digest": {"max_bytes": 32_000_000},
+    "directory_digest": {
+        "path": ".", "max_depth": 12, "max_files": 2_000, "max_total_bytes": 32_000_000,
+        "max_file_bytes": 32_000_000, "max_results": 2_500,
+    },
+    "data_inspect": {"max_bytes": 256_000},
+    "data_query": {
+        "sql": "", "projection_json": "[]", "filters_json": "{}", "max_rows": 100,
+        "max_columns": 50, "max_output_bytes": 256_000, "max_scan_bytes": 4_000_000,
+        "timeout": 5.0,
+    },
+    "dependency_inventory": {
+        "path": ".", "max_depth": 5, "max_files": 100, "max_total_bytes": 2_000_000,
+        "max_results": 2000,
+    },
+}
+
+
+# The inspections this adapter can run. The native MCP surface routes exactly
+# these names to the inspection service and every other tool to the packaged
+# executor; a name listed here without a handler below, or a handler without
+# a name here, is caught by the drift test.
+SUPPORTED_INSPECTIONS = frozenset({
+    "archive_list", "data_inspect", "data_query", "dependency_inventory",
+    "directory_digest", "file_digest", "log_inspect", "project_detect",
+    "workspace_compare",
+})
+
+
 class InspectionExecutorAdapter:
     """Strict allowlisted adapter for read-only inspection modules."""
+
+    def _handlers(self) -> dict:
+        return {
+            "archive_list": self._archive_list,
+            "data_inspect": self._data_inspect,
+            "data_query": self._data_query,
+            "dependency_inventory": self._dependency_inventory,
+            "directory_digest": self._directory_digest,
+            "file_digest": self._file_digest,
+            "log_inspect": self._log_inspect,
+            "project_detect": self._project_detect,
+            "workspace_compare": self._workspace_compare,
+        }
 
     def execute(self, call: ToolCall, context: OperationContext) -> ToolResult:
         args = dict(call.arguments or {})
@@ -85,23 +160,18 @@ class InspectionExecutorAdapter:
             return ToolResult(
                 ok=False, error_code="Cancelled", output="operation cancelled"
             )
-        handlers = {
-            "archive_list": self._archive_list,
-            "data_inspect": self._data_inspect,
-            "data_query": self._data_query,
-            "dependency_inventory": self._dependency_inventory,
-            "directory_digest": self._directory_digest,
-            "file_digest": self._file_digest,
-            "log_inspect": self._log_inspect,
-            "project_detect": self._project_detect,
-            "workspace_compare": self._workspace_compare,
-        }
+        handlers = self._handlers()
         handler = handlers.get(call.tool)
         if handler is None:
             return ToolResult(
                 ok=False, error_code="unknown_inspection",
                 output="unsupported read-only inspection: %s" % call.tool,
             )
+        # The legacy handlers fill every bound from their signatures; a native
+        # MCP client sends only what its schema requires. Fill the same
+        # defaults here, so an omitted bound is the tool's own default and not
+        # a KeyError from inside the adapter.
+        args = {**inspection_defaults(call.tool), **args}
         try:
             return handler(args, context)
         except Exception as exc:

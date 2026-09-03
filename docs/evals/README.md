@@ -278,3 +278,16 @@ covered by `tests/test_eval_harness.py`, `tests/test_eval_harness_outcomes.py`,
 command are **experimental**: they reuse proven building blocks
 (`server._make_generate`, `promotion_eval.local_model_digest`) but have no
 automated test coverage, since tests never touch a model.
+
+## Surface sweep
+
+`scripts/surface_sweep.py` is the instrument next to the evaluation lane: it
+drives every catalogued command on every surface (console loop, control
+chain, legacy and native MCP, served API, agent dispatch), the
+natural-language router and the CLI, in a hermetic home with the model
+stubbed, and classifies each outcome instead of asserting one. It is not a
+CI gate; run it on a build to see what a caller sees on every door at once
+and read its "needs reading" list. It leaves the checkout as it found it:
+every module-local file root is redirected into its home, and a run that
+changes any path in the checkout reports the path and exits non-zero. The
+2026-09-02 record is `docs/architecture/evidence/SURFACE-SWEEP-2026-09-02.md`.
