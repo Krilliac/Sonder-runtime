@@ -136,7 +136,7 @@ def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkey
     assert answer in text
     assert "Sonder completed in 1.00s" in text
     assert "/pass or /fail" in text
-    assert any(glyph in text for glyph in ("╭", "+"))
+    assert any(glyph in text for glyph in ("◈", "*"))
 
 
 def test_interactive_error_result_uses_error_tone(monkeypatch, capsys):

@@ -1924,8 +1924,9 @@ class _AssistantContent extends StatelessWidget {
     final answer =
         (markerIndex < 0 ? content : content.substring(0, markerIndex))
             .trimRight();
-    final activity =
+    final activityRaw =
         markerIndex < 0 ? '' : content.substring(markerIndex).trim();
+    final parsed = _parseActivityBlock(activityRaw);
     final body = Theme.of(context).textTheme.bodyMedium?.copyWith(
           color: error ? tokens.text : color,
         );
@@ -1961,9 +1962,15 @@ class _AssistantContent extends StatelessWidget {
       listIndent: 22,
     );
 
+    final hasToolCalls = parsed.toolCalls.isNotEmpty;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (hasToolCalls && !error) ...[
+          _ToolCallSection(calls: parsed.toolCalls, stats: parsed.stats),
+          const SizedBox(height: 10),
+        ],
         MarkdownBody(
           data: answer,
           selectable: true,
@@ -1978,12 +1985,12 @@ class _AssistantContent extends StatelessWidget {
             body: reasoning.trim(),
           ),
         ],
-        if (activity.isNotEmpty) ...[
+        if (activityRaw.isNotEmpty && !hasToolCalls) ...[
           const SizedBox(height: 8),
           _CollapsedDetail(
             icon: Icons.monitor_heart_outlined,
             label: 'Activity evidence',
-            body: activity,
+            body: activityRaw,
           ),
         ],
         if (metadata != null && metadata!.diagnosticText.isNotEmpty) ...[
@@ -2006,6 +2013,157 @@ class _AssistantContent extends StatelessWidget {
         ],
       ],
     );
+  }
+
+  static _ParsedActivity _parseActivityBlock(String raw) {
+    if (raw.isEmpty) return const _ParsedActivity([], {});
+    final calls = <_ToolCall>[];
+    final stats = <String, int>{};
+    for (final line in raw.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.startsWith('model calls:')) {
+        final parts = trimmed.split(RegExp(r'\s+'));
+        if (parts.length >= 9) {
+          stats['model_calls'] = int.tryParse(parts[2]) ?? 0;
+          stats['tool_calls'] = int.tryParse(parts[5]) ?? 0;
+          final tokenParts = parts.length > 8 ? parts[8] : '';
+          if (tokenParts.contains('/')) {
+            final tp = tokenParts.split('/');
+            stats['tokens_in'] = int.tryParse(tp[0]) ?? 0;
+            stats['tokens_out'] = int.tryParse(tp[1]) ?? 0;
+          }
+        }
+      } else if (trimmed.startsWith('files:')) {
+        final parts = trimmed.split(RegExp(r'\s+'));
+        if (parts.length >= 4) {
+          stats['file_creates'] =
+              int.tryParse(parts[1].replaceAll('+', '')) ?? 0;
+          stats['file_edits'] =
+              int.tryParse(parts[2].replaceAll('~', '')) ?? 0;
+          stats['file_deletes'] =
+              int.tryParse(parts[3].replaceAll('-', '')) ?? 0;
+        }
+      } else if (trimmed.startsWith('• ') || trimmed.startsWith('× ')) {
+        final ok = trimmed.startsWith('•');
+        calls.add(_ToolCall(title: trimmed.substring(2).trim(), ok: ok));
+      } else if (trimmed.startsWith('+') && trimmed.contains('ms ')) {
+        final parts = trimmed.split(RegExp(r'\s+'));
+        if (parts.length >= 3 && parts[1] == 'tool_call') {
+          final elapsed = int.tryParse(
+            parts[0].replaceAll('+', '').replaceAll('ms', ''),
+          );
+          calls.add(_ToolCall(
+            title: parts.sublist(2).join(' '),
+            ok: true,
+            elapsedMs: elapsed,
+          ));
+        }
+      }
+    }
+    return _ParsedActivity(calls, stats);
+  }
+}
+
+class _ParsedActivity {
+  final List<_ToolCall> toolCalls;
+  final Map<String, int> stats;
+  const _ParsedActivity(this.toolCalls, this.stats);
+}
+
+class _ToolCall {
+  final String title;
+  final bool ok;
+  final int? elapsedMs;
+  const _ToolCall({required this.title, this.ok = true, this.elapsedMs});
+}
+
+class _ToolCallSection extends StatelessWidget {
+  final List<_ToolCall> calls;
+  final Map<String, int> stats;
+  const _ToolCallSection({required this.calls, required this.stats});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    final tc = stats['tool_calls'] ?? calls.length;
+    final mc = stats['model_calls'] ?? 0;
+    final tin = stats['tokens_in'] ?? 0;
+    final tout = stats['tokens_out'] ?? 0;
+    final fc = (stats['file_creates'] ?? 0) +
+        (stats['file_edits'] ?? 0) +
+        (stats['file_deletes'] ?? 0);
+
+    final statParts = <String>[];
+    if (tc > 0) statParts.add('$tc tool call${tc == 1 ? '' : 's'}');
+    if (mc > 0) statParts.add('$mc model call${mc == 1 ? '' : 's'}');
+    if (tin > 0 || tout > 0) {
+      statParts.add('${_compact(tin)}/${_compact(tout)} tokens');
+    }
+    if (fc > 0) statParts.add('$fc file${fc == 1 ? '' : 's'} changed');
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: tokens.panel,
+        borderRadius: BorderRadius.circular(SonderRadius.row),
+        border: Border.all(color: tokens.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final call in calls)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Icon(
+                    call.ok
+                        ? Icons.play_arrow_rounded
+                        : Icons.block_rounded,
+                    size: 14,
+                    color: call.ok ? tokens.ok : tokens.danger,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      call.title,
+                      style: tokens.mono(12, color: tokens.text2),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (call.elapsedMs != null) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      _elapsedLabel(call.elapsedMs!),
+                      style: tokens.mono(11, color: tokens.muted),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          if (statParts.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Divider(height: 1, color: tokens.hairline),
+            const SizedBox(height: 6),
+            Text(
+              statParts.join(' · '),
+              style: tokens.mono(11, color: tokens.muted),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _compact(int n) {
+    if (n < 1000) return '$n';
+    if (n < 10000) return '${(n / 1000).toStringAsFixed(1)}k';
+    return '${n ~/ 1000}k';
+  }
+
+  static String _elapsedLabel(int ms) {
+    if (ms < 1000) return '${ms}ms';
+    return '${(ms / 1000).toStringAsFixed(2)}s';
   }
 }
 

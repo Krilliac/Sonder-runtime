@@ -64,6 +64,7 @@ class _SystemScreenState extends State<SystemScreen>
   final _systemActivityKey = GlobalKey();
   final _systemLearningKey = GlobalKey();
   final _systemPolicyKey = GlobalKey();
+  final _systemExtensionsKey = GlobalKey();
 
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
@@ -696,6 +697,7 @@ class _SystemScreenState extends State<SystemScreen>
               activityKey: _systemActivityKey,
               learningKey: _systemLearningKey,
               policyKey: _systemPolicyKey,
+              extensionsKey: _systemExtensionsKey,
             ),
           if (!wide) const SizedBox(height: 12),
           _Section(
@@ -717,7 +719,7 @@ class _SystemScreenState extends State<SystemScreen>
             const SizedBox(height: 12),
           ],
           if (_extensionRegistry != null) ...[
-            _ExtensionRegistrySection(status: _extensionRegistry!),
+            _ExtensionRegistrySection(key: _systemExtensionsKey, status: _extensionRegistry!),
             const SizedBox(height: 12),
           ],
           if (localInfo != null) ...[
@@ -1398,6 +1400,7 @@ class _SystemScreenState extends State<SystemScreen>
                 activityKey: _systemActivityKey,
                 learningKey: _systemLearningKey,
                 policyKey: _systemPolicyKey,
+                extensionsKey: _systemExtensionsKey,
               ),
               Expanded(child: content),
             ],
@@ -2926,6 +2929,7 @@ class _SystemRail extends StatelessWidget {
   final GlobalKey activityKey;
   final GlobalKey learningKey;
   final GlobalKey policyKey;
+  final GlobalKey extensionsKey;
 
   const _SystemRail({
     required this.onSelect,
@@ -2934,6 +2938,7 @@ class _SystemRail extends StatelessWidget {
     required this.activityKey,
     required this.learningKey,
     required this.policyKey,
+    required this.extensionsKey,
   });
 
   @override
@@ -2944,10 +2949,12 @@ class _SystemRail extends StatelessWidget {
       (label: 'Activity', icon: Icons.timeline_outlined, key: activityKey),
       (label: 'Learning', icon: Icons.school_outlined, key: learningKey),
       (label: 'Policy', icon: Icons.security_outlined, key: policyKey),
+      (label: 'Extensions', icon: Icons.extension_outlined, key: extensionsKey),
     ];
     return NavigationRail(
       key: const Key('system-section-rail'),
       extended: MediaQuery.sizeOf(context).width >= 1200,
+      minExtendedWidth: 220,
       selectedIndex: null,
       onDestinationSelected: (index) => onSelect(destinations[index].key),
       labelType: NavigationRailLabelType.all,
@@ -2969,6 +2976,7 @@ class _SystemCompactNav extends StatelessWidget {
   final GlobalKey activityKey;
   final GlobalKey learningKey;
   final GlobalKey policyKey;
+  final GlobalKey extensionsKey;
 
   const _SystemCompactNav({
     required this.onSelect,
@@ -2977,6 +2985,7 @@ class _SystemCompactNav extends StatelessWidget {
     required this.activityKey,
     required this.learningKey,
     required this.policyKey,
+    required this.extensionsKey,
   });
 
   @override
@@ -2987,6 +2996,7 @@ class _SystemCompactNav extends StatelessWidget {
       (label: 'Activity', icon: Icons.timeline_outlined, key: activityKey),
       (label: 'Learning', icon: Icons.school_outlined, key: learningKey),
       (label: 'Policy', icon: Icons.security_outlined, key: policyKey),
+      (label: 'Extensions', icon: Icons.extension_outlined, key: extensionsKey),
     ];
     return Semantics(
       container: true,
@@ -3161,7 +3171,7 @@ class _OutputText extends StatelessWidget {
 class _ExtensionRegistrySection extends StatelessWidget {
   final ExtensionRegistryStatus status;
 
-  const _ExtensionRegistrySection({required this.status});
+  const _ExtensionRegistrySection({super.key, required this.status});
 
   @override
   Widget build(BuildContext context) {
