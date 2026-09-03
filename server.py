@@ -295,6 +295,10 @@ from sonder_runtime.domain.thinking_controls import (
     think_option_unsupported as _think_option_unsupported,
     with_local_thinking_budget as _with_local_thinking_budget,
 )
+from sonder_runtime.domain.fanout_receipts import (
+    safe_answer as _fanout_safe_answer,
+    snapshot_allows as _fanout_snapshot_allows_policy,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -23270,36 +23274,6 @@ def _fanout_provider_retry_after_ts(exc):
     return fanout_store.retry_after_timestamp(exc.retry_after_seconds)
 
 
-def _fanout_safe_answer(value, prompt):
-    """Return receipt-safe model output without retaining obvious credentials.
-
-    Fanout answers are deliberately returned to the caller, but they are also
-    durable receipt fields.  A model can repeat a credential from context or
-    emit one while demonstrating a configuration snippet, so prompt-echo
-    removal alone is not sufficient for that persistence boundary.  This is
-    intentionally a narrow marker-based scrubber: ordinary prose remains
-    useful, while recognizable bearer/header/key values are never stored.
-    """
-    rendered = _fanout_redact_prompt_echo(value, prompt)
-    rendered = re.sub(
-        r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*"
-        r"(?:(?:bearer|basic)\s+)?[^\s\"',;}\]]+",
-        "Authorization: <redacted>",
-        rendered,
-    )
-    rendered = re.sub(
-        r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}",
-        "Bearer <redacted>",
-        rendered,
-    )
-    rendered = re.sub(
-        r"(?i)(^|[\s,{])([\"']?(?:password|passwd|secret|token|api[-_]?key|credential)[\"']?)"
-        r"\s*[:=]\s*(?!<(?:redacted|nested)>)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)",
-        r"\1\2=<redacted>",
-        rendered,
-    )
-    return rendered
-
 
 def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile="",
                   request_owner="", request_role=""):
@@ -23388,16 +23362,7 @@ def _fanout_dispatch_residency_reason(limits, model):
 
 def _fanout_snapshot_allows(run, model):
     """Check a claimed receipt against the run's immutable target contract."""
-    try:
-        snapshot = json.loads(run.get("models_json") or "[]")
-    except (TypeError, ValueError):
-        snapshot = []
-    selected = {str(name).casefold() for name in snapshot if str(name).strip()}
-    if str(model).casefold() not in selected:
-        return False
-    scope = str(run.get("scope") or "local").casefold()
-    cloud = _is_cloud_model_name(model)
-    return scope in ("all", "available") or (scope == "cloud" and cloud) or (scope == "local" and not cloud)
+    return _fanout_snapshot_allows_policy(run, model, is_cloud_model_name=_is_cloud_model_name)
 
 
 def _fanout_admission(run, rows, limits):
