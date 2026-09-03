@@ -257,6 +257,14 @@ from sonder_runtime.domain.agents.claim_review import (
     exact_negative_action as _exact_negative_action_policy,
     task_exact_anchors as _agent_task_exact_anchors,
 )
+from sonder_runtime.domain.agents.evidence_quality import (
+    codegen_build_succeeded as _ensemble_codegen_build_succeeded,
+    tool_observation_ok as _tool_observation_ok_policy,
+)
+from sonder_runtime.domain.agents.verification_reach import (
+    VERIFICATION_TOOLS as _AGENT_VERIFICATION_TOOLS,
+    verifier_reachable as _verifier_reachable_policy,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -18912,17 +18920,6 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
-
-# Verifiers whose passing result is a citation a completion claim can rest on.
-#
-# Deliberately NOT members of _WORK_VALIDATION_TOOLS: _agent_validation_covers
-# has no branch for these names and falls through to False, so adding them
-# there would set validation_ok=False and stamp the run VALIDATION_FAILED --
-# running the tests would be the thing that failed the run.
-_AGENT_VERIFICATION_TOOLS = frozenset({
-    "test_run", "build_run", "lint_run", "typecheck_run",
-})
-
 # Leads an end report that claims completion the record says must be earned.
 # A statement of standing, not a failure: deliberately absent from
 # autopilot_controller.FAILURE_PREFIXES.
@@ -18948,34 +18945,10 @@ _AGENT_VERIFIERS_PHRASE = (
 
 
 def _agent_verifier_reachable(read_only, allowed_tools):
-    """Whether any verifier could have been called in this lane at all.
-
-    Read from the two gates the dispatcher actually enforces -- the read-only
-    policy, which admits only ``REPOSITORY_READ_ONLY_TOOLS``, and the lane's
-    own ``tool_allowlist`` -- rather than from a list of lane names, so a lane
-    added later is classified by what it can do instead of by whether someone
-    remembered to add it here.
-
-    This exists because a demand nothing in the lane can satisfy is not a gate.
-    Four allowlists in this file admit no member of
-    ``_AGENT_VERIFICATION_TOOLS``: ``REPOSITORY_READ_ONLY_TOOLS`` (repository
-    workers), ``_AUTOPILOT_OBSERVE_TOOLS``, the chat/web research allowlist,
-    and the selfmod editor's. Leading their answers -- every weather question
-    among them -- with "claimed completion without a passing verification
-    (test_run, build_run, lint_run or typecheck_run)" names tools the lane is
-    forbidden from calling, and no run in it could ever clear the line. A
-    standing with no OFF state is a banner, and a banner teaches a reader to
-    skip exactly where a real warning would appear.
-
-    The measurement is unchanged either way, and still reaches the caller
-    through the end-report standing line, which ships on every run.
-    """
-    reachable = set(_AGENT_VERIFICATION_TOOLS)
-    if read_only:
-        reachable &= REPOSITORY_READ_ONLY_TOOLS
-    if allowed_tools is not None:
-        reachable &= set(allowed_tools)
-    return bool(reachable)
+    """Whether any verifier could have been called in this lane at all."""
+    return _verifier_reachable_policy(
+        read_only, allowed_tools, read_only_tools=REPOSITORY_READ_ONLY_TOOLS,
+    )
 
 
 # Flags that make a program report on itself instead of on the project. Taken
@@ -19287,37 +19260,10 @@ def _agent_observation_ok(observation):
 
 def _agent_tool_observation_ok(tool_name, observation):
     """Apply evidence-quality checks that are specific to a tool contract."""
-    if str(tool_name or "") == "ensemble_codegen_build_loop":
-        return _ensemble_codegen_build_succeeded(observation)
-    if str(tool_name or "") == "web_fetch" and observation is None:
-        return False
-    if not _agent_observation_ok(observation):
-        return False
-    if str(tool_name or "") == "archive_list":
-        try:
-            return bool(json.loads(str(observation or "")).get("valid"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return False
-    if str(tool_name or "") != "web_fetch":
-        return True
-    # A transport-level success with an empty page is not grounding. Require
-    # at least one readable letter or digit before a fetch can satisfy the
-    # research agent's required-tool evidence gate. Keep the generic success
-    # predicate unchanged because empty/zero-ish output is valid for several
-    # execution and inspection tools.
-    text = str(observation or "").strip()
-    return bool(text and any(character.isalnum() for character in text))
-
-
-def _ensemble_codegen_build_succeeded(observation):
-    """Read only the host-rendered terminal verdict from the codegen loop."""
-    lines = {line.strip() for line in str(observation or "").splitlines()}
-    return (
-        "BUILD SUCCEEDED" in lines
-        and not any(line.startswith("BUILD FAILED") for line in lines)
-        and "BUILD DID NOT RUN" not in lines
-        and not any(line.startswith("BUILD MEASUREMENT INCOMPLETE") for line in lines)
+    return _tool_observation_ok_policy(
+        tool_name, observation, observation_ok=_agent_observation_ok,
     )
+
 
 
 def _agent_normalized_path(value):
