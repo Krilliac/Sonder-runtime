@@ -400,7 +400,7 @@ class Sweep:
         self._redact = Redactor().redact
         import server
         import permission_modes
-        import command_catalog
+        from sonder_runtime.adapters import command_catalog
         from sonder_runtime.adapters.filesystem import file_ops
 
         self._server = server
@@ -861,7 +861,7 @@ def _same_command(command, resolved: str) -> bool:
     """Whether ``resolved`` runs ``command``: its own name, an alias, or a native
     slash whose branch fronts the same tool (``autopilot cancel`` resolves to
     ``/autopilot cancel``, ``master status`` to ``/agents``)."""
-    import command_catalog
+    from sonder_runtime.adapters import command_catalog
 
     head = resolved.split()[0]
     if head in {command.name, *command.aliases}:
