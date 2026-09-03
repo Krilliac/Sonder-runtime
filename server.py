@@ -237,6 +237,10 @@ from sonder_runtime.domain.mcp_runtime_formatting import (
     format_mcp_runtime as _format_mcp_runtime_report,
     safe_mcp_error as _safe_mcp_error,
 )
+from sonder_runtime.domain.fanout_admission import (
+    fanout_admission as _fanout_admission_policy,
+    fanout_limits as _fanout_limits,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -23740,24 +23744,6 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
     return run
 
 
-def _fanout_limits(run):
-    try:
-        raw = json.loads(run.get("limits_json") or "{}")
-    except (TypeError, ValueError):
-        raw = {}
-    return {
-        "num_predict": max(32, min(int(raw.get("num_predict", 512)), 4096)),
-        "timeout": max(5, min(int(raw.get("timeout", 45)), 300)),
-        "cloud_workers": max(1, min(int(raw.get("cloud_workers", 2)), 2)),
-        "resident_before": [str(name) for name in raw.get("resident_before", []) if str(name)],
-        # Legacy receipts have no trustworthy snapshot provenance.  Conserving
-        # a model is safe; evicting one based on an unknown empty snapshot is
-        # not, so the backwards-compatible default is deliberately false.
-        "resident_snapshot_known": raw.get("resident_snapshot_known") is True,
-        "plan_skipped": list(raw.get("plan_skipped", [])),
-        "selection_profile": str(raw.get("selection_profile") or "").strip().lower(),
-    }
-
 
 def _fanout_dispatch_residency_reason(limits, model):
     """Return a no-load fence refusal for a selected resident-only target.
@@ -23807,78 +23793,12 @@ def _fanout_admission(run, rows, limits):
     so the receipt gives callers concrete request and scheduling ceilings
     instead of a misleading currency estimate.
     """
-    # The persisted snapshot, not mutable result rows, is the admission
-    # authority.  A fenced worker must never make an inconsistent row look
-    # like a selected target in the caller-visible privacy/budget record.
-    try:
-        raw_snapshot = json.loads(run.get("models_json") or "[]")
-    except (TypeError, ValueError):
-        raw_snapshot = []
-    selected = sorted(
-        {str(name).strip() for name in raw_snapshot if str(name).strip()},
-        key=str.casefold,
+    return _fanout_admission_policy(
+        run, rows, limits,
+        is_cloud_model_name=_is_cloud_model_name,
+        known_thinking_model=_known_thinking_model,
+        local_thinking_min_num_predict=LOCAL_THINKING_MIN_NUM_PREDICT,
     )
-    cloud_targets = [name for name in selected if _is_cloud_model_name(name)]
-    # Durable fanout dispatches exactly the immutable selected targets.  In
-    # particular, a K3 availability failure remains a failed K3 row rather
-    # than silently sending the sealed prompt to K2.7 and misattributing the
-    # answer or model health.
-    disclosed_cloud_targets = sorted(set(cloud_targets), key=str.casefold)
-    effective_num_predict = max([
-        int(limits["num_predict"]),
-        *[
-            max(int(limits["num_predict"]), 4096)
-            for name in cloud_targets
-            if str(name).casefold().startswith(("kimi-k3:", "glm-5.2:", "kimi-k2.7-code:"))
-        ],
-        *[
-            max(int(limits["num_predict"]), LOCAL_THINKING_MIN_NUM_PREDICT)
-            for name in selected
-            if not _is_cloud_model_name(name) and _known_thinking_model(name)
-        ],
-    ])
-    local_count = len(selected) - len(cloud_targets)
-    cloud_workers = limits["cloud_workers"]
-    # Locals execute serially to protect shared VRAM/RAM. Cloud rows use the
-    # bounded worker pool. This deliberately excludes setup and queue costs.
-    request_phase_seconds = limits["timeout"] * (
-        local_count + math.ceil(len(cloud_targets) / cloud_workers)
-    )
-    return {
-        "selected_models": selected,
-        "targets": {
-            "total": len(selected), "local": local_count, "cloud": len(cloud_targets),
-        },
-        "execution": {
-            "num_predict": effective_num_predict,
-            "requested_num_predict": limits["num_predict"],
-            "request_timeout_s": limits["timeout"],
-            "local_concurrency": 1,
-            "cloud_concurrency": cloud_workers,
-        },
-        "upper_bounds": {
-            "initial_request_attempts_total": len(selected),
-            "initial_cloud_request_attempts": len(cloud_targets),
-            "scheduled_request_phase_wall_ms": int(request_phase_seconds * 1000),
-            "excludes": [
-                "catalog discovery", "queue or lease wait", "model load or unload",
-                "provider retry or throttle beyond a request timeout", "explicit later resume attempts",
-            ],
-        },
-        "cost": {
-            "provider_pricing": "not_estimated",
-            "reason": "the runtime has no trustworthy provider price schedule",
-        },
-        "privacy": {
-            "cloud_opt_in": bool(run.get("cloud_opt_in")),
-            "cloud_targets": disclosed_cloud_targets,
-            "prompt_leaves_machine": bool(disclosed_cloud_targets),
-            "notice": (
-                "selected cloud targets receive the prompt; cloud calls require explicit operator opt-in"
-                if disclosed_cloud_targets else "no selected cloud target receives the prompt"
-            ),
-        },
-    }
 
 
 def _fanout_receipt(run_id):
