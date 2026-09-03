@@ -34,6 +34,7 @@ class Settings {
   static const _kServer = 'sonder_server_url';
   static const _kKey = 'sonder_api_key';
   static const _kDark = 'sonder_dark_mode';
+  static const _kThemeMode = 'sonder_theme_mode';
   static const _kModel = 'sonder_model';
   static const _kAllowHosted = 'sonder_allow_hosted';
   static const _kContextSize = 'sonder_context_size';
@@ -53,7 +54,10 @@ class Settings {
 
   String serverUrl;
   String apiKey;
-  bool darkMode;
+
+  /// `dark`, `light` or `system`. Dark is the primary theme; `system`
+  /// follows the platform. [darkMode] is derived for older call sites.
+  String themeMode;
   // Inference route/model identifier exposed by the Sonder Runtime server.
   String model;
   bool allowHosted;
@@ -66,7 +70,7 @@ class Settings {
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
     this.apiKey = '',
-    this.darkMode = true,
+    this.themeMode = 'dark',
     this.model = defaultModel,
     this.allowHosted = false,
     this.contextSize = '8192',
@@ -77,6 +81,10 @@ class Settings {
   });
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
+
+  static const themeModes = ['dark', 'light', 'system'];
+
+  bool get darkMode => themeMode != 'light';
 
   /// Host control is intentionally explicit. Deriving this from [serverUrl]
   /// could send a persisted launcher credential to a newly selected server.
@@ -133,7 +141,7 @@ class Settings {
     return Settings(
       serverUrl: p.getString(_kServer) ?? 'http://127.0.0.1:11435',
       apiKey: apiKey,
-      darkMode: p.getBool(_kDark) ?? true,
+      themeMode: _themeModeFrom(p),
       model: p.getString(_kModel) ?? defaultModel,
       allowHosted: p.getBool(_kAllowHosted) ?? false,
       contextSize: p.getString(_kContextSize) ?? '8192',
@@ -142,6 +150,15 @@ class Settings {
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
       launcherToken: launcherToken,
     );
+  }
+
+  /// The stored preference, falling back to the boolean older builds wrote.
+  static String _themeModeFrom(SharedPreferences p) {
+    final stored = p.getString(_kThemeMode);
+    if (stored != null && themeModes.contains(stored)) return stored;
+    final dark = p.getBool(_kDark);
+    if (dark == false) return 'light';
+    return 'dark';
   }
 
   /// Writes bearer credentials only to the platform credential store.
@@ -174,6 +191,8 @@ class Settings {
       await p.remove(_kLauncherToken);
     }
     await p.setString(_kServer, serverUrl.trim());
+    await p.setString(_kThemeMode, themeModes.contains(themeMode) ? themeMode : 'dark');
+    // Kept for builds that still read the boolean.
     await p.setBool(_kDark, darkMode);
     await p.setString(_kModel, model);
     await p.setBool(_kAllowHosted, allowHosted);
