@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 230,
+      "file_count": 236,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -60,6 +60,8 @@
         "sonder_runtime/adapters/accelerators/npu/service.py",
         "sonder_runtime/adapters/admin_formatting.py",
         "sonder_runtime/adapters/agent_call_signature.py",
+        "sonder_runtime/adapters/agent_decision_generation.py",
+        "sonder_runtime/adapters/agent_work_coverage.py",
         "sonder_runtime/adapters/application_lifecycle.py",
         "sonder_runtime/adapters/archive_create.py",
         "sonder_runtime/adapters/artifact_digest.py",
@@ -68,6 +70,7 @@
         "sonder_runtime/adapters/artifact_risk.py",
         "sonder_runtime/adapters/backup.py",
         "sonder_runtime/adapters/backup_gateway.py",
+        "sonder_runtime/adapters/bounded_cloud_generation.py",
         "sonder_runtime/adapters/cli_options.py",
         "sonder_runtime/adapters/client_config.py",
         "sonder_runtime/adapters/client_endpoint.py",
@@ -105,6 +108,8 @@
         "sonder_runtime/adapters/extensions/memory_limits.py",
         "sonder_runtime/adapters/external_mcp.py",
         "sonder_runtime/adapters/fanout_failures.py",
+        "sonder_runtime/adapters/fanout_health.py",
+        "sonder_runtime/adapters/fanout_receipt.py",
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
         "sonder_runtime/adapters/filesystem/file_ops.py",
@@ -228,6 +233,7 @@
         "sonder_runtime/adapters/recall.py",
         "sonder_runtime/adapters/recall_gateway.py",
         "sonder_runtime/adapters/repl_services.py",
+        "sonder_runtime/adapters/repo_repair_runner.py",
         "sonder_runtime/adapters/repository_errors.py",
         "sonder_runtime/adapters/reproducible_evaluation.py",
         "sonder_runtime/adapters/runtime_capabilities.py",
