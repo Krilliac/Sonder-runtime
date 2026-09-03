@@ -135,7 +135,26 @@ def _line_count_on_disk(path: Path) -> int:
 
 
 def workspace_root() -> Path:
-    return Path(__file__).resolve().parent
+    """Sonder's own checkout: the base for relative paths with no project scope.
+
+    This module used to live at the repository root, where "the directory of
+    this file" *was* the checkout. The strangler migration moved it four
+    levels down and the expression silently started naming
+    ``sonder_runtime/adapters/filesystem`` -- measured 2026-09-03, when an
+    agent's ``ledger/core.py`` resolved to a path inside the adapter package.
+    The directory that contains the ``sonder_runtime`` package is the
+    checkout (or the installed payload), so name it explicitly.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def inside_allowed_roots(path, extra_roots: str = "") -> bool:
+    """Whether ``path`` lies inside a root the deployment already exposes."""
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return False
+    return any(_is_inside(resolved, root) for root in allowed_roots(extra_roots))
 
 
 def _split_roots(raw: str) -> list[Path]:
