@@ -762,11 +762,18 @@ class SonderApi {
   final String apiKey; // empty when the server has auth disabled
   final String localFallbackUrl;
 
-  const SonderApi({
+  http.Client? _chatClient;
+
+  SonderApi({
     required this.baseUrl,
     this.apiKey = '',
     this.localFallbackUrl = 'http://127.0.0.1:11435',
   });
+
+  void cancelChat() {
+    _chatClient?.close();
+    _chatClient = null;
+  }
 
   static final RegExp _relativeLocationIntent = RegExp(
     r'\b(near me|nearby|my area|around me|where am i|my location|locate me)\b',
@@ -1271,14 +1278,16 @@ class SonderApi {
 
     late http.Response resp;
     String warning = '';
+    final client = http.Client();
+    _chatClient = client;
     try {
-      resp = await http
+      resp = await client
           .post(_uri('/v1/chat/completions'), headers: _headers(), body: body)
           .timeout(const Duration(minutes: 5));
     } catch (e) {
       if (_canFallback) {
         try {
-          resp = await http
+          resp = await client
               .post(
                 _uri('/v1/chat/completions', localFallbackUrl),
                 headers: _headers(''),
@@ -1287,11 +1296,15 @@ class SonderApi {
               .timeout(const Duration(minutes: 5));
           warning = _fallbackWarning('chat', e);
         } catch (_) {
+          _chatClient = null;
           throw SonderException.transport(e, baseUrl);
         }
       } else {
+        _chatClient = null;
         throw SonderException.transport(e, baseUrl);
       }
+    } finally {
+      _chatClient = null;
     }
 
     if (resp.statusCode == 401) {
