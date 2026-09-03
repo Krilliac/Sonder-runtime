@@ -499,3 +499,4 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Three-Hundred-Thirty-Third Slice: compare-and-swap persistence of a verified code repair now lives in `sonder_runtime.adapters.code_repair_persistence`, preserving the root `_persist_verified_code_repair` delegate.
 - WP1 Three-Hundred-Thirty-Fourth Slice: project-scoped path key lookup now lives in sonder_runtime.domain.project_scope_keys, preserving the root _project_scoped_path_key compatibility alias.
 - WP1 Three-Hundred-Thirty-Fifth Slice: selfmod test command construction now lives in sonder_runtime.domain.automation.selfmod_test_commands, preserving the root _selfmod_test_commands compatibility alias.
+- WP1 Three-Hundred-Thirty-Sixth Slice: approval listing limit parsing now lives in sonder_runtime.domain.approvals_limit, preserving the root _approvals_limit compatibility alias.

@@ -361,6 +361,9 @@ from sonder_runtime.domain.project_scope_keys import (
 from sonder_runtime.domain.automation.selfmod_test_commands import (
     selfmod_test_commands as _selfmod_test_commands,
 )
+from sonder_runtime.domain.approvals_limit import (
+    approvals_limit as _approvals_limit,
+)
 from sonder_runtime.adapters.cloud_fallback import (
     chat_request_with_cloud_fallback as _chat_request_with_cloud_fallback_policy,
     extra_usage_fallback as _extra_usage_fallback_policy,
@@ -7784,15 +7787,6 @@ def _approval_authority(token) -> tuple[str, str]:
         "prompt), a developer token, or SONDER_ALLOW_PERMISSION_EDITS=1."
     )
 
-
-def _approvals_limit(arg: str) -> int:
-    text = str(arg or "").strip()
-    if not text:
-        return 20
-    try:
-        return max(1, min(int(text), 200))
-    except ValueError:
-        return 20
 
 
 def _approve_command(arg: str, *, operator_approved: bool = False) -> str:
