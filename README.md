@@ -507,3 +507,7 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Three-Hundred-Forty-First Slice: agent tool observation quality classification now lives in sonder_runtime.domain.agent_observation_quality, preserving the root _agent_observation_ok alias.
 - WP1 Three-Hundred-Forty-Second Slice: agent run-created-paths key normalization now lives in sonder_runtime.domain.agent_path_keys, preserving the root _agent_created_path_key alias.
 - WP1 Three-Hundred-Forty-Third Slice: agent model-escalation identity key now lives in sonder_runtime.domain.agent_escalation_identity, preserving the root _agent_escalation_key alias.
+- WP1 Three-Hundred-Forty-Fourth Slice: cloud tier classification now lives in sonder_runtime.domain.model_routing.is_cloud_tier, preserving the root _is_cloud_tier compatibility delegate.
+- WP1 Three-Hundred-Forty-Fifth Slice: fanout worker id construction now delegates to sonder_runtime.domain.fanout_worker_identity.fanout_worker_id, removing duplicated logic from the root _fanout_worker_id delegate.
+- WP1 Three-Hundred-Forty-Sixth Slice: agent help text tool-name parsing now lives in sonder_runtime.domain.agent_help_parsing, preserving the root _agent_help_advertised_tools alias.
+- WP1 Three-Hundred-Forty-Seventh Slice: agent mutation record convenience wrapper now lives in sonder_runtime.adapters.agent_work_coverage.mutation_record, preserving the root _agent_mutation_record alias.
