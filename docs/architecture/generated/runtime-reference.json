@@ -4209,18 +4209,6 @@
           "name": "token",
           "required": false,
           "type": "str"
-        },
-        {
-          "default": "",
-          "name": "approval",
-          "required": false,
-          "type": "str"
-        },
-        {
-          "default": "",
-          "name": "write_approval",
-          "required": false,
-          "type": "str"
         }
       ],
       "risk": "execution",
@@ -9271,7 +9259,7 @@
     "events": 43,
     "tools": 208
   },
-  "digest": "4738d4808a81a96e03b95e7d22d4b84e26bf457759af6a3deac56bb1c8deef7d",
+  "digest": "70c43f6461d408010fbd535e14dcf38e332ad6ecc9c6dbb093e3af1c03045112",
   "events": [
     {
       "name": "session.started",
@@ -9742,7 +9730,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "3a6e4c69f8b2eb2d1f278cd35a87a2a401f01dfdae723f8c6e88dba75cfb82eb",
+    "server.py": "c1e5c00d8a8f8e5a420eaed29288a337488c5a736860ccad0a827ce115e7bdfc",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "1634c0aea94d705017ae2ab96b8ed2d1b3f52313571b56f559fa950c07c23e8c"
@@ -12932,7 +12920,7 @@
       }
     },
     {
-      "description": "Run an installed Linux container image under a fixed isolation policy.\n\n    This direct MCP tool requires developer authentication, a host approval\n    secret, and explicit risk acknowledgement in addition to the local ``ask``\n    policy. Writable binds require a second host secret. It is intentionally\n    unavailable to Sonder agents and autopilot. ``argv_json``\n    must be a JSON string array. The exact absolute ``project`` directory is the\n    only host bind and is read-only unless the host explicitly sets\n    ``writable_workspace=true``. Docker/Podman flags, mounts, devices, user,\n    environment, sockets, and privileges are not caller-configurable.\n\n    The fixed policy disables networking, uses a read-only root filesystem,\n    drops all capabilities, enables no-new-privileges, scrubs the process\n    environment, and caps time, output, memory, CPU, PIDs, stdin, and /tmp.\n    This relies on the external runtime and host kernel and is not escape-proof.\n    ",
+      "description": "Run an installed Linux container image under a fixed isolation policy.\n\n    This direct MCP tool requires developer authentication and explicit risk\n    acknowledgement in addition to the local ``ask`` policy. A writable bind\n    (``writable_workspace=true``, the only integrity-expanding option) also\n    needs a person to have approved exactly this call once: ``/approve <call\n    id>`` at the console, spent by the next unchanged call. The shared\n    ``SONDER_ISOLATED_APPROVAL_CODE`` / ``SONDER_ISOLATED_WRITE_APPROVAL_CODE``\n    secrets are retired and grant nothing. It is intentionally\n    unavailable to Sonder agents and autopilot. ``argv_json``\n    must be a JSON string array. The exact absolute ``project`` directory is the\n    only host bind and is read-only unless the host explicitly sets\n    ``writable_workspace=true``. Docker/Podman flags, mounts, devices, user,\n    environment, sockets, and privileges are not caller-configurable.\n\n    The fixed policy disables networking, uses a read-only root filesystem,\n    drops all capabilities, enables no-new-privileges, scrubs the process\n    environment, and caps time, output, memory, CPU, PIDs, stdin, and /tmp.\n    This relies on the external runtime and host kernel and is not escape-proof.\n    ",
       "name": "isolated_run",
       "parameters": {
         "properties": {
@@ -12940,11 +12928,6 @@
             "default": false,
             "title": "Acknowledge Isolation Limits",
             "type": "boolean"
-          },
-          "approval": {
-            "default": "",
-            "title": "Approval",
-            "type": "string"
           },
           "argv_json": {
             "title": "Argv Json",
@@ -12997,11 +12980,6 @@
             "default": false,
             "title": "Writable Workspace",
             "type": "boolean"
-          },
-          "write_approval": {
-            "default": "",
-            "title": "Write Approval",
-            "type": "string"
           }
         },
         "required": [

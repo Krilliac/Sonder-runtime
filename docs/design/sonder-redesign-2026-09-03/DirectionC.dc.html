@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; background: #F6F3EC; }
+    a { color: #7A5C2E; } a:hover { color: #5D4420; }
+    .h { font-family: "Caveat", "Segoe Print", "Bradley Hand", cursive; color: #2B2B2B; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 11px; line-height: 16px; color: #6C665C; }
+    .box { border: 1.5px solid #2B2B2B; border-radius: 4px; }
+    .ln { height: 5px; border-radius: 3px; background: #D9D3C7; }
+    .cell { border: 1px solid #B9B2A5; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+  </style>
+</helmet>
+<div style="width: 720px; height: 480px; box-sizing: border-box; background: #F6F3EC; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; overflow: hidden;">
+  <div style="display: flex; align-items: baseline; gap: 12px;">
+    <div class="h" style="font-size: 30px; line-height: 34px;">Direction C · Dense operator console</div>
+    <div class="t">low-fi · everything on one screen · panes, not pages · data first</div>
+  </div>
+  <div style="display: flex; gap: 16px; flex: 1;">
+    <div class="box" style="flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 6px; background: #FFFDF8;">
+      <div class="cell" style="grid-row: span 2;"><div class="t" style="color: #2B2B2B;">transcript</div><div class="ln" style="width: 90%;"></div><div class="ln" style="width: 70%;"></div><div class="ln" style="width: 85%;"></div><div class="ln" style="width: 50%;"></div><div style="flex: 1;"></div><div class="box" style="height: 22px; border-radius: 3px;"></div></div>
+      <div class="cell"><div class="t" style="color: #2B2B2B;">lanes · agents</div><div class="ln" style="width: 80%; background: #4C8C6A;"></div><div class="ln" style="width: 60%;"></div><div class="ln" style="width: 70%;"></div></div>
+      <div class="cell"><div class="t" style="color: #2B2B2B;">policy · approvals</div><div class="ln" style="width: 70%; background: #C4573A;"></div><div class="ln" style="width: 55%;"></div></div>
+      <div class="cell"><div class="t" style="color: #2B2B2B;">context · budgets</div><div class="ln" style="width: 40%; background: #4C8C6A;"></div><div class="ln" style="width: 65%; background: #4C8C6A;"></div><div class="ln" style="width: 30%;"></div></div>
+      <div class="cell"><div class="t" style="color: #2B2B2B;">live feed</div><div class="ln" style="width: 95%;"></div><div class="ln" style="width: 90%;"></div><div class="ln" style="width: 92%;"></div><div class="ln" style="width: 88%;"></div></div>
+    </div>
+    <div style="width: 220px; display: flex; flex-direction: column; gap: 10px;">
+      <div class="box" style="background: #2B2B2B; padding: 10px; display: flex; flex-direction: column; gap: 4px;">
+        <div class="t" style="color: #F6F3EC;">S code | M:manual | L1 A0 | C12k/32k</div>
+        <div class="t" style="color: #9A948A;">▸ read  ▸ grep  ▸ read   ⊘ write_file</div>
+        <div class="t" style="color: #F6F3EC;">◈ answer ─────────  ╰ 1.20s</div>
+      </div>
+      <div class="h" style="font-size: 20px; line-height: 24px; margin-top: 6px;">Why</div>
+      <div class="t">An operator sees lanes, budgets and the gate at once; nothing hides behind a drawer; the terminal's compact vocabulary becomes the app's.</div>
+      <div class="h" style="font-size: 20px; line-height: 24px; margin-top: 6px;">Trade-off</div>
+      <div class="t">Loud for a chat you read every day; phones need a different layout entirely; more chrome to keep honest when data is unavailable.</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

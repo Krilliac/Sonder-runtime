@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0B1117; }
+    a { color: #63D6C8; } a:hover { color: #8EE4D9; }
+    .s { font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; color: #E7EDF2; font-size: 15px; line-height: 22px; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12px; line-height: 18px; color: #A5B2BD; }
+    .m { color: #6F7E8A; } .m2 { color: #A5B2BD; }
+    .lbl { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #6F7E8A; }
+    .ic { width: 20px; height: 20px; flex: 0 0 20px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; color: #A5B2BD; }
+    .item { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 4px 16px; box-sizing: border-box; }
+    .field { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+    .val { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: #E7EDF2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sw { width: 40px; height: 24px; border-radius: 12px; background: #2A3944; position: relative; flex: 0 0 40px; }
+    .sw.on { background: #63D6C8; }
+    .kn { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 9px; background: #A5B2BD; }
+    .sw.on .kn { left: 19px; background: #062A27; }
+    .grp { display: flex; flex-direction: column; border-top: 1px solid #1F2C36; }
+  </style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #0B1117; display: flex; flex-direction: column; overflow: hidden;">
+  <div style="height: 54px;"></div>
+  <div style="display: flex; align-items: center; gap: 4px; height: 48px; padding: 0 8px;">
+    <div class="btn"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l-6 6 6 6"/></svg></div>
+    <span class="s" style="flex: 1; font-weight: 500; font-size: 16px;">Settings</span>
+    <span class="s" style="display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 10px; background: #63D6C8; color: #062A27; font-weight: 600; font-size: 14px;">Save</span>
+    <div style="width: 8px;"></div>
+  </div>
+
+  <div style="flex: 1; display: flex; flex-direction: column; overflow: hidden;">
+    <div class="s lbl" style="padding: 8px 16px 6px 16px;">Connection</div>
+    <div class="grp">
+      <div class="item" style="border-bottom: 1px solid #1F2C36;"><div class="field"><span class="s" style="font-size: 14px;">Server</span><span class="val">http://127.0.0.1:11435</span></div><span class="t" style="color: #79D394; font-size: 11px;">reachable</span></div>
+      <div class="item" style="border-bottom: 1px solid #1F2C36;"><div class="field"><span class="s" style="font-size: 14px;">API key</span><span class="val">••••••••••••••••••••</span></div><span class="t m2" style="font-size: 11px;">reveal</span></div>
+      <div class="item" style="border-bottom: 1px solid #1F2C36;"><div class="field"><span class="s" style="font-size: 14px;">Host launcher</span><span class="val">http://127.0.0.1:11436 · signed proof</span></div><span class="t" style="color: #79D394; font-size: 11px;">healthy</span></div>
+      <div class="item"><div class="field"><span class="s" style="font-size: 14px;">Default model</span><span class="val">qwen2.5-coder:7b · ctx 32,768</span></div><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#6F7E8A" stroke-width="1.6" stroke-linecap="round" style="width: 14px; height: 14px;"><path d="M8 5l5 5-5 5"/></svg></div>
+    </div>
+
+    <div class="s lbl" style="padding: 14px 16px 6px 16px;">Privacy and autonomy</div>
+    <div class="grp">
+      <div class="item" style="border-bottom: 1px solid #1F2C36;"><div class="field"><span class="s" style="font-size: 14px;">Allow hosted model tiers</span><span class="t m" style="font-size: 12px;">Off keeps every prompt on this machine</span></div><span class="sw"><span class="kn"></span></span></div>
+      <div class="item" style="border-bottom: 1px solid #1F2C36;"><div class="field"><span class="s" style="font-size: 14px;">Keep the runtime running after close</span><span class="t m" style="font-size: 12px;">Autopilot and fleets keep going</span></div><span class="sw on"><span class="kn"></span></span></div>
+      <div class="item"><div class="field"><span class="s" style="font-size: 14px;">Approximate location for weather</span><span class="t m" style="font-size: 12px;">City-level only, asked per request</span></div><span class="sw"><span class="kn"></span></span></div>
+    </div>
+
+    <div class="s lbl" style="padding: 14px 16px 6px 16px;">Appearance</div>
+    <div class="grp">
+      <div class="item"><div class="field"><span class="s" style="font-size: 14px;">Theme</span></div><span style="display: inline-flex; border: 1px solid #2A3944; border-radius: 8px; overflow: hidden;"><span class="t" style="padding: 6px 10px; color: #A5B2BD;">Light</span><span class="t" style="padding: 6px 10px; color: #062A27; background: #63D6C8; font-weight: 600;">Dark</span><span class="t" style="padding: 6px 10px; color: #A5B2BD;">System</span></span></div>
+    </div>
+
+    <div class="s lbl" style="padding: 14px 16px 6px 16px;">Account</div>
+    <div class="grp" style="border-bottom: 1px solid #1F2C36;">
+      <div class="item"><div class="field"><span class="s" style="font-size: 14px;">nathan</span><span class="t m" style="font-size: 12px;">developer · local session kept in the keychain</span></div><span class="t m2" style="font-size: 12px;">Forget</span></div>
+    </div>
+    <div style="flex: 1;"></div>
+    <div class="t m" style="padding: 8px 16px; font-size: 11px;">Not a standalone model: Sonder orchestrates the local runtime you point it at.</div>
+  </div>
+  <div style="height: 34px;"></div>
+</div>
+</x-dc>
+</body>
+</html>

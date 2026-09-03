@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0B1117; }
+    a { color: #63D6C8; } a:hover { color: #8EE4D9; }
+    .s { font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; color: #E7EDF2; font-size: 15px; line-height: 23px; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12px; line-height: 18px; color: #A5B2BD; font-variant-numeric: tabular-nums; }
+    .m { color: #6F7E8A; } .m2 { color: #A5B2BD; }
+    .ic { width: 20px; height: 20px; flex: 0 0 20px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; color: #A5B2BD; }
+    .turn { display: flex; gap: 12px; }
+    .gut { width: 24px; flex: 0 0 24px; display: flex; justify-content: center; padding-top: 3px; }
+  </style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #0B1117; display: flex; flex-direction: column; overflow: hidden;">
+  <div style="height: 54px;"></div>
+  <div style="display: flex; align-items: center; gap: 4px; height: 48px; padding: 0 8px; border-bottom: 1px solid #1F2C36;">
+    <div class="btn"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 5h14M3 10h14M3 15h9"/></svg></div>
+    <div style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 0;">
+      <span class="s" style="font-size: 14px; font-weight: 500; line-height: 18px;">Unattended asks</span>
+      <span class="t m" style="font-size: 11px; line-height: 14px;">qwen2.5-coder:7b · local</span>
+    </div>
+    <div class="btn"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M10 4v12M4 10h12"/></svg></div>
+  </div>
+
+  <div style="flex: 1; padding: 16px 16px 4px 16px; display: flex; flex-direction: column; gap: 14px; overflow: hidden;">
+    <div class="turn">
+      <div class="gut"><span class="t" style="color: #63D6C8; font-weight: 600; font-size: 14px;">❯</span></div>
+      <div class="s" style="flex: 1;">Read the permission gate and tell me where unattended asks are refused.</div>
+    </div>
+    <div class="turn">
+      <div class="gut"><span class="t" style="color: #6F7E8A;">▸</span></div>
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 3px;">
+        <div style="display: flex; gap: 8px;"><span class="t m2">read</span><span class="t" style="color: #E7EDF2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">permission_modes.py</span><span class="t m">137 ln</span></div>
+        <div style="display: flex; gap: 8px;"><span class="t m2">text_search</span><span class="t" style="color: #E7EDF2;">"unattended"</span><span class="t m">12 hits</span></div>
+        <div style="display: flex; gap: 8px;"><span class="t m2">read</span><span class="t" style="color: #E7EDF2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">permission_receipts.py</span><span class="t m">88 ln</span></div>
+      </div>
+    </div>
+    <div class="turn">
+      <div class="gut"><span class="t" style="color: #63D6C8; font-weight: 600; font-size: 14px;">◈</span></div>
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 10px;">
+        <div class="s">Unattended asks are refused at step 5c of <span class="t" style="color: #E7EDF2; font-size: 13px;">_decide</span>. Effect classes fail closed with nobody attending; each refusal names the call so it can be approved once.</div>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <span class="t m" style="font-size: 11px;">local · 3.3k tok · 1.20s</span>
+          <span style="flex: 1;"></span>
+          <span class="t m2" style="font-size: 11px; border-bottom: 1px solid #2A3944;">evidence</span>
+          <span class="t m2" style="font-size: 11px; border-bottom: 1px solid #2A3944;">receipt</span>
+        </div>
+      </div>
+    </div>
+    <div class="turn">
+      <div class="gut"><span class="t" style="color: #63D6C8; font-weight: 600; font-size: 14px;">❯</span></div>
+      <div class="s" style="flex: 1;">Write that up into notes/gate.md.</div>
+    </div>
+    <div class="turn">
+      <div class="gut"><span class="t" style="color: #F27B7B; font-weight: 600; font-size: 14px;">⊘</span></div>
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 10px; border: 1px solid #1F2C36; background: #0F171E;">
+        <div class="s" style="font-size: 14px; line-height: 21px;">Refused <span class="t" style="color: #E7EDF2; font-size: 13px;">write_file</span> <span class="m2">— unattended file change in manual mode.</span></div>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <span class="s" style="display: inline-flex; align-items: center; justify-content: center; height: 44px; border-radius: 10px; background: #63D6C8; color: #062A27; font-weight: 600; font-size: 14px;">Approve once</span>
+          <div style="display: flex; gap: 8px;">
+            <span class="s" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; height: 44px; border-radius: 10px; border: 1px solid #2A3944; font-size: 14px;">Allow notes/</span>
+            <span class="s" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; height: 44px; border-radius: 10px; border: 1px solid #2A3944; font-size: 14px;">acceptEdits</span>
+          </div>
+        </div>
+        <span class="t m" style="font-size: 11px;">call 3f9a12c0 · receipt kept</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="padding: 8px 12px 0 12px;">
+    <div style="border-radius: 14px; border: 1px solid #2A3944; background: #0F171E; display: flex; flex-direction: column;">
+      <div class="s" style="padding: 10px 14px 2px 14px; min-height: 32px; color: #6F7E8A; font-size: 15px;">Message Sonder</div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 4px 6px 6px 10px;">
+        <span style="display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border-radius: 999px; border: 1px solid #2A3944;"><span style="width: 7px; height: 7px; border-radius: 4px; background: #7FB8F0;"></span><span class="t" style="color: #E7EDF2; font-size: 12px;">manual</span></span>
+        <span style="display: inline-flex; align-items: center; height: 32px; padding: 0 10px; border-radius: 999px; border: 1px solid #2A3944;"><span class="t" style="color: #A5B2BD; font-size: 12px;">/</span></span>
+        <span style="flex: 1;"></span>
+        <span style="display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; background: #63D6C8;"><svg viewBox="0 0 20 20" fill="none" stroke="#062A27" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width: 18px; height: 18px;"><path d="M10 16V4M5 9l5-5 5 5"/></svg></span>
+      </div>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 12px; height: 28px; padding: 0 16px;">
+    <span class="t m" style="font-size: 11px;">ctx <span style="color: #E7EDF2;">38%</span></span>
+    <span class="t m" style="font-size: 11px;">local <span style="color: #79D394;">running</span></span>
+    <span style="flex: 1;"></span>
+    <span class="t m" style="font-size: 11px;">1 needs you</span>
+  </div>
+  <div style="height: 34px;"></div>
+</div>
+</x-dc>
+</body>
+</html>

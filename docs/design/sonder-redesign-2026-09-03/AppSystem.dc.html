@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0B1117; }
+    a { color: #63D6C8; } a:hover { color: #8EE4D9; }
+    .s { font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; color: #E7EDF2; font-size: 14px; line-height: 22px; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12px; line-height: 18px; color: #A5B2BD; font-variant-numeric: tabular-nums; }
+    .m { color: #6F7E8A; } .m2 { color: #A5B2BD; }
+    .lbl { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #6F7E8A; }
+    .nav { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 12px; border-radius: 8px; }
+    .nav.on { background: #141F28; }
+    .ic { width: 16px; height: 16px; flex: 0 0 16px; }
+    .sec { display: flex; flex-direction: column; gap: 10px; padding: 18px 0; border-top: 1px solid #1F2C36; }
+    .kv { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+    .k { display: flex; flex-direction: column; gap: 2px; }
+    .bt { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid #2A3944; font-size: 13px; color: #E7EDF2; }
+    .bt.p { background: #63D6C8; border-color: #63D6C8; color: #062A27; font-weight: 600; }
+    .bt.d { border-color: #3A2A2E; color: #F27B7B; }
+    .ev { display: grid; grid-template-columns: 56px 64px minmax(0, 1fr) 96px; gap: 12px; align-items: center; height: 30px; }
+    .ev > span:nth-child(3) { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .bar { height: 4px; border-radius: 2px; background: #1F2C36; overflow: hidden; }
+  </style>
+</helmet>
+<div style="width: 1440px; height: 900px; box-sizing: border-box; background: #0B1117; display: flex; overflow: hidden;">
+
+  <div style="width: 220px; flex: 0 0 220px; box-sizing: border-box; border-right: 1px solid #1F2C36; background: #0F171E; display: flex; flex-direction: column; padding: 0 12px;">
+    <div style="display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 4px;">
+      <svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#A5B2BD" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l-6 6 6 6"/></svg>
+      <span class="s" style="font-size: 13px; color: #A5B2BD;">Chat</span>
+    </div>
+    <div class="s lbl" style="padding: 10px 12px 6px 12px;">System</div>
+    <div class="nav on"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#63D6C8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 9h14M7 13h2"/></svg><span class="s" style="font-size: 13px;">Runtime</span></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#A5B2BD" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a6 6 0 1 1 12 0 6 6 0 0 1-12 0z"/><path d="M8 8l4 2-4 2V8z"/></svg><span class="s m2" style="font-size: 13px;">Autopilot</span></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#A5B2BD" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10h3l2-5 4 10 2-5h3"/></svg><span class="s m2" style="font-size: 13px;">Activity</span><span style="flex: 1;"></span><span class="t" style="font-size: 11px; color: #79D394;">live</span></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#A5B2BD" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15l4-6 3 4 5-8"/></svg><span class="s m2" style="font-size: 13px;">Learning</span></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#A5B2BD" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3l6 2v5c0 4-3 6-6 7-3-1-6-3-6-7V5l6-2z"/></svg><span class="s m2" style="font-size: 13px;">Policy</span><span style="flex: 1;"></span><span class="t" style="font-size: 11px; color: #F0C36A;">1</span></div>
+    <div class="nav"><svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#A5B2BD" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M4 10h12M4 14h8"/></svg><span class="s m2" style="font-size: 13px;">Extensions</span></div>
+    <div style="flex: 1;"></div>
+    <div style="padding: 12px 4px; display: flex; flex-direction: column; gap: 4px;">
+      <div class="t m" style="font-size: 11px;">host launcher</div>
+      <div style="display: flex; align-items: center; gap: 8px;"><span style="width: 7px; height: 7px; border-radius: 4px; background: #79D394;"></span><span class="t" style="color: #E7EDF2;">running</span><span class="t m">pid 41822</span></div>
+      <div class="t m" style="font-size: 11px;">0.9.0.dev0 · e8b7e8d4</div>
+    </div>
+  </div>
+
+  <div style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
+    <div style="display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 28px; border-bottom: 1px solid #1F2C36;">
+      <span class="s" style="font-weight: 500;">Runtime</span>
+      <span class="t m">polling every 2s</span>
+      <span style="flex: 1;"></span>
+      <span class="bt">Restart</span>
+      <span class="bt d">Stop</span>
+      <span class="bt p">Update from Git</span>
+    </div>
+
+    <div style="flex: 1; overflow: hidden; padding: 0 28px; display: flex; gap: 32px;">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
+
+        <div class="sec" style="border-top: none;">
+          <div class="kv">
+            <div class="k"><span class="s lbl">Main server</span><span class="t" style="color: #E7EDF2; font-size: 14px;">127.0.0.1:11435</span><span class="t m">api-key · loopback only</span></div>
+            <div class="k"><span class="s lbl">Model</span><span class="t" style="color: #E7EDF2; font-size: 14px;">qwen2.5-coder:7b</span><span class="t m">code tier · ollama local</span></div>
+            <div class="k"><span class="s lbl">Mode</span><span class="t" style="color: #7FB8F0; font-size: 14px;">manual</span><span class="t m">elevation off</span></div>
+            <div class="k"><span class="s lbl">State home</span><span class="t" style="color: #E7EDF2; font-size: 14px;">~/.sonder</span><span class="t m">memory.db 41 MB · 3 backups</span></div>
+          </div>
+        </div>
+
+        <div class="sec">
+          <div style="display: flex; align-items: baseline; gap: 12px;"><span class="s lbl">Autopilot</span><span class="t m">idle · last run finished 11 min ago · 6 tasks · 0 failures</span><span style="flex: 1;"></span><span class="bt">Plan</span><span class="bt p">Run</span></div>
+          <div style="display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid #2A3944; background: #0F171E;"><span class="s m" style="flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">Goal for the next run, e.g. bring the wiki in line with the retired approval code</span><span class="t m" style="font-size: 11px;">observe only</span><span style="width: 28px; height: 16px; border-radius: 8px; background: #2A3944; position: relative;"><span style="position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 6px; background: #A5B2BD;"></span></span></div>
+          <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px;">
+            <div class="k"><span class="t m" style="font-size: 11px;">tasks</span><span class="t" style="color: #E7EDF2; font-size: 16px;">6 / 12</span></div>
+            <div class="k"><span class="t m" style="font-size: 11px;">cycles</span><span class="t" style="color: #E7EDF2; font-size: 16px;">2 / 4</span></div>
+            <div class="k"><span class="t m" style="font-size: 11px;">tool calls</span><span class="t" style="color: #E7EDF2; font-size: 16px;">38 / 200</span></div>
+            <div class="k"><span class="t m" style="font-size: 11px;">replans</span><span class="t" style="color: #E7EDF2; font-size: 16px;">0 / 2</span></div>
+          </div>
+        </div>
+
+        <div class="sec" style="flex: 1;">
+          <div style="display: flex; align-items: baseline; gap: 12px;"><span class="s lbl">Live execution</span><span class="t m">bounded feed · redacted · newest first</span><span style="flex: 1;"></span><span class="t" style="font-size: 11px; color: #79D394;">● live</span></div>
+          <div style="display: flex; flex-direction: column;">
+            <div class="ev"><span class="t m">14:04:12</span><span class="t" style="color: #F27B7B;">refused</span><span class="t" style="color: #E7EDF2;">write_file notes/gate.md <span class="m">· unattended ask in manual · call 3f9a12c0</span></span><span class="t m" style="text-align: right;">foreground</span></div>
+            <div class="ev"><span class="t m">14:02:41</span><span class="t" style="color: #79D394;">ok</span><span class="t" style="color: #E7EDF2;">read adapters/security/permission_receipts.py <span class="m">· 88 lines</span></span><span class="t m" style="text-align: right;">foreground</span></div>
+            <div class="ev"><span class="t m">14:02:40</span><span class="t" style="color: #79D394;">ok</span><span class="t" style="color: #E7EDF2;">text_search "unattended" <span class="m">· 3 files · 12 matches</span></span><span class="t m" style="text-align: right;">foreground</span></div>
+            <div class="ev"><span class="t m">14:02:39</span><span class="t" style="color: #79D394;">ok</span><span class="t" style="color: #E7EDF2;">read permission_modes.py <span class="m">· 1204–1340</span></span><span class="t m" style="text-align: right;">foreground</span></div>
+            <div class="ev"><span class="t m">13:51:07</span><span class="t" style="color: #A5B2BD;">receipt</span><span class="t" style="color: #E7EDF2;">permission.unattended_allow read_file <span class="m">· content-free</span></span><span class="t m" style="text-align: right;">mcp</span></div>
+            <div class="ev"><span class="t m">13:49:55</span><span class="t" style="color: #79D394;">ok</span><span class="t" style="color: #E7EDF2;">read tests/test_gate.py <span class="m">· 212 lines</span></span><span class="t m" style="text-align: right;">autopilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width: 380px; flex: 0 0 380px; display: flex; flex-direction: column;">
+        <div class="sec" style="border-top: none;">
+          <div class="s lbl">Context health</div>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; align-items: baseline;"><span class="t m2">context</span><span style="flex: 1;"></span><span class="t" style="color: #E7EDF2;">12,480 / 32,768</span></div>
+            <div class="bar"><div style="width: 38%; height: 4px; background: #63D6C8;"></div></div>
+            <div style="display: flex; align-items: baseline;"><span class="t m2">turn budget</span><span style="flex: 1;"></span><span class="t" style="color: #E7EDF2;">3.3k / 8k</span></div>
+            <div class="bar"><div style="width: 41%; height: 4px; background: #63D6C8;"></div></div>
+            <div style="display: flex; align-items: baseline;"><span class="t m2">memory retrieval</span><span style="flex: 1;"></span><span class="t" style="color: #E7EDF2;">0.62 threshold · 4 hits</span></div>
+            <div class="bar"><div style="width: 62%; height: 4px; background: #7FB8F0;"></div></div>
+          </div>
+        </div>
+        <div class="sec">
+          <div style="display: flex; align-items: baseline;"><span class="s lbl">Policy</span><span style="flex: 1;"></span><span class="t" style="color: #F0C36A;">1 needs you</span></div>
+          <div style="display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 8px; background: #141F28;">
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="t" style="color: #E7EDF2;">write_file</span><span class="t m">notes/gate.md</span><span style="flex: 1;"></span><span class="t m" style="font-size: 11px;">2 min</span></div>
+            <div style="display: flex; gap: 8px;"><span class="bt p" style="height: 28px; font-size: 12px;">Approve once</span><span class="bt" style="height: 28px; font-size: 12px;">Revoke</span></div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="t m2" style="width: 52px;">allow</span><span class="t" style="color: #E7EDF2;">read_file, text_search</span><span style="flex: 1;"></span><span class="t m" style="font-size: 11px;">permissions.json</span></div>
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="t m2" style="width: 52px;">deny</span><span class="t" style="color: #E7EDF2;">file_delete</span><span style="flex: 1;"></span><span class="t m" style="font-size: 11px;">shipped default</span></div>
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="t m2" style="width: 52px;">open</span><span class="t" style="color: #E7EDF2;">n_8d2f file_delete</span><span style="flex: 1;"></span><span class="t m" style="font-size: 11px;">expires 12 min</span></div>
+          </div>
+        </div>
+        <div class="sec">
+          <div class="s lbl">Learning health</div>
+          <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;">
+            <div class="k"><span class="t m" style="font-size: 11px;">lessons</span><span class="t" style="color: #E7EDF2; font-size: 16px;">1,284</span><span class="t m" style="font-size: 11px;">312 grounded</span></div>
+            <div class="k"><span class="t m" style="font-size: 11px;">positive rate</span><span class="t" style="color: #E7EDF2; font-size: 16px;">71%</span><span class="t m" style="font-size: 11px;">7 days</span></div>
+            <div class="k"><span class="t m" style="font-size: 11px;">quarantined</span><span class="t" style="color: #E7EDF2; font-size: 16px;">3</span><span class="t m" style="font-size: 11px;">privacy review</span></div>
+          </div>
+        </div>
+        <div class="sec">
+          <div class="s lbl">Agents</div>
+          <div style="display: flex; align-items: center; gap: 10px;"><span style="width: 6px; height: 6px; border-radius: 3px; background: #2A3944;"></span><span class="t m2" style="flex: 1;">fleet</span><span class="t m">0 of 4 slots · RAM-limited</span></div>
+          <div style="display: flex; align-items: center; gap: 10px;"><span style="width: 6px; height: 6px; border-radius: 3px; background: #2A3944;"></span><span class="t m2" style="flex: 1;">selfmod</span><span class="t m">no run</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 16px; height: 28px; padding: 0 28px; border-top: 1px solid #1F2C36; background: #0F171E;">
+      <span class="t m" style="font-size: 11px;">db <span style="color: #E7EDF2;">~/.sonder/memory.db</span> · receipts <span style="color: #E7EDF2;">operations.db</span></span>
+      <span class="t m" style="font-size: 11px;">update <span style="color: #E7EDF2;">up to date · checked 6 min ago</span></span>
+      <span class="t m" style="font-size: 11px;">extensions <span style="color: #E7EDF2;">4 loaded</span></span>
+      <span style="flex: 1;"></span>
+      <span class="t m" style="font-size: 11px;">mode <span style="color: #7FB8F0;">manual</span></span>
+      <span class="t m" style="font-size: 11px;">launcher <span style="color: #79D394;">healthy · signed</span></span>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

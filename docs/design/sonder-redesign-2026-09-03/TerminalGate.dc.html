@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0B1117; }
+    a { color: #63D6C8; } a:hover { color: #8EE4D9; }
+    .t { font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px; line-height: 20px; color: #E7EDF2; }
+    .row { display: flex; align-items: baseline; white-space: pre; }
+    .g { display: inline-block; width: 24px; flex: 0 0 24px; }
+    .m { color: #6F7E8A; } .m2 { color: #A5B2BD; } .k { color: #63D6C8; }
+    .ok { color: #79D394; } .warn { color: #F0C36A; } .bad { color: #F27B7B; } .b { font-weight: 600; }
+  </style>
+</helmet>
+<div style="width: 1000px; height: 480px; box-sizing: border-box; background: #0B1117; display: flex; flex-direction: column; overflow: hidden;">
+  <div style="display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 14px; border-bottom: 1px solid #1F2C36; background: #0F171E;">
+    <div style="display: flex; gap: 6px; align-items: center;">
+      <div style="width: 10px; height: 10px; border-radius: 5px; background: #2A3944;"></div>
+      <div style="width: 10px; height: 10px; border-radius: 5px; background: #2A3944;"></div>
+      <div style="width: 10px; height: 10px; border-radius: 5px; background: #2A3944;"></div>
+    </div>
+    <div class="t" style="flex: 1; text-align: center; color: #6F7E8A; font-size: 12px;">sonder repl — approvals and modes</div>
+    <div style="width: 46px;"></div>
+  </div>
+  <div class="t" style="flex: 1; padding: 14px 18px 0 18px; display: flex; flex-direction: column;">
+    <div class="row" style="margin-bottom: 6px;"><span class="k b g">❯</span><span>/approvals</span></div>
+    <div class="row"><span class="g"></span><span class="m2 b">pending</span><span class="m">                                                  refused · waiting for a person</span></div>
+    <div class="row"><span class="g"></span><span class="m2">3f9a12c0</span><span class="m">  </span><span>write_file</span><span class="m">   path=notes/gate.md content=(41 chars)          2 min ago</span></div>
+    <div class="row" style="margin-top: 6px;"><span class="g"></span><span class="m2 b">open approvals</span><span class="m">                                           spent once, then gone</span></div>
+    <div class="row"><span class="g"></span><span class="m2">n_8d2f</span><span class="m">    </span><span>file_delete</span><span class="m">  call 5a0c19e2   by nathan · console   expires in 12 min</span></div>
+
+    <div style="height: 14px;"></div>
+    <div class="row" style="margin-bottom: 6px;"><span class="k b g">❯</span><span>/approve 3f9a12c0</span></div>
+    <div class="row"><span class="ok b g">✓</span><span class="ok">approved write_file call 3f9a12c0 once</span><span class="m">   nonce n_c41a · valid 15 min · any surface may spend it</span></div>
+
+    <div style="height: 14px;"></div>
+    <div class="row" style="margin-bottom: 6px;"><span class="k b g">❯</span><span>/permissions</span></div>
+    <div class="row"><span class="g"></span><span class="m">mode   </span><span style="color: #79D394;">plan</span><span class="m">   </span><span style="color: #7FB8F0;" class="b">● manual</span><span class="m">   </span><span style="color: #F0C36A;">acceptEdits</span><span class="m">   </span><span style="color: #D89CF6;">auto</span><span class="m">        Shift+Tab cycles · /permissions &lt;mode&gt; sets</span></div>
+    <div class="row"><span class="g"></span><span class="m">manual </span><span class="m2">safe reads run · ask waits for you · file changes, host programs and</span></div>
+    <div class="row"><span class="g"></span><span class="m">       </span><span class="m2">destructive tools are refused unattended · dangerous always needs a person</span></div>
+    <div class="row" style="margin-top: 6px;"><span class="g"></span><span class="m">rules  </span><span class="m2">allow  read_file, text_search          </span><span class="m">from permissions.json</span></div>
+    <div class="row"><span class="g"></span><span class="m">       </span><span class="m2">deny   file_delete                     </span><span class="m">shipped default</span></div>
+
+    <div style="flex: 1;"></div>
+    <div style="height: 1px; background: #1F2C36; margin: 0 -18px;"></div>
+    <div style="display: flex; align-items: center; height: 44px; background: #0F171E; margin: 0 -18px; padding: 0 18px;">
+      <span class="t k b g">❯</span>
+      <span class="t" style="flex: 1; color: #E7EDF2;"><span style="display: inline-block; width: 8px; height: 16px; background: #63D6C8; vertical-align: -3px;"></span></span>
+      <span class="t m" style="font-size: 12px;">ctx 12k/32k · 1 pending approval</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

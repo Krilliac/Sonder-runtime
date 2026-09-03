@@ -1022,3 +1022,86 @@ def test_kind_scoped_recovery_is_not_capped_by_older_global_jobs():
 
     recovered = provider.recover(kind_prefix="compute-", limit=1024)
     assert [view.record.identity.job_id for view in recovered] == ["compute-last"]
+
+
+# --- a child that exits before it can be fingerprinted ------------------------
+
+
+def test_a_child_that_exits_before_fingerprinting_still_reports_its_result():
+    """A deadline job whose process is gone by the time the identity probe
+    reads it is not a failed launch: nothing is left for the deadline to
+    enforce, and its exit code and output are still the job's result.
+    Refusing it reported a finished job as "deadline jobs require a durable
+    process identity", which is what a loaded host produced whenever the
+    launcher thread lost the CPU between Popen and the probe."""
+    if os.name != "posix":
+        pytest.skip("real process identities are probed through /proc here")
+
+    def launch_and_reap(argv, **kwargs):
+        process = subprocess.Popen(argv, **kwargs)
+        process.wait()  # exited and reaped before the provider can look at it
+        return process
+
+    registry = DurableJobRegistry()
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=launch_and_reap,
+        platform_name=os.name,
+        memory_limiter=_MemoryLimiter(),
+    )
+    request = ProcessJobRequest(
+        JobIdentity("job-fast-exit", "process", "execute", "idem-fast-exit"),
+        (sys.executable, "-c", "print('finished before the probe')"),
+        deadline_seconds=30,
+    )
+
+    started = provider.start(request)
+    assert started.process_id > 0
+    view = registry.view(request.identity.job_id)
+    assert view.metadata["launch_state"] == "attached"
+    assert view.metadata["process_instance_identity"] == ""
+    assert view.metadata["process_exited_before_fingerprint"] == "1"
+
+    finished = provider.wait(request.identity.job_id, timeout=5)
+    assert finished.timed_out is False
+    assert finished.exit_code == 0
+    assert finished.record.status is JobStatus.SUCCEEDED
+    assert finished.record.result == {"exit_code": 0}
+
+
+def test_a_live_process_without_a_durable_identity_is_still_refused():
+    """The refusal stays for the case it exists for: a process that is alive
+    but cannot be fingerprinted, which a later deadline could only kill by
+    pid and so might kill whatever recycled that pid."""
+    launched = []
+
+    def launch_sleeping(argv, **kwargs):
+        del argv
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs,
+        )
+        launched.append(process)
+        return process
+
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(),
+        process_cleanup=_Cleanup(complete=True),
+        launcher=launch_sleeping,
+        platform_name=os.name,
+        memory_limiter=_MemoryLimiter(),
+        process_identity_resolver=lambda _pid: None,
+    )
+    request = ProcessJobRequest(
+        JobIdentity("job-no-identity", "process", "execute", "idem-no-identity"),
+        (sys.executable, "-c", "pass"),
+        deadline_seconds=30,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="durable process identity"):
+            provider.start(request)
+    finally:
+        for process in launched:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)

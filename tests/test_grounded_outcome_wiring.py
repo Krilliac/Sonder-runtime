@@ -270,14 +270,12 @@ def test_run_project_writes_no_outcome_when_it_raised(monkeypatch, ledger):
 
 
 def _authorize_isolated(monkeypatch):
-    monkeypatch.setenv("SONDER_ISOLATED_APPROVAL_CODE", "execute-secret")
     monkeypatch.setattr(server, "_admin_account_from_token", lambda _token: {"role": "developer"})
     monkeypatch.setattr(server.admin_auth, "require", lambda _account, _role: (True, ""))
 
 
 ISOLATED_ARGS = {
     "token": "developer-token",
-    "approval": "execute-secret",
     "acknowledge_isolation_limits": True,
 }
 
