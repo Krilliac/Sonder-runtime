@@ -348,6 +348,13 @@ from sonder_runtime.adapters.agent_work_coverage import (
     verification_covers as _agent_verification_covers,
 )
 from sonder_runtime.adapters.repo_repair_runner import run_pytest as _repo_repair_pytest
+from sonder_runtime.domain.model_catalog import (
+    catalog_names as _catalog_names,
+    catalog_records as _catalog_records,
+    catalog_revision as _catalog_revision,
+    installed_records as _installed_catalog_records,
+    resolve_record as _resolve_catalog_record,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -603,16 +610,7 @@ def discovered_models():
     operator's Ollama endpoint currently advertises, but cannot turn an
     arbitrary string into a backend request.
     """
-    payload = _get("/api/tags")
-    raw = payload.get("models", []) if isinstance(payload, dict) else []
-    names, seen = [], set()
-    for item in raw if isinstance(raw, list) else []:
-        name = str(item.get("name") or item.get("model") or "").strip() if isinstance(item, dict) else ""
-        key = name.casefold()
-        if name and key not in seen:
-            names.append(name)
-            seen.add(key)
-    return sorted(names, key=str.casefold)
+    return _catalog_names(_get("/api/tags"))
 
 
 def discovered_model_records():
@@ -622,19 +620,7 @@ def discovered_model_records():
     Unknown records deliberately remain eligible; fanout excludes only models
     which the operator's catalog positively identifies as non-generative.
     """
-    payload = _get("/api/tags")
-    raw = payload.get("models", []) if isinstance(payload, dict) else []
-    records, seen = [], set()
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("model") or "").strip()
-        key = name.casefold()
-        if not name or key in seen:
-            continue
-        seen.add(key)
-        records.append((name, item))
-    return sorted(records, key=lambda row: row[0].casefold())
+    return _catalog_records(_get("/api/tags"))
 
 
 def _cache_model_revision(model):
@@ -650,23 +636,11 @@ def _cache_model_revision(model):
     requested = str(model or "").strip().casefold()
     if not requested:
         return ""
-    candidates = {requested}
-    if ":" not in requested:
-        candidates.add(requested + ":latest")
     try:
         records = discovered_model_records()
     except Exception:
         return ""
-    for name, record in records:
-        advertised = str(name or "").strip().casefold()
-        if advertised not in candidates:
-            continue
-        record = record if isinstance(record, dict) else {}
-        details = record.get("details") if isinstance(record.get("details"), dict) else {}
-        digest = str(record.get("digest") or details.get("digest") or "").strip()
-        if digest:
-            return digest
-    return ""
+    return _catalog_revision(requested, records)
 
 
 def _inventory_rows(payload, endpoint):
@@ -679,10 +653,7 @@ def resolve_discovered_model_record(selector):
     wanted = str(selector or "").strip().casefold()
     if not wanted:
         return None
-    for name, record in discovered_model_records():
-        if name.casefold() == wanted:
-            return name, record
-    return None
+    return _resolve_catalog_record(wanted, discovered_model_records())
 
 
 def resolve_discovered_model(selector):
@@ -21418,18 +21389,7 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
 
 def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
     """Read one coherent local catalog snapshot for policy validation."""
-    payload = _get("/api/tags")
-    rows = payload.get("models", []) if isinstance(payload, dict) else []
-    records, seen = [], set()
-    for item in rows if isinstance(rows, list) else []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("model") or "").strip()
-        key = name.casefold()
-        if name and key not in seen:
-            seen.add(key)
-            records.append((name, item))
-    return tuple(records)
+    return _installed_catalog_records(_get("/api/tags"))
 
 
 def _runtime_installed_models() -> set[str]:
