@@ -574,15 +574,20 @@
       ]
     },
     {
-      "file_count": 117,
+      "file_count": 126,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
         "sonder_runtime/domain/agent_mutation_policy.py",
         "sonder_runtime/domain/agents/__init__.py",
+        "sonder_runtime/domain/agents/activity_command.py",
+        "sonder_runtime/domain/agents/claim_review.py",
         "sonder_runtime/domain/agents/decision_parsing.py",
+        "sonder_runtime/domain/agents/evidence_quality.py",
         "sonder_runtime/domain/agents/observation_prompt.py",
         "sonder_runtime/domain/agents/roles.py",
+        "sonder_runtime/domain/agents/tool_naming.py",
+        "sonder_runtime/domain/agents/verification_reach.py",
         "sonder_runtime/domain/approval.py",
         "sonder_runtime/domain/artifact_risk_policy.py",
         "sonder_runtime/domain/automation/__init__.py",
@@ -610,6 +615,7 @@
         "sonder_runtime/domain/context/compaction.py",
         "sonder_runtime/domain/context/hardware_sizing.py",
         "sonder_runtime/domain/context/overflow.py",
+        "sonder_runtime/domain/context/pack_arguments.py",
         "sonder_runtime/domain/context/priority.py",
         "sonder_runtime/domain/context_formatting.py",
         "sonder_runtime/domain/control_history.py",
@@ -618,6 +624,7 @@
         "sonder_runtime/domain/doctor_result.py",
         "sonder_runtime/domain/doctor_specs.py",
         "sonder_runtime/domain/doctor_status.py",
+        "sonder_runtime/domain/ensemble_synthesis.py",
         "sonder_runtime/domain/execution/__init__.py",
         "sonder_runtime/domain/execution/policy.py",
         "sonder_runtime/domain/execution/status.py",
@@ -669,6 +676,7 @@
         "sonder_runtime/domain/routing/capability_router.py",
         "sonder_runtime/domain/routing/route_planner.py",
         "sonder_runtime/domain/runtime_identity.py",
+        "sonder_runtime/domain/runtime_model_binding.py",
         "sonder_runtime/domain/runtime_model_configuration.py",
         "sonder_runtime/domain/runtime_policy/__init__.py",
         "sonder_runtime/domain/runtime_policy/rules.py",
@@ -693,7 +701,8 @@
         "sonder_runtime/domain/training/reproducible.py",
         "sonder_runtime/domain/updates/__init__.py",
         "sonder_runtime/domain/updates/models.py",
-        "sonder_runtime/domain/updates/runtime_update_formatting.py"
+        "sonder_runtime/domain/updates/runtime_update_formatting.py",
+        "sonder_runtime/domain/updates/stash_formatting.py"
       ]
     },
     {
