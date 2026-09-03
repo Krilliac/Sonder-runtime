@@ -282,6 +282,10 @@ from sonder_runtime.domain.context.pack_arguments import (
     pack_paths as _context_pack_paths,
     pack_utf8_prefix as _context_pack_utf8_prefix,
 )
+from sonder_runtime.domain.runtime_model_binding import (
+    model_capability_error as _runtime_model_capability_error,
+    model_is_installed as _runtime_model_is_installed,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -22331,39 +22335,6 @@ def _runtime_installed_models() -> set[str]:
     return {name for name, _record in _runtime_installed_model_records()}
 
 
-def _runtime_model_is_installed(model: str, installed) -> bool:
-    requested = str(model or "").strip().casefold()
-    available = {str(name or "").strip().casefold() for name in installed}
-    if requested in available:
-        return True
-    # Ollama treats an omitted tag as :latest. Do not accept a different
-    # installed tag merely because its repository/base name happens to match.
-    if ":" not in requested:
-        return "%s:latest" % requested in available
-    if requested.endswith(":latest"):
-        return requested[:-len(":latest")] in available
-    return False
-
-
-def _runtime_model_capability_error(tier: str, model: str, records) -> str:
-    """Return a proven capability mismatch for a local tier binding.
-
-    Installation alone is not enough to make a model usable by a chat tier:
-    an embedding model can be present in Ollama's catalog but cannot satisfy a
-    workbench/code request.  Keep unknown catalog metadata compatible with
-    existing local models, but reject an explicit non-chat declaration before
-    persisting an unusable policy.  A vision tier is the one intentional
-    exception: image-conditioned models may declare only ``vision`` while
-    still being the correct target for a vision route.
-    """
-    for name, record in records:
-        if not _runtime_model_is_installed(model, (name,)):
-            continue
-        reason = _fanout_nonchat_reason(record)
-        if reason and not (tier == "vision" and "vision-only" in reason):
-            return reason
-        return ""
-    return ""
 
 
 def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
