@@ -34,6 +34,9 @@ Rules:
   gateway escalation policy enforces.
 - Only a failed or empty attempt steps up.  A satisfied answer never spends a
   stronger model; a cancellation or an exhausted budget is never retried.
+  For the workbench agent a completion claim that changed nothing and ran
+  no validation counts as a failure when the request asked for a change or
+  a check (the entry layer decides that from the request's action verbs).
 - The default route's augmentation (facts, lessons, recall) travels with the
   prompt to every rung: the caller asked for the learning route, the runtime
   substitutes a stronger *local* model for the same job, and the privacy
@@ -126,9 +129,11 @@ class Step:
     reason: str
     from_rung: Rung
     to_rung: Rung
+    detail: str = ""
 
     def summary(self) -> str:
-        return "%s -> %s: %s" % (self.from_rung.label(), self.to_rung.label(), self.reason)
+        text = "%s -> %s: %s" % (self.from_rung.label(), self.to_rung.label(), self.reason)
+        return "%s (%s)" % (text, self.detail) if self.detail else text
 
 
 def single(start: Rung) -> Plan:

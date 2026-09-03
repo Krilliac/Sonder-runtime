@@ -28,7 +28,10 @@ When a run started on the default (`auto`) tier ends because its model could
 not drive the loop (a transport failure, or no parseable decision after the
 format repairs), the runtime reruns the task on the next distinct bound local
 model of the capability ladder, at most twice, and prefixes the output with a
-`model escalation:` line naming each step. A run that finished stands, and an
+`model escalation:` line naming each step. The same happens when a run
+claims completion without changing anything or running any validation and
+the request asked for a change or a check (by its action verbs; a read or
+an explanation never triggers it). Any other finished run stands, and an
 explicit tier never moves; see the automatic escalation section of
 [Tiers & Gateway](08-model-tiers-and-gateway.md).
 
