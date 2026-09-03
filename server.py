@@ -321,6 +321,7 @@ from sonder_runtime.adapters.model_response_metadata import (
     response_error_metadata as _response_error_metadata,
 )
 from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
+from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -18993,56 +18994,10 @@ def _agent_created_path_key(path):
 
 def _agent_call_signature(tool_name, args):
     """Return a stable signature for equivalent host-scoped tool calls."""
-    canonical = dict(args) if isinstance(args, dict) else args
-    if isinstance(canonical, dict):
-        if tool_name == "archive_create":
-            root = os.path.realpath(os.path.normpath(str(canonical.get("root") or ".")))
-            canonical["root"] = os.path.normcase(root)
-            destination = str(canonical.get("destination") or "")
-            if destination:
-                if not os.path.isabs(destination):
-                    destination = os.path.join(root, destination)
-                canonical["destination"] = os.path.normcase(
-                    os.path.realpath(os.path.normpath(destination))
-                )
-            try:
-                inputs = archive_create_tool._parse_inputs(
-                    canonical.get("inputs_json", canonical.get("inputs", []))
-                )
-                canonical["inputs_json"] = [
-                    os.path.normcase(os.path.realpath(os.path.normpath(
-                        value if os.path.isabs(value) else os.path.join(root, value)
-                    )))
-                    for value in inputs
-                ]
-                canonical.pop("inputs", None)
-            except ValueError:
-                pass
-        path_keys = []
-        if tool_name == "data_convert":
-            path_keys.extend(("input_path", "output_path"))
-        elif tool_name in {"file_copy", "file_move", "archive_extract"}:
-            path_keys.extend(("source", "destination"))
-        elif tool_name == "archive_create":
-            path_keys = []
-        elif tool_name in _PROJECT_SCOPED_PATH_TOOLS:
-            path_keys.append(_project_scoped_path_key(tool_name))
-        elif tool_name == "workspace_run":
-            path_keys.append("cwd")
-        elif tool_name == "script_run":
-            path_keys.extend(("path", "cwd"))
-        for key in path_keys:
-            raw = canonical.get(key)
-            if raw:
-                try:
-                    canonical[key] = os.path.normcase(
-                        os.path.realpath(os.path.normpath(str(raw)))
-                    )
-                except (OSError, ValueError):
-                    pass
-    return (
-        str(tool_name),
-        json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str),
+    return _agent_call_signature_policy(
+        tool_name, args,
+        project_scoped_path_tools=_PROJECT_SCOPED_PATH_TOOLS,
+        project_scoped_path_key=_project_scoped_path_key,
     )
 
 
