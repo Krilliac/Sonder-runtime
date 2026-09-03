@@ -659,3 +659,4 @@ existing numeric ADRs are historical and are not renumbered in place.
   bootstrap/config boundary while preserving the root compatibility delegate.
 - WP1 Two-Hundred-Forty-Third Slice: `WP1-TWO-HUNDRED-FORTY-THIRD-SLICE.md` — moved speculative-execution configuration helpers to the packaged platform boundary while preserving root helper aliases and the packaged domain safety policy.
 - WP1 Two-Hundred-Forty-Seventh Slice: `WP1-TWO-HUNDRED-FORTY-SEVENTH-SLICE.md` — moved pure agent tool-invocation mutation policy to the packaged domain boundary while preserving root mutation tool-set and predicate aliases.
+- WP1 Two-Hundred-Ninety-Sixth Slice: `WP1-TWO-HUNDRED-NINETY-SIXTH-SLICE.md` — pure fanout prompt-echo redaction now lives in `sonder_runtime.domain.fanout_redaction`, preserving the root `_fanout_redact_prompt_echo` alias
