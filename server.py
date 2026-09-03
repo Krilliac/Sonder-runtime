@@ -80,6 +80,7 @@ import master_orchestrator
 from sonder_runtime.domain.execution import status as execution_status
 from sonder_runtime.domain.model_routing import (
     is_cloud_model_name as _is_cloud_model_name,
+    is_cloud_tier as _is_cloud_tier_impl,
 )
 from sonder_runtime.platform.deployment_auth import (
     authenticates_callers as _deployment_authenticates_callers_policy,
@@ -340,6 +341,7 @@ from sonder_runtime.adapters.agent_work_coverage import (
     NO_OP_COMMAND_FLAGS as _AGENT_NO_OP_COMMAND_FLAGS,
     build_command_examines as _agent_build_command_examines,
     explicit_command_paths as _agent_explicit_command_paths,
+    mutation_record as _agent_mutation_record,
     mutation_records as _agent_mutation_records,
     normalized_path as _agent_normalized_path,
     path_within as _agent_path_within,
@@ -367,13 +369,14 @@ from sonder_runtime.domain.approvals_limit import (
 from sonder_runtime.domain.callable_inspection import (
     callable_accepts_keyword as _callable_accepts_keyword,
 )
-from sonder_runtime.domain.fanout_worker_identity import FANOUT_WORKER_INSTANCE as _FANOUT_WORKER_INSTANCE
+from sonder_runtime.domain.fanout_worker_identity import (
+    FANOUT_WORKER_INSTANCE as _FANOUT_WORKER_INSTANCE,
+    fanout_worker_id as _fanout_worker_id_impl,
+)
 
 
 def _fanout_worker_id():
-    return "fanout-%s-%d-%d" % (
-        _FANOUT_WORKER_INSTANCE, os.getpid(), threading.get_ident(),
-    )
+    return _fanout_worker_id_impl(_FANOUT_WORKER_INSTANCE, os.getpid(), threading.get_ident())
 
 
 from sonder_runtime.adapters.cloud_fallback import (
@@ -479,6 +482,9 @@ from sonder_runtime.domain.agent_path_keys import (
 )
 from sonder_runtime.domain.agent_escalation_identity import (
     escalation_key as _agent_escalation_key,
+)
+from sonder_runtime.domain.agent_help_parsing import (
+    help_advertised_tools as _agent_help_advertised_tools,
 )
 import sonder_speculation
 import consult as consult_flow
@@ -1031,11 +1037,9 @@ def _note_escalation(step, surface):
 
 
 def _is_cloud_tier(tier, model=None):
-    if tier in CLOUD_TIERS:
-        return True
-    if model is None:
-        model = TIERS.get(tier, "")
-    return _is_cloud_model_name(model)
+    return _is_cloud_tier_impl(
+        tier, model, cloud_tiers=CLOUD_TIERS, tier_map=TIERS,
+    )
 
 # Which offload tiers feed the learning loop (capture + distill lessons). A stronger
 # paid/cloud model can provide grounded good outcomes that become lessons and
@@ -15852,18 +15856,6 @@ or
 """
 
 
-def _agent_help_advertised_tools(help_text):
-    """Tool names an agent help block advertises, one per '- name: {...}' line."""
-    names = []
-    for line in help_text.splitlines():
-        stripped = line.lstrip()
-        if not stripped.startswith("- "):
-            continue
-        name, separator, _ = stripped[2:].partition(":")
-        name = name.strip()
-        if separator and name.isidentifier():
-            names.append(name)
-    return tuple(names)
 
 
 def _agent_tool_help(
@@ -18525,11 +18517,6 @@ def _agent_call_signature(tool_name, args):
     )
 
 
-
-def _agent_mutation_record(tool_name, args):
-    """Compatibility helper for callers that expect one mutation record."""
-    records = _agent_mutation_records(tool_name, args)
-    return records[0] if records else {"tool": tool_name, "path": ""}
 
 
 
