@@ -312,6 +312,11 @@ _AUTHORITY_GRAMMAR_VERIFIED_EXEMPT = {
         "explicit allow rule for its own name (docs/wiki/09-security-model)"
     ),
     "permission_policy": "formats the on-disk rule policy; read-only",
+    "permission_approvals": (
+        "read-only: lists pending call ids (argument digests) and issued "
+        "approvals; a nonce identifies a row for /approve revoke, which "
+        "needs the same authority as issuing one"
+    ),
     "permission_mode": "bound: permission_mode_change",  # here for the dead-entry sweep
     "runtime_policy_status": "formats the runtime policy; read-only",
     "autopilot_status": "read-only progress report",
@@ -359,24 +364,30 @@ def test_tool_contract_ships_in_the_packaged_payload():
     assert "tool_contract.py" in package.REQUIRED_FILES
 
 
-def test_tool_contract_is_reloaded_with_the_served_authority_gate(monkeypatch):
-    """A deployed authority-policy edit must replace the HTTP process module."""
+def test_the_served_authority_gate_keeps_the_typed_contract_across_live_reloads(monkeypatch):
+    """The served gate binds the typed ``authority_contract``; a root
+    ``tool_contract`` reload must not rebind it.
+
+    The served module and the root module answer the same question with
+    different call shapes (the typed one takes the declarations explicitly).
+    Rebinding the served name to a reloaded root module -- which this process
+    once did -- left two contracts live and the HTTP gate calling one with the
+    other's arguments. The root module still reloads in ``server``, which is
+    the process that binds it.
+    """
     import sonder_runtime.interfaces.http.serve as sonder_serve
+    from sonder_runtime.interfaces.http import authority_contract
 
     original = sonder_serve.tool_contract
-    replacement = object()
     monkeypatch.setattr(
         sonder_serve.live_reload,
         "reload_changed_modules",
-        lambda names: {"tool_contract": replacement},
+        lambda names: {"tool_contract": object()},
     )
-    try:
-        sonder_serve._maybe_live_reload()
-        assert sonder_serve.tool_contract is replacement
-        assert "tool_contract" in sonder_serve.LIVE_RELOAD_MODULES
-        assert "tool_contract" in server.LIVE_RELOAD_MODULES
-    finally:
-        sonder_serve.tool_contract = original
+    sonder_serve._maybe_live_reload()
+    assert sonder_serve.tool_contract is original is authority_contract
+    assert "tool_contract" not in sonder_serve.LIVE_RELOAD_MODULES
+    assert "tool_contract" in server.LIVE_RELOAD_MODULES
 
 
 def test_diagnostics_reports_contract_drift_without_enforcement():
@@ -458,7 +469,7 @@ def test_an_unbound_durable_tool_keeps_its_actionable_refusal():
     assert "console" in refusal or "allow rule" in refusal, refusal
 
 
-def test_a_binding_deleted_at_runtime_fails_closed_for_served_accounts(monkeypatch):
+def test_a_binding_deleted_at_runtime_fails_closed_for_served_accounts(every_tool_allowed_by_rule, monkeypatch):
     """The deny-by-default rule at the real boundary, proven by deleting a
     binding: the tool stays declared (agent operator set) but unbound, and a
     served non-admin caller is refused rather than passed to the mode gate's

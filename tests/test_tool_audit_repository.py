@@ -96,7 +96,10 @@ def test_audit_redaction_failure_is_fail_closed_before_receipt_publication(tmp_p
 
 def test_audit_detects_tampering_and_enforces_bounds(tmp_path):
     path = tmp_path / "tool-audit.jsonl"
-    repository = DurableToolAuditRepository(path, limits=ToolAuditLimits(max_records=1, max_bytes=4096))
+    # rotation is the default remedy for a full audit; refusing it keeps the
+    # original fail-closed bound, which is what this test pins
+    repository = DurableToolAuditRepository(
+        path, limits=ToolAuditLimits(max_records=1, max_bytes=4096, rotate=False))
     receipts = _Receipts()
     _gateway(repository, receipts).execute(_request())
     with pytest.raises(ToolAuditError, match="record bound"):

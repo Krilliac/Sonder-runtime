@@ -5,6 +5,7 @@ stubs; grading uses the real grounding.run_code subprocess path only where
 the test is specifically about execution outcomes, so the suite stays fast.
 """
 import json
+import os
 import time
 
 import pytest
@@ -288,8 +289,9 @@ def test_pass_rate_excludes_infrastructure_failures(tmp_path):
     summary = eh.run_suite(suite, provider, run_code_fn=_fake_run_code)
     totals = summary["totals"]
     assert totals == {"cases": 2, "pass": 1, "fail": 0, "error": 1,
-                      "timeout": 0, "graded": 1, "pass_rate": 1.0,
-                      "cassette_drift": 0}
+                      "timeout": 0, "verifier_unavailable": 0, "unknown": 0,
+                      "abandoned": 0, "graded": 1, "infra": 1, "pass_rate": 1.0,
+                      "trials": 1, "pass_at_k": 1, "cassette_drift": 0}
 
 
 # --- baseline ratchet --------------------------------------------------------
@@ -405,3 +407,220 @@ def test_record_history_refuses_vacuous_run(tmp_path):
     summary["provider"]["digest"] = "a" * 64
     with pytest.raises(eh.HarnessError):
         eh.record_history(summary, str(tmp_path / "history.jsonl"))
+
+
+# --- verifiers and the outcome classes they add ------------------------------
+
+def test_a_scenario_may_name_a_registered_verifier_and_it_changes_the_hash():
+    import verifiers
+    plain = _scenario()
+    verified = _scenario(verifier="python_exec")
+    assert plain["verifier"] is None and verified["verifier"] == "python_exec"
+    assert eh._hashed_view(plain) == {
+        key: plain[key]
+        for key in ("id", "kind", "prompt", "check", "timeout_s", "max_attempts")}
+    assert eh._hashed_view(verified)["verifier"] == "python_exec"
+    assert "python_exec" in verifiers.REGISTRY
+    with pytest.raises(eh.HarnessError):
+        _scenario(verifier="no_such_verifier")
+    with pytest.raises(eh.HarnessError):
+        _scenario(verifier_spec=["not", "an", "object"])
+
+
+def test_the_python_exec_verifier_routes_through_the_injected_grader():
+    case = eh.run_case(_scenario(verifier="python_exec"),
+                       eh.CallableProvider(lambda prompt: GOOD),
+                       run_code_fn=_fake_run_code)
+    assert case["status"] == "pass"
+    assert [event["event"] for event in case["events"]] == ["generate", "exec", "outcome"]
+
+
+def test_a_verifier_that_cannot_judge_is_its_own_status(monkeypatch):
+    import verifiers
+
+    def unavailable(artifact, spec=None):
+        raise verifiers.VerifierUnavailable("mypy is not installed")
+
+    monkeypatch.setitem(verifiers.REGISTRY, "fake_unavailable", unavailable)
+    case = eh.run_case(_scenario(verifier="fake_unavailable"),
+                       eh.CallableProvider(lambda prompt: GOOD),
+                       run_code_fn=_fake_run_code)
+    assert case["status"] == "verifier_unavailable"
+    assert case["failure"]["kind"] == "verifier_unavailable"
+    assert "mypy" in case["failure"]["message"]
+    assert case["passed"] is False
+
+
+def test_a_named_verifier_that_passes_is_recorded_as_a_verify_event(monkeypatch):
+    import verifiers
+    seen = []
+
+    def judge(artifact, spec=None):
+        seen.append(spec["check"])
+        return verifiers.Verdict(True, "passed", "all good")
+
+    monkeypatch.setitem(verifiers.REGISTRY, "fake_judge", judge)
+    case = eh.run_case(_scenario(verifier="fake_judge", verifier_spec={"threshold": 7}),
+                       eh.CallableProvider(lambda prompt: GOOD),
+                       run_code_fn=_fake_run_code)
+    assert case["status"] == "pass"
+    verify = next(event for event in case["events"] if event["event"] == "verify")
+    assert verify["verifier"] == "fake_judge" and verify["ok"] is True
+    assert seen == ["assert double(2) == 4"]
+    assert case["trajectory"]["steps"][0]["output"]["exec_ok"] is True
+
+
+def test_a_harness_crash_is_unknown_never_a_graded_zero(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("solver exploded")
+
+    monkeypatch.setattr(eh.solver, "solve", boom)
+    case = eh.run_case(_scenario(), eh.CallableProvider(lambda prompt: GOOD),
+                       run_code_fn=_fake_run_code)
+    assert case["status"] == "unknown"
+    assert case["failure"]["kind"] == "harness_crash"
+    assert "solver exploded" in case["failure"]["message"]
+
+
+def test_a_live_provider_that_ran_out_of_wall_clock_after_an_attempt_is_abandoned():
+    def slow(prompt):
+        time.sleep(1.2)
+        return GOOD
+
+    live = eh.CallableProvider(slow, name="live", deterministic=False)
+    case = eh.run_case(_scenario(), live, run_code_fn=_fake_run_code,
+                       case_timeout=0.3)
+    assert case["status"] == "abandoned"
+    assert case["failure"]["kind"] == "abandoned"
+    assert case["attempts"] == 1
+
+
+def test_a_provider_error_escaping_solve_verified_is_still_a_provider_error(monkeypatch):
+    import verifiers
+    monkeypatch.setitem(verifiers.REGISTRY, "fake_judge",
+                        lambda artifact, spec=None: verifiers.Verdict(True, "ok", ""))
+
+    def down(prompt):
+        raise RuntimeError("provider down")
+
+    case = eh.run_case(_scenario(verifier="fake_judge"), eh.CallableProvider(down),
+                       run_code_fn=_fake_run_code)
+    assert case["status"] == "error"
+    assert case["failure"]["kind"] == "provider_error"
+
+
+# --- trials ------------------------------------------------------------------
+
+def test_trials_report_pass_at_1_and_pass_at_k_separately(tmp_path):
+    suite = eh.load_suite(_suite_file(tmp_path, scenarios=[
+        {"id": "double", "prompt": "p", "check": "assert double(2) == 4",
+         "max_attempts": 1}]))
+    responses = iter([BUGGY, GOOD, GOOD])
+    provider = eh.CallableProvider(lambda prompt: next(responses),
+                                   deterministic=False)
+    summary = eh.run_suite(suite, provider, run_code_fn=_fake_run_code, trials=3)
+    case = summary["cases"][0]
+    assert case["status"] == "fail"
+    assert case["trials"] == ["fail", "pass", "pass"]
+    assert case["pass_at_k"] is True
+    assert summary["totals"]["pass"] == 0 and summary["totals"]["pass_at_k"] == 1
+    assert summary["totals"]["trials"] == 3 and summary["trials"] == 3
+
+
+@pytest.mark.parametrize("trials", [0, 11, "3"])
+def test_trials_are_bounded(tmp_path, trials):
+    suite = eh.load_suite(_suite_file(tmp_path))
+    with pytest.raises(eh.HarnessError):
+        eh.run_suite(suite, eh.CallableProvider(lambda prompt: GOOD),
+                     run_code_fn=_fake_run_code, trials=trials)
+
+
+def test_totals_carry_the_full_outcome_vocabulary(tmp_path):
+    summary = _summary(tmp_path)
+    assert set(summary["totals"]) == {
+        "cases", "pass", "fail", "error", "timeout", "verifier_unavailable",
+        "unknown", "abandoned", "graded", "infra", "pass_rate", "trials",
+        "pass_at_k", "cassette_drift"}
+    assert summary["harness_version"] == 2
+
+
+# --- history policy ----------------------------------------------------------
+
+def test_history_is_recorded_by_default_only_where_honest(tmp_path):
+    summary = _summary(tmp_path)
+    summary["provider"]["digest"] = "unavailable: boom"
+    record, note = eh.history_disposition(summary)
+    assert record is False and "--record-history" in note
+    summary["provider"]["digest"] = "a" * 64
+    assert eh.history_disposition(summary)[0] is True
+    assert eh.history_disposition(summary, requested=False)[0] is False
+    assert eh.history_disposition(summary, requested=True)[0] is True
+    summary["provider"]["digest"] = "unavailable: boom"
+    assert eh.history_disposition(summary, requested=True)[0] is True, (
+        "an explicit request is refused by record_history, never skipped")
+
+
+def test_a_vacuous_run_is_not_recorded_by_default(tmp_path):
+    def explode(prompt):
+        raise RuntimeError("down")
+
+    summary = _summary(tmp_path, provider=eh.CallableProvider(explode))
+    summary["provider"]["digest"] = "a" * 64
+    record, note = eh.history_disposition(summary)
+    assert record is False and "zero graded" in note
+
+
+# --- comparing two runs ------------------------------------------------------
+
+def _run_dir(tmp_path, name, response):
+    suite = eh.load_suite(_suite_file(tmp_path))
+    out = str(tmp_path / name)
+    eh.run_suite(suite, eh.CallableProvider(lambda prompt: response), out_dir=out,
+                 run_code_fn=_fake_run_code)
+    return out
+
+
+def test_compare_names_exactly_the_doctored_case(tmp_path):
+    before = _run_dir(tmp_path, "before", GOOD)
+    after = _run_dir(tmp_path, "after", BUGGY)
+    comparison = eh.compare_runs(before, after, provider="callable")
+    assert comparison["regressed"] == ["double"]
+    assert comparison["passed"] is False
+    assert "case_regressions" in comparison["reason_codes"]
+    assert comparison["cases"][0]["trajectory"] == "divergent"
+    assert comparison["cases"][0]["divergences"], "the trace records give a step-level answer"
+    assert comparison["assessment"]["regressed_case_ids"] == ["double"]
+    assert comparison["assessment"]["baseline_run_id"] == comparison["before"]["report_id"]
+
+
+def test_compare_of_a_run_with_itself_is_clean(tmp_path):
+    before = _run_dir(tmp_path, "before", GOOD)
+    comparison = eh.compare_runs(before, before, provider="callable")
+    assert comparison["passed"] is True
+    assert comparison["reason_codes"] == []
+    assert comparison["cases"][0]["trajectory"] == "same"
+
+
+def test_compare_cli_writes_the_comparison_and_exits_one_on_regression(tmp_path):
+    before = _run_dir(tmp_path, "before", GOOD)
+    after = _run_dir(tmp_path, "after", BUGGY)
+    exit_code = eh.main(["compare", "--run", before, "--run", after,
+                         "--provider", "callable"])
+    assert exit_code == 1
+    with open(os.path.join(after, "comparison.json"), encoding="utf-8") as handle:
+        written = json.load(handle)
+    assert written["schema"] == eh.COMPARISON_SCHEMA
+    assert written["regressed"] == ["double"]
+    assert eh.main(["compare", "--run", before, "--run", before, "--provider",
+                    "callable", "--out", str(tmp_path / "same.json")]) == 0
+    assert eh.main(["compare", "--run", before, "--provider", "callable"]) == 2
+
+
+def test_load_run_summary_refuses_a_missing_or_foreign_run(tmp_path):
+    with pytest.raises(eh.HarnessError):
+        eh.load_run_summary(str(tmp_path / "nope"), "callable")
+    bogus = tmp_path / "bogus" / "callable"
+    bogus.mkdir(parents=True)
+    (bogus / "summary.json").write_text(json.dumps({"schema": "wrong"}), encoding="utf-8")
+    with pytest.raises(eh.HarnessError):
+        eh.load_run_summary(str(tmp_path / "bogus"), "callable")

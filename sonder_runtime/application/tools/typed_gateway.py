@@ -52,12 +52,19 @@ class _CancellationAdapter:
 
 
 def default_tool_context(request: Any) -> OperationContext:
-    """Create an explicit operation context without widening request scope."""
+    """Create an explicit operation context without widening request scope.
+
+    The context carries the request scope's own ``source`` and ``auth_level``;
+    it never invents either. A hard-coded console/local context here once
+    made every typed call audit as a local console call whatever surface it
+    arrived on.
+    """
+    scope = request.scope
     return OperationContext(
         correlation_id=request.request_id,
-        principal_id=request.scope.principal_id,
-        auth_level="local",
-        source="repl",
+        principal_id=scope.principal_id,
+        auth_level=getattr(scope, "auth_level", "local") or "local",
+        source=getattr(scope, "source", "repl") or "repl",
         deadline_monotonic=request.deadline_monotonic,
         cancellation=_CancellationAdapter(request.cancellation),
         workspace_roots=tuple(Path(root) for root in request.scope.workspace_roots),

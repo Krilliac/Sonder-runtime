@@ -30,6 +30,32 @@ of the model — an uncensored or "abliterated" model changes what it will
   Opted in it serves the same record as `reasoning_show` — the model's own
   thinking channel for the current turn — and nothing besides it. That channel
   can hold what the final answer deliberately left out.
+- **Unattended callers get a fourth route out: approve exactly one call.**
+  With nobody at the console, file changes, host programs and destructive
+  tools are refused (`permission_modes`, `UNATTENDED_REFUSED_RISKS`) and the
+  refusal names its remedies. A refusal of a call whose arguments reached the
+  gate also carries a *call id* — the digest of the tool name and its
+  credential-free arguments — and the call is noted as pending in
+  `approvals.db` (`SONDER_APPROVALS_DB`). `/approvals` lists those;
+  `/approve <call id>` at the console (or `permission_approve` with a
+  developer token, or with `SONDER_ALLOW_PERMISSION_EDITS=1`) approves that
+  one call once, and the next unchanged call from any surface spends it. An
+  approval is one tool and one digest, spent atomically, and expires (60 s to
+  24 h, 15 min by default); it never widens a rule and never overrides
+  `plan`, an explicit `deny`, or the durable-authority class —
+  `permission_approve` is itself in that class, so no unattended caller can
+  approve its own next call. The ledger stores digests and a bounded,
+  redacted preview, never arguments. A spent approval also carries exactly
+  the reach the operator approved: the call's own `extra_roots` are honoured
+  for that call alone, with containment still checked against them. The
+  shared `SONDER_FILE_APPROVAL_CODE` is retired (it warns once when set); a
+  model's string `token` or `approval` is dropped from every agent proposal.
+- **A worker whose lease is gone may look but not touch.** The autopilot
+  controller installs an effect fence for each task
+  (`sonder_runtime/adapters/execution/effect_fence.py`); the permission gate
+  consults it before every effect-class tool on that thread and refuses
+  (`source="fence"`, with a receipt) once the run's lease is lost or the run
+  is cancelled, whatever the mode or rules say. Reads are never fenced.
 
 ## Authentication
 

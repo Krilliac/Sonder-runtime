@@ -14,7 +14,7 @@ def test_serve_train_cap_is_much_larger(monkeypatch):
     assert sonder_serve._parse_train_n("9999") == (500, None)
 
 
-def test_serve_learn_alias_uses_grounded_practice(monkeypatch):
+def test_serve_learn_alias_uses_grounded_practice(unattended_effects_allowed, monkeypatch):
     monkeypatch.setattr(sonder_serve, "_do_train", lambda n: "practiced %d" % n)
 
     assert sonder_serve._handle_slash("/learn 7") == "practiced 7"

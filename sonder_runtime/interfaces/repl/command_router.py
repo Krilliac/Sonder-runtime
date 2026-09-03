@@ -768,25 +768,41 @@ def _adjacent(tokens, variant):
     return False
 
 
-def _score(entry, present, content_set):
+def _in_order(tokens, variant):
+    """The name's tokens appear in the turn contiguously and in their own order."""
+    width = len(variant)
+    return any(tuple(tokens[start:start + width]) == tuple(variant)
+               for start in range(max(0, len(tokens) - width + 1)))
+
+
+def _score(entry, present, content_set, tokens=()):
     """(stage, strength) for one command, or None when it is not a candidate.
 
     Stage 2 is a full name match -- every word of the command's name (or an
     alias) is in the turn. Stage 1 is the narrow summary fallback: part of the
     name plus two or more distinctive summary words, which is what lets "scan
     for leaked api keys" find ``/secret_scan``.
+
+    Two commands can share a name's tokens in a different order
+    (``ground_artifact`` and ``artifact_ground`` are different tools). A full
+    match ranks the name spoken in its own order above the permutation, so
+    "ground artifact" runs ``/ground_artifact`` and never its namesake;
+    summary words only break the tie after that.
     """
     full = 0
     partial = 0
     matched = ()
+    ordered = 0
     for variant in entry["variants"]:
         hits = sum(1 for token in variant if token in present)
         partial = max(partial, hits)
-        if hits == len(variant) and len(variant) > full:
-            full, matched = len(variant), variant
+        if hits == len(variant):
+            in_order = 1 if _in_order(tokens, variant) else 0
+            if (len(variant), in_order) > (full, ordered):
+                full, ordered, matched = len(variant), in_order, variant
     summary_hits = len(content_set & entry["summary"])
     if full:
-        return 2, (full, summary_hits), matched
+        return 2, (full, ordered, summary_hits), matched
     if partial and entry["command"].risk not in _RISKY:
         distinctive = len(content_set & entry["distinctive"])
         if distinctive >= 2:
@@ -884,7 +900,7 @@ def _catalog_match(value, trace=None):
 
     ranked = []
     for entry in entries:
-        scored = _score(entry, present, content_set)
+        scored = _score(entry, present, content_set, body)
         if scored:
             ranked.append((scored[0], scored[1], entry, scored[2]))
     if not ranked:

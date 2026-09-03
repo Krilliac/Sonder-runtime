@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 221,
+      "file_count": 226,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -93,6 +93,7 @@
         "sonder_runtime/adapters/evaluation_lifecycle.py",
         "sonder_runtime/adapters/execution/__init__.py",
         "sonder_runtime/adapters/execution/durable_output.py",
+        "sonder_runtime/adapters/execution/effect_fence.py",
         "sonder_runtime/adapters/execution/persistent_terminal.py",
         "sonder_runtime/adapters/execution/process_jobs.py",
         "sonder_runtime/adapters/execution/worlds.py",
@@ -236,8 +237,11 @@
         "sonder_runtime/adapters/secrets.py",
         "sonder_runtime/adapters/security/__init__.py",
         "sonder_runtime/adapters/security/account_auth.py",
+        "sonder_runtime/adapters/security/approval_ledger.py",
         "sonder_runtime/adapters/security/credential_provider.py",
+        "sonder_runtime/adapters/security/permission_evaluator.py",
         "sonder_runtime/adapters/security/permission_policy.py",
+        "sonder_runtime/adapters/security/permission_receipts.py",
         "sonder_runtime/adapters/security/recovery_evidence.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
         "sonder_runtime/adapters/storage.py",
@@ -249,6 +253,7 @@
         "sonder_runtime/adapters/task_store.py",
         "sonder_runtime/adapters/tool_executor.py",
         "sonder_runtime/adapters/training/__init__.py",
+        "sonder_runtime/adapters/typed_tool_executor.py",
         "sonder_runtime/adapters/unit_of_work.py",
         "sonder_runtime/adapters/updates/__init__.py",
         "sonder_runtime/adapters/updates/activation_journal.py",
@@ -270,7 +275,7 @@
       ]
     },
     {
-      "file_count": 268,
+      "file_count": 269,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -327,6 +332,7 @@
         "sonder_runtime/application/evaluation/case_manifest.py",
         "sonder_runtime/application/evaluation/corpus_inventory.py",
         "sonder_runtime/application/evaluation/durable_lifecycle.py",
+        "sonder_runtime/application/evaluation/harness_outcomes.py",
         "sonder_runtime/application/evaluation/proposal_lifecycle.py",
         "sonder_runtime/application/evaluation/reproducible.py",
         "sonder_runtime/application/evaluation/service.py",
@@ -544,7 +550,7 @@
       ]
     },
     {
-      "file_count": 16,
+      "file_count": 17,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -562,7 +568,8 @@
         "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
-        "sonder_runtime/bootstrap/subprocess_mcp.py"
+        "sonder_runtime/bootstrap/subprocess_mcp.py",
+        "sonder_runtime/bootstrap/typed_tools.py"
       ]
     },
     {

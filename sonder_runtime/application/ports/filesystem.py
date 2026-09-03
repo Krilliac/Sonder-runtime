@@ -108,6 +108,8 @@ class FileSystemEntry:
 class FileSystemReadResult:
     content: bytes
     observation: FileSystemObservation
+    # True when the file was longer than the read bound and content is a prefix.
+    truncated: bool = False
 
 
 @dataclass(frozen=True)

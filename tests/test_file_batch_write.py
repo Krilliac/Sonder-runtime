@@ -229,7 +229,7 @@ def test_hard_link_aliases_are_rejected(monkeypatch, tmp_path):
     assert second.read_text(encoding="utf-8") == "original"
 
 
-def test_mcp_manifest_help_dispatch_and_activity(monkeypatch, tmp_path):
+def test_mcp_manifest_help_dispatch_and_activity(unattended_effects_allowed, monkeypatch, tmp_path):
     monkeypatch.setattr(file_ops, "workspace_root", lambda: tmp_path)
     changes = []
     monkeypatch.setattr(
@@ -277,7 +277,7 @@ def test_project_scope_rebases_every_batch_target_and_rejects_escape(tmp_path):
     )
 
 
-def test_project_bound_dispatch_uses_same_host_selected_scope(
+def test_project_bound_dispatch_uses_same_host_selected_scope(unattended_effects_allowed, 
     monkeypatch, tmp_path,
 ):
     project = tmp_path / "project"

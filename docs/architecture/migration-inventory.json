@@ -1,4 +1,5 @@
 {
+  "status": "historical snapshot of 2026-08-21 (see WP0-BASELINE.md): the root module lists below are the baseline the strangler migration started from, not the current inventory; workbench and file_ops have since moved to sonder_runtime/adapters/filesystem/ and the current authority for root legacy modules is scripts/check_architecture.py",
   "baseline_date": "2026-08-21",
   "git_revision": "13be730",
   "test_baseline": {
@@ -46,10 +47,36 @@
     "updates"
   ],
   "missing_spec5_packages": {
-    "domain": ["training", "selfmod", "updates"],
-    "application": ["agents", "execution", "automation", "training", "selfmod", "updates", "operations"],
-    "adapters": ["persistence/sqlite", "execution", "git", "web", "training", "updates", "accelerators/npu", "observability"],
-    "interfaces": ["http", "mcp", "cli", "repl"]
+    "domain": [
+      "training",
+      "selfmod",
+      "updates"
+    ],
+    "application": [
+      "agents",
+      "execution",
+      "automation",
+      "training",
+      "selfmod",
+      "updates",
+      "operations"
+    ],
+    "adapters": [
+      "persistence/sqlite",
+      "execution",
+      "git",
+      "web",
+      "training",
+      "updates",
+      "accelerators/npu",
+      "observability"
+    ],
+    "interfaces": [
+      "http",
+      "mcp",
+      "cli",
+      "repl"
+    ]
   },
   "spec5_targets": {
     "root_legacy_module_target": 0,

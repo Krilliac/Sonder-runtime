@@ -77,7 +77,9 @@ def test_broken_cassette_fails_baseline_with_structured_report(tmp_path):
     assert slugify["failure_kind"] == "cassette_miss"
     assert summary["totals"] == {
         "cases": 4, "pass": 3, "fail": 0, "error": 1, "timeout": 0,
-        "graded": 3, "pass_rate": 1.0, "cassette_drift": 0}
+        "verifier_unavailable": 0, "unknown": 0, "abandoned": 0,
+        "graded": 3, "infra": 1, "pass_rate": 1.0, "trials": 1, "pass_at_k": 3,
+        "cassette_drift": 0}
 
     with open(os.path.join(out_dir, "failures.json"), encoding="utf-8") as handle:
         failures = json.load(handle)["failures"]
@@ -138,3 +140,30 @@ def test_shipped_baseline_pins_current_suite_hash():
         "eval_scenarios/smoke_python.json changed without re-baselining; "
         "run: python eval_harness.py run --suite smoke_python --out <dir> "
         "&& python eval_harness.py baseline update --run <dir>")
+
+
+def test_history_is_recorded_by_default_for_the_replay_digest(tmp_path):
+    import sonder_runtime.adapters.evaluation_history_store as store
+
+    history = tmp_path / "history.jsonl"
+    assert eh.main(["run", "--suite", SUITE, "--out", str(tmp_path / "run"),
+                    "--history-path", str(history)]) == 0
+    loaded = store.load_history(str(history))
+    assert len(loaded["records"]) == 1 and loaded["malformed"] == 0
+    assert loaded["records"][0]["identity"]["suite"] == "eval-harness:" + SUITE
+
+    untouched = tmp_path / "none.jsonl"
+    assert eh.main(["run", "--suite", SUITE, "--out", str(tmp_path / "run2"),
+                    "--history-path", str(untouched), "--no-record-history"]) == 0
+    assert not untouched.exists()
+
+
+def test_trials_on_the_replay_provider_are_identical_by_construction(tmp_path):
+    out = str(tmp_path / "run")
+    assert eh.main(["run", "--suite", SUITE, "--out", out, "--trials", "2",
+                    "--no-record-history"]) == 0
+    summary = _read_summary(out)
+    assert summary["totals"]["trials"] == 2 and summary["totals"]["pass_at_k"] == 4
+    assert all(case["trials"] == ["pass", "pass"] for case in summary["cases"])
+    with open(os.path.join(out, "report.md"), encoding="utf-8") as handle:
+        assert "deterministic" in handle.read()

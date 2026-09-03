@@ -1285,7 +1285,12 @@ LIVE_RELOAD_MODULES = [
     "admin_auth",
     "command_registry",
     "permission_rules",
-    "tool_contract",
+    # ``tool_contract`` is deliberately absent: this module binds the typed
+    # ``authority_contract`` under that name (pure, explicit inputs), and the
+    # root ``tool_contract`` module has a different call shape. Reloading the
+    # root module here once rebound the served gate to it mid-process, so an
+    # authority edit could leave two contracts live and the gate calling one
+    # with the other's arguments. The root module still reloads in ``server``.
     "debug_dump",
 ]
 
@@ -1420,6 +1425,7 @@ SYSTEM_OPERATION_ROLES = {
 SYSTEM_OPERATION_TOOLS = {
     "permission_mode": "permission_mode_change",
     "permission_rule_set": "permission_rule_change",
+    "permission_approve": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
     "runtime_source_update": "selfmod_deploy",
@@ -1739,7 +1745,7 @@ def _record_chat(role, content, kind="message", state=None):
 
 
 def _maybe_live_reload():
-    global grounding, training_tasks, intents, feedback, admin_auth, debug_dump, tool_contract
+    global grounding, training_tasks, intents, feedback, admin_auth, debug_dump
     modules = live_reload.reload_changed_modules(LIVE_RELOAD_MODULES)
     if "server" in modules:
         configure_legacy_runtime(modules["server"])
@@ -1749,7 +1755,6 @@ def _maybe_live_reload():
     feedback = modules.get("feedback", feedback)
     admin_auth = modules.get("admin_auth", admin_auth)
     debug_dump = modules.get("debug_dump", debug_dump)
-    tool_contract = modules.get("tool_contract", tool_contract)
 
 
 def _on_off(arg, current):
@@ -2065,11 +2070,12 @@ def _http_slash_refusal(cmd, argument="", context=None):
     port" (see `_deployment_gating_summary`). It has nothing to say about
     which mode is in force or which rules an operator wrote.
 
-    `interactive=False`, like every other caller with nobody to prompt: `ask`
-    degrades to `allow`, so this surface refuses nothing today that it did not
-    refuse before, while a `deny` rule and `plan` refuse. Only a `deny` can
-    come back from `decide()` here, which is why this is a flat loop rather
-    than a copy of the console's ask-and-rank gate.
+    `interactive=False`, like every other caller with nobody to prompt: file
+    changes, host programs and destructive tools are refused with the
+    remedies named, ask-class tools proceed on the record, and a `deny` rule
+    and `plan` refuse. Only a `deny` can come back from `decide()` here,
+    which is why this is a flat loop rather than a copy of the console's
+    ask-and-rank gate.
 
     The gate's own control is exempt for the reason it is everywhere else --
     though the app's real way back out of `plan` is the `/v1/permission-mode`
@@ -2090,26 +2096,9 @@ def _http_slash_refusal(cmd, argument="", context=None):
     # applying the mutation's admin gate to `/emotion status` or `/prefer
     # status` would accidentally turn a read-only request into an admin-only
     # operation.  Narrow only after the command's own grammar has established
-    # that it will take the read-only branch.
-    read_only_argument = str(argument or "").strip().lower()
-    if cmd in ("/emotion", "/emotions", "/vectors", "/mood") and (
-        not read_only_argument or read_only_argument in ("status", "list", "show")
-    ):
-        tools = ("emotion_vector_status",)
-    elif cmd in ("/prefer", "/preference", "/preferences") and (
-        not read_only_argument or read_only_argument in ("status", "list", "show")
-    ):
-        tools = ("preferences_status",)
-    elif cmd in ("/contextsize", "/ctxsize") and not read_only_argument:
-        tools = ("context_policy_status",)
-    elif cmd in ("/runtime", "/models") and (
-        not read_only_argument or read_only_argument == "status"
-    ):
-        tools = ("runtime_policy_status",)
-    elif cmd in ("/stash", "/runtime-stash") and (
-        not read_only_argument or read_only_argument in ("status", "list")
-    ):
-        tools = ("runtime_source_stash_status",)
+    # that it will take the read-only branch; the rules live in the catalog so
+    # this chain and `server.control_command` cannot disagree about a read.
+    tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
     return _http_tool_refusal(tools, cmd, context=context)
 
 
@@ -2162,8 +2151,13 @@ def _loop_global_operation_refusal(actions_json, context=None):
     return ""
 
 
-def _http_tool_refusal(tools, label, context=None):
+def _http_tool_refusal(tools, label, context=None, arguments=None):
     """The decision itself, shared by this surface's two entry points.
+
+    ``arguments`` are meaningful only for a single tool (the dynamic
+    ``/<tool>`` path passes its parsed keywords): they let an unattended
+    refusal name the call so an operator can approve exactly it once, and
+    let such an approval answer the retry.
 
     Only a `deny` can come back under `interactive=False`, so this is a flat
     loop rather than a copy of the console's ask-and-rank gate.
@@ -2204,7 +2198,8 @@ def _http_tool_refusal(tools, label, context=None):
                 if authority_error:
                     return "refused %s: %s" % (label, authority_error)
         decision = permission_policy.decide_for_caller(
-            tool, interactive=False, gate_control_exempt=True,
+            tool, interactive=False, gate_control_exempt=True, surface="http",
+            arguments=arguments if (len(tools) == 1 and isinstance(arguments, dict)) else None,
         )
         if decision is None:
             continue
@@ -2638,7 +2633,17 @@ def _dispatch_catalogued_tool(line, state, context=None):
     handler = getattr(server, tool_name, None)
     if not callable(handler):
         return "%s is catalogued but not callable here." % tool_name
-    refusal = _http_tool_refusal((tool_name,), "/" + tool_name, context=context)
+    with server.approved_call_reach(tool_name, kwargs):
+        return _run_catalogued_tool_gated(
+            line, tool_name, kwargs, handler, state=state, context=context,
+        )
+
+
+def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, context):
+    """The gated ``/<tool>`` dispatch, run inside the call's reach scope."""
+    refusal = _http_tool_refusal(
+        (tool_name,), "/" + tool_name, context=context, arguments=kwargs,
+    )
     if refusal:
         return refusal
     if tool_name == "loop":
@@ -2945,6 +2950,10 @@ def _run_prompt(
             context_size=context_size, session=session, project=project,
             raise_model_errors=True, target_observer=record_target, augment=augment,
             cache_scope=cache_scope, cache_observer=record_cache,
+            # This surface captures the turn itself (``_capture_live_session_turn``)
+            # under its own correlation id and fails the request closed when
+            # it cannot; the legacy path must not capture the same turn again.
+            capture_session=False,
         )
         outcome = "error" if out.startswith("ERROR") else "ok"
     finally:

@@ -18,12 +18,38 @@ class PermissionPolicyProvider:
         return getattr(_engine(), name)
 
     def decide_for_caller(self, tool_name: str, *, interactive: bool,
-                          gate_control_exempt: bool):
+                          gate_control_exempt: bool, surface: str = "",
+                          record: bool = True, mode: str | None = None,
+                          rule_lookup=None, arguments=None, fence=None):
         return _engine().decide_for_caller(
             tool_name,
             interactive=interactive,
             gate_control_exempt=gate_control_exempt,
+            surface=surface,
+            record=record,
+            mode=mode,
+            rule_lookup=rule_lookup,
+            arguments=arguments,
+            fence=fence,
         )
+
+    def call_digest(self, tool_name: str, arguments) -> str:
+        return _engine().call_digest(tool_name, arguments)
+
+    def approval_spent_for(self, tool_name: str, arguments) -> bool:
+        return _engine().approval_spent_for(tool_name, arguments)
+
+    def forget_spent_approval(self) -> None:
+        _engine().forget_spent_approval()
+
+    def approval_ledger(self):
+        return _engine().approval_ledger()
+
+    def unattended_summary(self) -> str:
+        return _engine().unattended_summary()
+
+    def unattended_refused_risks(self) -> frozenset[str]:
+        return _engine().UNATTENDED_REFUSED_RISKS
 
     def set_mode(self, name: str) -> str:
         return _engine().set_mode(name)

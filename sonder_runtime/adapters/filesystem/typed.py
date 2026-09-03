@@ -56,7 +56,10 @@ class GuardedFileSystemAdapter:
             succeeded=True,
             bytes_read=len(content),
         )
-        return FileSystemReadResult(content=content, observation=observation)
+        return FileSystemReadResult(
+            content=content, observation=observation,
+            truncated=bool(result.get("truncated")),
+        )
 
 
 __all__ = ["GuardedFileSystemAdapter"]

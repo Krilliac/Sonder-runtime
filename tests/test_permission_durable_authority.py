@@ -68,7 +68,7 @@ NON_INTERACTIVE_MODES = (pm.MANUAL, pm.ACCEPT_EDITS, pm.AUTO)
 def test_the_class_is_declared_and_names_the_authority_granting_tools():
     assert pm.DURABLE_AUTHORITY_TOOLS == frozenset({
         "admin_login", "admin_register", "admin_set_account",
-        "elevate", "permission_rule_set",
+        "elevate", "permission_rule_set", "permission_approve",
     })
 
 
@@ -85,6 +85,7 @@ def test_every_member_is_a_real_registered_tool():
 # non-interactive modes -- so the degrade branch is reached and the class binds.
 GRADED_DANGEROUS = sorted({
     "admin_register", "admin_set_account", "elevate", "permission_rule_set",
+    "permission_approve",
 })
 
 
@@ -191,16 +192,19 @@ def test_an_explicit_deny_rule_still_outranks_everything(monkeypatch):
     "task_delete", "self_heal_repair", "memory_quality_repair",
     "memory_privacy_repair",
 ])
-def test_agent_reachable_dangerous_tools_still_degrade(tool):
+def test_agent_reachable_dangerous_tools_are_refused_unattended(tool):
     """These 8 are the measured intersection of the catalog's ``dangerous``
-    set with ``_agent_dispatch``'s dispatch names. A class-wide non-degrade
-    would refuse all of them in every non-interactive lane -- the agent and
-    autopilot lanes entirely -- so the class is drawn narrower on purpose.
-    This test is the record of that cost decision, not an endorsement of the
-    degrade: if a later lane widens the class, it should fail here and be
-    argued, rather than widening silently."""
+    set with ``_agent_dispatch``'s dispatch names. The durable-authority class
+    stays narrow on purpose, but these no longer degrade either: every
+    ``dangerous`` tool is refused for a caller nobody can ask by the general
+    unattended rule, under its own source, so the audit trail still tells
+    "grants authority" apart from "is destructive"."""
     assert pm.risk_of(tool) == "dangerous"
-    assert pm.decide(tool, interactive=False, mode=pm.AUTO).action == pm.ALLOW
+    decision = pm.decide(
+        tool, interactive=False, mode=pm.AUTO, rule_lookup=lambda _t: None,
+    )
+    assert decision.action == pm.DENY
+    assert decision.source == "unattended"
 
 
 def test_ordinary_ask_tools_are_untouched():

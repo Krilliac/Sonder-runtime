@@ -32,6 +32,21 @@ import server
 import tool_capabilities as capabilities
 
 
+@pytest.fixture(autouse=True)
+def _effects_answered_for_the_agent(unattended_effects_allowed, every_tool_allowed_by_rule):
+    """Every dispatch here reaches a file change, a host program, or worse.
+
+    These tests are about the dispatcher reaching the real function with the
+    right arguments; whether the mode gate lets an unattended agent do so is
+    ``tests/test_permission_gate_dispatch.py``'s subject. ``auto`` answers
+    the file-change and host-program classes for an unattended caller, and a
+    written allow rule answers the two graded ``dangerous`` (``git_merge``,
+    ``git_cherry_pick``), which no mode answers unattended. The read-only
+    refusals asserted below are the dispatcher's own and are unaffected.
+    """
+    yield
+
+
 DEV_WORKFLOW_TOOLS = frozenset({
     "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
     "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",

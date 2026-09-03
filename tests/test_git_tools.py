@@ -543,7 +543,7 @@ def test_runtime_update_neutralizes_checkout_filter_processes(monkeypatch, tmp_p
     assert result["updated"] is True
 
 
-def test_runtime_source_update_tools_format_and_do_not_hide_refusal(monkeypatch):
+def test_runtime_source_update_tools_format_and_do_not_hide_refusal(every_tool_allowed_by_rule, monkeypatch):
     data = {
         "root": "C:/Sonder-runtime",
         "branch": "main",

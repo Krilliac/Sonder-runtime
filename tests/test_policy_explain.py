@@ -58,14 +58,30 @@ def test_preflight_uses_the_direct_mcp_gate_and_never_calls_the_target(
     assert "super-secret" not in out
 
 
-def test_preflight_reports_noninteractive_outcome_not_console_ask(policy_sandbox):
+def test_preflight_reports_the_unattended_outcome_not_console_ask(policy_sandbox):
     pm.set_mode(pm.MANUAL)
 
     out = server.policy_explain("file_write")
 
     assert "mode: manual" in out
-    assert "gate result: allow" in out
-    assert "non-interactive caller policy" in out
+    assert "gate result: deny" in out
+    assert "unattended-caller rule" in out
+
+    proceeds = server.policy_explain("task_create")
+    assert "gate result: allow" in proceeds
+    assert "proceeds on the record" in proceeds
+
+
+def test_preflight_leaves_no_receipt(policy_sandbox):
+    """Explaining a decision is not making one; the counters must not move."""
+    pm.set_mode(pm.MANUAL)
+    pm.reset_unattended_for_tests()
+
+    server.policy_explain("file_write")
+
+    assert pm.unattended_summary().startswith(
+        "unattended decisions since start: 0 refused, 0 allowed"
+    )
 
 
 def test_preflight_rejects_an_unknown_name_without_deciding(policy_sandbox, monkeypatch):

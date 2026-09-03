@@ -274,7 +274,7 @@ def test_normal_agent_and_autopilot_policies_are_unchanged(monkeypatch):
     assert server._file_bypass_allowed() is False
 
 
-def test_unsafe_mode_removes_agent_and_autopilot_host_tool_restrictions(monkeypatch):
+def test_unsafe_mode_removes_agent_and_autopilot_host_tool_restrictions(unattended_effects_allowed, monkeypatch):
     monkeypatch.setattr(unsafe_lab, "active", lambda: True)
     calls = []
 

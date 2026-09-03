@@ -7,6 +7,8 @@ server layer.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import fnmatch
 import hashlib
 import json
@@ -167,11 +169,50 @@ def _roots_from_file() -> list[Path]:
     return roots
 
 
+# Reach granted to the call in flight on this context: providers that answer
+# with the extra roots a one-shot approval covered (see ``reach_scope``).
+# Every root resolution goes through ``allowed_roots``, so a provider's roots
+# are honoured everywhere and containment is still checked against them; no
+# provider ever switches the check off the way ``bypass`` does.
+_CALL_REACH: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "sonder_call_reach", default=(),
+)
+
+
+@contextlib.contextmanager
+def reach_scope(provider):
+    """Honour ``provider()``'s roots for the calls inside the body.
+
+    ``provider`` is called at resolution time, not at entry, so a surface can
+    install the scope around a whole call -- gate and handler -- and the
+    roots appear only once the gate has actually spent an approval for the
+    call. Installed by the surfaces that decide a call and by the native MCP
+    surface; nothing a caller sends can install one.
+    """
+    token = _CALL_REACH.set(_CALL_REACH.get() + (provider,))
+    try:
+        yield
+    finally:
+        _CALL_REACH.reset(token)
+
+
+def _reach_roots() -> list[Path]:
+    roots: list[Path] = []
+    for provider in _CALL_REACH.get():
+        try:
+            granted = provider()
+        except Exception:
+            continue
+        roots.extend(_split_roots(granted if isinstance(granted, str) else ""))
+    return roots
+
+
 def allowed_roots(extra_roots: str = "") -> list[Path]:
     roots = [workspace_root(), Path(runtime_paths.default_home())]
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     roots.extend(_split_roots(extra_roots))
+    roots.extend(_reach_roots())
     out = []
     for root in roots:
         try:
@@ -316,9 +357,12 @@ def _is_protected_mutation_path(path: Path) -> bool:
 
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
     if _is_protected_mutation_path(path) and not developer_authorized:
+        # The path goes before the phrase: "token: <path>" reads as a
+        # credential to the output redactor, and this message is shown and
+        # audited through it on every surface.
         raise PermissionError(
-            "refusing to mutate protected Sonder control-plane path "
-            "without an authenticated developer token: %s" % path
+            "refusing to mutate protected Sonder control-plane path %s "
+            "without an authenticated developer token" % path
         )
 
 
@@ -358,8 +402,8 @@ def _require_read_access(path: Path, authorized: bool) -> None:
     """
     if _is_protected_read_path(path) and not authorized:
         raise PermissionError(
-            "refusing to read protected Sonder secret/control-plane path "
-            "without an authenticated developer token or bypass: %s" % path
+            "refusing to read protected Sonder secret/control-plane path %s "
+            "without an authenticated developer token or bypass" % path
         )
 
 
@@ -569,12 +613,12 @@ def _require_safe_recursive_delete(
                 if entry.is_symlink() or _is_reparse_point(child):
                     raise PermissionError(
                         "refusing recursive deletion of a tree containing a symlink "
-                        "or junction without an authenticated developer token: %s" % child
+                        "or junction (%s) without an authenticated developer token" % child
                     )
                 if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
                     raise PermissionError(
                         "refusing recursive deletion of a tree containing protected "
-                        "control state without an authenticated developer token: %s" % child
+                        "control state (%s) without an authenticated developer token" % child
                     )
                 if entry.is_dir(follow_symlinks=False):
                     pending.append(child)
@@ -675,7 +719,7 @@ def policy_text(*, bypass: bool = False, extra_roots: str = "") -> str:
     lines.extend([
         "  hot roots file: %s" % roots_file_path(),
         "  env bypass: SONDER_FILE_BYPASS=1",
-        "  approval code: SONDER_FILE_APPROVAL_CODE plus approval=<code>",
+        "  one call beyond the roots: /approve <call id> (the approved call's extra_roots are honoured once)",
         "  env extra roots: SONDER_FILE_ROOTS=<path%spath>" % os.pathsep,
     ])
     return "\n".join(lines)

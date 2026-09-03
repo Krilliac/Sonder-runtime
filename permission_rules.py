@@ -354,7 +354,16 @@ def rule_lookup(rules):
     return lookup
 
 
-def _both_callers(action):
+def _unattended_answer(decision):
+    """What a caller with nobody to ask gets for this ``ask`` row."""
+    import permission_modes
+
+    if decision.risk in permission_modes.UNATTENDED_REFUSED_RISKS:
+        return "refused (unattended)"
+    return "allow (non-interactive)"
+
+
+def _both_callers(decision):
     """An action, naming both callers' answers on the one row where they differ.
 
     ``/permissions`` is rendered with ``interactive=True`` -- the operator's
@@ -364,13 +373,15 @@ def _both_callers(action):
     where that is true: a ``deny`` is a deny for both, an ``allow`` is an
     allow for both, and ``plan`` -- the one mode where a non-interactive
     caller is still refused -- never produces ``ask`` at all (its matrix row
-    has no ASK entry). So naming both answers here, on ask rows only, turns
-    this output from disclosure into truth without plumbing a caller flag
-    through the renderer.
+    has no ASK entry). Which answer the unattended caller gets depends on the
+    tool's class: file changes, host programs and destructive tools are
+    refused, the ``ask`` class proceeds on the record. So naming both answers
+    here, on ask rows only, turns this output from disclosure into truth
+    without plumbing a caller flag through the renderer.
     """
-    if action != "ask":
-        return action
-    return "ask (console) / allow (non-interactive)"
+    if decision.action != "ask":
+        return decision.action
+    return "ask (console) / %s" % _unattended_answer(decision)
 
 
 def _effective_lines(decide, tool_name):
@@ -382,7 +393,7 @@ def _effective_lines(decide, tool_name):
         return [
             "  mode: %s" % decision.mode,
             "  risk: %s" % decision.risk,
-            "  effective: %s" % _both_callers(decision.action),
+            "  effective: %s" % _both_callers(decision),
             "  governed by: %s -- %s" % (decision.source, decision.reason),
         ]
     except Exception as exc:
@@ -407,7 +418,7 @@ def _effective_suffix(decide, rule):
     except Exception as exc:
         return "  -> UNAVAILABLE (%s)" % _describe_exc(exc)
     if decision.action == "ask":
-        return "  -> ask (%s) / allow (non-interactive)" % decision.source
+        return "  -> ask (%s) / %s" % (decision.source, _unattended_answer(decision))
     return "  -> %s (%s)" % (decision.action, decision.source)
 
 

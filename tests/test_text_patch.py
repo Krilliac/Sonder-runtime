@@ -145,7 +145,7 @@ def test_create_cleanup_failure_rolls_back_published_target(tmp_path, monkeypatc
     assert list(tmp_path.glob(".sonder-patch-*")) == []
 
 
-def test_public_and_agent_integration(tmp_path, monkeypatch):
+def test_public_and_agent_integration(unattended_effects_allowed, tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("one\ntwo\n")
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     output = server._agent_dispatch("text_patch", {
