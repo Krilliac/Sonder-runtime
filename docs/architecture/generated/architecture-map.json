@@ -275,7 +275,7 @@
       ]
     },
     {
-      "file_count": 269,
+      "file_count": 270,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -476,6 +476,7 @@
         "sonder_runtime/application/routing/__init__.py",
         "sonder_runtime/application/routing/calibration.py",
         "sonder_runtime/application/routing/capability_router.py",
+        "sonder_runtime/application/routing/tier_escalation.py",
         "sonder_runtime/application/runtime_policy/__init__.py",
         "sonder_runtime/application/runtime_policy/use_cases.py",
         "sonder_runtime/application/security/__init__.py",
