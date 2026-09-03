@@ -378,15 +378,20 @@ def test_a_deny_rule_stops_a_loop_action_in_every_mode(monkeypatch):
         assert "rule denies" in result["output"], mode
 
 
-def test_manual_leaves_the_loop_path_running(monkeypatch):
+def test_manual_refuses_an_unattended_loop_action_and_auto_runs_it(monkeypatch):
+    """A model-authored loop action has nobody to ask, so it is answered by
+    class: code execution is refused in `manual` and runs in `auto`."""
     monkeypatch.setattr(
         server.code_runner, "run_code",
         lambda **_kwargs: {"ok": True, "returncode": 0, "stdout": "1", "stderr": ""},
     )
     pm.set_mode(pm.MANUAL)
+    refused = server._loop_dispatch({"type": "code", "code": "print(1)"})
+    assert refused["ok"] is False
+    assert "nobody is here" in refused["output"]
 
+    pm.set_mode(pm.AUTO)
     result = server._loop_dispatch({"type": "code", "code": "print(1)"})
-
     assert result["ok"] is True
 
 
@@ -404,18 +409,33 @@ def test_selfmod_gets_no_exemption_from_the_delete_rule():
     ship-by-default denial did not apply to. The capability is still
     available, as one explicit, auditable, written-down grant
     (`permission_rule_set file_delete allow`), which is the right shape for
-    that decision. `file_write`/`file_edit` are unaffected, so scoped edits
-    still work.
+    that decision. `file_write`/`file_edit` are unaffected by the rule, so scoped
+    edits still work wherever the mode answers for an unattended caller.
     """
-    pm.set_mode(pm.MANUAL)
     allowlist = _selfmod_agent_allowlist()
 
     assert "file_delete" in allowlist, "the premise of this test moved"
-    assert server._agent_permission_gate_error("file_delete").startswith(
-        "ERROR: HOST POLICY:"
-    )
+    for mode in pm.MODES:
+        pm.set_mode(mode)
+        assert server._agent_permission_gate_error("file_delete").startswith(
+            "ERROR: HOST POLICY:"
+        ), mode
+
+    # The self-editing agent has nobody to ask, so in `manual` every file
+    # change or program it proposes is refused like any other unattended
+    # caller's. The operator who starts a run selects `acceptEdits` (edits)
+    # or `auto` (edits and programs), or writes a rule; scoped edits work
+    # there, and the shipped delete denial still binds.
+    pm.set_mode(pm.MANUAL)
     for tool in sorted(allowlist - {"file_delete"}):
-        assert server._agent_permission_gate_error(tool) == "", tool
+        if pm.risk_of(tool) in pm.UNATTENDED_REFUSED_RISKS:
+            assert "nobody is here" in server._agent_permission_gate_error(tool), tool
+    pm.set_mode(pm.AUTO)
+    for tool in sorted(allowlist - {"file_delete"}):
+        if pm.risk_of(tool) == "dangerous":
+            assert server._agent_permission_gate_error(tool) != "", tool
+        else:
+            assert server._agent_permission_gate_error(tool) == "", tool
 
 
 def _selfmod_agent_allowlist():
@@ -454,39 +474,13 @@ def _selfmod_agent_allowlist():
 # --- the constraint this whole change has to satisfy ----------------------
 
 
-def test_manual_refuses_nothing_the_mode_did_not_refuse_before():
-    """Default mode must not start denying tools that worked yesterday.
-
-    Wiring the gate in flips two dormant layers on at once. The mode layer was
-    a no-op on this path by construction (``interactive=False`` degrades
-    ``ask`` to ``allow``), so the refusals mode ``manual`` may produce are the
-    per-tool ``deny`` rules that ``/permissions`` has always printed and never
-    enforced. Anything else refused here is a regression that would surface to
-    a user as "Sonder stopped working".
-
-    Task #57 adds the second, declared exception:
-    ``permission_modes.DURABLE_AUTHORITY_TOOLS``, the class the non-interactive
-    degrade deliberately does not apply to. It is admitted here as an
-    enumerated set rather than by loosening the comparison, so the floor still
-    binds for every other name -- a change that starts denying anything else
-    still fails this test.
-
-    The cost this test exists to catch is measured, not assumed: none of those
-    names is reachable from ``_agent_dispatch`` at all (asserted below), so no
-    agent run that worked yesterday stops working. The gate refuses them on
-    this path anyway, and deliberately -- a model must not be able to grant
-    itself authority, and "there is no dispatch branch today" is not a
-    guarantee about tomorrow.
-    """
-    import tool_capabilities
-
-    pm.set_mode(pm.MANUAL)
+def _agent_gate_census(mode):
+    """What the agent gate refuses in ``mode`` for every catalogued tool."""
+    pm.set_mode(mode)
     # The hermetic test home has no permissions.json, so the gate's real rule
     # lookup resolves against exactly these built-in defaults.
     defaults = permission_rules.DEFAULT_RULES
-
-    refused = set()
-    denied_by_rule = set()
+    refused, denied_by_rule, by_risk = set(), set(), {}
     for command in command_catalog.catalog():
         # Compare on the canonical name the gate itself decides on, so an
         # alias is not counted as a mismatch with the rule it resolves to.
@@ -495,20 +489,64 @@ def test_manual_refuses_nothing_the_mode_did_not_refuse_before():
             refused.add(tool)
         if execution_policy.evaluate(defaults, tool)["action"] == pm.DENY:
             denied_by_rule.add(tool)
+        by_risk.setdefault(pm.risk_of(tool), set()).add(tool)
+    return refused, denied_by_rule, by_risk
 
-    assert refused == denied_by_rule | pm.DURABLE_AUTHORITY_TOOLS
+
+def test_manual_refuses_exactly_the_effect_classes_and_written_denials():
+    """The floor, restated for a gate that fails closed.
+
+    The agent path has nobody to ask, so in the default mode it refuses
+    exactly three things: the per-tool ``deny`` rules ``/permissions`` has
+    always printed, the durable-authority class, and every tool whose class
+    changes files, runs a host program, or is destructive
+    (``UNATTENDED_REFUSED_RISKS``). Everything else -- reads and the ``ask``
+    class the chat and task entry points carry -- keeps working, and a change
+    that starts refusing any of it fails this test. A change that stops
+    refusing an effect class fails it too.
+    """
+    import tool_capabilities
+
+    refused, denied_by_rule, by_risk = _agent_gate_census(pm.MANUAL)
+    effect_classes = set().union(
+        *(by_risk.get(risk, set()) for risk in pm.UNATTENDED_REFUSED_RISKS)
+    )
+
+    assert refused == denied_by_rule | pm.DURABLE_AUTHORITY_TOOLS | effect_classes
     # And the default policy really does deny something, so an empty set on
     # both sides can never pass this vacuously.
     assert "file_delete" in denied_by_rule
-    # The whole justification for admitting the class above: it costs the agent
-    # lane nothing, because the agent lane cannot call any of it.
+    assert "file_write" in effect_classes and "run_code" in effect_classes
+    assert "task_create" in by_risk["ask"] and "task_create" not in refused
+    # A model must not be able to grant itself authority, and "there is no
+    # dispatch branch today" is not a guarantee about tomorrow.
     dispatchable = set(tool_capabilities.dispatch_names(server._agent_dispatch))
     assert pm.DURABLE_AUTHORITY_TOOLS & dispatchable == set()
 
 
-def test_manual_allows_every_risk_class_on_the_agent_path():
+def test_auto_refuses_only_written_denials_and_the_dangerous_class():
+    """``auto`` executes tools unattended; only destruction still needs a person."""
+    refused, denied_by_rule, by_risk = _agent_gate_census(pm.AUTO)
+
+    assert refused == denied_by_rule | by_risk.get("dangerous", set())
+    assert "file_write" not in refused and "run_code" not in refused
+    assert "git_merge" in refused
+
+
+def test_manual_answers_each_risk_class_on_the_agent_path_by_class():
     """Spelled out per class, so a matrix change cannot slip past unnoticed."""
     pm.set_mode(pm.MANUAL)
+
+    assert server._agent_permission_gate_error("status") == ""       # safe
+    assert server._agent_permission_gate_error("task_plan") == ""    # ask, on the record
+    for tool in ("file_write", "run_code"):
+        error = server._agent_permission_gate_error(tool)
+        assert error.startswith("ERROR: HOST POLICY:"), tool
+        assert "nobody is here" in error, tool
+
+
+def test_auto_lets_edits_and_programs_through_on_the_agent_path():
+    pm.set_mode(pm.AUTO)
 
     for tool in ("status", "task_plan", "file_write", "run_code"):
         assert server._agent_permission_gate_error(tool) == "", tool
@@ -754,35 +792,42 @@ def test_the_console_exemption_set_cannot_widen_silently():
 # advertised as "reads only" -- writing and deleting files.
 
 
-# (console command, tool it fronts). Aliases and control_command delegations
-# included on purpose: `/mkdir` is only named inside server.control_command.
+# (console command, argument, tool it fronts). Aliases and control_command
+# delegations included on purpose: `/mkdir` is only named inside
+# server.control_command. `/todo` carries the argument that reaches its
+# delete: the bare form lists, and the gate grades the read forms it
+# recognises as the read they are (`command_catalog.narrow_branch_tools`), so
+# only an argument that names the write is graded as one.
 _NAMED_BRANCHES = [
-    ("/write", "file_write"),
-    ("/append", "file_write"),
-    ("/edit", "file_edit"),
-    ("/delete", "file_delete"),
-    ("/mkdir", "directory_create"),
-    ("/runprogram", "workspace_run"),
-    ("/runscript", "script_run"),
-    ("/scaffold", "scaffold_project"),
-    ("/setaccount", "admin_set_account"),
-    ("/register", "admin_register"),
-    ("/qualityfix", "memory_quality_repair"),
-    ("/work", "workbench_agent"),
-    ("/game", "game_generate_and_test"),
-    ("/asset", "artifact_generate"),
-    ("/todo", "task_delete"),
-    ("/cot", "admin_private_chain_of_thought"),
+    ("/write", "", "file_write"),
+    ("/append", "", "file_write"),
+    ("/edit", "", "file_edit"),
+    ("/delete", "", "file_delete"),
+    ("/mkdir", "", "directory_create"),
+    ("/runprogram", "", "workspace_run"),
+    ("/runscript", "", "script_run"),
+    ("/scaffold", "", "scaffold_project"),
+    ("/setaccount", "", "admin_set_account"),
+    ("/register", "", "admin_register"),
+    ("/qualityfix", "", "memory_quality_repair"),
+    ("/work", "", "workbench_agent"),
+    ("/game", "", "game_generate_and_test"),
+    ("/asset", "", "artifact_generate"),
+    ("/todo", "delete 1", "task_delete"),
+    ("/cot", "", "admin_private_chain_of_thought"),
 ]
 
 
-@pytest.mark.parametrize("command,tool", _NAMED_BRANCHES)
-def test_every_named_branch_resolves_to_the_tool_it_runs(command, tool):
+@pytest.mark.parametrize("command,argument,tool", _NAMED_BRANCHES)
+def test_every_named_branch_resolves_to_the_tool_it_runs(command, argument, tool):
+    del argument
     assert tool in command_catalog.console_tools().get(command, ())
 
 
-@pytest.mark.parametrize("command,tool", _NAMED_BRANCHES)
-def test_plan_refuses_every_named_branch_that_is_not_a_read(monkeypatch, command, tool):
+@pytest.mark.parametrize("command,argument,tool", _NAMED_BRANCHES)
+def test_plan_refuses_every_named_branch_that_is_not_a_read(
+    monkeypatch, command, argument, tool,
+):
     del tool
     monkeypatch.setattr(
         sonder_repl, "_confirm",
@@ -790,7 +835,7 @@ def test_plan_refuses_every_named_branch_that_is_not_a_read(monkeypatch, command
     )
     pm.set_mode(pm.PLAN)
 
-    may_run, refusal = sonder_repl._named_command_gate(command)
+    may_run, refusal = sonder_repl._named_command_gate(command, argument)
 
     assert not may_run
     assert refusal.startswith("refused %s:" % command)
@@ -812,9 +857,9 @@ def _rule_denied_tools(command):
     )
 
 
-@pytest.mark.parametrize("command,tool", _NAMED_BRANCHES)
+@pytest.mark.parametrize("command,argument,tool", _NAMED_BRANCHES)
 def test_manual_prompts_before_every_named_branch_and_a_no_stops_it(
-    monkeypatch, command, tool,
+    monkeypatch, command, argument, tool,
 ):
     """Manual asks first, and a "no" means the branch does not run.
 
@@ -833,7 +878,7 @@ def test_manual_prompts_before_every_named_branch_and_a_no_stops_it(
     )
     pm.set_mode(pm.MANUAL)
 
-    may_run, refusal = sonder_repl._named_command_gate(command)
+    may_run, refusal = sonder_repl._named_command_gate(command, argument)
 
     assert not may_run
     if denied:
@@ -852,7 +897,10 @@ def test_the_deny_rule_branches_are_exactly_the_two_the_shipped_rules_name():
     dropped default rule -- every branch would take the "prompts" arm and the
     deny-outranks-ask precedence would stop being tested at all.
     """
-    denied = {command for command, _ in _NAMED_BRANCHES if _rule_denied_tools(command)}
+    denied = {
+        command for command, _argument, _tool in _NAMED_BRANCHES
+        if _rule_denied_tools(command)
+    }
 
     assert denied == {"/delete", "/cot"}
 
@@ -882,9 +930,12 @@ def test_the_mode_control_branch_stays_reachable_in_plan(monkeypatch):
 def test_a_multi_tool_branch_is_gated_at_its_most_dangerous_member(monkeypatch):
     """`/todo` reaches task_list *and* task_delete; the worst one governs.
 
-    Which one runs depends on an argument the gate has not parsed, so it
-    rounds toward refusal. The prompt must name the dangerous member, not
-    whichever branch ast.walk happened to see first.
+    Which one runs depends on the argument. The read forms the branch grammar
+    names are narrowed to the member they reach before the gate decides -- a
+    bare `/todo` lists, and is graded as the list it runs -- and an action the
+    grammar does not name keeps the whole union, which rounds toward refusal:
+    the prompt must name the dangerous member, not whichever branch ast.walk
+    happened to see first.
     """
     asked = []
     monkeypatch.setattr(
@@ -892,7 +943,11 @@ def test_a_multi_tool_branch_is_gated_at_its_most_dangerous_member(monkeypatch):
     )
     pm.set_mode(pm.AUTO)  # auto allows everything except dangerous
 
-    may_run, _refusal = sonder_repl._named_command_gate("/todo")
+    assert sonder_repl._named_command_gate("/todo") == (True, "")
+    assert sonder_repl._named_command_gate("/todo", "list") == (True, "")
+    assert not asked, "the list a bare /todo runs must not be prompted for"
+
+    may_run, _refusal = sonder_repl._named_command_gate("/todo", "frobnicate 12")
 
     assert may_run
     assert len(asked) == 1
@@ -966,13 +1021,18 @@ def test_a_piped_console_is_not_an_open_door(monkeypatch):
 
 
 def test_the_catalogued_fallback_is_piped_the_same_way(monkeypatch):
-    """`/<tool_name>` degrades identically -- both console entries share a seam."""
+    """`/<tool_name>` is answered like any unattended caller -- both console
+    entries share a seam: refused in `manual`, run where the mode allows it."""
     piped = _piped_console(monkeypatch, "/exit\n")
     monkeypatch.setattr(server, "file_write", lambda **_kwargs: "wrote it")
     pm.set_mode(pm.MANUAL)
 
-    output = sonder_repl._run_catalogued("/file_write path=x content=y", "/file_write")
+    refused = sonder_repl._run_catalogued("/file_write path=x content=y", "/file_write")
+    assert refused.startswith("refused /file_write:")
+    assert "nobody is here" in refused
 
+    pm.set_mode(pm.ACCEPT_EDITS)
+    output = sonder_repl._run_catalogued("/file_write path=x content=y", "/file_write")
     assert output == "wrote it"
     assert piped.readline() == "/exit\n"
 
@@ -1131,7 +1191,13 @@ def test_selfmod_is_not_graded_by_its_most_harmless_sibling():
 
 
 def test_plan_refuses_selfmod_at_the_console(monkeypatch):
-    """The named requirement: `plan` must refuse the command that rewrites Sonder."""
+    """The named requirement: `plan` must refuse the command that rewrites Sonder.
+
+    Its read forms are another matter: a bare `/selfmod` shows status, and
+    `plan` -- the mode that only reads -- reads it. What `plan` refuses is
+    every form that can write, including one whose action the branch grammar
+    does not name, because an unnamed action keeps the strictest grade.
+    """
     monkeypatch.setattr(
         sonder_repl, "_confirm",
         lambda _question: pytest.fail("a plan-mode denial must not prompt"),
@@ -1139,9 +1205,12 @@ def test_plan_refuses_selfmod_at_the_console(monkeypatch):
     pm.set_mode(pm.PLAN)
 
     for name in ("/selfmod", "/selfmodify"):
-        may_run, refusal = sonder_repl._named_command_gate(name)
-        assert not may_run, name
-        assert refusal.startswith("refused %s:" % name), name
+        assert sonder_repl._named_command_gate(name) == (True, ""), name
+        assert sonder_repl._named_command_gate(name, "status") == (True, ""), name
+        for argument in ("deploy RUN1", "rollback RUN1", "run fix --files x.py", "frobnicate"):
+            may_run, refusal = sonder_repl._named_command_gate(name, argument)
+            assert not may_run, (name, argument)
+            assert refusal.startswith("refused %s:" % name), (name, argument)
 
 
 def test_auto_still_asks_before_selfmod(monkeypatch):
@@ -1152,7 +1221,7 @@ def test_auto_still_asks_before_selfmod(monkeypatch):
     )
     pm.set_mode(pm.AUTO)
 
-    may_run, refusal = sonder_repl._named_command_gate("/selfmod")
+    may_run, refusal = sonder_repl._named_command_gate("/selfmod", "deploy RUN1")
 
     assert (may_run, refusal) == (False, "skipped /selfmod")
     assert len(asked) == 1
@@ -1408,6 +1477,12 @@ def test_the_registry_refreshing_and_goal_writing_branches_are_graded():
 
 
 def test_plan_refuses_a_registry_refresh_and_a_goal_write(monkeypatch):
+    """The bare forms show status and are reads; the writes are refused.
+
+    `/mcp` alone reports and `/goal` alone shows, so `plan` reads both; the
+    refresh and the goal write are what it refuses, and so is any action the
+    branch grammar does not name, because that keeps the strictest grade.
+    """
     monkeypatch.setattr(
         sonder_repl, "_confirm",
         lambda _question: pytest.fail("a plan-mode denial must not prompt"),
@@ -1415,9 +1490,15 @@ def test_plan_refuses_a_registry_refresh_and_a_goal_write(monkeypatch):
     pm.set_mode(pm.PLAN)
 
     for name in ("/mcp", "/convergence", "/goal", "/goals"):
-        may_run, refusal = sonder_repl._named_command_gate(name)
-        assert not may_run, name
-        assert refusal.startswith("refused %s:" % name), name
+        assert sonder_repl._named_command_gate(name) == (True, ""), name
+    for name, argument in (
+        ("/mcp", "refresh"), ("/convergence", "refresh"), ("/mcp", "frobnicate"),
+        ("/goal", "set ship it"), ("/goals", "note shipped the parser"),
+        ("/goal", "frobnicate"),
+    ):
+        may_run, refusal = sonder_repl._named_command_gate(name, argument)
+        assert not may_run, (name, argument)
+        assert refusal.startswith("refused %s:" % name), (name, argument)
 
 
 def test_acceptedits_lets_a_goal_write_through_but_still_stops_a_registry_refresh(
@@ -1434,10 +1515,10 @@ def test_acceptedits_lets_a_goal_write_through_but_still_stops_a_registry_refres
     )
     pm.set_mode(pm.ACCEPT_EDITS)
 
-    assert sonder_repl._named_command_gate("/goal") == (True, "")
+    assert sonder_repl._named_command_gate("/goal", "note shipped the parser") == (True, "")
     assert not asked
 
-    may_run, _refusal = sonder_repl._named_command_gate("/mcp")
+    may_run, _refusal = sonder_repl._named_command_gate("/mcp", "refresh")
     assert not may_run
     assert len(asked) == 1
 
@@ -1487,9 +1568,9 @@ def test_the_control_command_chain_still_answers_a_read(monkeypatch):
 def test_gating_the_chain_cannot_double_prompt(monkeypatch):
     """The console gates, then forwards here. Nothing here may ask again.
 
-    `interactive=False` is what makes re-deciding free: an `ask` the console
-    already resolved degrades to allow on arrival rather than being put to the
-    operator a second time.
+    Re-deciding is free because nothing here prompts: an `ask` the mode
+    answers is allowed on arrival, and one it does not answer is refused with
+    the remedies named -- never put to an operator a second time.
     """
     import builtins
 
@@ -1498,9 +1579,11 @@ def test_gating_the_chain_cannot_double_prompt(monkeypatch):
         lambda *_a, **_k: pytest.fail("control_command prompted"),
     )
     monkeypatch.setattr(server, "directory_create", lambda **_k: "made it")
-    pm.set_mode(pm.MANUAL)
-
+    pm.set_mode(pm.ACCEPT_EDITS)
     assert server.control_command("/mkdir newdir") == "made it"
+
+    pm.set_mode(pm.MANUAL)
+    assert server.control_command("/mkdir newdir").startswith("refused /mkdir:")
 
 
 # --- the exemption has one owner, and it drifted the moment it had five ---

@@ -337,7 +337,7 @@ def test_validation_must_cover_persistent_mutation_path():
     ) is True
 
 
-def test_agent_observation_records_nested_run_code_once():
+def test_agent_observation_records_nested_run_code_once(unattended_effects_allowed):
     activity_tracker.reset_for_tests()
 
     with activity_tracker.response_span("agent", "run one check"):

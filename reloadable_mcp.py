@@ -33,8 +33,12 @@ from mcp.shared.subscriptions import (
 )
 
 
-def _refuse_if_gated(name: str) -> None:
+def _refuse_if_gated(name: str, arguments=None) -> None:
     """Apply the operator's permission gate to a direct MCP tool call.
+
+    ``arguments`` are the call's own, passed through to the decider and never
+    stored: they let an unattended refusal name the call (a call id an
+    operator can approve once) and let such an approval answer the retry.
 
     This is the only place an MCP *client* enters; every internal Python call
     to the same function bypasses it, which is exactly the split we want --
@@ -42,13 +46,14 @@ def _refuse_if_gated(name: str) -> None:
     value, and gating the function bodies instead would double-prompt them.
 
     ``interactive=False``: nobody is at a keyboard behind a protocol call, so
-    ``ask`` degrades to ``allow`` and the default ``manual`` mode refuses
-    nothing a client could do yesterday. What this does add is the mode that
-    exists to hold still: ``plan`` denies here too. Without this, ``plan``
-    advertised "reads only - no writes, no commands" while a client could call
-    ``file_write`` straight through -- an operator who selects that mode and
-    then watches their workspace change has been lied to by the indicator.
-    An explicit per-tool ``deny`` rule refuses here as well.
+    a mode's ``ask`` is answered by the tool's class -- file changes, host
+    programs and destructive tools are refused with the remedies named,
+    ask-class tools proceed on the record -- and ``plan`` denies here too.
+    Without the gate, ``plan`` advertised "reads only - no writes, no
+    commands" while a client could call ``file_write`` straight through -- an
+    operator who selects that mode and then watches their workspace change
+    has been lied to by the indicator. An explicit per-tool ``deny`` rule
+    refuses here as well.
 
     ``GATE_CONTROL_TOOLS`` is exempt, because the refusal below names
     ``permission_mode`` as the remedy and ``plan`` would otherwise refuse that
@@ -62,7 +67,8 @@ def _refuse_if_gated(name: str) -> None:
 
     tool = str(name or "")
     decision = permission_modes.decide_for_caller(
-        tool, interactive=False, gate_control_exempt=True,
+        tool, interactive=False, gate_control_exempt=True, surface="mcp",
+        arguments=arguments if isinstance(arguments, dict) else None,
     )
     if decision is None or decision.allowed:
         return
@@ -552,8 +558,14 @@ class ReloadableMCPServer(MCPServer):
 
     async def call_tool(self, name: str, arguments: dict, context=None):
         self.refresh_if_changed()
-        _refuse_if_gated(name)
-        return await super().call_tool(name, arguments, context)
+        # The reach scope wraps the gate and the call: the roots a one-shot
+        # approval covered appear only once the gate has spent it for exactly
+        # this call, and vanish when the call is over.
+        import server
+
+        with server.approved_call_reach(name, arguments):
+            _refuse_if_gated(name, arguments)
+            return await super().call_tool(name, arguments, context)
 
     async def list_resources(self):
         self.refresh_if_changed()

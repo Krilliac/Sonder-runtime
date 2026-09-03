@@ -364,6 +364,26 @@
     },
     {
       "aliases": [],
+      "category": "security",
+      "name": "/approvals",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "list calls refused unattended and the one-shot approvals issued",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "security",
+      "name": "/approve",
+      "native": true,
+      "params": [],
+      "risk": "dangerous",
+      "summary": "approve exactly one refused call once (/approve revoke <nonce>)",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "web",
       "name": "/approximate_location_lookup",
       "native": false,
@@ -5416,6 +5436,70 @@
     {
       "aliases": [],
       "category": "security",
+      "name": "/permission_approvals",
+      "native": false,
+      "params": [
+        {
+          "default": 20,
+          "name": "limit",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "safe",
+      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+      "tool": "permission_approvals"
+    },
+    {
+      "aliases": [],
+      "category": "security",
+      "name": "/permission_approve",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "call_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "tool",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "arguments_json",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 900,
+          "name": "ttl_seconds",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "",
+          "name": "revoke",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "dangerous",
+      "summary": "Approve exactly one refused call once (by call id, or tool + arguments JSON), or revoke one.",
+      "tool": "permission_approve"
+    },
+    {
+      "aliases": [],
+      "category": "security",
       "name": "/permission_mode",
       "native": false,
       "params": [
@@ -9182,12 +9266,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 306,
+    "commands": 310,
     "configuration": 75,
     "events": 43,
-    "tools": 206
+    "tools": 208
   },
-  "digest": "3d4a674449ea525f179d2aa3cd991d2d49a2ac7d5e6d4dd7a17e894aef3577f1",
+  "digest": "4738d4808a81a96e03b95e7d22d4b84e26bf457759af6a3deac56bb1c8deef7d",
   "events": [
     {
       "name": "session.started",
@@ -9658,7 +9742,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "7cdfaad1e787e812203f65d578f098b5473c4c1e1ad0f35e3148391761d754b5",
+    "server.py": "3a6e4c69f8b2eb2d1f278cd35a87a2a401f01dfdae723f8c6e88dba75cfb82eb",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "1634c0aea94d705017ae2ab96b8ed2d1b3f52313571b56f559fa950c07c23e8c"
@@ -13900,6 +13984,61 @@
           "jobs_json"
         ],
         "title": "parallel_run_codeArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+      "name": "permission_approvals",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "default": 20,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "permission_approvalsArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Approve exactly one refused call once (by call id, or tool + arguments JSON), or revoke one.",
+      "name": "permission_approve",
+      "parameters": {
+        "properties": {
+          "arguments_json": {
+            "default": "",
+            "title": "Arguments Json",
+            "type": "string"
+          },
+          "call_id": {
+            "default": "",
+            "title": "Call Id",
+            "type": "string"
+          },
+          "revoke": {
+            "default": "",
+            "title": "Revoke",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          },
+          "tool": {
+            "default": "",
+            "title": "Tool",
+            "type": "string"
+          },
+          "ttl_seconds": {
+            "default": 900,
+            "title": "Ttl Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "permission_approveArguments",
         "type": "object"
       }
     },

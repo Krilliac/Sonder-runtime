@@ -304,7 +304,7 @@ def test_module_has_no_shell_or_network_api():
     assert not [name for name in forbidden if name in source]
 
 
-def test_server_discovery_project_scope_activity_and_autopilot(project, tmp_path):
+def test_server_discovery_project_scope_activity_and_autopilot(unattended_effects_allowed, project, tmp_path):
     (project / "input.txt").write_text("input", encoding="utf-8")
     activity_tracker.reset_for_tests()
 

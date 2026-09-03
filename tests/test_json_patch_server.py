@@ -60,7 +60,7 @@ def test_agent_manifest_project_scope_mutation_and_autopilot_registration(tmp_pa
     assert "outside" in server._repository_scope_path_error("json_patch", scoped, str(project))
 
 
-def test_project_bound_agent_dispatch_applies_inside_selected_project(monkeypatch, tmp_path):
+def test_project_bound_agent_dispatch_applies_inside_selected_project(unattended_effects_allowed, monkeypatch, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     target = project / "config.json"

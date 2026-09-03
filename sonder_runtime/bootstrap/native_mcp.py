@@ -203,16 +203,32 @@ _NATIVE_TOOLS = (
          "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "make_directory", "Create a directory under an allowed root", {"type": "object"},
+        "make_directory", "Create a directory under an allowed root",
+        {"type": "object", "properties": {
+            "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "read_file", "Read a bounded file", {"type": "object"},
+        "read_file", "Read a bounded file",
+        {"type": "object", "properties": {
+            "path": _PATH, "max_bytes": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "run_program", "Run an argv-based program", {"type": "object"},
+        "run_program", "Run an argv-based program",
+        {"type": "object", "properties": {
+            "program": _PATH, "args_json": {"type": "string"}, "cwd": {"type": "string"},
+            "stdin": {"type": "string"}, "timeout": {"type": "integer"},
+            "max_output": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["program"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "run_script", "Run a bounded script", {"type": "object"},
+        "run_script", "Run a bounded script",
+        {"type": "object", "properties": {
+            "path": _PATH, "args_json": {"type": "string"}, "cwd": {"type": "string"},
+            "stdin": {"type": "string"}, "timeout": {"type": "integer"},
+            "max_output": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "program_search", "Search the executable path for programs",
@@ -261,7 +277,12 @@ _NATIVE_TOOLS = (
         }, "required": ["program"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "write_file", "Write a file under an allowed root", {"type": "object"},
+        "write_file", "Write a file under an allowed root",
+        {"type": "object", "properties": {
+            "path": _PATH, "content": {"type": "string"},
+            "mode": {"type": "string", "enum": ["create", "overwrite", "append"]},
+            "extra_roots": _ROOT,
+        }, "required": ["path", "content"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "archive_extract", "Extract a bounded archive transactionally without replacing a destination",
@@ -415,10 +436,26 @@ _INSPECTION_TOOLS = (
     ),
 )
 _NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS
-_INSPECTION_NAMES = frozenset(item.name for item in _INSPECTION_TOOLS)
+# Only the inspections the inspection service can run go to it. The catalog
+# groups the web, weather, location, process and artifact tools with the
+# inspections for presentation, but they run through the packaged executor;
+# routing them by group sent nine native tools to a service that answered
+# "unsupported read-only inspection" for every one of them.
+from ..adapters.inspection_executor import SUPPORTED_INSPECTIONS as _INSPECTION_NAMES  # noqa: E402
 _VISION_NAMES = frozenset({"vision_analyze"})
 _COMPUTE_NAMES = frozenset(item.name for item in _COMPUTE_TOOLS)
 
+
+# The read-only workbench family and the mutating file family run through the
+# typed tool gateway when the application graph composed one
+# (bootstrap/typed_tools.py); every other tool still reaches the packaged
+# executor directly.
+_TYPED_TOOL_NAMES = frozenset({
+    "directory_tree", "file_find", "file_read_range", "program_search",
+    "read_file", "script_search", "text_search",
+    "edit_file", "file_batch_write", "file_copy", "file_delete", "file_move",
+    "json_patch", "make_directory", "text_patch", "write_file",
+})
 
 _LEGACY_ALIASES = {
     "directory_tree": "directory_tree",
@@ -432,6 +469,15 @@ _LEGACY_ALIASES = {
     "script_search": "script_search",
     "text_search": "text_search",
     "workspace_run": "run_program",
+}
+
+# Canonical name -> the legacy name the permission catalog grades, derived
+# from the alias table so this module does not import ``typed_tools`` (which
+# derives its descriptors from this one). ``typed_tools.POLICY_NAMES`` is the
+# declared map; a drift test pins the two together for the typed family.
+_GRADED_NAMES = {
+    canonical: legacy for legacy, canonical in _LEGACY_ALIASES.items()
+    if legacy != canonical
 }
 
 
@@ -568,6 +614,79 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             },
         }
 
+    def typed_result(tools, canonical_name: str, arguments: dict, context) -> dict:
+        """Run one workbench file tool through the typed gateway.
+
+        The gateway is the single seam: schema, resource policy, the
+        runtime's permission modes (as an unattended native-MCP caller, with
+        the call's arguments so a one-shot approval of exactly this call can
+        answer), deadline and cancellation, the packaged guards, redaction,
+        and one durable receipt whatever the outcome. The envelope keeps its
+        shape; a permission refusal reports the decision, call id included.
+        """
+        from ..application.tools.gateway_contract import (
+            ToolGatewayRequest, ToolPermission, ToolScope,
+        )
+        from ..domain.common.errors import Cancelled, DeadlineExceeded, Forbidden
+
+        request = ToolGatewayRequest(
+            request_id=context.correlation_id,
+            tool_name=canonical_name,
+            arguments=arguments,
+            scope=ToolScope(
+                principal_id=context.principal_id,
+                workspace_roots=tuple(str(root) for root in roots),
+                source="mcp",
+                auth_level=context.auth_level,
+            ),
+            permission=ToolPermission(),
+            deadline_monotonic=context.deadline_monotonic,
+            cancellation=context.cancellation,
+            execution_world="local",
+        )
+        # The roots a one-shot approval covered are honoured for this call
+        # alone, and only once the gateway's evaluator has spent it: the
+        # provider is consulted at resolution time, after the decision.
+        from ..adapters.filesystem import file_ops
+        from ..adapters.security.permission_policy import permission_policy
+
+        graded = _GRADED_NAMES.get(canonical_name, canonical_name)
+
+        def granted() -> str:
+            if not permission_policy.approval_spent_for(graded, arguments):
+                return ""
+            roots = arguments.get("extra_roots", "")
+            return roots if isinstance(roots, str) else ""
+
+        try:
+            with file_ops.reach_scope(granted):
+                receipt = tools.execute(request)
+        except Forbidden as exc:
+            return {
+                "output": str(exc), "isError": True, "error": "permission_denied",
+                "evidence": {"tool": canonical_name, **dict(getattr(exc, "decision", {}) or {})},
+            }
+        except (Cancelled, DeadlineExceeded) as exc:
+            return {
+                "output": str(exc), "isError": True,
+                "error": type(exc).__name__, "evidence": {"tool": canonical_name},
+            }
+        finally:
+            permission_policy.forget_spent_approval()
+        evidence = dict(receipt.evidence)
+        evidence.update({
+            "request_id": receipt.request_id,
+            "argument_digest": receipt.argument_digest,
+            "result_digest": receipt.result_digest,
+            "terminal": receipt.terminal,
+        })
+        return {
+            "output": receipt.output,
+            "isError": not receipt.success,
+            "error": receipt.error_code or None,
+            "evidence": evidence,
+        }
+
     def execute(name: str, arguments: dict) -> dict:
         descriptor = registry.get(name)
         if descriptor is None:
@@ -599,6 +718,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     canonical_name,
                     interactive=False,
                     gate_control_exempt=False,
+                    surface="native-mcp",
                 )
                 if (
                     decision is not None
@@ -644,6 +764,9 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 "error": None,
                 "evidence": {"model": vision.model, "tier": vision.tier},
             }
+        typed_tools = getattr(application, "tools", None)
+        if canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None:
+            return typed_result(typed_tools, canonical_name, canonical_arguments, context)
         if canonical_name in _INSPECTION_NAMES:
             result = application.inspections.inspect(
                 canonical_name, canonical_arguments, context

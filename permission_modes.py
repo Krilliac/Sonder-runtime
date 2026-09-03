@@ -37,16 +37,17 @@ including ``auto``, the tools the catalog classes ``dangerous`` (``file_delete``
 ``admin_register``/``admin_set_account``, and the policy-changing
 ``runtime_policy_update``/``permission_rule_set``) still stop and ask.
 
-Read that as the promise it is, which is narrower than "cannot happen":
-``ask`` is a promise about a *prompt*, and a prompt needs somebody to answer
-it. Three of the five call sites below pass ``interactive=False`` -- the agent
-path, the loop path and the MCP entry point -- and there ``ask`` degrades to
-``allow`` (see "Enforcement scope"), so ``auto`` plus no operator runs a
-``dangerous`` tool without stopping. ``plan`` is the exception that holds
-everywhere. That degrade is deliberate and is what "preserve current
-behaviour" requires; what is not acceptable is stating the guarantee without
-it, so ``ASK_CAVEAT`` carries the condition onto every surface that repeats
-the claim.
+Read that as the promise it is: ``ask`` is a promise about a *prompt*, and a
+prompt needs somebody to answer it. Every protocol surface below passes
+``interactive=False`` -- the agent, loop and control paths, both MCP entry
+points, the HTTP chain, and a piped console -- and there ``ask`` fails closed
+for anything that changes files, runs a host program, or is graded
+``dangerous`` (``UNATTENDED_REFUSED_RISKS``): the call is refused with the
+remedies named, and the refusal is recorded (see "Unattended callers"). So
+``auto`` plus no operator never runs a ``dangerous`` tool; it is refused until
+an operator writes an explicit ``allow`` rule or answers at the console.
+``plan`` denies everywhere. ``ASK_CAVEAT`` carries the exact rule onto every
+surface that repeats the claim.
 
 Note the other qualifier: *what the catalog classes dangerous*, which is not every
 ``admin_*`` tool. Read-only ones such as ``admin_whoami`` are ordinary ``ask``
@@ -83,6 +84,10 @@ chosen -- by a model, by a person, or by a protocol client -- does:
                                     hand-written branch, via
                                     ``_permission_gate``. Same, via the same
                                     ``_gate_tools`` seam.
+    sonder_serve._http_tool_refusal the app's slash chain and its catalogued
+                                    fall-through. ``interactive=False``.
+    native_mcp                      the typed MCP transport's host-control
+                                    tools. ``interactive=False``.
 
 The console's two entries are disjoint by construction: a typed command is
 served by a named branch or by the catalogued fallback, never both, so nothing
@@ -95,14 +100,74 @@ there ``input()`` does not ask anyone anything -- it consumes the next line of
 the script. A piped console therefore degrades exactly like a protocol caller.
 
 Interactive surfaces honour ``ask`` by actually asking (the console prompts
-``y/N``, defaulting to no). A caller with no one to ask degrades ``ask`` to
-``allow`` unless the mode is ``plan`` -- whose entire purpose is to hold still,
-and which therefore denies everywhere. Preserving existing behaviour by default
-matters here: these rules have been dormant since they were written, and
-switching them on globally in one step would break flows that have always
-worked. That is what ``interactive=False`` buys: under the default ``manual``
-mode such a caller refuses nothing the mode itself refused before, and only
-``plan`` or an explicit per-tool ``deny`` rule can stop a call.
+``y/N``, defaulting to no).
+
+Unattended callers
+------------------
+A caller with no one to ask gets one of three answers for a mode's ``ask``:
+
+    mutation / execution / dangerous   refused (``source="unattended"``).
+                                       Remedies, named in the refusal: an
+                                       explicit ``allow`` rule, a mode that
+                                       already allows the class (``acceptEdits``
+                                       for file changes, ``auto`` for host
+                                       programs; nothing allows ``dangerous``
+                                       unattended), the console, or a one-shot
+                                       approval of exactly this call (below).
+    ask                                proceeds, recorded
+                                       (``source="non-interactive"``). This is
+                                       the class the catalog gives the chat,
+                                       task and memory entry points
+                                       (``sonder``, ``agent``, ``task_create``);
+                                       refusing it would refuse every
+                                       conversation over MCP and HTTP, while
+                                       the effects those entry points can
+                                       cause are gated tool by tool on the
+                                       agent path.
+    unclassified / durable authority   refused, as before (5a and 5b below).
+
+``plan`` denies everything that is not a read whoever is present.
+
+One-shot approvals
+------------------
+A caller that passes its ``arguments`` gives the gate a *call digest*
+(``call_digest``: the tool name plus the canonical JSON of the arguments with
+the credential knobs removed). When such a call is refused unattended for an
+effect class, the refusal carries a call id (the digest's first 16 hex
+characters) and the call is noted as pending in the approval ledger
+(``sonder_runtime.adapters.security.approval_ledger``). An operator at the
+console approves exactly that call once -- ``/approve <call id>``, the
+``permission_approve`` tool -- and the next unchanged call, from any surface,
+consumes the approval and runs (``source="approval"``). The approval is one
+tool and one digest, spent atomically on first use, and expires; it is not a
+rule, and it never touches ``plan``'s denials, an explicit ``deny`` rule, the
+unclassified grade or the durable-authority class. A preflight
+(``record=False``) never spends one.
+
+A spent approval also carries the *reach* the operator approved: the digest
+binds the call's ``extra_roots``, so the surface that spent it may honour
+exactly those roots for exactly that call (``approval_spent_for``, consulted
+by the filesystem adapter's reach scope). That is the only way a call gains
+roots it was not configured with, now that the shared
+``SONDER_FILE_APPROVAL_CODE`` is retired: a static secret in a model-visible
+argument that switched containment off entirely.
+
+Effect fences
+-------------
+A worker that holds a lease -- the autopilot controller -- installs an effect
+fence for the duration of a task (``sonder_runtime.adapters.execution.
+effect_fence``). ``decide()`` consults the fence before deciding any tool of
+an effect class and refuses (``source="fence"``) the moment the lease is lost
+or the run cancelled, whatever the mode or rules say; reads are never fenced.
+
+Every unattended decision that is a refusal, or an allow of anything but a
+``safe`` read, is handed to the decision observers the composition root
+installs (``add_decision_observer``). The production observer
+(``sonder_runtime.adapters.security.permission_receipts``) writes a
+content-free receipt -- tool, surface, mode, risk, source, action -- to the
+operations event store, and ``unattended_summary()`` shows the running
+counts on ``/permissions``. A gate that refuses silently is one operators
+route around; a gate that allows silently is one nobody can audit.
 
 The gate sits at those entry points and *not* inside the tool functions
 themselves. An internal Python call to ``server.file_write`` is therefore
@@ -143,6 +208,9 @@ specific ``permissions.json``.
 
 The combination follows one explicit precedence, in this order:
 
+    0. a lost effect fence     refuses every effect-class call on the fenced
+                                 thread before any policy is read (see
+                                 "Effect fences" above); reads pass.
     1. an explicit rule DENY   always wins -- over every mode, including auto.
     2. privilege                (``PRIVILEGED_TOOLS`` or a per-call
                                  ``requires_elevation=True`` + ``elevated()``)
@@ -157,7 +225,11 @@ The combination follows one explicit precedence, in this order:
     5. anything else           (no rule matched, or a matched rule says
                                  ``ask``, or is otherwise unrecognised) is
                                  inert: the mode alone decides, byte-for-byte
-                                 what it decided before rules were wired in.
+                                 what it decided before rules were wired in --
+                                 except that an unattended ``ask`` for an
+                                 effect class first looks for a one-shot
+                                 approval of exactly this call (5c) and spends
+                                 it if one is open.
 
 Why deny outranks every mode, including auto: a rule is a narrower, written
 decision about ONE tool (``permission_rule_set file_delete deny``); a mode is
@@ -169,7 +241,8 @@ letting it loosen a deny would mean a five-risk-class dial (or ``plan``'s
 unrelated tool's convenience. ``Decision.reason`` always says which of these
 layers actually decided, so an operator can tell a mode refusal from a rule
 refusal from an elevation refusal, and ``Decision.source`` says the same thing
-in one word (``rule``/``mode``/``privilege``/``non-interactive``) for anything
+in one word (``rule``/``mode``/``privilege``/``unattended``/``non-interactive``)
+for anything
 that needs to branch on it rather than print it -- notably ``/permissions``,
 which must show *which* of the rule and the mode governs a tool. That answer is
 produced here, once, where the precedence above is implemented; re-deriving it
@@ -204,7 +277,10 @@ reason -- so this module keeps importing on its own with no cycle.
 """
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import json
+import logging
 import os
 import threading
 from dataclasses import dataclass
@@ -231,26 +307,28 @@ MODE_LABELS = {
 
 # The one sentence that keeps every "ask" claim on this module's surfaces
 # honest, defined once so the copies cannot drift. `ask` is a promise about a
-# prompt; a caller with nobody to prompt gets `allow` instead, except under
-# `plan`. `server._permission_mode_context` prints this on every
-# `/permissions` render and the presentation functions below repeat it, so a
-# reader of any of them can get from a row to their own answer.
+# prompt; with nobody to prompt, the effect classes are refused and the ask
+# class proceeds on the record. `server._permission_mode_context` prints this
+# on every `/permissions` render and the presentation functions below repeat
+# it, so a reader of any of them can get from a row to their own answer.
 ASK_CAVEAT = (
-    "'ask' means a prompt at the console; a caller with nobody to ask "
-    "proceeds instead, except under plan and except for tools nothing can "
-    "classify, which are refused."
+    "'ask' means a prompt at the console; with nobody to ask, file changes, "
+    "host programs, and destructive tools are refused (write an allow rule, "
+    "pick a mode that allows the class, or answer at the console), while "
+    "ask-class tools proceed and are recorded; plan denies, and tools nothing "
+    "can classify are always refused."
 )
 
 MODE_BLURBS = {
     PLAN: "reads only - no writes, no commands",
-    MANUAL: "ask before anything that is not a read",
-    ACCEPT_EDITS: "file changes proceed; running programs still asks",
-    # "destructive still asks" full stop was false for the three
-    # `interactive=False` call sites, and this string has the widest reach of
-    # any of them: `server.permission_mode_data()` ships it to the Flutter
-    # client, which renders it on the mode chip and in the mode picker. Name
-    # where the prompt happens, because it does not happen anywhere else.
-    AUTO: "file changes and programs proceed; destructive still asks at the console",
+    MANUAL: "ask before anything that is not a read; refused when nobody can be asked",
+    ACCEPT_EDITS: "file changes proceed; running programs asks, or is refused unattended",
+    # This string has the widest reach of any of them:
+    # `server.permission_mode_data()` ships it to the Flutter client, which
+    # renders it on the mode chip and in the mode picker. Name where the prompt
+    # happens and what happens when it cannot, because both are true and only
+    # one used to be said.
+    AUTO: "file changes and programs proceed; destructive asks at the console, or is refused unattended",
 }
 
 # Colour hints for whatever renders the indicator (ANSI 256 palette).
@@ -263,11 +341,12 @@ MODE_COLOURS = {PLAN: 117, MANUAL: 250, ACCEPT_EDITS: 114, AUTO: 221}
 # Every production gate calls ``decide(interactive=False)`` --
 # ``reloadable_mcp._refuse_if_gated``, ``server._agent_permission_gate_error``,
 # ``server._loop_permission_refusal``, ``server._control_tool_refusal``,
-# ``sonder_serve._http_tool_refusal`` -- and that path degrades ASK to ALLOW.
-# So on the path that actually runs, *no* severity of grade fails closed:
-# ``dangerous`` is ``ask`` in manual/acceptEdits/auto and is allowed there too.
-# Returning a scarier class was the previous attempt at failing closed and it
-# achieved nothing; what is needed is a class the degrade does not apply to.
+# ``sonder_serve._http_tool_refusal`` -- and that path once degraded ASK to
+# ALLOW for every grade. The effect classes now fail closed there
+# (``UNATTENDED_REFUSED_RISKS``), but the ``ask`` class still proceeds, so a
+# name graded ``ask`` by accident would still run unattended. Returning a
+# scarier class was the previous attempt at failing closed and it achieved
+# nothing; what is needed is a class no degrade applies to.
 UNCLASSIFIED = "unclassified"
 
 # Work reachable through a gate that legitimately fronts no registered tool,
@@ -286,6 +365,114 @@ NON_TOOL_WORK = {"sleep": "safe"}
 NATIVE_MCP_WORK = {
     "compute_submit": "execution",
     "compute_cancel": "mutation",
+}
+
+# Risk classes an unattended caller is refused for when the mode says ``ask``.
+# ``safe`` never reaches the ask branch; ``ask`` proceeds on the record (see
+# "Unattended callers" above); ``unclassified`` is refused by its own branch.
+UNATTENDED_REFUSED_RISKS = frozenset({"mutation", "execution", "dangerous"})
+
+# Argument names that carry authority rather than describing the call. They
+# are removed before a call is digested, so the call an operator approved and
+# the call a surface retries hash the same whatever token, approval string or
+# host-injected knob travelled with them -- and so that none of them is ever
+# previewed.
+CREDENTIAL_ARGUMENTS = frozenset({"token", "approval", "bypass", "developer_authorized"})
+
+# Bulk payloads: digested in full (an approval is for exactly this content)
+# but never previewed; ``argument_preview`` shows their length instead.
+BULK_ARGUMENTS = frozenset({
+    "content", "patch", "operations", "operations_json", "old", "new", "text",
+    "prompt", "code", "stdin", "args_json", "inputs_json",
+})
+
+CALL_ID_CHARS = 16
+
+
+def _call_body(arguments) -> dict | None:
+    if arguments is None:
+        return None
+    try:
+        items = dict(arguments)
+    except (TypeError, ValueError):
+        return None
+    return {
+        str(key): value for key, value in items.items()
+        if str(key) not in CREDENTIAL_ARGUMENTS
+    }
+
+
+def call_digest(tool_name: str, arguments) -> str:
+    """SHA-256 over the tool name and its canonical, credential-free arguments.
+
+    "" when there is nothing to digest (no arguments, or arguments that have no
+    canonical JSON form): such a call can neither be approved nor pending.
+    """
+    name = str(tool_name or "").strip().lstrip("/")
+    body = _call_body(arguments)
+    if not name or body is None:
+        return ""
+    try:
+        canonical = json.dumps(
+            body, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=True,
+        )
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(("%s\n%s" % (name, canonical)).encode("utf-8")).hexdigest()
+
+
+def call_id(digest: str) -> str:
+    """The short, typeable form of a call digest."""
+    return str(digest or "")[:CALL_ID_CHARS]
+
+
+def argument_preview(arguments, limit: int = 200) -> str:
+    """A bounded, content-free line naming what a call was about.
+
+    Keys and short scalar values, credential knobs omitted, bulk payloads
+    shown only by their length. This is what ``/approvals`` shows an operator
+    next to a call id; it identifies the call without reproducing it.
+    """
+    body = _call_body(arguments)
+    if not body:
+        return ""
+    parts = []
+    for key in sorted(body):
+        value = body[key]
+        if key in BULK_ARGUMENTS:
+            try:
+                size = len(value) if isinstance(value, (str, bytes, list, tuple, dict)) else len(str(value))
+            except Exception:
+                size = 0
+            parts.append("%s=<%d chars>" % (key, size) if isinstance(value, str)
+                         else "%s=<%d items>" % (key, size))
+            continue
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, sort_keys=True, default=str, ensure_ascii=True)
+            except (TypeError, ValueError):
+                text = str(value)
+        text = text.replace("\r", " ").replace("\n", " ")
+        if len(text) > 40:
+            text = text[:37] + "..."
+        parts.append("%s=%s" % (key, text))
+    line = " ".join(parts)
+    return line if len(line) <= limit else line[:limit - 3] + "..."
+
+# Read-only branches of a slash command that fronts a dangerous tool, graded
+# because they were declared. ``/selfmod status`` reads
+# ``selfmod.format_status`` and calls no registered tool, but the chain gates
+# grade ``/selfmod`` by its strictest member, which would refuse the read for
+# an unattended caller. ``command_catalog.narrow_branch_tools`` substitutes
+# these names for the read forms it recognises from the argument grammar, and
+# a drift test pins each entry to a narrowing rule that actually produces it,
+# so this cannot become a list of free-floating exemptions.
+READ_BRANCH_WORK = {
+    "selfmod_status": "safe",   # /selfmod [status|show|list|history|inspect|diff|tests|backups]
+    "goal_status": "safe",      # /goal [show|status|history|proposals]
+    "training_status": "safe",  # /training [plan|status|hardware|help]
 }
 
 # risk class -> action, per mode. "execution" is a synthetic class: tools that
@@ -400,20 +587,113 @@ GATE_CONTROL_TOOLS = frozenset({"permission_mode"})
 # persistent, auditable -- still satisfies the ask at step 3. A refusal with no
 # route out is one operators learn to route around.
 #
-# Not extended to ``/selfmod``: ``work/17-selfmod-gate`` gates that with a
-# per-invocation ``non_degrading=`` flag keyed on the ACTION, because
-# ``/selfmod status`` and ``/selfmod deploy`` arrive at the same command and
-# refusing a status read unattended is the over-refusal these gates exist to
-# avoid. That is the right shape there and the wrong shape here; the two
-# mechanisms compose, and this list must not grow to swallow that one.
+# Not extended to ``/selfmod``: ``server._selfmod_command`` gates the two
+# source-writing actions on the ACTION (``_SELFMOD_SOURCE_WRITING_ACTIONS``),
+# because ``/selfmod status`` and ``/selfmod deploy`` arrive at the same
+# command and refusing a status read unattended is the over-refusal these
+# gates exist to avoid. That is the right shape there and the wrong shape
+# here; the two mechanisms compose, and this list must not grow to swallow
+# that one.
+#
+# ``permission_approve`` is a member for the same reason ``permission_rule_set``
+# is: it issues authority that outlives the call (a one-shot approval another
+# caller spends later), so a caller that could approve unattended would
+# approve its own next call. The console operator answering the prompt is the
+# route out, exactly as for the rest of the class.
 DURABLE_AUTHORITY_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account",
-    "elevate", "permission_rule_set",
+    "elevate", "permission_rule_set", "permission_approve",
 })
 
 _LOCK = threading.RLock()
 _STATE = {"mode": DEFAULT_MODE, "elevated": False, "elevation_reason": ""}
 _LOADED = False
+
+# --- unattended decision receipts ----------------------------------------
+#
+# ``decide()`` is pure and must not open a database. Observers are installed
+# by the composition root (``sonder_runtime.adapters.security.
+# permission_receipts``) and receive every unattended decision worth a
+# receipt: a refusal, or an allow of anything but a ``safe`` read. The
+# counters below are process-local and back the ``/permissions`` summary
+# line; the durable record is the observer's. An observer that raises is
+# dropped for that call and never changes the decision.
+_DECISION_OBSERVERS: list = []
+_UNATTENDED_LOCK = threading.Lock()
+_UNATTENDED = {"refused": 0, "allowed": 0, "last_refusal": "", "last_allow": ""}
+_FIRST_REFUSAL_HINT = (
+    "first unattended permission refusal in this process: /permissions shows "
+    "which rule or mode governs each tool; /mode acceptEdits lets file changes "
+    "proceed unattended and /mode auto lets host programs proceed too"
+)
+_HINT_STATE = {"shown": False}
+_log = logging.getLogger(__name__)
+
+
+def add_decision_observer(observer) -> None:
+    """Register ``observer(decision, surface)`` for unattended decisions."""
+    if not callable(observer):
+        raise TypeError("a decision observer must be callable")
+    with _UNATTENDED_LOCK:
+        if observer not in _DECISION_OBSERVERS:
+            _DECISION_OBSERVERS.append(observer)
+
+
+def remove_decision_observer(observer) -> None:
+    with _UNATTENDED_LOCK:
+        if observer in _DECISION_OBSERVERS:
+            _DECISION_OBSERVERS.remove(observer)
+
+
+def _worth_a_receipt(decision) -> bool:
+    """A refusal, or an allow of anything that is not a read."""
+    return decision.action == DENY or decision.risk != "safe"
+
+
+def _observe(decision, surface: str) -> None:
+    label = "%s via %s" % (decision.tool or "(empty name)", surface or "unspecified")
+    with _UNATTENDED_LOCK:
+        if decision.action == DENY:
+            _UNATTENDED["refused"] += 1
+            _UNATTENDED["last_refusal"] = label
+        else:
+            _UNATTENDED["allowed"] += 1
+            _UNATTENDED["last_allow"] = label
+        observers = list(_DECISION_OBSERVERS)
+    for observer in observers:
+        try:
+            observer(decision, surface or "unspecified")
+        except Exception:
+            # The receipt is evidence, not authority: a broken sink must
+            # neither block nor change the decision it was told about.
+            continue
+
+
+def _note_first_refusal() -> None:
+    with _UNATTENDED_LOCK:
+        if _HINT_STATE["shown"]:
+            return
+        _HINT_STATE["shown"] = True
+    _log.warning(_FIRST_REFUSAL_HINT)
+
+
+def unattended_summary() -> str:
+    """One line for ``/permissions``: what unattended callers got since start."""
+    with _UNATTENDED_LOCK:
+        refused, allowed = _UNATTENDED["refused"], _UNATTENDED["allowed"]
+        last_refusal, last_allow = _UNATTENDED["last_refusal"], _UNATTENDED["last_allow"]
+    parts = ["unattended decisions since start: %d refused, %d allowed" % (refused, allowed)]
+    if last_refusal:
+        parts.append("last refusal: %s" % last_refusal)
+    if last_allow:
+        parts.append("last allow: %s" % last_allow)
+    return "; ".join(parts)
+
+
+def reset_unattended_for_tests() -> None:
+    with _UNATTENDED_LOCK:
+        _UNATTENDED.update({"refused": 0, "allowed": 0, "last_refusal": "", "last_allow": ""})
+        _HINT_STATE["shown"] = False
 
 
 @dataclass(frozen=True)
@@ -433,10 +713,15 @@ class Decision:
     risk: str
     reason: str
     tool: str = ""
-    # rule | mode | privilege | non-interactive -- the layer that decided.
+    # rule | mode | privilege | unattended | non-interactive | unclassified |
+    # durable-authority | approval | fence -- the layer that decided.
     # Defaulted to the commonest case so the field cannot be forgotten into a
     # crash, but every return site in decide() sets it explicitly.
     source: str = "mode"
+    # The short digest of the call this decision is about, when the caller
+    # passed arguments (see "One-shot approvals"); "" otherwise. A digest, not
+    # an argument: the receipt stays content-free.
+    call_id: str = ""
 
     @property
     def allowed(self) -> bool:
@@ -444,7 +729,8 @@ class Decision:
 
     def to_dict(self) -> dict:
         return {"action": self.action, "mode": self.mode, "risk": self.risk,
-                "reason": self.reason, "tool": self.tool, "source": self.source}
+                "reason": self.reason, "tool": self.tool, "source": self.source,
+                "call_id": self.call_id}
 
 
 # --- persistence ----------------------------------------------------------
@@ -643,6 +929,8 @@ def risk_of(tool_name: str) -> str:
     # Checked after the catalog so a real tool of the same name always wins.
     if name in NON_TOOL_WORK:
         return NON_TOOL_WORK[name]
+    if name in READ_BRANCH_WORK:
+        return READ_BRANCH_WORK[name]
     # Nothing knows this name. Not "probably fine, ask someone" -- that
     # answer was indistinguishable from a catalogued ``ask`` and, with nobody
     # to ask, indistinguishable from ``allow``. Say the classifier failed.
@@ -700,6 +988,54 @@ def _default_rule_lookup(tool_name: str) -> dict | None:
 _rule_lookup = _default_rule_lookup
 
 
+def _default_approval_ledger():
+    """The production one-shot approval ledger, resolved lazily (it is an adapter)."""
+    from sonder_runtime.adapters.security import approval_ledger
+
+    return approval_ledger.default_ledger()
+
+
+# Swappable for the same reason ``_rule_lookup`` is: a test of the decision
+# logic must not need a real approvals database. Returns the ledger to consult
+# (anything with ``consume`` and ``record_pending``), or None to consult none.
+_approval_ledger = _default_approval_ledger
+
+# The approval the most recent live decision on this context spent, as
+# ``(tool, digest)``. It exists so the surface that made the decision can
+# honour the reach the operator approved for exactly that call; it is
+# replaced by the next live decision on the same context and cleared by the
+# surface when the call is over (``forget_spent_approval``). Per context, so
+# two concurrent protocol calls never see each other's.
+_SPENT_APPROVAL: contextvars.ContextVar = contextvars.ContextVar(
+    "sonder_spent_approval", default=None,
+)
+
+
+def approval_spent_for(tool_name: str, arguments) -> bool:
+    """Whether the last live decision on this context spent an approval for exactly this call."""
+    spent = _SPENT_APPROVAL.get()
+    if spent is None:
+        return False
+    name = str(tool_name or "").strip().lstrip("/")
+    digest = call_digest(name, arguments)
+    return bool(digest) and spent == (name, digest)
+
+
+def forget_spent_approval() -> None:
+    """Clear the spent-approval note once the call it was for is over."""
+    _SPENT_APPROVAL.set(None)
+
+
+def approval_ledger():
+    """The one-shot approval ledger the gate consults, or None when there is none.
+
+    The same hook ``decide()`` resolves, so the ``permission_approve`` tool
+    and ``/approvals`` issue into and list from exactly the ledger the gate
+    spends from -- in production and under a test that swapped the hook.
+    """
+    return _ledger_for(None)
+
+
 def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
     """Resolve ``(action, pattern)`` for a tool via a rule lookup, or (None, "").
 
@@ -723,11 +1059,21 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
 
 
 def decide_for_caller(tool_name: str, *, interactive: bool,
-                      gate_control_exempt: bool):
+                      gate_control_exempt: bool, surface: str = "",
+                      record: bool = True, mode: str | None = None,
+                      rule_lookup=None, arguments=None, fence=None):
     """``decide()`` plus the one exemption, for callers that share both.
 
     Returns ``None`` when the tool is exempt and there is therefore nothing to
     decide; otherwise the ``Decision``.
+
+    ``mode`` and ``rule_lookup`` are the same per-call overrides ``decide()``
+    takes; the evaluation lane passes them so a ``tool_policy`` scenario can
+    ask what this kind of caller would get under a stated mode and rule set
+    without touching the operator's own. ``arguments`` and ``fence`` are
+    passed through as well: the first lets a one-shot approval of exactly
+    this call answer an unattended ask, the second lets a worker's lost
+    lease refuse the effect (see ``decide()``).
 
     The exemption existed as six identical lines at four call sites, and this
     round it drifted at the fifth: the gate added to
@@ -747,38 +1093,33 @@ def decide_for_caller(tool_name: str, *, interactive: bool,
     """
     if gate_control_exempt and str(tool_name or "").strip().lstrip("/") in GATE_CONTROL_TOOLS:
         return None
-    return decide(tool_name, interactive=interactive)
+    return decide(tool_name, interactive=interactive, mode=mode,
+                  rule_lookup=rule_lookup, surface=surface, record=record,
+                  arguments=arguments, fence=fence)
 
 
 def decide(tool_name: str, *, interactive: bool = True,
            mode: str | None = None, rule_lookup=None,
            requires_elevation: bool = False,
-           non_degrading: bool = False) -> Decision:
+           surface: str = "", record: bool = True,
+           arguments=None, fence=None, approval_ledger=None) -> Decision:
     """Whether ``tool_name`` may run right now.
 
     ``interactive=False`` means nobody is present to answer a prompt (a direct
-    MCP call). ``ask`` then degrades to ``allow`` -- preserving how Sonder has
-    always behaved -- except under ``plan``, which denies regardless because
-    holding still is the entire point of that mode.
+    MCP call, the HTTP chain, the agent and loop paths, a piped console). A
+    mode's ``ask`` is then answered by the class of the tool: file changes,
+    host programs and destructive tools are refused (``source="unattended"``)
+    and the refusal names the remedies; ``ask``-class tools proceed and are
+    recorded (``source="non-interactive"``); ``plan`` denies regardless. See
+    "Unattended callers" in the module docstring for why the line sits there.
+    Both routes out survive: an explicit ``allow`` rule is resolved at (3)
+    below, before this ever runs, and a console operator who answers the
+    prompt reaches here with ``interactive`` already true.
 
-    ``non_degrading``, if given, turns off exactly that degrade for THIS
-    invocation: ``ask`` with nobody to ask becomes ``deny`` instead of
-    ``allow``. It is per-invocation for the same reason ``requires_elevation``
-    is -- what makes an operation unrecoverable is usually what the caller is
-    asking a general entry point to do, not the entry point itself.
-    ``/selfmod`` is the live case and currently the only caller: ``status``
-    and ``deploy`` arrive at the same command, and only one of them
-    ``os.replace``s the interpreter that is running.
-
-    The degrade is right for ordinary tools and is deliberately left alone for
-    them. It trades a refusal nobody could answer for the chance to undo the
-    result afterwards -- a bargain that assumes the thing that would undo it
-    still works. ``selfmod.deploy`` can overwrite ``selfmod.py``, so for self
-    modification that assumption is exactly what is at stake, and the trade
-    stops paying. Both routes out survive, because a refusal with no route out
-    is one operators learn to route around: an explicit ``allow`` rule is
-    resolved at (3) below, before this ever runs, and a console operator who
-    answers the prompt reaches here with ``interactive`` already true.
+    ``surface`` names the entry point for the receipt an unattended decision
+    leaves (``agent``, ``loop``, ``control``, ``mcp``, ``native-mcp``,
+    ``http``, ``repl``); it never changes the decision. ``record=False`` is
+    for preflight callers (``policy_explain``) that decide without acting.
 
     ``rule_lookup``, if given, overrides the module-level ``_rule_lookup``
     hook for this call only. See the module docstring for the precedence
@@ -792,7 +1133,90 @@ def decide(tool_name: str, *, interactive: bool = True,
     of the tool; a caller that already knows this particular call needs
     administrator rights can say so without every future call to the same
     tool being refused too.
+
+    ``arguments``, if given, are the call's own arguments (a mapping). They
+    are never stored or logged: they are digested (``call_digest``) so that an
+    unattended refusal of an effect class can name the call (``Decision.
+    call_id``), note it as pending, and -- on the next unchanged call -- be
+    answered by a one-shot approval an operator issued for exactly it. Both
+    the noting and the spending happen only when ``record`` is true: a
+    preflight neither burns an approval nor leaves a request behind.
+
+    ``fence``, if given, is an effect fence (``effect_fence.Fence``, or any
+    callable returning "" while it holds) consulted before every effect-class
+    decision; a fence that no longer holds refuses with ``source="fence"``.
+
+    ``approval_ledger`` overrides the module-level ``_approval_ledger`` hook
+    for this call, the way ``rule_lookup`` overrides ``_rule_lookup``.
     """
+    decision = _decide(
+        tool_name, interactive=interactive, mode=mode, rule_lookup=rule_lookup,
+        requires_elevation=requires_elevation, arguments=arguments, fence=fence,
+        approval_ledger=approval_ledger, surface=surface, live=record,
+    )
+    if record and not interactive and _worth_a_receipt(decision):
+        _observe(decision, surface)
+    return decision
+
+
+_EFFECT_NOUNS = {
+    "mutation": "changes files",
+    "execution": "runs a host program",
+    "dangerous": "is destructive or administrative",
+}
+
+
+def _modes_allowing(risk: str) -> list:
+    """Modes whose matrix already allows ``risk`` outright, least autonomous first."""
+    return [m for m in MODES if _MATRIX[m].get(risk) == ALLOW]
+
+
+def _unattended_reason(name: str, active: str, risk: str, call: str = "") -> str:
+    """Name what was refused and every route out, so the refusal can be acted on."""
+    remedies = ["write an explicit allow rule with /permissions"]
+    modes = [m for m in _modes_allowing(risk) if m != active]
+    if modes:
+        remedies.append("switch to %s" % " or ".join(modes))
+    remedies.append("run it from the console and answer the prompt")
+    if call:
+        remedies.append(
+            "approve exactly this call once at the console with /approve %s" % call
+        )
+    noun = _EFFECT_NOUNS.get(risk, "is graded %s" % risk)
+    return (
+        "%s %s and nobody is here to answer %s's ask, so it is refused "
+        "rather than assumed; %s"
+        % (name or "(empty name)", noun, MODE_LABELS.get(active, active),
+           ", or ".join(remedies))
+    )
+
+
+def _fence_reason(fence) -> str:
+    """"" while ``fence`` holds; otherwise why it does not (a failing check included)."""
+    check = getattr(fence, "check", fence)
+    label = getattr(fence, "label", "") or "effect fence"
+    try:
+        return str(check() or "")
+    except Exception as exc:
+        return "%s could not be verified: %s" % (label, exc)
+
+
+def _ledger_for(approval_ledger):
+    if approval_ledger is not None:
+        return approval_ledger
+    provider = _approval_ledger
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception:
+        # No ledger is "no approval can apply", never a crash of the gate.
+        return None
+
+
+def _decide(tool_name: str, *, interactive: bool, mode: str | None,
+            rule_lookup, requires_elevation: bool, arguments=None, fence=None,
+            approval_ledger=None, surface: str = "", live: bool = True) -> Decision:
     active = mode or current_mode()
     if active not in _MATRIX:
         # Report the mode actually applied. Echoing an unknown name back in the
@@ -800,19 +1224,38 @@ def decide(tool_name: str, *, interactive: bool = True,
         active = DEFAULT_MODE
     risk = risk_of(tool_name)
     name = str(tool_name or "").lstrip("/")
+    digest = call_digest(name, arguments)
+    call = call_id(digest)
+    if live:
+        # A live decision starts a new call on this context; whatever the
+        # previous one spent is not this one's.
+        _SPENT_APPROVAL.set(None)
+
+    # 0. The fence on this thread's effects, before any policy is read. A
+    #    worker whose lease is gone produces no effect whatever the mode or
+    #    the rules say; it may still read.
+    if fence is not None and risk in UNATTENDED_REFUSED_RISKS:
+        lost = _fence_reason(fence)
+        if lost:
+            return Decision(
+                DENY, active, risk,
+                "%s %s, and the fence on this worker's effects no longer holds: %s"
+                % (name or "(empty name)", _EFFECT_NOUNS.get(risk, "is graded %s" % risk), lost),
+                name, source="fence", call_id=call,
+            )
 
     rule_action, rule_pattern = _rule_action_for(name, rule_lookup)
 
     # 1. An explicit deny is a narrower, written-down decision than any mode
     #    dial, so it wins outright -- including over auto, and immune to the
-    #    non-interactive degrade below (a real deny is never softened).
+    #    unattended rule below (a real deny is never softened).
     if rule_action == DENY:
         return Decision(
             DENY, active, risk,
             "rule denies this tool (pattern %r); an explicit deny outranks "
             "every mode, including auto" % (rule_pattern or name),
             name,
-            source="rule",
+            source="rule", call_id=call,
         )
 
     # 2. Privilege is a separate axis from both modes and rules; neither can
@@ -821,7 +1264,7 @@ def decide(tool_name: str, *, interactive: bool = True,
     #    (requires_elevation, set by the caller).
     if (name in PRIVILEGED_TOOLS or requires_elevation) and not elevated():
         return Decision(DENY, active, risk, "needs elevation, which is off", name,
-                        source="privilege")
+                        source="privilege", call_id=call)
 
     mode_action = _MATRIX[active].get(risk, ASK)
 
@@ -835,19 +1278,18 @@ def decide(tool_name: str, *, interactive: bool = True,
             "rule allows this tool (pattern %r), satisfying %s's ask"
             % (rule_pattern or name, MODE_LABELS.get(active, active)),
             name,
-            source="rule",
+            source="rule", call_id=call,
         )
 
     # 5. No rule applied (or it was inert): the mode alone decides, exactly as
     #    it did before rules were wired in.
     action = mode_action
     if action == ASK and not interactive:
-        # 5a. The one grade the degrade must not touch. "Nobody is here to
-        #     answer" is a reason to proceed when the answer would merely have
-        #     been a confirmation of something known; it is not a reason to
-        #     proceed when the gate does not know what it is confirming. An
-        #     explicit ``allow`` rule already resolved above (3), so an
-        #     operator who wants this name to run has a written way to say so.
+        # 5a. The one grade no rule below may touch. "Nobody is here to
+        #     answer" is never a reason to proceed when the gate does not know
+        #     what it is confirming. An explicit ``allow`` rule already
+        #     resolved above (3), so an operator who wants this name to run
+        #     has a written way to say so.
         if risk == UNCLASSIFIED:
             return Decision(
                 DENY, active, risk,
@@ -856,17 +1298,15 @@ def decide(tool_name: str, *, interactive: bool = True,
                 "permission rule for it, or register it in the command catalog"
                 % (name or "(empty name)"),
                 name,
-                source="unclassified",
+                source="unclassified", call_id=call,
             )
-        # 5b. The other grade the degrade must not touch, and it is a class
-        #     rather than a severity -- see DURABLE_AUTHORITY_TOOLS. The
-        #     degrade trades an unanswerable prompt for the chance to undo the
-        #     result; for a tool that grants authority the undo is "the
-        #     operator revokes it later", which assumes the operator learned it
-        #     happened, and the degraded prompt is exactly the notice that did
-        #     not reach them. Resolved after the explicit-allow branch at (3),
-        #     so an operator who wants this unattended still has a written way
-        #     to say so.
+        # 5b. Authority that outlives the call -- see DURABLE_AUTHORITY_TOOLS.
+        #     For a tool that grants authority the undo is "the operator
+        #     revokes it later", which assumes the operator learned it
+        #     happened, and an unanswered prompt is exactly the notice that
+        #     did not reach them. Resolved after the explicit-allow branch at
+        #     (3), so an operator who wants this unattended still has a
+        #     written way to say so.
         if name in DURABLE_AUTHORITY_TOOLS:
             return Decision(
                 DENY, active, risk,
@@ -875,21 +1315,67 @@ def decide(tool_name: str, *, interactive: bool = True,
                 "answer the prompt, or write an explicit allow rule with "
                 "/permissions" % (name or "(empty name)"),
                 name,
-                source="durable-authority",
+                source="durable-authority", call_id=call,
             )
+        # 5c. The effect classes fail closed. A prompt nobody answered is not
+        #     a yes; the refusal names every route out so it is a gate, not a
+        #     wall, and the receipt the caller leaves (see ``_observe``) is how
+        #     an operator learns what unattended work wanted to happen.
+        #
+        #     One route out is answered right here: an operator may already
+        #     have approved exactly this call (tool + argument digest). The
+        #     approval is spent atomically on the way through, and only for a
+        #     live decision -- a preflight neither spends one nor leaves a
+        #     pending request behind.
+        if risk in UNATTENDED_REFUSED_RISKS:
+            ledger = _ledger_for(approval_ledger) if (digest and live) else None
+            if ledger is not None:
+                try:
+                    approval = ledger.consume(name, digest, surface=surface)
+                except Exception:
+                    approval = None
+                if approval is not None:
+                    _SPENT_APPROVAL.set((name, digest))
+                    return Decision(
+                        ALLOW, active, risk,
+                        "one-shot approval %s by %s covers exactly this call "
+                        "(call %s) and is now spent" % (
+                            getattr(approval, "nonce", "?"),
+                            getattr(approval, "approver", "?"), call),
+                        name, source="approval", call_id=call,
+                    )
+                try:
+                    ledger.record_pending(
+                        name, digest, surface=surface,
+                        preview=argument_preview(arguments),
+                    )
+                except Exception:
+                    # The ledger is a route out, not the gate: a ledger that
+                    # cannot be written leaves the refusal exactly as it was.
+                    pass
+            _note_first_refusal()
+            return Decision(
+                DENY, active, risk, _unattended_reason(name, active, risk, call), name,
+                source="unattended", call_id=call,
+            )
+        # 5d. The ``ask`` class proceeds on the record: it is the grade the
+        #     catalog gives the chat, task and memory entry points, whose
+        #     effects are gated tool by tool on the agent path. Refusing it
+        #     would refuse every conversation held over MCP or HTTP.
         return Decision(
             ALLOW, active, risk,
-            "no interactive prompt available; %s tools are not blocked outside "
-            "the console" % risk,
+            "no interactive prompt available; %s-class tools proceed "
+            "unattended and are recorded" % risk,
             name,
-            source="non-interactive",
+            source="non-interactive", call_id=call,
         )
     reasons = {
         ALLOW: "%s allows %s tools" % (MODE_LABELS.get(active, active), risk),
         ASK: "%s asks before %s tools" % (MODE_LABELS.get(active, active), risk),
         DENY: "%s forbids %s tools" % (MODE_LABELS.get(active, active), risk),
     }
-    return Decision(action, active, risk, reasons[action], name, source="mode")
+    return Decision(action, active, risk, reasons[action], name, source="mode",
+                    call_id=call)
 
 
 # --- presentation ---------------------------------------------------------

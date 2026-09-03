@@ -312,6 +312,7 @@ _CATEGORY_BY_SLASH = {
     "/trace": "system", "/strict": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
+    "/approve": "security", "/approvals": "security",
     "/goal": "system", "/improve": "system", "/append": "filesystem",
     "/updatecheck": "repo", "/update": "repo", "/updatesource": "repo",
     "/stash": "repo", "/runtime-stash": "repo",
@@ -338,6 +339,9 @@ _DANGEROUS = frozenset({
     # shape of decision -- it widens what every later privileged call is
     # allowed to do -- so it gets the same treatment.
     "runtime_policy_update", "permission_rule_set", "elevate", "cloud_opt_in",
+    # A one-shot approval is authority another caller spends later; issuing
+    # one is graded with the rule-writing tool it stands beside.
+    "permission_approve",
     # Fast-forwarding the source tree changes the bytes enforcing every later
     # request.  The paired status tool is separately marked read-only below.
     "runtime_source_update",
@@ -378,6 +382,7 @@ _READ_ONLY = frozenset({
     "memory_export", "policy_explain",
     "runtime_source_update_status",
     "runtime_source_stash_status",
+    "permission_approvals",
 })
 
 # Branches whose real work is done by module-level functions that front no
@@ -985,6 +990,113 @@ def _with_unregistered_work(mapped: dict) -> dict:
     for slash, stand_in in _UNREGISTERED_BRANCH_WORK.items():
         out[slash] = tuple(sorted(set(out.get(slash, ())) | {stand_in}))
     return out
+
+
+# --- read-branch narrowing --------------------------------------------------
+#
+# The chain gates grade a slash command by the strictest tool it can front,
+# because they run before the branch's own argument grammar has chosen a
+# member. That is the right default for an argument nothing here recognises
+# (one prompt, worst case named) and the wrong one for a read once the effect
+# classes fail closed for unattended callers: ``/selfmod status`` would be
+# refused for the ``deploy`` its sibling branch can reach, and ``/todo list``
+# for ``task_delete``. These rules name the member a *recognisable read form*
+# actually reaches, the bare form included wherever the branch treats it as
+# one (``/todo`` alone lists, ``/selfmod`` alone shows status). They are
+# deliberately literal to each branch's grammar -- an argument this table does
+# not recognise keeps the whole union -- and each stand-in they produce for
+# work that fronts no registered tool is graded in
+# ``permission_modes.READ_BRANCH_WORK`` and pinned by a drift test.
+
+READ_STAND_INS = frozenset({"selfmod_status", "goal_status", "training_status"})
+
+_STATUS_FORMS = ("", "status", "list", "show")
+# ``server._selfmod_command`` treats the bare form as ``status`` and these
+# actions as reads of recorded runs (``tests`` reports stored results and runs
+# nothing). ``plan``, ``run``, ``deploy``, ``rollback``, ``mode``,
+# ``retention`` and ``prune-backups`` keep the strictest grade.
+_SELFMOD_READ_ACTIONS = frozenset({
+    "", "status", "show", "list", "history", "inspect", "diff", "tests", "backups",
+})
+# ``server._mcp_command`` treats the bare form as ``status``, reads for these
+# and reloads for ``refresh``; the registered ``mcp_runtime_status`` tool
+# renders the same report.
+_MCP_READ_ACTIONS = frozenset({"", "status", "show", "audit", "list", "help", "?"})
+# ``server._goal_command`` treats the bare form as ``show``; ``set``/``note``/
+# ``done``/``abandon``/``refresh``/``adopt``/``decline`` mutate, and these
+# only read.
+_GOAL_READ_ACTIONS = frozenset({"", "show", "status", "history", "proposals"})
+# ``server._training_command`` renders the plan for the bare form and a plan
+# or a status for these; anything else (``start``, ``deploy``, ``rollback``)
+# reaches the attended lifecycle.
+_TRAINING_READ_ACTIONS = frozenset({"", "plan", "status", "hardware", "help", "?"})
+# The bare form lists in both branches that carry this command
+# (``sonder_repl.main`` and ``sonder_serve._handle_slash``); an action neither
+# grammar names keeps the union, which a command that can delete grades at
+# its delete.
+_TASK_ACTIONS = {
+    "": ("task_list",), "list": ("task_list",), "ls": ("task_list",),
+    "show": ("task_show",), "view": ("task_show",),
+    "progress": ("task_progress",), "status": ("task_progress",),
+    "add": ("task_create",), "create": ("task_create",), "new": ("task_create",),
+    "done": ("task_update",), "complete": ("task_update",), "finish": ("task_update",),
+    "start": ("task_update",), "doing": ("task_update",),
+    "block": ("task_update",), "blocked": ("task_update",),
+    "plan": ("task_plan",),
+    "delete": ("task_delete",), "rm": ("task_delete",), "remove": ("task_delete",),
+    "depend": ("task_depend",), "dep": ("task_depend",), "blockedby": ("task_depend",),
+}
+
+
+def narrow_branch_tools(cmd, argument, tools):
+    """The tools the recognised read form of ``cmd`` reaches, else ``tools``.
+
+    ``tools`` is the chain's union for ``cmd`` and is returned unchanged for
+    every argument this table does not recognise, so narrowing can only ever
+    remove members the argument grammar proves unreachable. The bare form is
+    recognised exactly where the branch treats it as a read (``/todo`` lists,
+    ``/selfmod`` and ``/mcp`` show status, ``/goal`` shows, ``/training``
+    plans); a branch whose bare form does anything else keeps its union. Members of a
+    narrowed set that the union does not contain are kept only when they are
+    the declared read stand-ins or the read-only status tools the surfaces
+    already substitute (``emotion_vector_status`` for ``/emotion status``);
+    a task or fact member absent from the union means the surface does not
+    support that operation, and the union is kept so the surface refuses it
+    as it always did.
+    """
+    command = str(cmd or "").strip().lower()
+    words = str(argument or "").strip().split(None, 1)
+    action = words[0].lower() if words else ""
+    union = tuple(tools or ())
+    if command in ("/emotion", "/emotions", "/vectors", "/mood") and action in _STATUS_FORMS:
+        return ("emotion_vector_status",)
+    if command in ("/prefer", "/preference", "/preferences") and action in _STATUS_FORMS:
+        return ("preferences_status",)
+    if command in ("/contextsize", "/ctxsize") and action == "":
+        return ("context_policy_status",)
+    if command in ("/runtime", "/models") and action in ("", "status"):
+        return ("runtime_policy_status",)
+    if command in ("/stash", "/runtime-stash") and action in ("", "status", "list"):
+        return ("runtime_source_stash_status",)
+    if command in ("/selfmod", "/selfmodify"):
+        if action == "opportunities":
+            return ("system_improvement_report",)
+        if action in _SELFMOD_READ_ACTIONS:
+            return ("selfmod_status",)
+        return union
+    if command in ("/mcp", "/convergence") and action in _MCP_READ_ACTIONS:
+        return ("mcp_runtime_status",)
+    if command in ("/goal", "/goals") and action in _GOAL_READ_ACTIONS:
+        return ("goal_status",)
+    if command in ("/training", "/weighttraining") and action in _TRAINING_READ_ACTIONS:
+        return ("training_status",)
+    if command in ("/task", "/tasks", "/todo") and action in _TASK_ACTIONS:
+        narrowed = _TASK_ACTIONS[action]
+        return narrowed if all(name in union for name in narrowed) else union
+    if command == "/fact" and action:
+        narrowed = ("sonder_forget_fact",) if action == "forget" else ("sonder_remember_fact",)
+        return narrowed if all(name in union for name in narrowed) else union
+    return union
 
 
 # Marker for a branch that is a one-line forward to ``server.control_command``.

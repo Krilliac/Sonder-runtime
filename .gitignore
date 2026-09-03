@@ -35,8 +35,12 @@ examples/codegen-arena-shooter/FpsGame_Skeleton/
 .runtime/
 # Claude Code session state, including git worktrees checked out beneath the
 # repo. A worktree is a second copy of this repo, so leaving it visible also
-# made repo-wide source scans report the copy's files as offenders.
-.claude/
+# made repo-wide source scans report the copy's files as offenders. The
+# project skill library under .claude/skills/ is tracked on purpose (it is
+# shared, not session state), which is why the contents are ignored rather
+# than the directory: git cannot re-include a child of an ignored directory.
+.claude/*
+!.claude/skills/
 .pytest_cache/
 # Codex/pytest bounded-run output directories; keep repository status usable
 # when many isolated suites run concurrently.

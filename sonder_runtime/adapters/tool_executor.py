@@ -37,6 +37,8 @@ class ToolExecutorAdapter:
 
                 if "operations_json" in args and "operations" not in args:
                     args["operations"] = args.pop("operations_json")
+                if "operations" not in args:
+                    raise ValueError("json_patch needs operations (or operations_json)")
                 res = json_patch_tool.patch_json(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "text_patch":
@@ -174,6 +176,10 @@ class ToolExecutorAdapter:
             if call.tool == "file_batch_write":
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
+                if "operations_json" in args and "operations" not in args:
+                    args["operations"] = args.pop("operations_json")
+                if "operations" not in args:
+                    raise ValueError("file_batch_write needs operations (or operations_json)")
                 res = file_ops.batch_write_files(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "file_delete":
@@ -187,8 +193,21 @@ class ToolExecutorAdapter:
                 res = file_ops.find_files(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "file_read_range":
+                import sonder_runtime.adapters.filesystem.file_ops as file_ops
                 import sonder_runtime.adapters.filesystem.workbench as workbench
 
+                # The same secret/control-plane read guard the in-module read
+                # tools enforce, applied before the workbench primitive is
+                # touched: a bounded line range of a secret is still a read
+                # of a secret.
+                developer_authorized = bool(args.pop("developer_authorized", False)) or (
+                    context.auth_level in ("developer", "admin")
+                )
+                file_ops.require_read_access(
+                    args["path"], extra_roots=args.get("extra_roots", ""),
+                    bypass=bool(args.get("bypass", False)),
+                    developer_authorized=developer_authorized,
+                )
                 res = workbench.read_line_range(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool in {"directory_tree", "text_search", "script_search", "program_search"}:
@@ -229,7 +248,9 @@ class ToolExecutorAdapter:
                     max_bytes=args.pop("max_bytes", 256_000),
                     extra_roots=args.pop("extra_roots", ""),
                     bypass=args.pop("bypass", False),
-                    developer_authorized=args.pop("developer_authorized", False),
+                    developer_authorized=bool(args.pop("developer_authorized", False)) or (
+                        context.auth_level in ("developer", "admin")
+                    ),
                 )
                 if args:
                     raise TypeError("unsupported read_file arguments: %s" % sorted(args))
@@ -240,29 +261,15 @@ class ToolExecutorAdapter:
                     evidence={
                         "path": str(typed.observation.resource.path),
                         "bytes": typed.observation.bytes_read,
+                        "truncated": bool(typed.truncated),
                     },
                 )
-            if call.tool == "write_file":
+            if call.tool in {"write_file", "edit_file", "make_directory"}:
                 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
-                res = file_ops.write_file(**args)
-                return ToolResult(
-                    ok=True,
-                    evidence=res if isinstance(res, dict) else {"result": res},
-                )
-            if call.tool == "edit_file":
-                import sonder_runtime.adapters.filesystem.file_ops as file_ops
-
-                res = file_ops.edit_file(**args)
-                return ToolResult(
-                    ok=True,
-                    evidence=res if isinstance(res, dict) else {"result": res},
-                )
-            if call.tool == "make_directory":
-                import sonder_runtime.adapters.filesystem.file_ops as file_ops
-
-                res = file_ops.make_directory(**args)
-                return ToolResult(ok=True, evidence=res)
+                res = getattr(file_ops, call.tool)(**args)
+                data = res if isinstance(res, dict) else {"result": res}
+                return ToolResult(ok=True, output=json.dumps(data, sort_keys=True), evidence=data)
             return ToolResult(
                 ok=False,
                 error_code="unknown_tool",
@@ -271,4 +278,17 @@ class ToolExecutorAdapter:
         except (PermissionError, ValueError, OSError, KeyError, TypeError) as exc:
             return ToolResult(
                 ok=False, error_code=type(exc).__name__, output=str(exc)
+            )
+        except RuntimeError as exc:
+            # The transactional primitives (batch write, JSON patch, text
+            # patch) refuse with a structured report on their exception. The
+            # report is the failure's output, so a surface can render it as
+            # the primitive's own callers always have; anything else is a
+            # real fault and propagates.
+            report = getattr(exc, "report", None)
+            if not isinstance(report, dict):
+                raise
+            return ToolResult(
+                ok=False, error_code=type(exc).__name__,
+                output=json.dumps(report, sort_keys=True, default=str), evidence=report,
             )
