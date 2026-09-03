@@ -163,6 +163,7 @@ from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
+from sonder_runtime.application.routing import tier_escalation
 from sonder_runtime.application.context_health import (
     ContextHealthService,
     ContextHealthSettings,
@@ -871,6 +872,53 @@ def _runtime_lane_tier(lane: str, requested: str = "") -> str:
         _RUNTIME_POLICY or _refresh_runtime_policy(create=True),
         fallback="code",
     )
+
+
+def _model_escalation_enabled() -> bool:
+    """SONDER_MODEL_ESCALATION=0/off disables automatic tier escalation."""
+    return tier_escalation.enabled(os.environ.get(tier_escalation.KNOB))
+
+
+def _local_tier_rung(tier, *, augment=True):
+    """One bound local tier as an escalation rung; None when unbound or cloud."""
+    model = TIERS.get(tier)
+    if not model or _is_cloud_tier(tier, model):
+        return None
+    return tier_escalation.Rung(tier=tier, model=model, cloud=False, augment=augment)
+
+
+def _default_route_plan(prompt, start, *, has_image=False):
+    """The bounded attempt list for one default-route turn.
+
+    A single rung (today's behaviour) for a cloud start, when the knob is
+    off, or when every bound tier resolves to the start's model.  Otherwise
+    the rungs are locally bound tiers from the capability router's ladder for
+    the task, distinct by model, at most tier_escalation.MAX_ESCALATIONS
+    beyond the start.  A failure to read the policy leaves the start alone:
+    routing must never make a valid turn fail.
+    """
+    if start.cloud or not _model_escalation_enabled():
+        return tier_escalation.single(start)
+    try:
+        available = _configured_local_tiers()
+        return tier_escalation.plan(
+            prompt, start=start, available=available,
+            resolve=lambda tier: _local_tier_rung(tier, augment=start.augment),
+            has_image=has_image,
+        )
+    except Exception:
+        return tier_escalation.single(start)
+
+
+def _note_escalation(step, surface):
+    """Record one escalation on the activity record; observation only."""
+    try:
+        activity_tracker.record_event(
+            "model_escalation", summary="%s: %s" % (surface, step.summary()),
+            model=step.to_rung.model,
+        )
+    except Exception:
+        pass
 
 
 def _is_cloud_tier(tier, model=None):
@@ -5447,8 +5495,16 @@ def _sonder_impl_serialized(
             )
         tgt_model = pinned_model
     internal_generate = _internal_generate_for_route(tgt_model, cloud)
-    effective_system = _build_system(
-        system, trace, persona, model=tgt_model, cloud=cloud)
+    # The default route may step to a stronger bound local model when its
+    # first model fails or answers nothing (tier_escalation); an explicit
+    # tier or model pin is a routing contract and stays a single attempt.
+    start_rung = tier_escalation.Rung(
+        tier=tier_label, model=tgt_model, cloud=cloud, augment=augment,
+    )
+    escalation_plan = (
+        tier_escalation.single(start_rung) if explicit_target
+        else _default_route_plan(prompt, start_rung)
+    )
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
@@ -5460,11 +5516,20 @@ def _sonder_impl_serialized(
         )
         # Sessioned threads get the selected virtual context window; honor a
         # larger explicit num_ctx.
-        num_ctx_eff = max(num_ctx, requested_ctx) if session_id else requested_ctx
+        pinned_ctx = max(num_ctx, requested_ctx) if session_id else requested_ctx
     else:
+        pinned_ctx = None
+
+    def _generation_context(rung):
         # No pin: size from the selected model, not the process-wide session
         # default. This is what lets a 7B and a 30B use different KV windows.
-        num_ctx_eff = 0 if cloud else _auto_model_context(tgt_model)
+        ctx = pinned_ctx
+        if ctx is None:
+            ctx = 0 if rung.cloud else _auto_model_context(rung.model)
+        return (
+            _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud),
+            ctx,
+        )
 
     interaction_snapshot = None
     conn = _open_db()
@@ -5478,12 +5543,41 @@ def _sonder_impl_serialized(
                 conn, session_id, MAX_TURNS, project=project_id,
                 internal_generate=internal_generate,
             )
-        response, iid, trace_ctx = _answer(
-            conn, prompt, tgt_model, effective_system, temperature, num_predict,
-            num_ctx_eff, session_id, project_id, history, trace=trace,
-            tier=tier_label, cloud=cloud, augment=augment,
-            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
-        )
+        attempt = 0
+        while True:
+            rung = escalation_plan.rungs[attempt]
+            tgt_model, cloud, augment, tier_label = (
+                rung.model, rung.cloud, rung.augment, rung.tier,
+            )
+            effective_system, num_ctx_eff = _generation_context(rung)
+            following = escalation_plan.next_rung(attempt)
+            try:
+                response, iid, trace_ctx = _answer(
+                    conn, prompt, tgt_model, effective_system, temperature, num_predict,
+                    num_ctx_eff, session_id, project_id, history, trace=trace,
+                    tier=tier_label, cloud=cloud, augment=augment,
+                    allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+                )
+            except ModelCallError as error:
+                reason = (
+                    tier_escalation.failure_reason(error=error)
+                    if following is not None else None
+                )
+                if reason is None:
+                    raise
+            else:
+                reason = (
+                    tier_escalation.failure_reason(response=response)
+                    if following is not None else None
+                )
+                if reason is None:
+                    break
+                # The empty attempt was captured; it must not reach lessons.
+                _discard_interaction(iid)
+            _note_escalation(
+                tier_escalation.Step(attempt + 1, reason, rung, following), "chat",
+            )
+            attempt += 1
         _capture_turn(tgt_model, tier_label, trace_ctx, prompt, response, iid)
         if iid is not None:
             interaction_snapshot = memory_store.get_interaction(conn, iid)
@@ -5766,24 +5860,31 @@ def _answer_with_history_impl(
     if model is None:
         return ("ERROR: `sonder:latest` Ollama alias not found. Run setup_alias.py, or call "
                 "with strict=False to fall back to the base coder.")
-    if target_observer is not None:
+    def _observe_target(observed_model, observed_label, observed_cloud):
+        if target_observer is None:
+            return
         try:
-            target_observer(model, tier_label, cloud)
+            target_observer(observed_model, observed_label, observed_cloud)
         except Exception:
             # Observability must not make a valid model call fail.  The
             # observer is an in-process metadata hook, never model input.
             pass
-    effective_system = _build_system("", trace, "", model=model, cloud=cloud)
-    # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
-    # resends history each request), so a non-learning model can skip capture entirely:
-    # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
-    # cloud from learning and have the app respect it. The local route is gated via 'code'.
-    learn = _should_learn(_canonical_learn_tier(tier_label), True)
+
+    # The default OpenAI ``model`` (sonder) may step to a stronger bound local
+    # model when its first model fails or answers nothing (tier_escalation);
+    # any explicit model field is a routing contract and stays one attempt.
+    start_rung = tier_escalation.Rung(
+        tier=tier_label, model=model, cloud=cloud, augment=model_augment,
+    )
+    escalation_plan = (
+        tier_escalation.single(start_rung)
+        if _explicit_serve_selection(tier, "")
+        else _default_route_plan(prompt, start_rung)
+    )
     temperature = _serve_temperature()
-    req_ctx = (
+    pinned_ctx = (
         _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
-        if str(context_size or "").strip()
-        else (0 if cloud else _auto_model_context(model))
+        if str(context_size or "").strip() else None
     )
     session_id = _resolve_session(session) if (session or "").strip() else None
     project_id = _resolve_project(project)
@@ -5792,84 +5893,127 @@ def _answer_with_history_impl(
     try:
         if session_id:
             memory_store.touch_session(conn, session_id, project_id)
-        if learn:
-            # Augmentation policy controls what the model sees, not provenance.
-            # Even clean/cloud teacher turns retain their explicit project so a
-            # later grounded outcome cannot become an unscoped raw recall.
-            capture_project = project_id
-            response, iid, trace_ctx = _answer(
-                conn, prompt, model, effective_system, temperature, 1024, req_ctx,
-                session_id, capture_project, history or None, trace=trace,
-                # ``augment`` is an HTTP-owned privacy boundary.  A model
-                # route can further opt out (for example cloud teacher mode),
-                # but it must never re-enable retrieval that the caller
-                # disabled.
-                tier=tier_label, cloud=cloud,
-                augment=bool(augment and model_augment),
-                allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+        attempt = 0
+        while True:
+            rung = escalation_plan.rungs[attempt]
+            model, cloud, model_augment, tier_label = (
+                rung.model, rung.cloud, rung.augment, rung.tier,
             )
-            _capture_turn(model, tier_label, trace_ctx, prompt, response, iid)
-            if iid is not None:
-                interaction_snapshot = memory_store.get_interaction(conn, iid)
-        else:
-            # The non-learning route is the only pure one: no interaction
-            # capture, no memory augmentation, and (for a local target) no
-            # cloud availability fallback — the bound model is the serving
-            # model.  That makes it the sole admission point for the
-            # deterministic request cache; eligibility stays default-deny
-            # (local, greedy decoding, an HTTP-supplied owner scope) and the
-            # identity binds every input of the generate call below.  "Local"
-            # is asserted on both axes: not a cloud target, and not a
-            # configured remote Ollama endpoint — a non-loopback OLLAMA_HOST
-            # serves cloud=False turns too, and the cache is local-only.
-            response = None
-            request_cache_key = None
-            request_cache_status = ""
-            endpoint_is_local = _ollama_endpoint_is_local()
-            model_revision = (
-                _cache_model_revision(model)
-                if not cloud and endpoint_is_local else ""
+            following = escalation_plan.next_rung(attempt)
+            # Every attempt reports its own target, so the receipt names the
+            # model that answered -- including a pre-routed first attempt,
+            # which is not the route the request resolved to.
+            _observe_target(model, tier_label, cloud)
+            effective_system = _build_system("", trace, "", model=model, cloud=cloud)
+            # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
+            # resends history each request), so a non-learning model can skip capture entirely:
+            # no interaction row, no footer, nothing distilled. This lets a user exclude e.g.
+            # cloud from learning and have the app respect it. The local route is gated via 'code'.
+            learn = _should_learn(_canonical_learn_tier(tier_label), True)
+            req_ctx = (
+                pinned_ctx if pinned_ctx is not None
+                else (0 if cloud else _auto_model_context(model))
             )
-            if model_revision and request_cache.eligible(
-                scope=cache_scope, cloud=cloud, temperature=temperature,
-                learning=False, augmented=False,
-                remote_endpoint=not endpoint_is_local,
-            ):
-                request_cache_key = request_cache.identity_key(
-                    scope=cache_scope, model=model, model_revision=model_revision,
-                    tier=tier_label,
-                    system=effective_system, prompt=prompt,
-                    history=history or [],
-                    options=_platform_local_model_options(
-                        temperature,
-                        1024,
-                        req_ctx,
-                        native_context=context_policy.native,
-                        environ=os.environ,
-                    ),
-                    cloud_allowed=_cloud_allowed_policy(os.environ),
+            try:
+                if learn:
+                    # Augmentation policy controls what the model sees, not provenance.
+                    # Even clean/cloud teacher turns retain their explicit project so a
+                    # later grounded outcome cannot become an unscoped raw recall.
+                    capture_project = project_id
+                    response, iid, trace_ctx = _answer(
+                        conn, prompt, model, effective_system, temperature, 1024, req_ctx,
+                        session_id, capture_project, history or None, trace=trace,
+                        # ``augment`` is an HTTP-owned privacy boundary.  A model
+                        # route can further opt out (for example cloud teacher mode),
+                        # but it must never re-enable retrieval that the caller
+                        # disabled.
+                        tier=tier_label, cloud=cloud,
+                        augment=bool(augment and model_augment),
+                        allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+                    )
+                    _capture_turn(model, tier_label, trace_ctx, prompt, response, iid)
+                    if iid is not None:
+                        interaction_snapshot = memory_store.get_interaction(conn, iid)
+                else:
+                    # The non-learning route is the only pure one: no interaction
+                    # capture, no memory augmentation, and (for a local target) no
+                    # cloud availability fallback — the bound model is the serving
+                    # model.  That makes it the sole admission point for the
+                    # deterministic request cache; eligibility stays default-deny
+                    # (local, greedy decoding, an HTTP-supplied owner scope) and the
+                    # identity binds every input of the generate call below.  "Local"
+                    # is asserted on both axes: not a cloud target, and not a
+                    # configured remote Ollama endpoint — a non-loopback OLLAMA_HOST
+                    # serves cloud=False turns too, and the cache is local-only.
+                    response = None
+                    request_cache_key = None
+                    request_cache_status = ""
+                    endpoint_is_local = _ollama_endpoint_is_local()
+                    model_revision = (
+                        _cache_model_revision(model)
+                        if not cloud and endpoint_is_local else ""
+                    )
+                    if model_revision and request_cache.eligible(
+                        scope=cache_scope, cloud=cloud, temperature=temperature,
+                        learning=False, augmented=False,
+                        remote_endpoint=not endpoint_is_local,
+                    ):
+                        request_cache_key = request_cache.identity_key(
+                            scope=cache_scope, model=model, model_revision=model_revision,
+                            tier=tier_label,
+                            system=effective_system, prompt=prompt,
+                            history=history or [],
+                            options=_platform_local_model_options(
+                                temperature,
+                                1024,
+                                req_ctx,
+                                native_context=context_policy.native,
+                                environ=os.environ,
+                            ),
+                            cloud_allowed=_cloud_allowed_policy(os.environ),
+                        )
+                        response = request_cache.get(request_cache_key)
+                        request_cache_status = "hit" if response is not None else "miss"
+                    if response is None:
+                        gen = _make_generate(
+                            model, effective_system, temperature, 1024, req_ctx,
+                            cloud=cloud,
+                            allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+                        )
+                        response = gen(prompt, history or None)
+                        # Success-only: a raised ModelCallError never reaches this
+                        # store, and request_cache.put refuses in-band error text.
+                        if request_cache_key is not None and str(response or "").strip():
+                            request_cache.put(request_cache_key, response)
+                    if request_cache_status and cache_observer is not None:
+                        try:
+                            cache_observer(request_cache_status)
+                        except Exception:
+                            # Like target_observer: an observability hook must never
+                            # fail a valid turn.
+                            pass
+                    iid, trace_ctx = None, None
+            except ModelCallError as error:
+                reason = (
+                    tier_escalation.failure_reason(error=error)
+                    if following is not None else None
                 )
-                response = request_cache.get(request_cache_key)
-                request_cache_status = "hit" if response is not None else "miss"
-            if response is None:
-                gen = _make_generate(
-                    model, effective_system, temperature, 1024, req_ctx,
-                    cloud=cloud,
-                    allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
+                if reason is None:
+                    raise
+            else:
+                reason = (
+                    tier_escalation.failure_reason(response=response)
+                    if following is not None else None
                 )
-                response = gen(prompt, history or None)
-                # Success-only: a raised ModelCallError never reaches this
-                # store, and request_cache.put refuses in-band error text.
-                if request_cache_key is not None:
-                    request_cache.put(request_cache_key, response)
-            if request_cache_status and cache_observer is not None:
-                try:
-                    cache_observer(request_cache_status)
-                except Exception:
-                    # Like target_observer: an observability hook must never
-                    # fail a valid turn.
-                    pass
-            iid, trace_ctx = None, None
+                if reason is None:
+                    break
+                # The empty attempt was captured; it must not reach lessons.
+                _discard_interaction(iid)
+            _note_escalation(
+                tier_escalation.Step(attempt + 1, reason, rung, following),
+                "chat-api",
+            )
+            attempt += 1
     except ModelCallError as error:
         if raise_model_errors:
             raise
@@ -20124,6 +20268,37 @@ def _agent_checklist_fail(checklist_id, states, reason, item=1):
     _agent_checklist_mark(checklist_id, states, 4, "done", "failure included in end report")
 
 
+_AGENT_MODEL_FAILURE = threading.local()
+
+
+def _agent_escalation_key(tier, prompt):
+    """Identity of one agent run for the failure note: its tier and prompt."""
+    digest = hashlib.sha256(str(prompt or "").encode("utf-8", "replace")).hexdigest()[:16]
+    return "%s:%s" % (str(tier or "").strip().lower(), digest)
+
+
+def _note_agent_model_failure(reason, *, key, step, detail="", vacuous=False):
+    """Remember that an agent run ended on a model failure (this thread).
+
+    ``vacuous`` marks a completion claim that changed nothing and validated
+    nothing; the escalating runner honours it only for a request that asked
+    for a change or a check.
+    """
+    if not reason:
+        return
+    _AGENT_MODEL_FAILURE.value = {
+        "reason": str(reason), "key": str(key), "step": int(step or 0),
+        "detail": str(detail or ""), "vacuous": bool(vacuous),
+    }
+
+
+def _take_agent_model_failure():
+    """Read and clear the last noted agent model failure for this thread."""
+    value = getattr(_AGENT_MODEL_FAILURE, "value", None)
+    _AGENT_MODEL_FAILURE.value = None
+    return value if isinstance(value, dict) else None
+
+
 def _agent_impl(*args, **kwargs) -> str:
     """One agent turn, with the disk-backed system-prompt parts pinned.
 
@@ -20172,6 +20347,11 @@ def _agent_turn(
         )
 
     _maybe_live_reload()
+    # A model failure that ends this run is noted for the escalating
+    # workbench runner under this run's own identity, so a nested agent's
+    # failure can never be mistaken for it.
+    escalation_key = _agent_escalation_key(tier, prompt)
+    _take_agent_model_failure()
     unsafe = unsafe_lab.active()
     if unsafe:
         # Unsafe lab mode is for a disposable host where the model is the
@@ -20514,6 +20694,17 @@ def _agent_turn(
             # Otherwise users see ``result: complete`` directly above this
             # warning and the model's claim wins the most visible field.
             activity_tracker.set_response_status("unverified", "agent completion lacks required verification")
+            if not mutated and not validation_attempted:
+                # Measured 2026-09-03: a 1.5B "completed" a fix request after
+                # twelve model calls that changed nothing and ran nothing.
+                # That is the model not doing the work, and the escalating
+                # runner treats it as a failure when the request asked for a
+                # change or a check (never for a read or an explanation).
+                _note_agent_model_failure(
+                    tier_escalation.REASON_FAILED, key=escalation_key, step=0,
+                    detail="claimed completion without a change or a validation",
+                    vacuous=True,
+                )
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
@@ -20714,12 +20905,19 @@ def _agent_turn(
                         checklist_id, checklist_states,
                         "model request failed before a valid tool decision", 1,
                     )
+                _note_agent_model_failure(
+                    tier_escalation.failure_reason(error=decision_error),
+                    key=escalation_key, step=step,
+                )
                 return _early_exit(render_model_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
                     checklist_id, checklist_states,
                     "model returned an invalid tool decision", 1,
                 )
+            _note_agent_model_failure(
+                tier_escalation.REASON_FAILED, key=escalation_key, step=step,
+            )
             return _early_exit(
                 "ERROR: could not parse agent decision at step %d: %s\nraw=%s" % (
                     step, decision_error, raw[:1000])
@@ -21406,6 +21604,81 @@ def agent(
     )
 
 
+# Action verbs of the work classifier that only read.  A request whose verbs
+# are all here expects no change and no validation, so a completion claim
+# with neither is not the model failing the task.
+_READ_ONLY_WORK_VERBS = frozenset({
+    "audit", "diagnose", "find", "inspect", "list", "open", "read", "review",
+    "scan", "search", "view",
+})
+
+
+def _work_expects_effects(prompt):
+    """Whether a work request asked for a change or a check, by its verbs."""
+    verbs = set(intents._WORK_ACTION_RE.findall(str(prompt or "").lower()))
+    return bool(verbs - _READ_ONLY_WORK_VERBS)
+
+
+def _workbench_agent_escalating(
+    prompt, tier, *, max_steps, allow_web, project, allow_location,
+):
+    """Run the workbench agent on ``tier``, stepping up when the model fails.
+
+    A run whose model could not drive the loop (a transport failure, or no
+    parseable decision after the format repairs) is rerun on the next
+    distinct bound local model of the capability ladder, at most
+    tier_escalation.MAX_ESCALATIONS times; so is a run that claimed
+    completion without changing anything or running any validation when the
+    request asked for a change or a check.  Any other finished run stands,
+    however it judged its own work.  Each attempt goes through workbench_agent
+    with an explicit tier, so surfaces that observe or replace that tool see
+    every attempt.  Returns ``(output, tier)`` for the attempt that stood; an
+    escalated output carries the escalation line.
+    """
+    start = _local_tier_rung(tier)
+    escalation_plan = _default_route_plan(prompt, start) if start is not None else None
+    if escalation_plan is None or escalation_plan.escalations == 0:
+        return workbench_agent(
+            prompt=prompt, tier=tier, max_steps=max_steps, allow_web=allow_web,
+            project=project, allow_location=allow_location,
+        ), tier
+    steps = []
+    answered = escalation_plan.start
+    output = ""
+    final_failed = False
+    expects_effects = _work_expects_effects(prompt)
+    for index, rung in enumerate(escalation_plan.rungs):
+        answered = rung
+        _take_agent_model_failure()
+        output = workbench_agent(
+            prompt=prompt, tier=rung.tier, max_steps=max_steps, allow_web=allow_web,
+            project=project, allow_location=allow_location,
+        )
+        failure = _take_agent_model_failure()
+        owned = bool(failure) and failure.get("key") == _agent_escalation_key(rung.tier, prompt)
+        if owned and failure.get("vacuous") and not expects_effects:
+            owned = False
+        following = escalation_plan.next_rung(index)
+        if not owned:
+            break
+        if following is None:
+            final_failed = True
+            break
+        step = tier_escalation.Step(
+            index + 1, str(failure.get("reason") or tier_escalation.REASON_FAILED),
+            rung, following, detail=str(failure.get("detail") or ""),
+        )
+        steps.append(step)
+        _note_escalation(step, "agent")
+    if steps:
+        line = tier_escalation.describe(steps)
+        output = (
+            "%s\n\n%s" % (str(output).rstrip(), line) if final_failed
+            else "%s\n\n%s" % (line, output)
+        )
+    return output, answered.tier
+
+
 @mcp.tool()
 def workbench_agent(
     prompt: str,
@@ -21417,10 +21690,17 @@ def workbench_agent(
 ) -> str:
     """Execute local work with guarded tools, checklist, validation, and report."""
     _maybe_live_reload()
-    tier = _runtime_lane_tier("workbench", tier)
+    requested = str(tier or "").strip().lower()
+    lane_tier = _runtime_lane_tier("workbench", tier)
+    if requested in ("", "auto", "default", "policy"):
+        output, _answered_tier = _workbench_agent_escalating(
+            prompt, lane_tier, max_steps=max_steps, allow_web=allow_web,
+            project=project, allow_location=allow_location,
+        )
+        return output
     return agent(
         prompt=prompt,
-        tier=tier,
+        tier=lane_tier,
         max_steps=max_steps,
         allow_web=allow_web,
         project=project,
@@ -22448,13 +22728,9 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
             master_kwargs["project"] = resolved_project
         output = master_orchestrate(**master_kwargs)
     elif mode == "workbench":
-        output = workbench_agent(
-            prompt=prompt,
-            tier=selected_tier,
-            max_steps=12,
-            allow_web=True,
-            project=resolved_project,
-            allow_location=False,
+        output, selected_tier = _workbench_agent_escalating(
+            prompt, selected_tier, max_steps=12, allow_web=True,
+            project=resolved_project, allow_location=False,
         )
     else:
         active = []
