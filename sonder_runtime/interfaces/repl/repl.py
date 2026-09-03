@@ -709,13 +709,15 @@ def _box_chars():
     with it. A decorative header must never be able to do that.
     """
     glyphs = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯",
-              "h": "─", "v": "│", "dot": "◈", "prompt": "❯"}
+              "h": "─", "v": "│", "dot": "◈", "prompt": "❯",
+              "tool": "▸", "refused": "⊘", "approved": "✓", "alert": "!"}
     encoding = getattr(sys.stdout, "encoding", None) or "ascii"
     try:
         "".join(glyphs.values()).encode(encoding)
     except (UnicodeEncodeError, LookupError, TypeError):
         return {"tl": "+", "tr": "+", "bl": "+", "br": "+",
-                "h": "-", "v": "|", "dot": "*", "prompt": ">"}
+                "h": "-", "v": "|", "dot": "*", "prompt": ">",
+                "tool": ">", "refused": "x", "approved": "*", "alert": "!"}
     return glyphs
 
 
@@ -979,39 +981,42 @@ def _startup_banner(strict, persona, project, tier=None):
         """``label value``: the label always muted, the value as styled."""
         return ("%s %s" % (_paint(label, _Ansi.muted), _paint(value, *styles)), ())
 
-    # Three groups, each packed to the terminal width: who is answering,
-    # where this session lives, and what source is running. The mode's blurb
-    # and an elevation reason are sentences, so they get lines of their own.
+    # Two-line header: identity on the first, hint on the second, then a
+    # hairline rule.  Provenance (installed/running/newest source, update)
+    # packs onto a third line so /updatecheck still has something to echo.
     identity = [
         ("%s %s" % (_paint(box["dot"], _Ansi.teal, _Ansi.bold),
                     _paint("sonder", _Ansi.teal, _Ansi.bold)), ()),
-        field("model", "%s %s" % (_paint(model, _Ansi.cyan),
-                                  _paint("· %s" % tier, _Ansi.muted))),
-        field("endpoint", _terminal_link(endpoint) if live else "%s %s" % (
-            _terminal_link(endpoint), _paint("(not listening)", _Ansi.amber)),
-            _Ansi.green if live else _Ansi.muted),
-        field("directory", _home_relative(os.getcwd())),
+        field("persona", str(persona), _Ansi.cyan) if persona else None,
+        ("%s %s" % (
+            _paint(model, _Ansi.cyan),
+            _paint("· %s" % tier, _Ansi.muted),
+        ), ()),
     ]
-    session = [
-        field("persona", str(persona), _Ansi.cyan),
-        field("project", str(project or "(none)")),
-    ]
+    identity = [s for s in identity if s is not None]
+    endpoint_text = (_terminal_link(endpoint) if live
+                     else "%s %s" % (_terminal_link(endpoint),
+                                     _paint("(not listening)", _Ansi.amber)))
+    identity.append(field("endpoint", endpoint_text,
+                          *(_Ansi.green if live else _Ansi.muted,)))
+    identity.append(field("project", str(project or "(none)")))
+    if permission is not None:
+        mode_view = PermissionModeFacade()
+        identity.append(field("mode", mode_view.label(permission),
+                              _permission_mode_colour(permission)))
     notes = []
     if permission is not None:
         mode_view = PermissionModeFacade()
-        session.append(field("mode", mode_view.label(permission),
-                             _permission_mode_colour(permission)))
         blurb = str(permission.get("blurb") or "").strip()
         if blurb:
             notes.append(_paint("  %s: %s" % (mode_view.label(permission), blurb),
                                 _Ansi.muted))
         if mode_view.elevated(permission):
-            session.append(field("elevation", "on", _Ansi.red))
             reason = mode_view.elevation_reason(permission)
             if reason:
                 notes.append(_paint("  elevation: %s" % reason, _Ansi.red))
     if strict:
-        session.append(field("strict", "on · pinned to the sonder alias", _Ansi.amber))
+        notes.append(_paint("  strict: on · pinned to the sonder alias", _Ansi.amber))
     provenance = [
         field("installed source", revision),
         field("running source", running, *((_Ansi.amber,) if source.get("restart_required") else ())),
@@ -1019,12 +1024,13 @@ def _startup_banner(strict, persona, project, tier=None):
         field("update", "%s · /updatecheck | /update" % update, _Ansi.amber),
     ]
     width = _terminal_columns()
-    lines = (_header_lines(identity, width) + _header_lines(session, width)
-             + notes + _header_lines(provenance, width))
-    hint = "%s  %s" % (
-        _paint("type /help for commands", _Ansi.muted),
-        _paint("or just start typing.", _Ansi.muted),
-    )
+    lines = _header_lines(identity, width) + notes + _header_lines(provenance, width)
+    sep = _paint(" · ", _Ansi.muted)
+    hint = sep.join([
+        _paint("/help for commands", _Ansi.muted),
+        _paint("just start typing", _Ansi.muted),
+        _paint("Shift+Tab cycles the mode", _Ansi.muted),
+    ])
     return "%s\n  %s\n%s\n" % (
         "\n".join(lines), hint, _rule(box["h"], min(width, 72)),
     )
@@ -1553,12 +1559,12 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
 
     box = _box_chars()
     title = "%s %s " % (
-        box["tl"], _response_status_label(label, error=error),
+        box["dot"], _response_status_label(label, error=error),
     )
     tone = _Ansi.red if error else _Ansi.teal
-    # The label carries the accent; the trailing rule is chrome and stays
-    # muted, so the eye lands on the answer rather than on a coloured bar.
-    print(_paint(title, tone, _Ansi.bold) + _paint(box["h"] * 8, _Ansi.muted))
+    width = _terminal_columns()
+    rule_len = max(4, width - _visible_len(title))
+    print(_paint(title, tone, _Ansi.bold) + _paint(box["h"] * rule_len, _Ansi.muted))
     print(answer)
     footer = _response_footer(box, timing, offer_feedback=offer_feedback)
     print(_paint(footer, _Ansi.muted))
@@ -2243,12 +2249,17 @@ def main(*, machine_output=False):
             # _run_catalogued (the `else`) are gated there instead.
             may_run, refusal = _named_command_gate(cmd, arg)
             if not may_run:
-                print(refusal)
-                # Terminal-only garnish; piped refusal text stays byte-stable.
-                if _stdout_is_interactive():
+                box = _box_chars()
+                if _stdout_is_interactive() and refusal.startswith("refused "):
+                    print("%s %s" % (
+                        _paint(box["refused"], _Ansi.red, _Ansi.bold),
+                        _paint(refusal, _Ansi.red),
+                    ))
                     hint = _error_hint(refusal)
                     if hint:
-                        print(_paint("  hint: %s" % hint, _Ansi.muted))
+                        print(_paint("  %s" % hint, _Ansi.muted))
+                else:
+                    print(refusal)
                 continue
 
             if cmd == "/":
