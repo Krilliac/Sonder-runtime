@@ -460,3 +460,4 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
   `sonder_runtime.domain.runtime_identity`, reducing composition-root policy
   while preserving the `server._runtime_identity_block` compatibility surface.
 - WP1 Two-Hundred-Ninety-Sixth Slice: pure fanout prompt-echo redaction now lives in `sonder_runtime.domain.fanout_redaction`, preserving the root `_fanout_redact_prompt_echo` alias.
+- WP1 Two-Hundred-Ninety-Seventh Slice: pure agent decision parsing now lives in `sonder_runtime.domain.agents.decision_parsing`, preserving the root `_extract_agent_json` alias.
