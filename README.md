@@ -459,3 +459,4 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - Extracted the state-independent runtime identity prompt renderer into
   `sonder_runtime.domain.runtime_identity`, reducing composition-root policy
   while preserving the `server._runtime_identity_block` compatibility surface.
+- WP1 Two-Hundred-Ninety-Sixth Slice: pure fanout prompt-echo redaction now lives in `sonder_runtime.domain.fanout_redaction`, preserving the root `_fanout_redact_prompt_echo` alias.
