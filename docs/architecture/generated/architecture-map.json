@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 226,
+      "file_count": 230,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -59,6 +59,7 @@
         "sonder_runtime/adapters/accelerators/npu/providers.py",
         "sonder_runtime/adapters/accelerators/npu/service.py",
         "sonder_runtime/adapters/admin_formatting.py",
+        "sonder_runtime/adapters/agent_call_signature.py",
         "sonder_runtime/adapters/application_lifecycle.py",
         "sonder_runtime/adapters/archive_create.py",
         "sonder_runtime/adapters/artifact_digest.py",
@@ -103,6 +104,7 @@
         "sonder_runtime/adapters/extensions/host.py",
         "sonder_runtime/adapters/extensions/memory_limits.py",
         "sonder_runtime/adapters/external_mcp.py",
+        "sonder_runtime/adapters/fanout_failures.py",
         "sonder_runtime/adapters/filesystem/__init__.py",
         "sonder_runtime/adapters/filesystem/atomic_json.py",
         "sonder_runtime/adapters/filesystem/file_ops.py",
@@ -153,6 +155,7 @@
         "sonder_runtime/adapters/model_gateway_factory.py",
         "sonder_runtime/adapters/model_inventory.py",
         "sonder_runtime/adapters/model_inventory_formatting.py",
+        "sonder_runtime/adapters/model_response_metadata.py",
         "sonder_runtime/adapters/model_transport.py",
         "sonder_runtime/adapters/observability/__init__.py",
         "sonder_runtime/adapters/observability/activity_formatting.py",
@@ -169,6 +172,7 @@
         "sonder_runtime/adapters/observability/session_list_formatting.py",
         "sonder_runtime/adapters/observability/session_replay_formatting.py",
         "sonder_runtime/adapters/observability/trace_buffer.py",
+        "sonder_runtime/adapters/offload_schema_argument.py",
         "sonder_runtime/adapters/ollama/__init__.py",
         "sonder_runtime/adapters/ollama/gateway.py",
         "sonder_runtime/adapters/ollama_lifecycle.py",
@@ -574,7 +578,7 @@
       ]
     },
     {
-      "file_count": 132,
+      "file_count": 134,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -591,12 +595,14 @@
         "sonder_runtime/domain/approval.py",
         "sonder_runtime/domain/artifact_risk_policy.py",
         "sonder_runtime/domain/automation/__init__.py",
+        "sonder_runtime/domain/automation/command_programs.py",
         "sonder_runtime/domain/automation/models.py",
         "sonder_runtime/domain/automation/state_machine.py",
         "sonder_runtime/domain/campaign_environment.py",
         "sonder_runtime/domain/campaign_expectations.py",
         "sonder_runtime/domain/campaign_formatting.py",
         "sonder_runtime/domain/campaign_policy.py",
+        "sonder_runtime/domain/campaign_prompt.py",
         "sonder_runtime/domain/cancellation_policy.py",
         "sonder_runtime/domain/cancellation_tree.py",
         "sonder_runtime/domain/chat_template_policy.py",
