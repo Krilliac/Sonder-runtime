@@ -71,7 +71,10 @@ are in `_sonder_impl_serialized`, `_answer_with_history_impl` and
 What counts as a failure is objective: a transport failure that is not a
 cancellation or an exhausted budget, an empty answer, or (for the agent) a
 model that could not produce a parseable tool decision after the format
-repairs. A satisfied answer never spends a stronger model; a finished agent
+repairs, or a completion claim that changed nothing and ran no validation
+on a request that asked for a change or a check (decided from the request's
+action verbs, so a read or an explanation never escalates on that ground).
+A satisfied answer never spends a stronger model; any other finished agent
 run stands however it judged its own work. An empty attempt's captured
 interaction is discarded so it never reaches lessons.
 

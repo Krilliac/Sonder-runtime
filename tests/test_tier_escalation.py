@@ -424,6 +424,58 @@ def test_workbench_agent_reports_the_last_failure_when_every_rung_fails(
     assert "m-reasoning" in factory_models
 
 
+@pytest.mark.parametrize("prompt, expected", [
+    ("fix the bug in app.py and run the tests", True),
+    ("add a trial_balance function to ledger/core.py", True),
+    ("run the tests in tests/", True),
+    ("read app.py and explain what it does", False),
+    ("inspect the repository and list its files", False),
+    ("search the repo for TODO markers", False),
+])
+def test_work_expects_effects_reads_the_request_verbs(prompt, expected):
+    assert server._work_expects_effects(prompt) is expected
+
+
+def test_a_completion_claim_without_a_change_or_a_validation_escalates_a_change_request(
+    monkeypatch, tmp_path,
+):
+    """Measured 2026-09-03: a 1.5B 'completed' a fix after changing nothing."""
+    factory_models = _install_agent_fakes(monkeypatch, {
+        "m-code": '{"final":"done"}',
+        "m-general": '{"final":"done"}',
+        "m-reasoning": '{"final":"done"}',
+    })
+
+    out = server.workbench_agent(
+        prompt="fix the bug in app.py and run the tests", tier="auto",
+        project=str(tmp_path),
+    )
+
+    assert out.rstrip().endswith(
+        "model escalation: code (m-code) -> general (m-general): failed "
+        "(claimed completion without a change or a validation); "
+        "general (m-general) -> reasoning (m-reasoning): failed "
+        "(claimed completion without a change or a validation)"
+    )
+    assert {"m-code", "m-general", "m-reasoning"} <= set(factory_models)
+
+
+def test_a_completion_claim_on_a_read_request_stands(monkeypatch, tmp_path):
+    factory_models = _install_agent_fakes(monkeypatch, {
+        "m-code": '{"final":"the file defines two functions"}',
+        "m-general": '{"final":"unreached"}',
+    })
+
+    out = server.workbench_agent(
+        prompt="read app.py and explain what it does", tier="auto",
+        project=str(tmp_path),
+    )
+
+    assert "the file defines two functions" in out
+    assert "model escalation" not in out
+    assert set(factory_models) == {"m-code"}
+
+
 def test_routed_work_names_the_tier_that_answered(monkeypatch):
     seen = []
     monkeypatch.delenv(te.KNOB, raising=False)

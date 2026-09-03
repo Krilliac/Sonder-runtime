@@ -20276,12 +20276,18 @@ def _agent_escalation_key(tier, prompt):
     return "%s:%s" % (str(tier or "").strip().lower(), digest)
 
 
-def _note_agent_model_failure(reason, *, key, step):
-    """Remember that an agent run ended on a model failure (this thread)."""
+def _note_agent_model_failure(reason, *, key, step, detail="", vacuous=False):
+    """Remember that an agent run ended on a model failure (this thread).
+
+    ``vacuous`` marks a completion claim that changed nothing and validated
+    nothing; the escalating runner honours it only for a request that asked
+    for a change or a check.
+    """
     if not reason:
         return
     _AGENT_MODEL_FAILURE.value = {
         "reason": str(reason), "key": str(key), "step": int(step or 0),
+        "detail": str(detail or ""), "vacuous": bool(vacuous),
     }
 
 
@@ -20687,6 +20693,17 @@ def _agent_turn(
             # Otherwise users see ``result: complete`` directly above this
             # warning and the model's claim wins the most visible field.
             activity_tracker.set_response_status("unverified", "agent completion lacks required verification")
+            if not mutated and not validation_attempted:
+                # Measured 2026-09-03: a 1.5B "completed" a fix request after
+                # twelve model calls that changed nothing and ran nothing.
+                # That is the model not doing the work, and the escalating
+                # runner treats it as a failure when the request asked for a
+                # change or a check (never for a read or an explanation).
+                _note_agent_model_failure(
+                    tier_escalation.REASON_FAILED, key=escalation_key, step=0,
+                    detail="claimed completion without a change or a validation",
+                    vacuous=True,
+                )
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
@@ -21586,6 +21603,21 @@ def agent(
     )
 
 
+# Action verbs of the work classifier that only read.  A request whose verbs
+# are all here expects no change and no validation, so a completion claim
+# with neither is not the model failing the task.
+_READ_ONLY_WORK_VERBS = frozenset({
+    "audit", "diagnose", "find", "inspect", "list", "open", "read", "review",
+    "scan", "search", "view",
+})
+
+
+def _work_expects_effects(prompt):
+    """Whether a work request asked for a change or a check, by its verbs."""
+    verbs = set(intents._WORK_ACTION_RE.findall(str(prompt or "").lower()))
+    return bool(verbs - _READ_ONLY_WORK_VERBS)
+
+
 def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
 ):
@@ -21594,8 +21626,10 @@ def _workbench_agent_escalating(
     A run whose model could not drive the loop (a transport failure, or no
     parseable decision after the format repairs) is rerun on the next
     distinct bound local model of the capability ladder, at most
-    tier_escalation.MAX_ESCALATIONS times.  A run that finished -- however it
-    judged its own work -- stands.  Each attempt goes through workbench_agent
+    tier_escalation.MAX_ESCALATIONS times; so is a run that claimed
+    completion without changing anything or running any validation when the
+    request asked for a change or a check.  Any other finished run stands,
+    however it judged its own work.  Each attempt goes through workbench_agent
     with an explicit tier, so surfaces that observe or replace that tool see
     every attempt.  Returns ``(output, tier)`` for the attempt that stood; an
     escalated output carries the escalation line.
@@ -21611,6 +21645,7 @@ def _workbench_agent_escalating(
     answered = escalation_plan.start
     output = ""
     final_failed = False
+    expects_effects = _work_expects_effects(prompt)
     for index, rung in enumerate(escalation_plan.rungs):
         answered = rung
         _take_agent_model_failure()
@@ -21620,6 +21655,8 @@ def _workbench_agent_escalating(
         )
         failure = _take_agent_model_failure()
         owned = bool(failure) and failure.get("key") == _agent_escalation_key(rung.tier, prompt)
+        if owned and failure.get("vacuous") and not expects_effects:
+            owned = False
         following = escalation_plan.next_rung(index)
         if not owned:
             break
@@ -21628,7 +21665,7 @@ def _workbench_agent_escalating(
             break
         step = tier_escalation.Step(
             index + 1, str(failure.get("reason") or tier_escalation.REASON_FAILED),
-            rung, following,
+            rung, following, detail=str(failure.get("detail") or ""),
         )
         steps.append(step)
         _note_escalation(step, "agent")
