@@ -247,9 +247,11 @@ def _install_generation_fakes(monkeypatch, *, model, cloud, tier_label,
     monkeypatch.setattr(server, "_open_db", _Connection)
     monkeypatch.setattr(server, "_resolve_project", lambda *_a: None)
     monkeypatch.setattr(server, "_capture_turn", lambda *a, **k: None)
+    # A plain-text answer has nothing for the code gate to verify (``None``);
+    # a ``False`` verdict would now mean runnable code failed and step up.
     monkeypatch.setattr(
         server, "_apply_code_gate",
-        lambda response, interaction_id=None, regenerate=None: (response, False, False),
+        lambda response, interaction_id=None, regenerate=None: (response, None, False),
     )
 
     def make_generate(selected_model, system, temperature, num_predict, num_ctx,
