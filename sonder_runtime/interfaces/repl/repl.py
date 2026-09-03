@@ -24,6 +24,9 @@ from sonder_runtime.adapters.observability.repl_formatting import (
     response_footer as _response_footer,
     response_status_label as _response_status_label,
 )
+from sonder_runtime.adapters.observability.response_formatting import (
+    _strip_activity_block as _strip_activity,
+)
 from sonder_runtime.adapters.observability import repl_machine_output as _machine_output
 from sonder_runtime.adapters.observability.error_hint_formatting import (
     error_hint as _error_hint,
@@ -1523,6 +1526,119 @@ def _begin_chat_turn(label="Sonder"):
     return _WorkingIndicator(label).start()
 
 
+def _parse_activity_events(text):
+    """Extract tool call events from the embedded activity block.
+
+    Returns ``(clean_answer, events, stats)`` where *events* is a list of
+    dicts with keys ``tool``, ``title``, ``ok``, ``elapsed_ms``, ``summary``
+    and *stats* has aggregate counts.  When no activity block is present the
+    events list is empty and the answer is returned unchanged.
+    """
+    marker = "=== ACTIVITY (observable work) ==="
+    end_marker = "=== END ACTIVITY ==="
+    idx = text.find(marker)
+    if idx < 0:
+        return text.rstrip(), [], {}
+    clean = text[:idx].rstrip()
+    block_end = text.find(end_marker, idx)
+    block = text[idx:block_end] if block_end > idx else text[idx:]
+    events = []
+    stats = {}
+    for line in block.splitlines():
+        line = line.strip()
+        if line.startswith("model calls:"):
+            parts = line.split()
+            try:
+                stats["model_calls"] = int(parts[2])
+                stats["tool_calls"] = int(parts[5])
+                tokens_part = " ".join(parts[8:])
+                if "/" in tokens_part:
+                    tin, tout = tokens_part.split("/", 1)
+                    stats["tokens_in"] = int(tin)
+                    stats["tokens_out"] = int(tout)
+            except (IndexError, ValueError):
+                pass
+        elif line.startswith("files:"):
+            parts = line.split()
+            try:
+                stats["file_creates"] = int(parts[1].lstrip("+"))
+                stats["file_edits"] = int(parts[2].lstrip("~"))
+                stats["file_deletes"] = int(parts[3].lstrip("-"))
+            except (IndexError, ValueError):
+                pass
+        elif line.startswith(("• ", "× ")):
+            ok = line[0] == "•"
+            title = line[2:].strip()
+            events.append({"title": title, "ok": ok})
+        elif line.startswith("+") and "ms " in line:
+            parts = line.split(None, 2)
+            if len(parts) >= 3:
+                try:
+                    elapsed = int(parts[0].lstrip("+").rstrip("ms"))
+                except ValueError:
+                    elapsed = 0
+                kind = parts[1]
+                detail = parts[2] if len(parts) > 2 else ""
+                if kind == "tool_call":
+                    events.append({
+                        "title": detail, "ok": True, "elapsed_ms": elapsed,
+                    })
+    return clean, events, stats
+
+
+def _render_tool_rows(events, box, width):
+    """Print codex-style tool call rows with status glyphs and timing."""
+    if not events:
+        return
+    for ev in events:
+        ok = ev.get("ok", True)
+        glyph = box["tool"] if ok else box["refused"]
+        tone = _Ansi.green if ok else _Ansi.red
+        title = ev.get("title") or "tool"
+        elapsed = ev.get("elapsed_ms")
+        timing = " %s" % _elapsed_label(elapsed) if elapsed else ""
+        status = _paint(glyph, tone)
+        label = _paint(title, _Ansi.text2)
+        time_str = _paint(timing, _Ansi.muted) if timing else ""
+        print("  %s %s%s" % (status, label, time_str))
+
+
+def _render_turn_stats(stats, box):
+    """Print a compact stats summary line under tool rows."""
+    if not stats:
+        return
+    parts = []
+    mc = stats.get("model_calls", 0)
+    tc = stats.get("tool_calls", 0)
+    tin = stats.get("tokens_in", 0)
+    tout = stats.get("tokens_out", 0)
+    fc = stats.get("file_creates", 0)
+    fe = stats.get("file_edits", 0)
+    fd = stats.get("file_deletes", 0)
+    if tc:
+        parts.append("%d tool call%s" % (tc, "" if tc == 1 else "s"))
+    if mc:
+        parts.append("%d model call%s" % (mc, "" if mc == 1 else "s"))
+    if tin or tout:
+        parts.append("%s/%s tokens" % (
+            _compact_number(tin), _compact_number(tout),
+        ))
+    files_total = fc + fe + fd
+    if files_total:
+        parts.append("%d file%s changed" % (files_total, "" if files_total == 1 else "s"))
+    if parts:
+        print(_paint("  %s %s" % (box["h"], " · ".join(parts)), _Ansi.muted))
+
+
+def _compact_number(n):
+    """Format a token count compactly: 1234 -> 1.2k, 12345 -> 12k."""
+    if n < 1000:
+        return str(n)
+    if n < 10000:
+        return "%.1fk" % (n / 1000.0)
+    return "%dk" % (n // 1000)
+
+
 def _print_chat_result(text, started_at, *, offer_feedback=False,
                        label="Sonder", error=False, indicator=None,
                        interaction_id=None):
@@ -1558,6 +1674,9 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
         return
 
     box = _box_chars()
+    clean_answer, events, stats = _parse_activity_events(answer)
+    clean_answer = _strip_activity(clean_answer)
+
     title = "%s %s " % (
         box["dot"], _response_status_label(label, error=error),
     )
@@ -1565,12 +1684,16 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
     width = _terminal_columns()
     rule_len = max(4, width - _visible_len(title))
     print(_paint(title, tone, _Ansi.bold) + _paint(box["h"] * rule_len, _Ansi.muted))
-    print(answer)
+
+    if events and not error:
+        _render_tool_rows(events, box, width)
+        _render_turn_stats(stats, box)
+        print()
+
+    print(clean_answer)
     footer = _response_footer(box, timing, offer_feedback=offer_feedback)
     print(_paint(footer, _Ansi.muted))
     if error:
-        # Garnish, not classification: a known failure shape earns one muted
-        # next-step line under the panel; anything unrecognized adds nothing.
         hint = _error_hint(answer)
         if hint:
             print(_paint("  hint: %s" % hint, _Ansi.muted))
