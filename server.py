@@ -241,6 +241,10 @@ from sonder_runtime.domain.fanout_admission import (
     fanout_admission as _fanout_admission_policy,
     fanout_limits as _fanout_limits,
 )
+from sonder_runtime.domain.agents.tool_naming import (
+    AGENT_TOOL_ALIASES as _AGENT_TOOL_ALIASES,
+    canonical_agent_tool_name as _canonical_agent_tool_name,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -18539,17 +18543,6 @@ _PROJECT_SCOPED_ROOT_AND_PATH_TOOLS = frozenset({
 # are not execution tools for scoping purposes -- their working directory is
 # `root`, not `cwd`.
 _PROJECT_SCOPED_COMMAND_TOOLS = frozenset({"build_run"})
-_AGENT_TOOL_ALIASES = {
-    "assetgen": "artifact_generate",
-    "game_generate": "game_generate_and_test",
-    "game_campaign": "game_generation_campaign",
-    "improvement_report": "system_improvement_report",
-    "agent_status": "master_status",
-    "agent_capacity": "master_capacity",
-    "agent_cancel": "master_cancel",
-    "agent_retry": "master_retry",
-    "master": "master_orchestrate",
-}
 _PROJECT_BOUND_AGENT_TOOLS = (
     _PROJECT_SCOPED_PATH_TOOLS
     | _PROJECT_SCOPED_EXECUTION_TOOLS
@@ -18663,10 +18656,6 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
         )
     return ""
 
-
-def _canonical_agent_tool_name(tool_name):
-    name = str(tool_name or "")
-    return _AGENT_TOOL_ALIASES.get(name, name)
 
 
 def _project_scoped_path_key(tool_name):
