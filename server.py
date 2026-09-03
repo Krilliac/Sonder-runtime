@@ -317,6 +317,10 @@ from sonder_runtime.adapters.fanout_failures import (
     no_eligible_models_error as _fanout_no_eligible_models_error,
     safe_error as _fanout_safe_error,
 )
+from sonder_runtime.adapters.model_response_metadata import (
+    response_error_metadata as _response_error_metadata,
+)
+from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -4564,37 +4568,6 @@ def _chat_request(
 
 
 
-def _response_error_metadata(error) -> dict:
-    """Extract the scalar-safe metadata embedded in an empty-response error.
-
-    ``_empty_model_response_detail`` deliberately serializes a small
-    allowlisted JSON object.  This parser treats all other errors/details as
-    opaque and returns no metadata, preventing provider bodies or reasoning
-    text from becoming durable observations.
-    """
-    if not isinstance(error, ModelCallError) or error.kind != "empty_response":
-        return {}
-    prefix = "Ollama returned no assistant content; metadata="
-    detail = str(error.detail or "")
-    if not detail.startswith(prefix):
-        return {}
-    try:
-        source = json.loads(detail[len(prefix):])
-    except (TypeError, ValueError, RecursionError):
-        return {}
-    if not isinstance(source, dict):
-        return {}
-    metadata = {}
-    thinking_chars = _model_usage_count(source.get("thinking_chars"))
-    if thinking_chars is not None and thinking_chars > 0:
-        metadata["thinking_chars"] = thinking_chars
-    done_reason = source.get("done_reason")
-    if isinstance(done_reason, str):
-        normalized = done_reason.strip().casefold()
-        if normalized:
-            metadata["done_reason"] = normalized if normalized in {"stop", "length"} else "other"
-    return metadata
-
 
 def _format_model_call_error(error: ModelCallError) -> str:
     return _format_runtime_model_call_error_policy(
@@ -4732,43 +4705,6 @@ def _get(path: str) -> dict:
         if OLLAMA_POOL.enabled else send(BASE)
     )
 
-
-def _parse_schema_arg(schema):
-    """Normalize an offload `schema` argument to a schema object, or None.
-
-    Accepts an already-parsed object (internal callers) or the JSON text the
-    tool surface passes (matching how every other structured argument crosses
-    that boundary). A blank string means "no schema", so the unconstrained path
-    stays the default. Anything else that is not a JSON object is a caller
-    error and is raised as a typed configuration failure -- never quietly
-    dropped, because dropping it would run the call unconstrained while the
-    caller believed it was constrained.
-    """
-    if schema is None:
-        return None
-    if isinstance(schema, dict):
-        return schema
-    if isinstance(schema, str):
-        text = schema.strip()
-        if not text:
-            return None
-        try:
-            parsed = json.loads(text)
-        except ValueError as exc:
-            raise ModelCallError(
-                "configuration",
-                "schema is not valid JSON: %s" % exc,
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise ModelCallError(
-                "configuration",
-                "schema must be a JSON object, got %s" % type(parsed).__name__,
-            )
-        return parsed
-    raise ModelCallError(
-        "configuration",
-        "schema must be a JSON object or JSON text, got %s" % type(schema).__name__,
-    )
 
 
 # The complete set of keywords `json_schema_verifier` enforces. Coverage below
