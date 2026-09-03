@@ -355,6 +355,10 @@ from sonder_runtime.domain.model_catalog import (
     installed_records as _installed_catalog_records,
     resolve_record as _resolve_catalog_record,
 )
+from sonder_runtime.adapters.cloud_fallback import (
+    chat_request_with_cloud_fallback as _chat_request_with_cloud_fallback_policy,
+    extra_usage_fallback as _extra_usage_fallback_policy,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -791,21 +795,10 @@ def _remember_unsupported_think_option(model) -> None:
 
 
 def _cloud_extra_usage_fallback(model, error):
-    """Return the plan-covered Kimi fallback for an unfunded K3 request.
-
-    Ollama currently bills Kimi K3 only against the separate extra-usage
-    balance, even for Pro/Max accounts.  A 402 is therefore a deterministic
-    model-availability decision, not a transient transport failure.  Honor an
-    explicit K3 selection, but let opted-in cloud work consume the account's
-    ordinary resettable allowance through K2.7 when that balance is empty.
-    """
-    if not isinstance(error, ModelCallError) or error.status != 402:
-        return None
-    if not str(model or "").strip().casefold().startswith("kimi-k3:"):
-        return None
-    if str(model).strip().casefold() == CLOUD_EXTRA_USAGE_FALLBACK_MODEL.casefold():
-        return None
-    return CLOUD_EXTRA_USAGE_FALLBACK_MODEL
+    """Return the plan-covered Kimi fallback for an unfunded K3 request."""
+    return _extra_usage_fallback_policy(
+        model, error, fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
+    )
 
 
 def _chat_request_with_cloud_fallback(
@@ -813,48 +806,16 @@ def _chat_request_with_cloud_fallback(
     accept_native_tool_calls=False, compact_cloud_reasoning=False,
     allow_cloud_fallback=True,
 ):
-    """Make one cloud request, optionally falling back once on K3 HTTP 402.
-
-    A normal single-model request may use the documented K3-to-K2.7
-    availability fallback.  Durable fanout rows are different: each row is an
-    immutable, caller-visible target and must never attribute another model's
-    response (or spend) to it.  Those callers pass ``allow_cloud_fallback``
-    false so the requested target's provider error is recorded directly.
-    """
-    try:
-        out, content = _chat_request(
-            payload,
-            model=model,
-            cloud=True,
-            timeout=timeout,
-            cancel_check=cancel_check,
-            accept_native_tool_calls=accept_native_tool_calls,
-            idempotent=True,
-        )
-        return out, content, model
-    except ModelCallError as error:
-        if not allow_cloud_fallback:
-            raise
-        fallback = _cloud_extra_usage_fallback(model, error)
-        if fallback is None:
-            raise
-
-    fallback_payload = dict(payload)
-    fallback_payload["model"] = fallback
-    fallback_payload.pop("think", None)
-    _apply_cloud_thinking_policy(
-        fallback_payload, fallback, compact=compact_cloud_reasoning,
-    )
-    out, content = _chat_request(
-        fallback_payload,
-        model=fallback,
-        cloud=True,
-        timeout=timeout,
-        cancel_check=cancel_check,
+    """Make one cloud request, optionally falling back once on K3 HTTP 402."""
+    return _chat_request_with_cloud_fallback_policy(
+        payload, model=model, timeout=timeout, cancel_check=cancel_check,
         accept_native_tool_calls=accept_native_tool_calls,
-        idempotent=True,
+        compact_cloud_reasoning=compact_cloud_reasoning,
+        allow_cloud_fallback=allow_cloud_fallback,
+        chat_request=_chat_request,
+        apply_thinking_policy=_apply_cloud_thinking_policy,
+        fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
     )
-    return out, content, fallback
 
 
 if _is_cloud_model_name(TIERS["code"]):
