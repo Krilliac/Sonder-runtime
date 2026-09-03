@@ -216,33 +216,57 @@ _HISTORY_SECRET_ASSIGNMENT = re.compile(
 )
 
 
+_COLOUR_ENABLED = bool(
+    getattr(sys.stdout, "isatty", lambda: False)()
+) and not os.environ.get("NO_COLOR")
+_TRUECOLOR = _COLOUR_ENABLED and os.environ.get("COLORTERM", "").lower() in {
+    "truecolor", "24bit",
+}
+
+
+def _fg(rgb, cell):
+    """A foreground escape: the 24-bit token, or its nearest 256-colour cell.
+
+    The design tokens are the 24-bit values; a terminal that only advertises
+    ANSI colours must never receive them, so the fallback cell is chosen by
+    hand to keep the same hierarchy (accent, identity, four tones, greys).
+    """
+    if _TRUECOLOR:
+        return "\x1b[38;2;%d;%d;%dm" % tuple(rgb)
+    return "\x1b[38;5;%dm" % int(cell)
+
+
 class _Ansi:
     """Small dependency-free palette; automatically disappears when piped.
 
-    Truecolor is opt-in from the terminal's ``COLORTERM`` declaration. The
-    fallback uses a 256-color surface so a terminal that only advertises ANSI
-    colors does not receive unsupported 24-bit escape sequences.
+    One accent (Sonder's signal teal) carries the prompt, the answer label and
+    the header mark; a cool blue names identity (model, persona) and the
+    ``manual`` mode; green, amber, red and violet are the four semantic tones
+    (ok/plan, warn/acceptEdits, error/danger, auto); ``text2`` and ``muted``
+    are the two greys the chrome is drawn in. Truecolor is opt-in from the
+    terminal's ``COLORTERM`` declaration; the 256-colour fallback keeps the
+    same hierarchy.
     """
 
-    enabled = bool(getattr(sys.stdout, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
-    truecolor = enabled and os.environ.get("COLORTERM", "").lower() in {
-        "truecolor", "24bit",
-    }
+    enabled = _COLOUR_ENABLED
+    truecolor = _TRUECOLOR
     reset = "\x1b[0m"
-    teal = "\x1b[38;5;80m"
-    cyan = "\x1b[38;5;117m"
-    # Keep the existing bright-cyan text, but give the composer itself a
-    # quieter, darker-blue surface that separates input from the transcript.
-    composer_surface = (
-        "\x1b[48;2;17;38;54m\x1b[38;5;117m"
-        if truecolor
-        else "\x1b[48;5;23m\x1b[38;5;117m"
-    )
-    muted = "\x1b[38;5;245m"
-    green = "\x1b[38;5;114m"
-    amber = "\x1b[38;5;221m"
-    red = "\x1b[38;5;210m"
     bold = "\x1b[1m"
+    teal = _fg((99, 214, 200), 80)
+    cyan = _fg((127, 184, 240), 111)
+    green = _fg((121, 211, 148), 114)
+    amber = _fg((240, 195, 106), 221)
+    red = _fg((242, 123, 123), 210)
+    violet = _fg((216, 156, 246), 183)
+    text2 = _fg((165, 178, 189), 249)
+    muted = _fg((111, 126, 138), 243)
+    # The composer keeps its own quiet surface: a darker panel that separates
+    # what is being typed from the transcript above it.
+    composer_surface = (
+        "\x1b[48;2;15;23;30m\x1b[38;2;231;237;242m"
+        if truecolor
+        else "\x1b[48;5;234m\x1b[38;5;255m"
+    )
 
 
 def _paint(text, *styles):
@@ -685,54 +709,46 @@ def _box_chars():
     with it. A decorative header must never be able to do that.
     """
     glyphs = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯",
-              "h": "─", "v": "│", "dot": "◈"}
+              "h": "─", "v": "│", "dot": "◈", "prompt": "❯"}
     encoding = getattr(sys.stdout, "encoding", None) or "ascii"
     try:
         "".join(glyphs.values()).encode(encoding)
     except (UnicodeEncodeError, LookupError, TypeError):
         return {"tl": "+", "tr": "+", "bl": "+", "br": "+",
-                "h": "-", "v": "|", "dot": "*"}
+                "h": "-", "v": "|", "dot": "*", "prompt": ">"}
     return glyphs
 
 
-def _banner(rows, title="Sonder Runtime", subtitle="private AI runtime + orchestrator"):
-    """A bordered header, sized to its content.
+def _terminal_columns(default=100):
+    """The width the header packs to: the terminal's, held between 60 and 120."""
+    try:
+        columns = int(shutil.get_terminal_size((default, 24)).columns)
+    except (ValueError, OSError):
+        columns = default
+    return max(60, min(120, columns))
 
-    `rows` is a list of (label, value, styles); the caller decides what is
-    worth showing rather than this function knowing about the runtime.
+
+def _header_lines(segments, width=None):
+    """Pack ``(text, styles)`` segments into lines no wider than ``width``.
+
+    Segments are joined by three spaces and never split: one that does not
+    fit starts the next line. Width is measured with ``_visible_len`` so a
+    coloured value packs exactly like a plain one -- the boxed header this
+    replaced frayed at its right edge whenever padding counted escape bytes.
     """
-    box = _box_chars()
-    label_width = max((len(label) for label, _value, _styles in rows), default=0)
-    body = []
-    for label, value, styles in rows:
-        body.append((
-            _paint((label + ":").ljust(label_width + 1), _Ansi.muted),
-            _paint(value, *styles) if styles else str(value),
-        ))
-    head = "%s %s  %s" % (
-        _paint(box["dot"], _Ansi.teal),
-        _paint(title, _Ansi.teal, _Ansi.bold),
-        _paint(subtitle, _Ansi.muted),
-    )
-    widest = max([_visible_len(head)]
-                 + [_visible_len(a) + 1 + _visible_len(b) for a, b in body])
-    inner = widest + 3
-
-    def row(text):
-        return "%s %s%s%s" % (
-            _paint(box["v"], _Ansi.muted),
-            text,
-            " " * (inner - 2 - _visible_len(text)),
-            _paint(box["v"], _Ansi.muted),
-        )
-
-    lines = [_paint(box["tl"] + box["h"] * (inner - 1) + box["tr"], _Ansi.muted)]
-    lines.append(row(head))
-    lines.append(row(""))
-    for label, value in body:
-        lines.append(row("%s %s" % (label, value)))
-    lines.append(_paint(box["bl"] + box["h"] * (inner - 1) + box["br"], _Ansi.muted))
-    return "\n".join(lines)
+    columns = int(width) if width else _terminal_columns()
+    lines, current, used = [], [], 0
+    for text, styles in segments:
+        painted = _paint(text, *styles) if styles else str(text)
+        length = _visible_len(painted)
+        if current and used + 3 + length > columns:
+            lines.append("   ".join(current))
+            current, used = [], 0
+        current.append(painted)
+        used = length if used == 0 else used + 3 + length
+    if current:
+        lines.append("   ".join(current))
+    return lines
 
 
 def _installed_models():
@@ -896,7 +912,7 @@ def _permission_mode_colour(snapshot):
         "plan": _Ansi.green,
         "manual": _Ansi.cyan,
         "acceptEdits": _Ansi.amber,
-        "auto": _Ansi.red,
+        "auto": _Ansi.violet,
     }.get(str(mode.get("mode") or ""), _Ansi.muted)
 
 
@@ -957,41 +973,88 @@ def _startup_banner(strict, persona, project, tier=None):
         update = "check unavailable"
 
     permission = _permission_mode_snapshot()
-    rows = [
-        ("model", "%s  %s" % (model, _paint("(%s tier)" % tier, _Ansi.muted)),
-         (_Ansi.cyan,)),
-        ("endpoint", _terminal_link(endpoint) if live else
-         "%s  %s" % (_terminal_link(endpoint), _paint("(not listening)", _Ansi.amber)),
-         (_Ansi.green,) if live else (_Ansi.muted,)),
-        ("directory", _home_relative(os.getcwd()), ()),
-        ("persona", str(persona), (_Ansi.cyan,)),
-        ("project", str(project or "(none)"), ()),
-        ("installed source", revision, ()),
-        ("running source", running, (_Ansi.amber,) if source.get("restart_required") else ()),
-        (newest_label, newest, ()),
-        ("update", "%s  /updatecheck | /update" % update, (_Ansi.amber,)),
+    box = _box_chars()
+
+    def field(label, value, *styles):
+        """``label value``: the label always muted, the value as styled."""
+        return ("%s %s" % (_paint(label, _Ansi.muted), _paint(value, *styles)), ())
+
+    # Three groups, each packed to the terminal width: who is answering,
+    # where this session lives, and what source is running. The mode's blurb
+    # and an elevation reason are sentences, so they get lines of their own.
+    identity = [
+        ("%s %s" % (_paint(box["dot"], _Ansi.teal, _Ansi.bold),
+                    _paint("sonder", _Ansi.teal, _Ansi.bold)), ()),
+        field("model", "%s %s" % (_paint(model, _Ansi.cyan),
+                                  _paint("· %s" % tier, _Ansi.muted))),
+        field("endpoint", _terminal_link(endpoint) if live else "%s %s" % (
+            _terminal_link(endpoint), _paint("(not listening)", _Ansi.amber)),
+            _Ansi.green if live else _Ansi.muted),
+        field("directory", _home_relative(os.getcwd())),
     ]
+    session = [
+        field("persona", str(persona), _Ansi.cyan),
+        field("project", str(project or "(none)")),
+    ]
+    notes = []
     if permission is not None:
         mode_view = PermissionModeFacade()
-        mode_text = mode_view.label(permission)
+        session.append(field("mode", mode_view.label(permission),
+                             _permission_mode_colour(permission)))
         blurb = str(permission.get("blurb") or "").strip()
-        rows.append((
-            "mode", "%s%s" % (mode_text, "  -- " + blurb if blurb else ""),
-            (_permission_mode_colour(permission),),
-        ))
+        if blurb:
+            notes.append(_paint("  %s: %s" % (mode_view.label(permission), blurb),
+                                _Ansi.muted))
         if mode_view.elevated(permission):
+            session.append(field("elevation", "on", _Ansi.red))
             reason = mode_view.elevation_reason(permission)
-            rows.append((
-                "elevation", "on%s" % ("  -- " + reason if reason else ""),
-                (_Ansi.red,),
-            ))
+            if reason:
+                notes.append(_paint("  elevation: %s" % reason, _Ansi.red))
     if strict:
-        rows.append(("strict", "on  pinned to the sonder alias", (_Ansi.amber,)))
+        session.append(field("strict", "on · pinned to the sonder alias", _Ansi.amber))
+    provenance = [
+        field("installed source", revision),
+        field("running source", running, *((_Ansi.amber,) if source.get("restart_required") else ())),
+        field(newest_label, newest),
+        field("update", "%s · /updatecheck | /update" % update, _Ansi.amber),
+    ]
+    width = _terminal_columns()
+    lines = (_header_lines(identity, width) + _header_lines(session, width)
+             + notes + _header_lines(provenance, width))
     hint = "%s  %s" % (
         _paint("type /help for commands", _Ansi.muted),
         _paint("or just start typing.", _Ansi.muted),
     )
-    return "%s\n\n  %s\n" % (_banner(rows), hint)
+    return "%s\n  %s\n%s\n" % (
+        "\n".join(lines), hint, _rule(box["h"], min(width, 72)),
+    )
+
+
+def _composer_available():
+    """Whether the raw composer frame will draw the prompt's title itself."""
+    if slash_menu is None:
+        return False
+    try:
+        return bool(slash_menu.available())
+    except Exception:
+        return False
+
+
+def _status_line(title):
+    """The composer title as a muted line above a plain prompt.
+
+    Inner spans keep their own colour (the mode is painted); the muted tone
+    resumes after each of them instead of falling back to the default.
+    """
+    text = str(title or "")
+    if not _Ansi.enabled or not text:
+        return text
+    return _Ansi.muted + text.replace(_Ansi.reset, _Ansi.reset + _Ansi.muted) + _Ansi.reset
+
+
+def _prompt_glyph():
+    """The gutter glyph a plain ``input()`` prompt is reduced to."""
+    return _paint(_box_chars()["prompt"], _Ansi.teal, _Ansi.bold) + " "
 
 
 def _execution_prompt(status=None):
@@ -1128,7 +1191,7 @@ def _composer_title(tier=None, status=None, *, context=None, last_turn=None,
             parts.append(("M%s T%s" if compact else "calls %sM/%sT") % (
                 _compact_count(calls), _compact_count(tools),
             ))
-    title = (" | " if compact else "  |  ").join(parts)
+    title = (" | " if compact else "  ·  ").join(parts)
     # A wide terminal can still have a long active model tag plus a complete
     # metrics suffix.  The frame truncates titles rather than wrapping them,
     # which previously left an unhelpful clipped tail such as ``ca-``.  Switch
@@ -1493,7 +1556,9 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
         box["tl"], _response_status_label(label, error=error),
     )
     tone = _Ansi.red if error else _Ansi.teal
-    print(_paint(title + box["h"] * 8, tone, _Ansi.bold))
+    # The label carries the accent; the trailing rule is chrome and stays
+    # muted, so the eye lands on the answer rather than on a coloured bar.
+    print(_paint(title, tone, _Ansi.bold) + _paint(box["h"] * 8, _Ansi.muted))
     print(answer)
     footer = _response_footer(box, timing, offer_feedback=offer_feedback)
     print(_paint(footer, _Ansi.muted))
@@ -2122,6 +2187,13 @@ def main(*, machine_output=False):
                 model_override=active_model,
                 permission=_permission_mode_snapshot(),
             )
+            if prompt and _stdout_is_interactive() and not _composer_available():
+                # No raw composer to frame the title (Linux, macOS, a dumb
+                # TERM): the status goes on its own muted line and the prompt
+                # is the gutter glyph, so what is typed lines up with the
+                # transcript.
+                print(_status_line(prompt))
+                prompt = _prompt_glyph()
             line = _read_input(
                 prompt,
                 history=input_history,

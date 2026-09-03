@@ -1,0 +1,22 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1440, "h": 900, "title": "App · chat (desktop, dark)" },
+    { "file": "AppSystem.dc.html", "x": 1520, "y": 0, "w": 1440, "h": 900, "title": "App · System (desktop, dark)" },
+    { "file": "AppChatLight.dc.html", "x": 0, "y": 1020, "w": 1440, "h": 900, "title": "App · chat (desktop, light)" },
+    { "file": "PhoneChat.dc.html", "x": 1520, "y": 1020, "w": 390, "h": 844, "title": "App · chat (phone)" },
+    { "file": "PhoneSettings.dc.html", "x": 1990, "y": 1020, "w": 390, "h": 844, "title": "App · settings (phone)" },
+    { "file": "Terminal.dc.html", "x": 0, "y": 2040, "w": 1000, "h": 660, "title": "Terminal · a session" },
+    { "file": "TerminalGate.dc.html", "x": 1080, "y": 2040, "w": 1000, "h": 480, "title": "Terminal · approvals and modes" },
+    { "file": "TerminalWorking.dc.html", "x": 1080, "y": 2640, "w": 1000, "h": 300, "title": "Terminal · working, and piped" },
+    { "file": "Tokens.dc.html", "x": 2160, "y": 2040, "w": 1000, "h": 760, "title": "Tokens" },
+    { "file": "DirectionB.dc.html", "x": 0, "y": 3080, "w": 720, "h": 480, "title": "Direction B · editorial light (not chosen)" },
+    { "file": "DirectionC.dc.html", "x": 800, "y": 3080, "w": 720, "h": 480, "title": "Direction C · dense operator console (not chosen)" }
+  ],
+  "annotations": [
+    { "id": "brief", "x": 0, "y": -170, "w": 560, "text": "Sonder redesign · quiet instrument\nThe transcript is the object; chrome is hairlines and a 24px glyph gutter (❯ you, ◈ sonder, ▸ tool, ⊘ refused). One accent: Sonder's own signal teal #63D6C8 on the existing #0B1117 canvas. IBM Plex Sans for UI, IBM Plex Mono for the transcript, status and terminal. Dark first, light mirrored. Static mockups: nothing here is wired." },
+    { "id": "app-note", "x": 1520, "y": -110, "w": 420, "text": "App: left rail 272px (threads, projects, quick actions), reading column 760px, activity drawer 320px on wide screens, 28px status bar. A refusal is a card with the three real remedies; the mode chip lives in the composer." },
+    { "id": "terminal-note", "x": 0, "y": 2760, "w": 900, "text": "Terminal: keeps the pinned contracts (the Sonder · answer label, the ╰ 1.20s (/pass or /fail) footer, the ◈ Sonder is working... line, byte-exact piped output) and restyles around them: the box banner becomes a two-line header, gutter glyphs, tool rows, a refusal that names /approve, status right-aligned on the prompt line. ASCII fallbacks for every glyph." },
+    { "id": "alternates", "x": 1600, "y": 3100, "w": 420, "text": "Two other directions, sketched low-fi so the choice is about structure. Neither was built out; the committed direction above is the deliverable. Say the word and either becomes the main line." }
+  ],
+  "launch": { "view": "canvas" }
+}

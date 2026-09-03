@@ -26,3 +26,23 @@ flutter:
   uses-material-design: true
   assets:
     - assets/
+  # IBM Plex (OFL 1.1, see fonts/OFL.txt): the UI face and the transcript,
+  # code and status face. Bundled so an offline, private-first install never
+  # fetches a font, and every platform renders the same hierarchy.
+  fonts:
+    - family: IBM Plex Sans
+      fonts:
+        - asset: fonts/IBMPlexSans-Regular.ttf
+          weight: 400
+        - asset: fonts/IBMPlexSans-Medium.ttf
+          weight: 500
+        - asset: fonts/IBMPlexSans-SemiBold.ttf
+          weight: 600
+    - family: IBM Plex Mono
+      fonts:
+        - asset: fonts/IBMPlexMono-Regular.ttf
+          weight: 400
+        - asset: fonts/IBMPlexMono-Medium.ttf
+          weight: 500
+        - asset: fonts/IBMPlexMono-SemiBold.ttf
+          weight: 600

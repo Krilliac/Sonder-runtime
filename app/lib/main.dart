@@ -101,9 +101,11 @@ class _SonderRuntimeAppState extends State<SonderRuntimeApp>
       debugShowCheckedModeBanner: false,
       theme: SonderTheme.light,
       darkTheme: SonderTheme.dark,
-      themeMode: (settings?.darkMode ?? true)
-          ? ThemeMode.dark
-          : ThemeMode.light,
+      themeMode: switch (settings?.themeMode) {
+        'light' => ThemeMode.light,
+        'system' => ThemeMode.system,
+        _ => ThemeMode.dark,
+      },
       home: settings == null
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
           : ChatScreen(settings: settings, onSettingsChanged: _update),

@@ -186,8 +186,14 @@ untouched.
 
 The legacy `approval` parameter stays on the handlers' signatures: it still
 carries the host's in-process project-root sentinel, and a protocol caller's
-string in it is inert. `SONDER_ISOLATED_APPROVAL_CODE` has the same shape as
-the retired code and should follow. `ResourcePolicy.Decision.ALLOW_ONCE` remains
+string in it is inert. `SONDER_ISOLATED_APPROVAL_CODE` and
+`SONDER_ISOLATED_WRITE_APPROVAL_CODE` had the same shape and followed on
+2026-09-03: `isolated_run` keeps its developer token and risk acknowledgement,
+and a writable workspace needs a one-shot approval of exactly that call, spent
+by the gate on an unattended refusal answered with `/approve`, or by the
+handler itself when the mode let the call through
+(`server._isolated_write_approved`, pinned in `tests/test_isolated_run_server.py`).
+`ResourcePolicy.Decision.ALLOW_ONCE` remains
 unused: the permission ledger is the one-shot mechanism. The compute job
 worker is not fenced: its effect is the job it launches for a controller,
 its claim is the job record itself, and cancellation already reaches the

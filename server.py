@@ -25,7 +25,7 @@ import logging
 import datetime
 import functools
 import hashlib
-import hmac
+import contextvars
 import importlib
 import http.client
 import inspect
@@ -9612,6 +9612,80 @@ def _warn_retired_approval_code() -> None:
     )
 
 
+_RETIRED_ISOLATED_CODE_WARNED = threading.Event()
+
+
+def _warn_retired_isolated_code() -> None:
+    """Say once per process that the isolated approval codes no longer do anything."""
+    if _RETIRED_ISOLATED_CODE_WARNED.is_set():
+        return
+    _RETIRED_ISOLATED_CODE_WARNED.set()
+    logging.getLogger("sonder.server").warning(
+        "SONDER_ISOLATED_APPROVAL_CODE / SONDER_ISOLATED_WRITE_APPROVAL_CODE are set "
+        "but no longer honoured: they were shared secrets in model-visible arguments "
+        "that unlocked isolated_run. A developer token and "
+        "acknowledge_isolation_limits=true still gate every call; a writable "
+        "workspace needs a one-shot approval of exactly that call (/approve <call id>)."
+    )
+
+
+# The call a surface is serving right now: the tool name and the argument view
+# it digested for the permission gate (credentials stripped there, defaults the
+# caller omitted absent). A handler that has to reason about "exactly this
+# call" -- consume or note a one-shot approval for it -- reads the same view
+# the gate used, so both layers name the same call id. Per context, so two
+# concurrent protocol calls never see each other's.
+_ACTIVE_CALL: contextvars.ContextVar = contextvars.ContextVar(
+    "sonder_active_call", default=None,
+)
+
+
+def _active_call_arguments(tool_name: str):
+    """The surface's argument view for the in-flight call of ``tool_name``, or None."""
+    active = _ACTIVE_CALL.get()
+    if active is None or active[0] != str(tool_name or "").strip().lstrip("/"):
+        return None
+    return active[1]
+
+
+def _isolated_write_approved() -> tuple[bool, str]:
+    """Whether a person approved exactly this writable ``isolated_run`` call once.
+
+    Returns ``(True, "")`` when the gate already spent a one-shot approval for
+    this call on the way in (an unattended refusal answered by ``/approve``),
+    or when an open approval for exactly this call is in the ledger and is
+    spent here (the mode let the call through without consulting one: ``auto``,
+    an allow rule, an attended ask answered yes). Otherwise ``(False, call
+    id)``: the call is noted pending so ``/approvals`` lists it and ``/approve
+    <call id>`` can answer it. ``(False, "")`` when no surface is serving the
+    call: nothing digested it, so nothing could have approved it.
+    """
+    args = _active_call_arguments("isolated_run")
+    if args is None:
+        return False, ""
+    if permission_modes.approval_spent_for("isolated_run", args):
+        return True, ""
+    digest = permission_modes.call_digest("isolated_run", args)
+    short = permission_modes.call_id(digest)
+    ledger = permission_modes.approval_ledger()
+    if not digest or ledger is None:
+        return False, short
+    try:
+        approval = ledger.consume("isolated_run", digest, surface="tool")
+    except Exception:
+        approval = None
+    if approval is not None:
+        return True, ""
+    try:
+        ledger.record_pending(
+            "isolated_run", digest, surface="tool",
+            preview=permission_modes.argument_preview(args),
+        )
+    except Exception:
+        pass
+    return False, short
+
+
 def _file_bypass_allowed(token: str = "", approval: str = "") -> bool:
     """Whether this call may resolve paths with containment switched off.
 
@@ -9662,10 +9736,12 @@ def approved_call_reach(tool_name, arguments):
         roots = args.get("extra_roots", "")
         return roots if isinstance(roots, str) else ""
 
+    active = _ACTIVE_CALL.set((name, args))
     try:
         with file_ops.reach_scope(granted):
             yield
     finally:
+        _ACTIVE_CALL.reset(active)
         permission_modes.forget_spent_approval()
 
 
@@ -13220,14 +13296,16 @@ def isolated_run(
     output_bytes: int = 131072,
     acknowledge_isolation_limits: bool = False,
     token: str = "",
-    approval: str = "",
-    write_approval: str = "",
 ) -> str:
     """Run an installed Linux container image under a fixed isolation policy.
 
-    This direct MCP tool requires developer authentication, a host approval
-    secret, and explicit risk acknowledgement in addition to the local ``ask``
-    policy. Writable binds require a second host secret. It is intentionally
+    This direct MCP tool requires developer authentication and explicit risk
+    acknowledgement in addition to the local ``ask`` policy. A writable bind
+    (``writable_workspace=true``, the only integrity-expanding option) also
+    needs a person to have approved exactly this call once: ``/approve <call
+    id>`` at the console, spent by the next unchanged call. The shared
+    ``SONDER_ISOLATED_APPROVAL_CODE`` / ``SONDER_ISOLATED_WRITE_APPROVAL_CODE``
+    secrets are retired and grant nothing. It is intentionally
     unavailable to Sonder agents and autopilot. ``argv_json``
     must be a JSON string array. The exact absolute ``project`` directory is the
     only host bind and is read-only unless the host explicitly sets
@@ -13252,16 +13330,14 @@ def isolated_run(
         )
         return message
 
+    if (os.environ.get("SONDER_ISOLATED_APPROVAL_CODE", "").strip()
+            or os.environ.get("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "").strip()):
+        _warn_retired_isolated_code()
     account = _admin_account_from_token(token) if token else None
     authorized, _message = admin_auth.require(account, "developer")
-    expected = os.environ.get("SONDER_ISOLATED_APPROVAL_CODE", "")
-    approval_ok = bool(
-        expected and approval and hmac.compare_digest(approval, expected)
-    )
-    if not authorized or not approval_ok:
+    if not authorized:
         return deny("authorization-denied", (
-            "ERROR: isolated_run requires a developer token and the host's "
-            "SONDER_ISOLATED_APPROVAL_CODE."
+            "ERROR: isolated_run requires a developer token."
         ))
     if acknowledge_isolation_limits is not True:
         return deny(
@@ -13269,15 +13345,17 @@ def isolated_run(
             "ERROR: acknowledge_isolation_limits=true is required.",
         )
     if writable_workspace is True:
-        expected_write = os.environ.get("SONDER_ISOLATED_WRITE_APPROVAL_CODE", "")
-        if not (
-            expected_write
-            and write_approval
-            and hmac.compare_digest(write_approval, expected_write)
-        ):
+        approved, call = _isolated_write_approved()
+        if not approved:
+            remedy = (
+                "/approve %s at the console lets exactly this call run once "
+                "(see /approvals), then repeat it." % call
+                if call else
+                "only a served call (console, MCP, API) can carry one."
+            )
             return deny("writable-authorization-denied", (
-                "ERROR: writable_workspace requires the separate host "
-                "SONDER_ISOLATED_WRITE_APPROVAL_CODE."
+                "ERROR: writable_workspace needs a one-shot approval of exactly "
+                "this call; %s" % remedy
             ))
     try:
         result = isolated_runner.run_isolated(

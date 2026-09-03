@@ -20,10 +20,27 @@ answer):
 
 - All styling goes through one helper, `_paint(text, *styles)`, using the
   palette in `class _Ansi`. Color is enabled only when stdout is a tty and
-  `NO_COLOR` is unset; truecolor needs `COLORTERM=truecolor|24bit`.
-- Width math must use `_visible_len()` (escape-aware), never `len()`.
-- Box glyphs degrade to ASCII when the console encoding cannot encode
-  them (`_box_chars()`); a decorative header must never crash a launch.
+  `NO_COLOR` is unset; truecolor needs `COLORTERM=truecolor|24bit`, and
+  every token has a hand-picked 256-colour cell (`_fg()`) so a plain xterm
+  sees the same hierarchy.
+- The palette is one accent and a few tones, not a rainbow: `teal` is the
+  accent (the header mark, the `❯` prompt, the answer label); `cyan` names
+  identity (model, persona) and the `manual` mode; `green`, `amber`, `red`
+  and `violet` are ok/plan, warn/acceptEdits, error/danger and auto;
+  `text2` and `muted` are the greys the chrome is drawn in. Meaning is never
+  carried by colour alone -- every coloured value has its label.
+- The launch header is a few packed lines, not a box: `_header_lines()`
+  packs `label value` segments to the terminal width (`_terminal_columns()`,
+  60..120) by printed width, then the hint and a rule. Width math must use
+  `_visible_len()` (escape-aware), never `len()`.
+- Where the raw composer cannot frame the prompt (Linux, macOS, a dumb
+  `TERM`), the composer title is printed as one muted status line
+  (`_status_line()`) and the prompt itself is the gutter glyph
+  (`_prompt_glyph()`, `❯`), so typed input lines up with the transcript.
+  The raw composer (Windows) keeps the title in its frame.
+- Box and gutter glyphs degrade to ASCII when the console encoding cannot
+  encode them (`_box_chars()`); a decorative header must never crash a
+  launch.
 - OSC-8 hyperlinks (`_terminal_link()`) are emitted only when color is
   enabled, so copied or piped output keeps the literal URL.
 - Presentation failures never kill the REPL: slash-menu errors fall back
