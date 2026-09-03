@@ -34,6 +34,19 @@ def _wait_for_page(service, terminal_id, *, after=None, timeout=3.0):
     raise AssertionError("terminal output did not arrive")
 
 
+def _wait_for_sequence(service, terminal_id, sequence, *, timeout=3.0):
+    """Block until the durable log has advanced to ``sequence`` or beyond."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        page = service.read_page(
+            terminal_id, after=OutputWatermark(0), max_events=16, max_bytes=4096
+        )
+        if page.next_watermark.sequence >= sequence:
+            return page
+        time.sleep(0.01)
+    raise AssertionError(f"terminal output did not reach sequence {sequence}")
+
+
 def test_persistent_terminal_reconnects_and_replays_durable_watermarks(tmp_path):
     code = "import sys; [print('echo:'+line.strip(), flush=True) for line in sys.stdin]"
     service = SQLitePersistentTerminalService(tmp_path / "term.sqlite", world_id="world-1")
@@ -59,17 +72,20 @@ def test_persistent_terminal_reconnects_and_replays_durable_watermarks(tmp_path)
 
 
 def test_reads_are_bounded_and_report_retention_gap(tmp_path):
-    code = (
-        "import sys,time; "
-        "[ (print(value, flush=True), time.sleep(.08)) for value in ('one','two','three') ]; "
-        "time.sleep(5)"
-    )
+    # The child echoes a line only after the test sends it, and the next line
+    # is sent only once the previous echo is durable, so the three outputs
+    # land as at least three separate journal events whatever the reader
+    # thread's timing. A timed burst from the child left that to scheduler
+    # luck: on a loaded runner the reader coalesced two prints into one
+    # chunk, nothing was evicted, and the gap was never reported.
+    code = "import sys; [print('echo:'+line.strip(), flush=True) for line in sys.stdin]"
     service = SQLitePersistentTerminalService(
         tmp_path / "term.sqlite", world_id="world-1", max_events=2, max_bytes=64
     )
-    service.open_named("term-1", _request(code), _context())
-    _wait_for_page(service, "term-1")
-    time.sleep(0.25)
+    handle = service.open_named("term-1", _request(code), _context())
+    for sequence, value in enumerate(("one", "two", "three"), start=1):
+        handle.send(value + "\n")
+        _wait_for_sequence(service, "term-1", sequence)
     page = service.read_page("term-1", after=OutputWatermark(0), max_events=16, max_bytes=4096)
     assert len(page.events) <= 2
     assert page.truncated is True
