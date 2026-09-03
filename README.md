@@ -462,3 +462,4 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Two-Hundred-Ninety-Sixth Slice: pure fanout prompt-echo redaction now lives in `sonder_runtime.domain.fanout_redaction`, preserving the root `_fanout_redact_prompt_echo` alias.
 - WP1 Two-Hundred-Ninety-Seventh Slice: pure agent decision parsing now lives in `sonder_runtime.domain.agents.decision_parsing`, preserving the root `_extract_agent_json` alias.
 - WP1 Two-Hundred-Ninety-Eighth Slice: pure improvement report rendering now lives in `sonder_runtime.domain.improvement_report_formatting`, preserving the root `format_improvement_report` alias.
+- WP1 Two-Hundred-Ninety-Ninth Slice: the pure natural-language model and fanout request grammar now lives in `sonder_runtime.domain.natural_model_request`, preserving the root `natural_model_request` and `_fanout_profile_scope` delegates and the selector constant aliases.
