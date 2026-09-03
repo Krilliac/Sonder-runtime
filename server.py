@@ -360,6 +360,10 @@ from sonder_runtime.adapters.cloud_fallback import (
     extra_usage_fallback as _extra_usage_fallback_policy,
 )
 from sonder_runtime.domain.fanout_residency import dispatch_residency_reason as _dispatch_residency_reason_policy
+from sonder_runtime.adapters.session_turn_claims import (
+    acquire_session_turn as _acquire_session_turn_policy,
+    release_session_turn_claim as _release_session_turn_claim_policy,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -1943,78 +1947,13 @@ def _serialized_session_turn(session_id):
 
 def _acquire_persistent_session_turn(session_id):
     """Acquire a DB-backed session claim before reading remembered history."""
-    owner_state, owner_identity = process_liveness.probe_process(os.getpid())
-    if (
-        owner_state != process_liveness.PROCESS_ALIVE
-        or not owner_identity
-    ):
-        return None, "ERROR: session owner identity is unavailable."
-    try:
-        conn = _open_db()
-    except Exception:
-        return None, "ERROR: session turn coordination is unavailable."
-    claim_token = memory_store.new_id()
-    deadline = time.monotonic() + _SESSION_TURN_CLAIM_WAIT_SECONDS
-    while True:
-        try:
-            claimed = memory_store.claim_session_turn(
-                conn,
-                session_id,
-                claim_token,
-                owner_pid=os.getpid(),
-                owner_identity=owner_identity,
-            )
-        except Exception:
-            conn.close()
-            return None, "ERROR: session turn coordination is unavailable."
-        if claimed:
-            return {
-                "conn": conn,
-                "session_id": session_id,
-                "claim_token": claim_token,
-                "owner_pid": os.getpid(),
-                "owner_identity": owner_identity,
-            }, ""
-        if time.monotonic() >= deadline:
-            conn.close()
-            session_label = str(session_id).replace("\r", " ").replace("\n", " ")[:120]
-            return None, (
-                "ERROR: session '%s' already has a turn in progress; retry shortly."
-                % session_label
-            )
-        time.sleep(0.05)
+    return _acquire_session_turn_policy(
+        session_id, open_db=_open_db, claim_wait_seconds=_SESSION_TURN_CLAIM_WAIT_SECONDS,
+    )
 
 
 def _release_persistent_session_turn(claim):
-    if not claim:
-        return
-    conn = claim["conn"]
-    for attempt in range(3):
-        try:
-            memory_store.release_session_turn(
-                conn, claim["session_id"], claim["claim_token"],
-            )
-            break
-        except Exception:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            if attempt == 2:
-                memory_store.abandon_session_turn_claim(
-                    claim["session_id"], claim["claim_token"],
-                    claim["owner_pid"], claim["owner_identity"],
-                )
-                return
-            time.sleep(0.05)
-            try:
-                conn = _open_db()
-            except Exception:
-                continue
-    try:
-        conn.close()
-    except Exception:
-        pass
+    return _release_session_turn_claim_policy(claim, open_db=_open_db)
 
 
 def _resolve_project(project):
