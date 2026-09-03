@@ -324,6 +324,30 @@ from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as 
 from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
 from sonder_runtime.domain.campaign_prompt import campaign_prompt as _campaign_prompt_policy
 from sonder_runtime.domain.automation.command_programs import command_programs as _autopilot_command_programs
+from sonder_runtime.adapters.agent_decision_generation import (
+    DECISION_REPAIR_LIMIT as _AGENT_DECISION_REPAIR_LIMIT,
+    generate_decision as _generate_agent_decision,
+)
+from sonder_runtime.adapters.bounded_cloud_generation import (
+    CLOUD_AGENT_NUM_PREDICT as _CLOUD_AGENT_NUM_PREDICT,
+    CLOUD_AGENT_OUTPUT_BUDGET as _CLOUD_AGENT_OUTPUT_BUDGET,
+    bounded_cloud_generate as _bounded_cloud_agent_generate,
+)
+from sonder_runtime.adapters.fanout_health import record_health as _fanout_health_policy
+from sonder_runtime.adapters.fanout_receipt import build_receipt as _fanout_receipt_policy
+from sonder_runtime.adapters.agent_work_coverage import (
+    BUILD_DRIVERS as _AGENT_BUILD_DRIVERS,
+    NO_OP_COMMAND_FLAGS as _AGENT_NO_OP_COMMAND_FLAGS,
+    build_command_examines as _agent_build_command_examines,
+    explicit_command_paths as _agent_explicit_command_paths,
+    mutation_records as _agent_mutation_records,
+    normalized_path as _agent_normalized_path,
+    path_within as _agent_path_within,
+    paths_covered_by_targets as _agent_paths_covered_by_targets,
+    validation_covers as _agent_validation_covers,
+    verification_covers as _agent_verification_covers,
+)
+from sonder_runtime.adapters.repo_repair_runner import run_pytest as _repo_repair_pytest
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -6951,56 +6975,6 @@ _REPO_REPAIR_TASKS = [
      "    assert inclusive_range(2, 2) == [2]\n"),
 ]
 
-
-def _repo_repair_pytest(workdir, timeout):
-    """Run pytest for one scratch project; (ok, bounded output, infra_error).
-
-    ``infra_error`` is non-empty only when the verdict says nothing about the
-    candidate code: a timeout, a failed spawn, or pytest itself breaking.
-    Recording those as model failures poisons the reward store with negative
-    signals the model did not earn (observed 2026-08-02: a memory-starved
-    20-job run banked 20 bogus ``failed`` outcomes). The converse matters just
-    as much - a candidate that fails to even import is the model's fault and
-    must stay attributable.
-    """
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "--no-header", "-x"],
-            cwd=str(workdir), capture_output=True, text=True,
-            # This server's own stdin is the MCP protocol pipe. A child that
-            # inherits it can block forever on a read nobody will answer —
-            # exactly how every job in a 20-job run timed out while the
-            # identical call from a child process took 0.8s.
-            stdin=subprocess.DEVNULL,
-            timeout=max(5, timeout),
-            env=sonder_logging.child_environment(),
-        )
-    except subprocess.TimeoutExpired:
-        return False, "pytest timed out", "pytest timed out"
-    except OSError as exc:
-        return False, str(exc)[:200], "pytest could not start: %s" % (
-            type(exc).__name__,
-        )
-    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    # pytest exit codes: 0 passed, 1 test failed, 2 interrupted (a collection
-    # error), 3 internal error, 4 usage error, 5 no tests collected.
-    #
-    # 2 is the candidate's own fault and must stay attributable. A module the
-    # model wrote with a SyntaxError fails at import, pytest aborts collection,
-    # and the error is reported against the test file that imported it -
-    # observed live when a generation leaked activity-log text into module.py.
-    # Treating 2 as infrastructure excused a real model failure, which is the
-    # mirror image of the bug this split was added to fix.
-    #
-    # 3/4/5 say nothing about the candidate: pytest broke, was misinvoked, or
-    # the test file never arrived. Those stay unattributable, as do a timeout
-    # and a failed spawn above.
-    infra = ""
-    if proc.returncode not in (0, 1, 2):
-        infra = "pytest exited %d without a test verdict" % proc.returncode
-    return proc.returncode == 0, output[-1500:], infra
 
 
 @mcp.tool()
@@ -18636,186 +18610,6 @@ def _agent_verifier_reachable(read_only, allowed_tools):
     )
 
 
-# Flags that make a program report on itself instead of on the project. Taken
-# from the set ``_agent_validation_covers`` already applies to ``workspace_run``
-# -- the sibling free-form-argv tool -- so the two routes refuse the same
-# no-ops rather than each keeping a private list.
-_AGENT_NO_OP_COMMAND_FLAGS = frozenset({
-    "--help", "-h", "--version", "-version", "--collect-only", "--co",
-    "--list-tests", "--dry-run", "--fixtures", "--fixtures-per-test",
-    "--show-only", "-n",
-})
-
-# Programs that build or test a project, and the action words that mean they
-# did. Derived, not recalled: the first rows are exactly the argv
-# ``harness_tools.build_run`` auto-detects from a root's own marker files
-# (Makefile, Cargo.toml, CMakeLists.txt, go.mod, package.json, build.gradle,
-# pom.xml), and the rest are the drivers ``_agent_validation_covers`` already
-# treats as broad for ``workspace_run``. An empty tuple means any non-no-op
-# invocation of that program builds something.
-_AGENT_BUILD_DRIVERS = {
-    "make": (), "gmake": (), "nmake": (), "mingw32-make": (),
-    "cargo": ("build", "check", "test"),
-    "cmake": ("--build",),
-    "go": ("build", "test", "vet", "install"),
-    "npm": ("build", "test", "check", "lint"),
-    "pnpm": ("build", "test", "check", "lint"),
-    "yarn": ("build", "test", "check", "lint"),
-    "gradle": ("build", "test", "check", "assemble", "verify"),
-    "gradlew": ("build", "test", "check", "assemble", "verify"),
-    "mvn": ("package", "install", "verify", "test", "compile"),
-    "msbuild": (), "ninja": (), "ctest": (), "pytest": (),
-    "dotnet": ("build", "test"),
-}
-
-
-def _agent_build_command_examines(command, root, scope, changed):
-    """Whether a ``build_run`` command could have looked at the work at all.
-
-    ``build_run`` is the one verifier with neither a ``path`` nor a fixed
-    program: ``harness_tools.build_run`` takes ``root``/``command``/``timeout``
-    and appends nothing, so the S2 narrowing that made this gate read ``path``
-    cannot reach it and ``root`` alone decided coverage. Measured on a project
-    with no build system, ``build_run(root=proj, command="git --version")``
-    returns ``ok=True, returncode=0``, so ``verification_ok`` was granted --
-    and through ``_work_validated`` that satisfied a whole ``validate`` task --
-    for a command that examined nothing. "Exit 0" is not a verdict about the
-    work when the caller chose the whole argv.
-
-    The control is not new doctrine: ``_agent_validation_covers`` already
-    applies it to ``workspace_run``, the sibling tool whose argv the caller
-    also chooses, on the *validation* route. ``build_run`` reached the
-    *verification* route, where the same shape had no check. The command is
-    tokenized with ``str.split()`` because that is exactly what the child does
-    (``harness_tools.build_run``'s ``parts = command.split()``); analysing it
-    any other way would judge an argv the child never runs.
-
-    An empty ``command`` stays covered. The argv is then derived from the
-    root's own build files, which the caller cannot forge, and a root with no
-    build system comes back ``{"ok": False, ...}`` so ``tool_ok`` already
-    refuses it one level up. That is the non-fabricable binding this check
-    exists to demand, and it is already present on that path.
-    """
-    text = str(command or "").strip()
-    if not text:
-        return True
-    parts = text.split()
-    if not parts:
-        return True
-    program = os.path.basename(parts[0]).casefold()
-    for suffix in (".exe", ".cmd", ".bat"):
-        if program.endswith(suffix):
-            program = program[: -len(suffix)]
-            break
-    argv = parts[1:]
-    lowered = [item.casefold() for item in argv]
-
-    # Self-reporting flags first, and before the driver table: ``make
-    # --version`` is the project's real build program and still builds nothing.
-    if any(item.split("=", 1)[0] in _AGENT_NO_OP_COMMAND_FLAGS for item in lowered):
-        return False
-    if any(
-        item == "clean" or item.endswith(":clean") or item in {"/t:clean", "-t:clean"}
-        for item in lowered
-    ):
-        return False
-    # Inline source runs the caller's own text, never the project's.
-    if program in {"python", "py", "python3", "node"} and any(
-        flag in lowered for flag in ("-c", "-e", "--eval", "-p", "--print")
-    ):
-        return False
-
-    if program in _AGENT_BUILD_DRIVERS:
-        required = _AGENT_BUILD_DRIVERS[program]
-        if not required or any(action in lowered for action in required):
-            return True
-
-    # Otherwise it has to say what it looked at, and that has to be the work.
-    targets = _agent_explicit_command_paths(argv, root)
-    targets = [target for target in targets if _agent_path_within(target, scope)]
-    if not targets:
-        return False
-    if not changed:
-        return True
-    return _agent_paths_covered_by_targets(changed, targets)
-
-
-def _agent_verification_covers(tool_name, args, mutations, project_scope=""):
-    """Whether this verifier ran over the work this run is answerable for.
-
-    Keyed on ``root`` NARROWED BY ``path``. This used to key on ``root`` alone,
-    justified here as: *"their `path` argument narrows which checks run inside
-    it, not what those checks exercise."* That was refuted by code in the same
-    lane. ``harness_tools`` appends ``path`` straight to the child argv
-    (``cmd.append(path)`` in test_run/lint_run/format_code/typecheck_run), so
-    ``path`` decides what the child actually looks at -- it *is* what those
-    checks exercise. ``server.py:15659`` says so in the other direction, and
-    until the confinement added beside this fix, ``path`` could even point
-    outside ``root`` altogether (measured: ``test_run`` executed a file outside
-    the authorized root through it).
-
-    The half the old comment had right is kept, and is why the narrowing is
-    conditional: ``path`` is empty on a default invocation, and reading it
-    unconditionally -- as the file-oriented ``_agent_validation_covers`` does --
-    would answer "" for nearly every real call and refuse verifications that
-    genuinely covered the change. So an empty ``path`` means "the whole root",
-    exactly as before; a non-empty one means the verifier looked at that
-    subtree and must be judged on it.
-
-    Without this, the model changes ``payments.py`` and runs the verifier
-    narrowed to ``tests/`` -- a real, passing, in-scope check of a different
-    part of the tree -- and it counted as covering the change.
-
-    The no-mutation case is decided explicitly, never left to fall through an
-    empty ``all()``: ``all([])`` is True, so a run that changed nothing
-    previously reported *any* root as covering -- a check answering yes because
-    it had nothing to check. That is load-bearing now that a passing verifier
-    also sets validation_attempted/validation_passed, which is what
-    _task_passed and _completion_gate accept for a whole ``validate`` task.
-    With nothing changed on disk, the work the run is answerable for is the
-    scope it was confined to, so the verifier has to cover that scope.
-
-    An unscoped run has no declared boundary to violate -- ``root`` defaults to
-    the server CWD, which is that run's implicit scope -- so it is covered.
-    That default is a separately-tracked item, not something decided here.
-    """
-    args = args if isinstance(args, dict) else {}
-    root = str(args.get("root") or ".")
-    scope = _agent_normalized_path(root)
-    if not scope:
-        return False
-    # A non-empty `path` narrows the scope to what the child was actually
-    # pointed at. Resolved against `root`, matching how the child resolves it
-    # (harness_tools runs it with cwd=root).
-    narrowing = str(args.get("path") or "").strip()
-    if narrowing:
-        narrowed = _agent_normalized_path(
-            narrowing if os.path.isabs(narrowing)
-            else os.path.join(root, narrowing)
-        )
-        # Only ever narrows. A `path` that resolves outside `root` is refused
-        # by harness_tools now; if one still arrives, the scope it covers is
-        # not the root it claimed, so fall closed rather than widen.
-        if not narrowed or not _agent_path_within(narrowed, scope):
-            return False
-        scope = narrowed
-    changed = [
-        str(record.get("path") or "") for record in mutations
-        if record.get("path")
-    ]
-    # ``build_run`` has no ``path`` to narrow with, so the narrowing above can
-    # never reach it and ``root`` alone said yes to any command that exited 0.
-    # See ``_agent_build_command_examines``: the caller chooses this whole argv,
-    # so the argv has to name something in scope before its exit status counts.
-    if tool_name == "build_run" and not _agent_build_command_examines(
-        args.get("command"), root, scope, changed,
-    ):
-        return False
-    if not changed:
-        declared = _agent_normalized_path(project_scope)
-        return _agent_path_within(declared, scope) if declared else True
-    return all(_agent_path_within(path, scope) for path in changed)
-
 
 def _agent_verification_standing():
     """Whether the measured record demands a citation, and the measured why.
@@ -18951,15 +18745,6 @@ def _agent_tool_observation_ok(tool_name, observation):
 
 
 
-def _agent_normalized_path(value):
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        return os.path.normcase(str(file_ops.resolve_path(text)))
-    except (OSError, PermissionError, ValueError):
-        return os.path.normcase(os.path.abspath(text))
-
 
 def _agent_created_path_key(path):
     """One canonical key per on-disk target for the run-created-paths ledger.
@@ -18981,55 +18766,6 @@ def _agent_call_signature(tool_name, args):
     )
 
 
-def _agent_mutation_records(tool_name, args):
-    args = args if isinstance(args, dict) else {}
-    if tool_name == "file_batch_write":
-        operations = _batch_agent_operations(args) or []
-        return [
-            {"tool": tool_name, "path": _agent_normalized_path(item.get("path", ""))}
-            for item in operations if isinstance(item, dict)
-        ]
-    if tool_name == "text_patch":
-        try:
-            root = args.get("root") or "."
-            return [
-                {"tool": tool_name, "path": _agent_normalized_path(os.path.join(root, *item["path"].split("/")))}
-                for item in text_patch_ops._parse(args.get("patch", ""))
-            ]
-        except (TypeError, ValueError, PermissionError):
-            return [{"tool": tool_name, "path": _agent_normalized_path(args.get("root", ""))}]
-    if tool_name == "data_convert":
-        if args.get("apply") is not True:
-            return []
-        return [{
-            "tool": tool_name,
-            "path": _agent_normalized_path(args.get("output_path", "")),
-        }]
-    if tool_name == "archive_create":
-        root = str(args.get("root") or ".")
-        destination = str(args.get("destination") or "")
-        if destination and not os.path.isabs(destination):
-            destination = os.path.join(root, destination)
-        return [{"tool": tool_name, "path": _agent_normalized_path(destination)}]
-    path = args.get("path", "")
-    if tool_name == "archive_extract":
-        path = args.get("destination", "")
-    elif tool_name == "artifact_generate":
-        path = args.get("output_dir") or os.path.join(
-            "artifacts", "generated", str(args.get("name", "generated-artifact")),
-        )
-    elif tool_name in {"game_generate_and_test", "game_generation_campaign"}:
-        path = os.path.join("games", str(args.get("name", "generated-game")))
-    elif tool_name in {"file_copy", "file_move"}:
-        path = args.get("destination", "")
-    record = {
-        "tool": tool_name,
-        "path": _agent_normalized_path(path),
-    }
-    if tool_name == "file_move":
-        record["source"] = _agent_normalized_path(args.get("source", ""))
-    return [record]
-
 
 def _agent_mutation_record(tool_name, args):
     """Compatibility helper for callers that expect one mutation record."""
@@ -19037,277 +18773,10 @@ def _agent_mutation_record(tool_name, args):
     return records[0] if records else {"tool": tool_name, "path": ""}
 
 
-def _agent_path_within(path, root):
-    path = _agent_normalized_path(path)
-    root = _agent_normalized_path(root)
-    if not path or not root:
-        return False
-    try:
-        return os.path.commonpath((path, root)) == root
-    except (OSError, ValueError):
-        return False
 
 
 
-def _agent_explicit_command_paths(argv, cwd):
-    """Resolve path-looking argv entries against the validator working dir."""
-    resolved = []
-    for item in argv:
-        text = str(item or "").strip()
-        if not text or text.startswith("-"):
-            continue
-        looks_pathlike = (
-            os.path.isabs(text)
-            or bool(re.match(r"^[A-Za-z]:[\\/]", text))
-            or "/" in text
-            or "\\" in text
-            or text in {".", ".."}
-            or bool(os.path.splitext(text)[1])
-        )
-        if not looks_pathlike:
-            continue
-        candidate = text if os.path.isabs(text) else os.path.join(cwd, text)
-        resolved.append(_agent_normalized_path(candidate))
-    return [path for path in resolved if path]
 
-
-def _agent_paths_covered_by_targets(paths, targets):
-    return bool(paths and targets) and all(
-        any(path == target or _agent_path_within(path, target) for target in targets)
-        for path in paths
-    )
-
-
-def _agent_validation_covers(tool_name, args, mutations, observation=""):
-    """Require validators to touch changed disk state, not equivalent draft code."""
-    args = args if isinstance(args, dict) else {}
-    records = [record for record in mutations if record.get("tool")]
-    if not records:
-        if tool_name in {"artifact_verify", "artifact_ground"}:
-            return bool(str(args.get("path") or "").strip())
-        if tool_name == "ground_artifact":
-            checks = args.get("checks_json", args.get("checks", []))
-            return bool(str(args.get("artifact") or "") and checks)
-        if tool_name in {
-            "game_reference_suite", "self_heal_check", "memory_quality_report",
-            "memory_privacy_review", "learning_health_status",
-        }:
-            return True
-    paths = [record["path"] for record in records if record.get("path")]
-    target = _agent_normalized_path(args.get("path", args.get("artifact", "")))
-
-    if tool_name == "archive_extract":
-        destination = _agent_normalized_path(args.get("destination", ""))
-        return bool(destination) and all(
-            record["tool"] == "archive_extract"
-            and record.get("path") == destination
-            for record in records
-        ) and '"validation_passed": true' in str(observation or "").lower()
-
-    if tool_name == "archive_create":
-        root = str(args.get("root") or ".")
-        destination = str(args.get("destination") or "")
-        if destination and not os.path.isabs(destination):
-            destination = os.path.join(root, destination)
-        destination = _agent_normalized_path(destination)
-        return bool(destination) and all(
-            record["tool"] == "archive_create"
-            and record.get("path") == destination
-            for record in records
-        ) and '"ok": true' in str(observation or "").lower() and bool(
-            re.search(r'"archive_sha256":\s*"[0-9a-f]{64}"', str(observation or "").lower())
-        )
-
-    if tool_name in {
-        "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
-    }:
-        game_path = _agent_normalized_path(
-            os.path.join("games", str(args.get("name", "generated-game")))
-        )
-        return bool(records) and all(
-            record["tool"] in {
-                "game_generate_and_test", "game_generation_campaign",
-            }
-            and record.get("path") == game_path
-            for record in records
-        )
-    if tool_name == "memory_quality_report":
-        return bool(records) and all(
-            record["tool"] == "memory_quality_repair" for record in records
-        )
-    if tool_name == "memory_privacy_review":
-        return bool(records) and all(
-            record["tool"] == "memory_privacy_repair" for record in records
-        )
-    if tool_name == "learning_health_status":
-        return bool(records) and all(record["tool"] in {
-            "memory_embedding_backfill",
-            "memory_interaction_embedding_backfill",
-        } for record in records)
-    if tool_name in {"artifact_verify", "artifact_ground"}:
-        return bool(records) and all(
-            record["tool"] == "artifact_generate"
-            and bool(target)
-            and _agent_path_within(target, record.get("path", ""))
-            for record in records
-        )
-    if tool_name == "script_run":
-        if target and paths and all(path == target for path in paths):
-            return True
-        name = os.path.basename(target).lower()
-        if not any(
-            word in name for word in ("test", "check", "verify", "smoke", "build")
-        ):
-            return False
-        cwd = _agent_normalized_path(
-            args.get("cwd") or os.path.dirname(target)
-        )
-        if not paths:
-            return bool(cwd)
-        return bool(cwd) and all(
-            _agent_path_within(path, cwd) for path in paths
-        )
-    if tool_name == "workspace_run":
-        program = os.path.basename(str(args.get("program", ""))).lower()
-        argv = _agent_argv(args)
-        argv_text = [item.casefold() for item in argv]
-        no_op_flags = {
-            "--help", "-h", "--version", "--collect-only", "--co",
-            "--list-tests", "--dry-run", "--fixtures", "--fixtures-per-test",
-            "--show-only",
-        }
-        if any(item.split("=", 1)[0] in no_op_flags for item in argv_text):
-            return False
-        if program in {"ctest", "ctest.exe", "ninja", "ninja.exe"} and "-n" in argv_text:
-            return False
-        if "help" in argv_text and program in {
-            "cmake", "cmake.exe", "ninja", "ninja.exe", "gradle", "gradle.bat",
-            "mvn", "mvn.cmd", "npm", "npm.cmd", "cargo", "cargo.exe",
-        }:
-            return False
-        clean_only = any(
-            item == "clean"
-            or item.endswith(":clean")
-            or item in {"/t:clean", "-t:clean"}
-            for item in argv_text
-        )
-        if clean_only:
-            return False
-        observation_lower = str(observation or "").casefold()
-        if re.search(
-            r"(?:no tests ran|collected\s+0\s+items|total tests:\s*0|"
-            r"(?<!\d)0\s+tests\s+(?:passed|run)\b)",
-            observation_lower,
-        ):
-            return False
-        cwd = _agent_normalized_path(args.get("cwd") or ".")
-        explicit_targets = _agent_explicit_command_paths(argv, cwd)
-        explicit_coverage = _agent_paths_covered_by_targets(
-            paths, explicit_targets,
-        )
-        if not paths:
-            explicit_coverage = bool(explicit_targets)
-
-        python_programs = {"python", "python.exe", "py", "py.exe"}
-        node_programs = {"node", "node.exe"}
-        if program in python_programs and any(
-            flag in argv_text for flag in ("-c", "-command")
-        ):
-            return False
-        if program in node_programs and any(
-            flag in argv_text for flag in ("-e", "--eval", "-p", "--print")
-        ):
-            return False
-
-        broad = program in {
-            "pytest", "pytest.exe", "ctest", "ctest.exe", "ninja", "ninja.exe",
-            "msbuild", "msbuild.exe",
-        }
-        if program in {"cmake", "cmake.exe"}:
-            broad = "--build" in argv_text
-        elif program in {"cargo", "cargo.exe"}:
-            broad = any(action in argv_text for action in ("test", "check", "build"))
-        elif program in {"dotnet", "dotnet.exe"}:
-            broad = any(action in argv_text for action in ("test", "build"))
-        elif program in {"npm", "npm.cmd"}:
-            broad = (
-                "test" in argv_text
-                or (
-                    "run" in argv_text
-                    and any(action in argv_text for action in ("build", "check", "lint"))
-                )
-            )
-        elif program in {"gradle", "gradle.bat", "mvn", "mvn.cmd"}:
-            broad = any(
-                action in argv_text
-                for action in ("test", "check", "build", "verify", "package")
-            )
-        elif program in {"flutter", "flutter.bat", "dart", "dart.exe"}:
-            broad = any(
-                action in argv_text
-                for action in ("test", "analyze", "build", "compile")
-            )
-        elif program in python_programs and "-m" in argv_text:
-            module_index = argv_text.index("-m") + 1
-            module = argv_text[module_index] if module_index < len(argv_text) else ""
-            broad = module in {"pytest", "unittest"}
-            if module in {"py_compile", "compileall"}:
-                return explicit_coverage
-        elif program in node_programs:
-            broad = "--test" in argv_text
-
-        if broad:
-            return bool(cwd) and (
-                not paths
-                or all(_agent_path_within(path, cwd) for path in paths)
-            )
-        if program in (
-            python_programs
-            | node_programs
-            | {"cl", "cl.exe", "g++", "g++.exe", "clang++", "clang++.exe"}
-        ):
-            return explicit_coverage
-        return False
-    if tool_name == "image_inspect":
-        return bool(
-            target in paths
-            and os.path.splitext(target)[1].lower()
-            in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ppm", ".svg"}
-        )
-    if tool_name in {"file_read", "file_read_range"}:
-        return bool(
-            target in paths
-            and os.path.splitext(target)[1].lower()
-            in {".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml", ".xml"}
-        )
-    if tool_name in {"workspace_inventory", "directory_tree", "file_find", "text_search"}:
-        root = _agent_normalized_path(args.get("root", args.get("path", ".")))
-        observed = os.path.normcase(str(observation or ""))
-        eligible = [
-            record["path"] for record in records
-            if record.get("path")
-            and (
-                (
-                    tool_name in {"workspace_inventory", "directory_tree", "file_find"}
-                    and record["tool"] in {
-                        "directory_create", "file_copy", "file_move",
-                    }
-                )
-                or (
-                    tool_name == "text_search"
-                    and os.path.splitext(record["path"])[1].lower()
-                    in {".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml", ".xml"}
-                )
-            )
-        ]
-        return bool(eligible) and all(
-            (path.startswith(root + os.sep) or path == root)
-            and os.path.basename(path) in observed
-            for path in eligible
-        )
-    # run_code/run_project validate generated snippets or temp projects, not the
-    # persistent files just edited. self_heal_check is likewise unrelated.
-    return False
 _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
@@ -19389,93 +18858,8 @@ _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
 })
 _LOCAL_AGENT_NUM_PREDICT = 1200
-# A hosted agent decision may contain a complete bounded file_write payload.
-# The per-call ceiling accommodates substantial native arguments, but exact
-# 64 KiB payloads may still require chunks because characters are not tokens.
-_CLOUD_AGENT_NUM_PREDICT = 16384
-_CLOUD_AGENT_OUTPUT_BUDGET = 65536
 _CLOUD_AGENT_WRITE_CHUNK_HINT = 24000
 
-
-def _bounded_cloud_agent_generate(
-    gen,
-    *,
-    per_call_limit=_CLOUD_AGENT_NUM_PREDICT,
-    total_budget=_CLOUD_AGENT_OUTPUT_BUDGET,
-    budget_state=None,
-):
-    """Hard-bound aggregate hosted output while preserving actual usage data."""
-    per_call_limit = max(1, int(per_call_limit))
-    total_budget = max(per_call_limit, int(total_budget))
-    if budget_state is None:
-        budget_state = {"spent": 0, "total": total_budget}
-    else:
-        budget_state.setdefault("spent", 0)
-        budget_state.setdefault("total", total_budget)
-        total_budget = max(1, int(budget_state["total"]))
-
-    def bounded(prompt, history=None):
-        spent = max(0, int(budget_state.get("spent", 0)))
-        remaining = total_budget - spent
-        if remaining <= 0:
-            raise ModelCallError(
-                "budget",
-                "the bounded %d-token allowance for this agent run was consumed"
-                % total_budget,
-                attempts=0,
-                cloud=True,
-            )
-        call_limit = min(per_call_limit, remaining)
-        try:
-            gen.num_predict_override = call_limit
-        except (AttributeError, TypeError):
-            pass
-        try:
-            content = gen(prompt, history=history)
-        except ModelCallError as error:
-            usage = dict(getattr(gen, "last_usage", None) or {})
-            charged = _model_usage_count(usage.get("tokens_out"))
-            # Empty/failed hosted responses may not expose usage to the
-            # caller. Charge the full request ceiling so repeated failures
-            # cannot evade the aggregate budget.
-            if error.attempts <= 0:
-                charged = 0
-            else:
-                charged = call_limit
-            spent += charged
-            budget_state["spent"] = spent
-            bounded.last_usage = usage
-            bounded.last_response_meta = dict(
-                getattr(gen, "last_response_meta", None) or {}
-            )
-            bounded.output_tokens_used = spent
-            raise
-        finally:
-            try:
-                gen.num_predict_override = None
-            except (AttributeError, TypeError):
-                pass
-        usage = dict(getattr(gen, "last_usage", None) or {})
-        reported = _model_usage_count(usage.get("tokens_out"))
-        estimated = max(1, _rough_token_count(content))
-        # Provider usage metadata is external input. Never let a zero or
-        # implausibly low count make nonempty/native-tool output free.
-        charged = max(reported or 0, estimated)
-        spent += charged
-        budget_state["spent"] = spent
-        bounded.last_usage = usage
-        bounded.last_response_meta = dict(
-            getattr(gen, "last_response_meta", None) or {}
-        )
-        bounded.output_tokens_used = spent
-        return content
-
-    bounded.last_usage = {}
-    bounded.last_response_meta = {}
-    bounded.output_tokens_used = 0
-    bounded.output_token_budget = total_budget
-    bounded.output_budget_state = budget_state
-    return bounded
 
 
 def _agent_project_scope(project):
@@ -23082,116 +22466,7 @@ def _fanout_admission(run, rows, limits):
 
 def _fanout_receipt(run_id):
     """Build a serializable receipt without exposing the sealed prompt."""
-    run = fanout_store.get_run(run_id)
-    if run is None:
-        return None
-    limits = _fanout_limits(run)
-    rows = fanout_store.list_results(run_id)
-    now = time.time()
-    def result_usage(row):
-        truncation_known = bool(row.get("answer_truncation_known"))
-        return {
-            # Legacy receipts never recorded source size.  Do not infer that a
-            # 64k prefix was complete: callers get an explicit unknown instead.
-            "answer_chars": max(0, int(row.get("answer_chars") or 0)) if truncation_known else None,
-            "stored_answer_chars": len(row.get("answer") or ""),
-            "answer_truncation_known": truncation_known,
-            "answer_truncated": bool(row.get("answer_truncated")) if truncation_known else None,
-            "thinking_chars": max(0, int(row.get("thinking_chars") or 0)),
-            "done_reason": row.get("done_reason") or None,
-        }
-
-    answers = [{"model": row["model"], "answer": row["answer"], "elapsed_ms": row["elapsed_ms"],
-                **result_usage(row)}
-               for row in rows if row["status"] == "answered"]
-    def failure_receipt(row):
-        item = {
-            "model": row["model"],
-            "error": row["error"],
-            "elapsed_ms": row["elapsed_ms"],
-            "status": row["status"],
-            # Null means a legacy receipt predates the closed vocabulary.
-            "failure_class": fanout_store.normalize_failure_class(row.get("failure_class")),
-            **result_usage(row),
-        }
-        # The database stores an absolute expiry so a process restart cannot
-        # turn a provider hint into a longer wait.  The public receipt gets
-        # only a live relative delay; it is informative and never causes an
-        # automatic replay of this terminal failed row.
-        try:
-            expiry = float(row.get("retry_after_ts"))
-            # A past-but-valid provider hint remains observable as zero.  This
-            # distinguishes it from no provider hint at all without exposing
-            # the absolute timestamp.
-            remaining_ms = max(0, int((expiry - now) * 1000))
-        except (TypeError, ValueError, OverflowError):
-            remaining_ms = None
-        if remaining_ms is not None:
-            item["retry_after_ms"] = remaining_ms
-        return item
-
-    failures = [failure_receipt(row) for row in rows if row["status"] in ("failed", "unknown")]
-    failed_rows = [row for row in rows if row["status"] == "failed"]
-    unknown_rows = [row for row in rows if row["status"] == "unknown"]
-    pending_rows = [row for row in rows if row["status"] == "pending"]
-    running_rows = [row for row in rows if row["status"] == "running"]
-    execution_skips = [{"model": row["model"], "reason": row["error"] or "not executed"}
-                       for row in rows if row["status"] == "skipped"]
-    ended = run.get("finished_ts") or now
-    plan_skips = []
-    for row in limits["plan_skipped"]:
-        item = dict(row) if isinstance(row, dict) else {"reason": str(row or "not eligible")}
-        expiry = item.pop("retry_after_ts", None)
-        try:
-            remaining_ms = int((float(expiry) - now) * 1000)
-        except (TypeError, ValueError):
-            remaining_ms = 0
-        if remaining_ms > 0:
-            item["retry_after_ms"] = remaining_ms
-        plan_skips.append(item)
-    answered_rows = [row for row in rows if row["status"] == "answered"]
-    known_answer_rows = [row for row in answered_rows if row.get("answer_truncation_known")]
-    return {
-        "run_id": run["id"],
-        "status": run["status"],
-        "scope": run["scope"],
-        "selection_profile": limits["selection_profile"] or None,
-        "models_selected": len(rows),
-        "models_answered": len(answers),
-        # ``unknown`` means the host cannot prove whether an in-flight
-        # provider request was sent. Keep it separate from ordinary failures
-        # so retry_unknown remains an explicit metered replay decision.
-        "models_failed": len(failed_rows),
-        "models_unknown": len(unknown_rows),
-        # These make an active durable receipt usable as a progress report.
-        # They are scalar-only; model ids and answers remain owner-scoped in
-        # the detailed arrays below.
-        "models_pending": len(pending_rows),
-        "models_running": len(running_rows),
-        "models_skipped": len(plan_skips) + len(execution_skips),
-        "skipped": plan_skips + execution_skips,
-        "resident_before": limits["resident_before"],
-        "resident_snapshot_known": limits["resident_snapshot_known"],
-        "total_elapsed_ms": max(0, int((float(ended) - float(run["created_ts"])) * 1000)),
-        "cloud_workers": limits["cloud_workers"],
-        "usage": {
-            # Total source output is exact only if every answered receipt was
-            # recorded after the metric migration.
-            "answer_chars": (
-                sum(max(0, int(row.get("answer_chars") or 0)) for row in known_answer_rows)
-                if len(known_answer_rows) == len(answered_rows) else None
-            ),
-            "stored_answer_chars": sum(len(row.get("answer") or "") for row in answered_rows),
-            "answer_chars_known_models": len(known_answer_rows),
-            "thinking_chars": sum(max(0, int(row.get("thinking_chars") or 0)) for row in rows),
-            "models_with_observed_thinking": sum(
-                1 for row in rows if int(row.get("thinking_chars") or 0) > 0
-            ),
-        },
-        "admission": _fanout_admission(run, rows, limits),
-        "answers": sorted(answers, key=lambda row: row["model"].casefold()),
-        "failures": sorted(failures, key=lambda row: row["model"].casefold()),
-    }
+    return _fanout_receipt_policy(run_id, admission=_fanout_admission)
 
 
 # Synthesis reads exact stored answer previews from a completed receipt.  It is
@@ -23361,61 +22636,8 @@ def _fanout_synthesis_generate(model, source_bundle):
 
 
 def _fanout_health(model, exc, prompt):
-    """Record advisory model health and cool down repeatable model failures.
-
-    A fanout is explicitly opt-in, but repeating a target that just timed out,
-    vanished, or returned malformed output makes the next "all models" request
-    slower without adding an answer.  Keep caller/prompt failures eligible: a
-    bad request is not evidence that the local model is unhealthy.  Cloud
-    cooldowns preserve provider retry hints; local failures use a short fixed
-    cooldown because there is no upstream throttle contract to honor.
-    """
-    if exc is None:
-        fanout_store.record_model_health(model, model_class="cloud" if _is_cloud_model_name(model) else "local", success=True)
-        return
-    disabled_until = None
-    availability_failure = False
-    if isinstance(exc, ModelCallError):
-        if _is_cloud_model_name(model) and exc.status in (402, 404, 410):
-            disabled_until = time.time() + 3600
-        elif _is_cloud_model_name(model) and exc.status == 429:
-            disabled_until = time.time() + (exc.retry_after_seconds or 60)
-        elif (
-            _is_cloud_model_name(model)
-            and exc.retry_after_seconds is not None
-            and (exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"})
-        ):
-            # Providers can throttle or shed load with transient statuses other
-            # than 429 (for example 503).  An explicit Retry-After remains
-            # authoritative for every transient cloud failure, not just 429.
-            disabled_until = time.time() + exc.retry_after_seconds
-        elif exc.status in (404, 410):
-            # The tag disappeared from Ollama after the immutable run snapshot
-            # was created. Avoid rediscovering and failing it on every fanout.
-            disabled_until = time.time() + 3600
-            availability_failure = True
-        elif exc.transient or exc.kind in {"timeout", "transport", "protocol", "empty_response"}:
-            # These identify the model/daemon response path, not the prompt.
-            # Back off repeated availability failures instead of making every
-            # frequent all-model request re-probe the same unhealthy local or
-            # cloud target.  A cloud provider's explicit 429 Retry-After above
-            # remains authoritative; this covers unavailable providers that
-            # offer no retry contract.
-            # Cap at an hour so recovery remains automatic without operator
-            # intervention. A successful model call resets the stored count.
-            previous = fanout_store.get_model_health(model)
-            try:
-                failure_count = max(0, int((previous or {}).get("availability_failure_count", 0))) + 1
-            except (TypeError, ValueError):
-                failure_count = 1
-            delay_seconds = min(3600, 300 * (2 ** min(4, failure_count - 1)))
-            disabled_until = time.time() + delay_seconds
-            availability_failure = True
-    fanout_store.record_model_health(
-        model, model_class="cloud" if _is_cloud_model_name(model) else "local",
-        error=_fanout_safe_error(exc, prompt), disabled_until=disabled_until,
-        counts_toward_backoff=availability_failure,
-    )
+    """Record advisory model health and cool down repeatable model failures."""
+    return _fanout_health_policy(model, exc, prompt, is_cloud_model_name=_is_cloud_model_name)
 
 
 def _execute_fanout_run(run_id):
