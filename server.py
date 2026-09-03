@@ -299,6 +299,9 @@ from sonder_runtime.domain.fanout_receipts import (
     safe_answer as _fanout_safe_answer,
     snapshot_allows as _fanout_snapshot_allows_policy,
 )
+from sonder_runtime.domain.model_response_detail import (
+    empty_model_response_detail as _empty_model_response_detail,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -4560,35 +4563,6 @@ def _chat_request(
         )
     return out, content
 
-
-def _empty_model_response_detail(out, message):
-    """Describe an empty response without exposing model reasoning content."""
-    metadata = {}
-    if isinstance(message, dict):
-        thinking = message.get("thinking")
-        if isinstance(thinking, str):
-            metadata["thinking_chars"] = len(thinking)
-        tool_calls = message.get("tool_calls")
-        if isinstance(tool_calls, (list, tuple)):
-            metadata["tool_call_count"] = len(tool_calls)
-
-    eval_count = _model_usage_count(out.get("eval_count"))
-    if eval_count is not None:
-        metadata["eval_count"] = eval_count
-
-    done_reason = out.get("done_reason")
-    if isinstance(done_reason, str) and done_reason.strip():
-        normalized_reason = done_reason.strip().casefold()
-        metadata["done_reason"] = (
-            normalized_reason
-            if normalized_reason in {"stop", "length"}
-            else "other"
-        )
-
-    detail = "Ollama returned no assistant content"
-    if metadata:
-        detail += "; metadata=" + json.dumps(metadata, sort_keys=True)
-    return detail
 
 
 def _response_error_metadata(error) -> dict:
