@@ -44,6 +44,7 @@ SENSITIVE_PREFIXES = (
     "model_transport.py", "sonder_runtime/adapters/model_transport.py",
     "sonder_runtime/domain/context/overflow.py",
     "sonder_runtime/domain/context/compaction.py",
+    "sonder_runtime/domain/cloud_agent_tool_policy.py",
     "process_liveness.py", "ollama_endpoint.py",
     "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
     "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",

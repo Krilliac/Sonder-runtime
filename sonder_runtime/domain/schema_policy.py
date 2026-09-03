@@ -43,3 +43,10 @@ def format_schema_gaps(gaps) -> str:
     if remaining > 0:
         shown.append("and %d more" % remaining)
     return "; ".join(shown)
+
+
+def with_schema_coverage(text, gaps):
+    """Append what the check could not verify, or return *text* untouched."""
+    if not gaps:
+        return text
+    return "%s\n[schema_unverified: %s]" % (text, format_schema_gaps(gaps))
