@@ -34,6 +34,9 @@ Rules:
   gateway escalation policy enforces.
 - Only a failed or empty attempt steps up.  A satisfied answer never spends a
   stronger model; a cancellation or an exhausted budget is never retried.
+  The one verifier a chat answer has is the execution-grounded code gate:
+  runnable code that still fails after its repair round-trip is a failed
+  attempt too (:func:`verifier_reason`).
   For the workbench agent a completion claim that changed nothing and ran
   no validation counts as a failure when the request asked for a change or
   a check (the entry layer decides that from the request's action verbs).
@@ -227,6 +230,16 @@ def failure_reason(error=None, response=None) -> str | None:
     return REASON_EMPTY if not str(response).strip() else None
 
 
+VERIFIER_DETAIL = "runnable code failed verification after a repair"
+
+
+def verifier_reason(verified) -> str | None:
+    """Classify a code-gate verdict: ``False`` (runnable code still failing
+    after the repair round-trip) steps up; ``True`` and ``None`` (nothing to
+    gate, or inconclusive) stand."""
+    return REASON_FAILED if verified is False else None
+
+
 def describe(steps: Iterable[Step]) -> str:
     """One operator-facing line for the escalations a turn spent ('' if none)."""
     parts = [step.summary() for step in steps]
@@ -235,6 +248,6 @@ def describe(steps: Iterable[Step]) -> str:
 
 __all__ = [
     "KNOB", "MAX_ESCALATIONS", "NON_ESCALATING_KINDS", "Plan", "REASON_EMPTY",
-    "REASON_FAILED", "Rung", "Step", "describe", "enabled", "failure_reason",
-    "plan", "single",
+    "REASON_FAILED", "Rung", "Step", "VERIFIER_DETAIL", "describe", "enabled",
+    "failure_reason", "plan", "single", "verifier_reason",
 ]

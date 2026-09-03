@@ -257,6 +257,9 @@ def test_repair_persistence_aggregates_usage_and_provenance(
 
 
 def test_sonder_impl_banners_broken_code(monkeypatch):
+    # This pins the gate's banner on one attempt; the ladder (a fake model
+    # that differs from the tier map would otherwise step up) is off here.
+    monkeypatch.setenv("SONDER_MODEL_ESCALATION", "0")
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
     monkeypatch.setattr(
@@ -494,6 +497,9 @@ def test_sonder_impl_leaves_verified_code_alone(monkeypatch):
 
 
 def test_answer_with_history_gates_code_too(monkeypatch):
+    # This pins the gate's banner on one attempt; the ladder (a fake model
+    # that differs from the tier map would otherwise step up) is off here.
+    monkeypatch.setenv("SONDER_MODEL_ESCALATION", "0")
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
     monkeypatch.setattr(

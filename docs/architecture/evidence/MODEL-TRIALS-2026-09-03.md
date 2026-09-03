@@ -219,6 +219,28 @@ failures, which is the honest reading: the suite says nothing about the
   models' general accuracy. The eval harness rows are the closest thing to
   a capability measure here.
 
+## Decisions taken later the same day
+
+The owner delegated the recorded decisions; each was taken the narrow way.
+
+- **Served `project` reaches routed work only inside the configured roots.**
+  `served_work_project` passes a client value through when it names an
+  existing directory inside `file_ops.allowed_roots()`, so the agent gains
+  a base for relative paths and nothing else; bare names and outside
+  directories keep the namespaced id (`_work_project_for_request`).
+- **`workspace_root()` is the checkout again.** The strangler migration had
+  moved `file_ops.py` four levels down and the "directory of this file"
+  expression with it; the base for unscoped relative paths is once more the
+  directory that contains the `sonder_runtime` package.
+- **The code gate is a verifier the ladder can see.** On both chat paths a
+  runnable code block that still fails the execution-grounded gate after
+  its repair round-trip steps to the next rung, with the failed attempt's
+  interaction discarded. Prose answers still have no verifier; that
+  limitation stands.
+- **Remote branch deletion** was retried and is still refused by this
+  session's permission classifier; the command list in
+  `RETIRED-BRANCHES-2026-09-02.md` remains the owner's to run.
+
 ## Reproduction
 
 The lab lives outside the repository (a scratch directory): a seeded
