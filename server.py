@@ -287,6 +287,43 @@ from sonder_runtime.domain.runtime_model_binding import (
     model_is_installed as _runtime_model_is_installed,
 )
 from sonder_runtime.domain.updates.stash_formatting import format_stash as _runtime_stash_format
+from sonder_runtime.domain.thinking_controls import (
+    LOCAL_THINKING_MIN_NUM_PREDICT,
+    THINK_OPTION_UNSUPPORTED_RE as _THINK_OPTION_UNSUPPORTED_RE,
+    apply_cloud_thinking_policy as _apply_cloud_thinking_policy_controls,
+    cloud_can_disable_thinking as _cloud_can_disable_thinking,
+    think_option_unsupported as _think_option_unsupported,
+    with_local_thinking_budget as _with_local_thinking_budget,
+)
+from sonder_runtime.domain.fanout_receipts import (
+    safe_answer as _fanout_safe_answer,
+    snapshot_allows as _fanout_snapshot_allows_policy,
+)
+from sonder_runtime.domain.model_response_detail import (
+    empty_model_response_detail as _empty_model_response_detail,
+)
+from sonder_runtime.domain.loop_actions import (
+    LOOP_ACTION_TOOLS as _LOOP_ACTION_TOOLS,
+    loop_action_tool as _loop_action_tool,
+    loop_verdict_result as _loop_verdict_result_policy,
+)
+from sonder_runtime.domain.serve_selection import (
+    allow_cloud_fallback_for_target as _allow_cloud_fallback_for_target,
+    explicit_serve_selection as _explicit_serve_selection,
+)
+from sonder_runtime.domain.context.compaction_plan_formatting import format_context_compaction_plan
+from sonder_runtime.adapters.fanout_failures import (
+    failure_class as _fanout_failure_class,
+    no_eligible_models_error as _fanout_no_eligible_models_error,
+    safe_error as _fanout_safe_error,
+)
+from sonder_runtime.adapters.model_response_metadata import (
+    response_error_metadata as _response_error_metadata,
+)
+from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
+from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
+from sonder_runtime.domain.campaign_prompt import campaign_prompt as _campaign_prompt_policy
+from sonder_runtime.domain.automation.command_programs import command_programs as _autopilot_command_programs
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -711,59 +748,18 @@ _THINKING_CAPABILITY_LOCK = threading.Lock()
 # from the observed reasoning cache: disabling the request switch must not
 # make the model look non-reasoning for budgeting or output handling.
 _THINK_OPTION_UNSUPPORTED_CACHE = set()
-_THINK_OPTION_UNSUPPORTED_RE = re.compile(
-    r"\b(?:think|thinking)\b.*\b(?:unsupported|not\s+supported)\b"
-    r"|\b(?:unsupported|does\s+not\s+support|not\s+supported)\b"
-    r"(?:\s+\w+){0,3}\s+\b(?:think|thinking)\b",
-    re.IGNORECASE,
-)
-
-# Some local community models serialize deliberation into ordinary ``content``
-# rather than Ollama's separate ``message.thinking`` field.  That field is
-# governed by explicit reasoning exposure policy; a leading closed tag must
-# not become an accidental bypass of the same boundary.
 def _apply_cloud_thinking_policy(payload, model, *, compact=False):
-    """Apply hosted-model thinking controls without changing custom models.
-
-    Tool-using agent turns need only a small JSON decision.  Keep their
-    reasoning bounded so a hosted model cannot consume the whole prediction
-    budget before returning that decision.  Ordinary offloads retain the
-    quality-oriented policy below.
-    """
-    name = str(model or "").strip().casefold()
-    if name.startswith("kimi-k3:"):
-        # K3 is a native-thinking model; do not assume its hosted endpoint
-        # supports disabling thought. Request it explicitly so hosted defaults
-        # cannot drift. Compact agent mode keeps the caller's bounded budget;
-        # ordinary offloads retain headroom for thinking plus final content.
-        payload["think"] = True
-        if not compact:
-            _ensure_cloud_prediction_budget(payload)
-    elif name.startswith("glm-5.2:"):
-        # GLM-5.2 accepts an explicit false value.  Even its "low" reasoning
-        # mode can consume the entire shared prediction budget without
-        # emitting the tiny JSON/native tool decision an agent turn needs.
-        # Ordinary offloads retain the quality-oriented high setting.
-        payload["think"] = False if compact else "high"
-        if not compact:
-            _ensure_cloud_prediction_budget(payload)
-    elif name.startswith("kimi-k2.7-code:"):
-        # Code review benefits materially from the model's native reasoning
-        # mode; the hosted API returns final content separately, so callers do
-        # not receive or depend on the private thinking stream.
-        payload["think"] = False if compact else True
-        if not compact:
-            _ensure_cloud_prediction_budget(payload)
-    elif name.startswith("gpt-oss:"):
-        payload["think"] = "low"
+    """Apply hosted-model thinking controls without changing custom models."""
+    return _apply_cloud_thinking_policy_controls(
+        payload, model, compact=compact,
+        ensure_prediction_budget=_ensure_cloud_prediction_budget,
+    )
 
 
 def _ensure_cloud_prediction_budget(payload, minimum=4096):
     """Compatibility delegate for the packaged thinking-budget policy."""
     return _ensure_cloud_prediction_budget_policy(payload, minimum)
 
-
-LOCAL_THINKING_MIN_NUM_PREDICT = 4096
 
 
 def _remember_thinking_model(model):
@@ -796,38 +792,7 @@ def _remember_unsupported_think_option(model) -> None:
         _THINK_OPTION_UNSUPPORTED_CACHE.add(name)
 
 
-def _think_option_unsupported(detail) -> bool:
-    """Whether Ollama explicitly refused only the optional ``think`` control."""
-    return bool(_THINK_OPTION_UNSUPPORTED_RE.search(str(detail or "")))
 
-
-def _cloud_can_disable_thinking(model) -> bool:
-    """Whether the hosted model is known to accept ``think=false``.
-
-    Keep this allow-list deliberately narrow. Some hosted reasoners require
-    their thinking mode, while GLM 5.2 and Kimi K2.7 Code have both been
-    observed accepting an explicit false value through Ollama's cloud API.
-    """
-    name = str(model or "").strip().casefold()
-    return name.startswith(("glm-5.2:", "kimi-k2.7-code:"))
-
-
-def _with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT):
-    """Return ``payload`` with room for a local model's thinking plus its answer.
-
-    The local mirror of _ensure_cloud_prediction_budget. Returns a copy so a
-    caller's dict is never mutated; an unset or already-generous num_predict is
-    left alone, and 0/-1 (unlimited) is not a small budget.
-    """
-    options = payload.get("options")
-    if not isinstance(options, dict):
-        return dict(payload)
-    requested = options.get("num_predict")
-    if not isinstance(requested, int) or requested <= 0 or requested >= minimum:
-        return dict(payload)
-    payload = dict(payload)
-    payload["options"] = dict(options, num_predict=minimum)
-    return payload
 
 
 def _cloud_extra_usage_fallback(model, error):
@@ -2266,22 +2231,6 @@ def _serve_target(tier, strict):
     return None, False, True, None
 
 
-def _allow_cloud_fallback_for_target(tier_label):
-    """Whether an availability fallback may replace this resolved target.
-
-    A configured cloud *tier* is an operator-selected route and can use its
-    documented K3-to-K2.7 availability fallback. A ``model:<name>`` label came
-    from an exact user-supplied live-catalog selector, so it must never spend
-    tokens on, or return a response from, a different model.
-    """
-    return not str(tier_label or "").casefold().startswith("model:")
-
-
-def _explicit_serve_selection(tier, model_override):
-    """Whether a call names its own target instead of the default route."""
-    if str(model_override or "").strip():
-        return True
-    return str(tier or "").strip().lower() not in ("", "sonder", "local")
 
 
 def _latest_runnable_block(history):
@@ -4621,66 +4570,6 @@ def _chat_request(
     return out, content
 
 
-def _empty_model_response_detail(out, message):
-    """Describe an empty response without exposing model reasoning content."""
-    metadata = {}
-    if isinstance(message, dict):
-        thinking = message.get("thinking")
-        if isinstance(thinking, str):
-            metadata["thinking_chars"] = len(thinking)
-        tool_calls = message.get("tool_calls")
-        if isinstance(tool_calls, (list, tuple)):
-            metadata["tool_call_count"] = len(tool_calls)
-
-    eval_count = _model_usage_count(out.get("eval_count"))
-    if eval_count is not None:
-        metadata["eval_count"] = eval_count
-
-    done_reason = out.get("done_reason")
-    if isinstance(done_reason, str) and done_reason.strip():
-        normalized_reason = done_reason.strip().casefold()
-        metadata["done_reason"] = (
-            normalized_reason
-            if normalized_reason in {"stop", "length"}
-            else "other"
-        )
-
-    detail = "Ollama returned no assistant content"
-    if metadata:
-        detail += "; metadata=" + json.dumps(metadata, sort_keys=True)
-    return detail
-
-
-def _response_error_metadata(error) -> dict:
-    """Extract the scalar-safe metadata embedded in an empty-response error.
-
-    ``_empty_model_response_detail`` deliberately serializes a small
-    allowlisted JSON object.  This parser treats all other errors/details as
-    opaque and returns no metadata, preventing provider bodies or reasoning
-    text from becoming durable observations.
-    """
-    if not isinstance(error, ModelCallError) or error.kind != "empty_response":
-        return {}
-    prefix = "Ollama returned no assistant content; metadata="
-    detail = str(error.detail or "")
-    if not detail.startswith(prefix):
-        return {}
-    try:
-        source = json.loads(detail[len(prefix):])
-    except (TypeError, ValueError, RecursionError):
-        return {}
-    if not isinstance(source, dict):
-        return {}
-    metadata = {}
-    thinking_chars = _model_usage_count(source.get("thinking_chars"))
-    if thinking_chars is not None and thinking_chars > 0:
-        metadata["thinking_chars"] = thinking_chars
-    done_reason = source.get("done_reason")
-    if isinstance(done_reason, str):
-        normalized = done_reason.strip().casefold()
-        if normalized:
-            metadata["done_reason"] = normalized if normalized in {"stop", "length"} else "other"
-    return metadata
 
 
 def _format_model_call_error(error: ModelCallError) -> str:
@@ -4819,43 +4708,6 @@ def _get(path: str) -> dict:
         if OLLAMA_POOL.enabled else send(BASE)
     )
 
-
-def _parse_schema_arg(schema):
-    """Normalize an offload `schema` argument to a schema object, or None.
-
-    Accepts an already-parsed object (internal callers) or the JSON text the
-    tool surface passes (matching how every other structured argument crosses
-    that boundary). A blank string means "no schema", so the unconstrained path
-    stays the default. Anything else that is not a JSON object is a caller
-    error and is raised as a typed configuration failure -- never quietly
-    dropped, because dropping it would run the call unconstrained while the
-    caller believed it was constrained.
-    """
-    if schema is None:
-        return None
-    if isinstance(schema, dict):
-        return schema
-    if isinstance(schema, str):
-        text = schema.strip()
-        if not text:
-            return None
-        try:
-            parsed = json.loads(text)
-        except ValueError as exc:
-            raise ModelCallError(
-                "configuration",
-                "schema is not valid JSON: %s" % exc,
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise ModelCallError(
-                "configuration",
-                "schema must be a JSON object, got %s" % type(parsed).__name__,
-            )
-        return parsed
-    raise ModelCallError(
-        "configuration",
-        "schema must be a JSON object or JSON text, got %s" % type(schema).__name__,
-    )
 
 
 # The complete set of keywords `json_schema_verifier` enforces. Coverage below
@@ -6778,30 +6630,8 @@ _CAMPAIGN_TASKS = [
 
 
 def _campaign_prompt(language, task_name, task_text, repair_note=""):
-    fence = grounding._LANG_FENCE.get(language, language)
-    repair = ("\nPrevious attempt failed:\n%s\nFix it." % repair_note) if repair_note else ""
-    language_note = ""
-    if language == "powershell" and task_name == "string":
-        language_note = (
-            " PowerShell arrays print one item per line; when building a string from "
-            "characters, reverse by index/order and join explicitly with -join; do not "
-            "sort the characters."
-        )
-    if language == "powershell" and task_name == "list":
-        language_note = (
-            " In PowerShell, use Measure-Object -Sum or a simple loop to sum numeric "
-            "arrays; do not use Invoke-Expression for arithmetic."
-        )
-    if language == "cpp" and task_name == "string":
-        language_note = (
-            " In C++, include <algorithm> before using std::reverse, or reverse the "
-            "string manually."
-        )
-    return (
-        "Write a complete runnable %s program for this task: %s.\n"
-        "Return only one ```%s code block. Do not use interactive input. "
-        "The program must terminate quickly.%s%s" % (
-            language, task_text, fence, language_note, repair)
+    return _campaign_prompt_policy(
+        language, task_name, task_text, repair_note, fences=grounding._LANG_FENCE,
     )
 
 
@@ -7996,29 +7826,6 @@ def context_compaction_plan_data(session: str = "", project: str = "") -> dict:
         })
     return {"context": data, "actions": actions}
 
-
-def format_context_compaction_plan(plan: dict) -> str:
-    ctx = plan.get("context", {})
-    lines = [
-        "sonder context compaction plan",
-        "  session: %s" % ctx.get("session", "none"),
-        "  context: %s%%  ~%s/%s tokens (%s mode)" % (
-            ctx.get("context_percent", 0),
-            ctx.get("estimated_tokens", 0),
-            ctx.get("context_limit", 0),
-            ctx.get("context_mode", "native"),
-        ),
-        "  live turns: %s/%s | summary: ~%s tokens" % (
-            ctx.get("live_turns", 0),
-            ctx.get("max_live_turns", 0),
-            ctx.get("summary_tokens", 0),
-        ),
-        "  recommended actions:",
-    ]
-    for item in plan.get("actions", []):
-        lines.append("    [%s] %s" % (item.get("priority", "info"), item.get("action", "")))
-        lines.append("        -> %s" % item.get("reason", ""))
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -14049,30 +13856,9 @@ def _loop_text_result(action_type, text):
 
 
 def _loop_verdict_result(action_type, text, success_prefix):
-    result = _loop_text_result(action_type, text)
-    result["ok"] = bool(text) and text.startswith(success_prefix)
-    return result
-
-
-# `_loop_dispatch` action types are mostly tool names already; these are the
-# ones that are not, so the gate below decides on the tool that actually runs
-# rather than on a name `risk_of` has never heard of.
-_LOOP_ACTION_TOOLS = {
-    "code": "run_code",
-    "project": "run_project",
-    "artifact": "artifact_generate",
-    "artifact_check": "artifact_ground",
-    "game_reference": "game_reference_suite",
-    "game": "game_generate_and_test",
-    "work": "workbench_agent",
-    "agent": "workbench_agent",
-    "improvement_report": "system_improvement_report",
-    "profile_status": "system_profile_text",
-    "emotion_status": "emotion_vector_status",
-    "emotion_update": "update_emotion_vectors",
-    "emotion_tune": "tune_emotion_vectors",
-    "learning_health": "learning_health_status",
-}
+    return _loop_verdict_result_policy(
+        action_type, text, success_prefix, text_result=_loop_text_result,
+    )
 
 # Single source for the public loop vocabulary.  It deliberately includes
 # aliases implemented by `_loop_dispatch`; hiding aliases makes clients think
@@ -14082,11 +13868,6 @@ _LOOP_ACTION_TYPES = (
     "code", "run_code", "project", "run_project", "artifact", "artifact_generate", "assetgen", "artifact_ground", "artifact_check", "game_reference", "game_reference_suite", "game", "game_generate", "game_generate_and_test", "game_campaign", "game_generation_campaign", "offload", "sonder", "status", "diagnostics", "context_health", "learning_health", "memory_quality_report", "memory_quality_repair", "memory_privacy_review", "memory_privacy_repair", "memory_embedding_backfill", "memory_interaction_embedding_backfill", "improvement_report", "system_improvement_report", "master_status", "agent_status", "master_capacity", "agent_capacity", "master_cancel", "agent_cancel", "master_retry", "agent_retry", "master", "master_orchestrate", "work", "agent", "workbench_agent", "workspace_inventory", "directory_tree", "directory_create", "file_read_range", "text_search", "script_search", "program_search", "workspace_run", "script_run", "artifact_risk_inspect", "process_list", "process_memory_risk_inspect", "image_inspect", "data_inspect", "checklist_create", "checklist_update", "checklist_show", "file_policy", "file_find", "file_read", "file_write", "file_copy", "file_move", "file_edit", "file_delete", "self_heal_check", "self_heal_repair", "profile_status", "emotion_status", "emotion_update", "emotion_tune", "learn_preference", "preferences_status", "memory_search", "ground_artifact", "apply_learned", "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup", "unload", "sleep",
 )
 
-
-def _loop_action_tool(action_type):
-    """The tool a loop action really runs, for the permission gate."""
-    name = str(action_type or "").strip().lower()
-    return _canonical_agent_tool_name(_LOOP_ACTION_TOOLS.get(name, name))
 
 
 def _loop_permission_refusal(action_type):
@@ -19193,56 +18974,10 @@ def _agent_created_path_key(path):
 
 def _agent_call_signature(tool_name, args):
     """Return a stable signature for equivalent host-scoped tool calls."""
-    canonical = dict(args) if isinstance(args, dict) else args
-    if isinstance(canonical, dict):
-        if tool_name == "archive_create":
-            root = os.path.realpath(os.path.normpath(str(canonical.get("root") or ".")))
-            canonical["root"] = os.path.normcase(root)
-            destination = str(canonical.get("destination") or "")
-            if destination:
-                if not os.path.isabs(destination):
-                    destination = os.path.join(root, destination)
-                canonical["destination"] = os.path.normcase(
-                    os.path.realpath(os.path.normpath(destination))
-                )
-            try:
-                inputs = archive_create_tool._parse_inputs(
-                    canonical.get("inputs_json", canonical.get("inputs", []))
-                )
-                canonical["inputs_json"] = [
-                    os.path.normcase(os.path.realpath(os.path.normpath(
-                        value if os.path.isabs(value) else os.path.join(root, value)
-                    )))
-                    for value in inputs
-                ]
-                canonical.pop("inputs", None)
-            except ValueError:
-                pass
-        path_keys = []
-        if tool_name == "data_convert":
-            path_keys.extend(("input_path", "output_path"))
-        elif tool_name in {"file_copy", "file_move", "archive_extract"}:
-            path_keys.extend(("source", "destination"))
-        elif tool_name == "archive_create":
-            path_keys = []
-        elif tool_name in _PROJECT_SCOPED_PATH_TOOLS:
-            path_keys.append(_project_scoped_path_key(tool_name))
-        elif tool_name == "workspace_run":
-            path_keys.append("cwd")
-        elif tool_name == "script_run":
-            path_keys.extend(("path", "cwd"))
-        for key in path_keys:
-            raw = canonical.get(key)
-            if raw:
-                try:
-                    canonical[key] = os.path.normcase(
-                        os.path.realpath(os.path.normpath(str(raw)))
-                    )
-                except (OSError, ValueError):
-                    pass
-    return (
-        str(tool_name),
-        json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str),
+    return _agent_call_signature_policy(
+        tool_name, args,
+        project_scoped_path_tools=_PROJECT_SCOPED_PATH_TOOLS,
+        project_scoped_path_key=_project_scoped_path_key,
     )
 
 
@@ -21340,25 +21075,6 @@ def _autopilot_allowed_tools(run: dict) -> frozenset | None:
     return allowed
 
 
-def _autopilot_command_programs(value) -> list[str]:
-    if value in (None, ""):
-        return []
-    try:
-        payload = json.loads(value) if isinstance(value, str) else value
-    except (TypeError, ValueError):
-        return ["(invalid)"]
-    if isinstance(payload, dict):
-        payload = payload.get("commands") or []
-    if not isinstance(payload, list):
-        return ["(invalid)"]
-    programs = []
-    for item in payload:
-        command = item.get("cmd") if isinstance(item, dict) else item
-        if not isinstance(command, list) or not command:
-            return ["(invalid)"]
-        programs.append(os.path.basename(str(command[0])).lower())
-    return programs
-
 
 def _autopilot_tool_policy(run: dict):
     """Return an argument-aware policy that models cannot override."""
@@ -23229,38 +22945,6 @@ def _fanout_models(scope):
     return plan["selected"], error
 
 
-def _fanout_no_eligible_models_error(plan, scope):
-    """Explain a zero-target plan without exposing model names or prompts."""
-    counts = {}
-    earliest_retry = None
-    now = time.time()
-    for row in plan.get("skipped", []):
-        reason = str(row.get("reason") or "not eligible")[:160]
-        counts[reason] = counts.get(reason, 0) + 1
-        if reason == "health cooldown active":
-            try:
-                remaining = float(row.get("retry_after_ts")) - now
-            except (TypeError, ValueError):
-                remaining = 0
-            if remaining > 0:
-                earliest_retry = remaining if earliest_retry is None else min(earliest_retry, remaining)
-    label = str(plan.get("scope") or scope or "local")
-    if not counts:
-        return ModelCallError(
-            "configuration", "no eligible %s models are currently discovered." % label,
-        )
-    summary = "; ".join(
-        "%s (%d)" % (reason, count)
-        for reason, count in sorted(counts.items())
-    )
-    if earliest_retry is not None:
-        retry_seconds = max(1, int(math.ceil(earliest_retry)))
-        summary += "; earliest cooldown retry in about %ds" % retry_seconds
-    return ModelCallError(
-        "configuration",
-        "no eligible %s models are currently available; skipped: %s." % (label, summary),
-    )
-
 
 _FANOUT_WORKER_INSTANCE = uuid.uuid4().hex
 
@@ -23280,51 +22964,6 @@ def _fanout_worker_id():
     )
 
 
-def _fanout_safe_error(exc, prompt):
-    """Render a useful failure without allowing an echoed prompt into a receipt."""
-    if isinstance(exc, ModelCallError):
-        # Provider-controlled details may contain only a *partial* request
-        # excerpt, which cannot be safely removed with exact replacement.
-        # Keep stable diagnostic class/status metadata, but never persist that
-        # untrusted body in a durable receipt or event.
-        rendered = "ERROR: fanout model failure (%s%s)" % (
-            exc.kind,
-            " HTTP %s" % exc.status if exc.status is not None else "",
-        )
-    else:
-        rendered = "ERROR: model request failed (%s)" % type(exc).__name__
-    # This also protects local exception messages that happen to echo the full
-    # request.  Provider excerpts were excluded above rather than redacted.
-    return _fanout_redact_prompt_echo(rendered, prompt)[:4000]
-
-
-def _fanout_failure_class(exc):
-    """Map a transport failure into the durable, non-content receipt enum."""
-    if not isinstance(exc, ModelCallError):
-        return "unknown"
-    kind = str(exc.kind or "").casefold()
-    direct = {
-        "configuration": "configuration",
-        "request": "request_rejected",
-        "timeout": "timeout",
-        "transport": "transport",
-        "protocol": "protocol",
-        "empty_response": "empty_response",
-        "budget": "budget_exhausted",
-        "cancelled": "cancelled",
-    }
-    if kind in direct:
-        return direct[kind]
-    if kind == "http":
-        if exc.status == 429:
-            return "throttled"
-        if exc.status == 408:
-            return "timeout"
-        if exc.status in (402, 404, 410) or (exc.status is not None and exc.status >= 500):
-            return "unavailable"
-        if exc.status is not None and 400 <= exc.status < 500:
-            return "request_rejected"
-    return "unknown"
 
 
 def _fanout_provider_retry_after_ts(exc):
@@ -23333,36 +22972,6 @@ def _fanout_provider_retry_after_ts(exc):
         return None
     return fanout_store.retry_after_timestamp(exc.retry_after_seconds)
 
-
-def _fanout_safe_answer(value, prompt):
-    """Return receipt-safe model output without retaining obvious credentials.
-
-    Fanout answers are deliberately returned to the caller, but they are also
-    durable receipt fields.  A model can repeat a credential from context or
-    emit one while demonstrating a configuration snippet, so prompt-echo
-    removal alone is not sufficient for that persistence boundary.  This is
-    intentionally a narrow marker-based scrubber: ordinary prose remains
-    useful, while recognizable bearer/header/key values are never stored.
-    """
-    rendered = _fanout_redact_prompt_echo(value, prompt)
-    rendered = re.sub(
-        r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*"
-        r"(?:(?:bearer|basic)\s+)?[^\s\"',;}\]]+",
-        "Authorization: <redacted>",
-        rendered,
-    )
-    rendered = re.sub(
-        r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}",
-        "Bearer <redacted>",
-        rendered,
-    )
-    rendered = re.sub(
-        r"(?i)(^|[\s,{])([\"']?(?:password|passwd|secret|token|api[-_]?key|credential)[\"']?)"
-        r"\s*[:=]\s*(?!<(?:redacted|nested)>)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)",
-        r"\1\2=<redacted>",
-        rendered,
-    )
-    return rendered
 
 
 def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile="",
@@ -23452,16 +23061,7 @@ def _fanout_dispatch_residency_reason(limits, model):
 
 def _fanout_snapshot_allows(run, model):
     """Check a claimed receipt against the run's immutable target contract."""
-    try:
-        snapshot = json.loads(run.get("models_json") or "[]")
-    except (TypeError, ValueError):
-        snapshot = []
-    selected = {str(name).casefold() for name in snapshot if str(name).strip()}
-    if str(model).casefold() not in selected:
-        return False
-    scope = str(run.get("scope") or "local").casefold()
-    cloud = _is_cloud_model_name(model)
-    return scope in ("all", "available") or (scope == "cloud" and cloud) or (scope == "local" and not cloud)
+    return _fanout_snapshot_allows_policy(run, model, is_cloud_model_name=_is_cloud_model_name)
 
 
 def _fanout_admission(run, rows, limits):
