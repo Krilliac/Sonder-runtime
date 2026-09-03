@@ -1900,6 +1900,7 @@ class _FeedbackAction extends StatelessWidget {
 
 class _AssistantContent extends StatelessWidget {
   static const _activityMarker = '=== ACTIVITY (observable work) ===';
+  static const _endReportMarker = '=== END REPORT ===';
 
   final String content;
   final Color color;
@@ -1921,8 +1922,12 @@ class _AssistantContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final markerIndex = content.indexOf(_activityMarker);
-    final answer =
+    final beforeActivity =
         (markerIndex < 0 ? content : content.substring(0, markerIndex))
+            .trimRight();
+    final endReportIndex = beforeActivity.indexOf(_endReportMarker);
+    final answer =
+        (endReportIndex < 0 ? beforeActivity : beforeActivity.substring(0, endReportIndex))
             .trimRight();
     final activityRaw =
         markerIndex < 0 ? '' : content.substring(markerIndex).trim();
@@ -1963,12 +1968,17 @@ class _AssistantContent extends StatelessWidget {
     );
 
     final hasToolCalls = parsed.toolCalls.isNotEmpty;
+    final effectiveStats = parsed.stats.isNotEmpty
+        ? parsed.stats
+        : _metadataToStats(metadata);
+    final showToolSection =
+        (hasToolCalls || effectiveStats.isNotEmpty) && !error;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (hasToolCalls && !error) ...[
-          _ToolCallSection(calls: parsed.toolCalls, stats: parsed.stats),
+        if (showToolSection) ...[
+          _ToolCallSection(calls: parsed.toolCalls, stats: effectiveStats),
           const SizedBox(height: 10),
         ],
         MarkdownBody(
@@ -1985,7 +1995,7 @@ class _AssistantContent extends StatelessWidget {
             body: reasoning.trim(),
           ),
         ],
-        if (activityRaw.isNotEmpty && !hasToolCalls) ...[
+        if (activityRaw.isNotEmpty && !showToolSection) ...[
           const SizedBox(height: 8),
           _CollapsedDetail(
             icon: Icons.monitor_heart_outlined,
@@ -2013,6 +2023,16 @@ class _AssistantContent extends StatelessWidget {
         ],
       ],
     );
+  }
+
+  static Map<String, int> _metadataToStats(ChatResponseMetadata? m) {
+    if (m == null) return const {};
+    final s = <String, int>{};
+    if (m.toolCalls > 0) s['tool_calls'] = m.toolCalls;
+    if (m.modelCalls > 0) s['model_calls'] = m.modelCalls;
+    if (m.promptTokens > 0) s['tokens_in'] = m.promptTokens;
+    if (m.completionTokens > 0) s['tokens_out'] = m.completionTokens;
+    return s;
   }
 
   static _ParsedActivity _parseActivityBlock(String raw) {
@@ -2159,8 +2179,10 @@ class _ToolCallSection extends StatelessWidget {
               ),
             ),
           if (statParts.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Divider(height: 1, color: tokens.hairline),
+            if (calls.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Divider(height: 1, color: tokens.hairline),
+            ],
             const SizedBox(height: 6),
             Text(
               statParts.join(' · '),
