@@ -24675,6 +24675,13 @@ def _model_fanout_authorized(prompt: str, scope: str = "", num_predict: int = 51
         receipt = _execute_fanout_run(run["id"])
     except ModelCallError as exc:
         return render_model_error(exc)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        # The fan-out probes the local model endpoint before it runs. A host
+        # with no reachable endpoint used to surface here as a raw urllib
+        # traceback on every surface (the console chain raised, the MCP
+        # client got the exception text); it is the same transport failure
+        # every other model tool renders as a policy answer.
+        return render_model_error(ModelCallError("transport", str(exc)))
     if receipt is None:
         return render_model_error(ModelCallError("configuration", "fanout receipt was unavailable"))
     return json.dumps(receipt, indent=2, sort_keys=True)

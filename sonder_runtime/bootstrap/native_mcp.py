@@ -215,10 +215,20 @@ _NATIVE_TOOLS = (
         }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "run_program", "Run an argv-based program", {"type": "object"},
+        "run_program", "Run an argv-based program",
+        {"type": "object", "properties": {
+            "program": _PATH, "args_json": {"type": "string"}, "cwd": {"type": "string"},
+            "stdin": {"type": "string"}, "timeout": {"type": "integer"},
+            "max_output": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["program"], "additionalProperties": False},
     ),
     ToolDescriptor(
-        "run_script", "Run a bounded script", {"type": "object"},
+        "run_script", "Run a bounded script",
+        {"type": "object", "properties": {
+            "path": _PATH, "args_json": {"type": "string"}, "cwd": {"type": "string"},
+            "stdin": {"type": "string"}, "timeout": {"type": "integer"},
+            "max_output": {"type": "integer"}, "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
         "program_search", "Search the executable path for programs",
@@ -426,7 +436,12 @@ _INSPECTION_TOOLS = (
     ),
 )
 _NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS
-_INSPECTION_NAMES = frozenset(item.name for item in _INSPECTION_TOOLS)
+# Only the inspections the inspection service can run go to it. The catalog
+# groups the web, weather, location, process and artifact tools with the
+# inspections for presentation, but they run through the packaged executor;
+# routing them by group sent nine native tools to a service that answered
+# "unsupported read-only inspection" for every one of them.
+from ..adapters.inspection_executor import SUPPORTED_INSPECTIONS as _INSPECTION_NAMES  # noqa: E402
 _VISION_NAMES = frozenset({"vision_analyze"})
 _COMPUTE_NAMES = frozenset(item.name for item in _COMPUTE_TOOLS)
 

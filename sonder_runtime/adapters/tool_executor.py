@@ -37,6 +37,8 @@ class ToolExecutorAdapter:
 
                 if "operations_json" in args and "operations" not in args:
                     args["operations"] = args.pop("operations_json")
+                if "operations" not in args:
+                    raise ValueError("json_patch needs operations (or operations_json)")
                 res = json_patch_tool.patch_json(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "text_patch":
@@ -176,6 +178,8 @@ class ToolExecutorAdapter:
 
                 if "operations_json" in args and "operations" not in args:
                     args["operations"] = args.pop("operations_json")
+                if "operations" not in args:
+                    raise ValueError("file_batch_write needs operations (or operations_json)")
                 res = file_ops.batch_write_files(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool == "file_delete":
