@@ -1533,6 +1533,11 @@ def _parse_activity_events(text):
     dicts with keys ``tool``, ``title``, ``ok``, ``elapsed_ms``, ``summary``
     and *stats* has aggregate counts.  When no activity block is present the
     events list is empty and the answer is returned unchanged.
+
+    The block contains two tool-call sections: ``recent events:`` (with
+    timing) and ``actions:`` (with ok/fail status from the transcript).
+    The actions section is preferred because it carries status; timing from
+    recent events is merged in by matching title order.
     """
     marker = "=== ACTIVITY (observable work) ==="
     end_marker = "=== END ACTIVITY ==="
@@ -1542,7 +1547,8 @@ def _parse_activity_events(text):
     clean = text[:idx].rstrip()
     block_end = text.find(end_marker, idx)
     block = text[idx:block_end] if block_end > idx else text[idx:]
-    events = []
+    actions = []
+    timed_events = []
     stats = {}
     for line in block.splitlines():
         line = line.strip()
@@ -1569,7 +1575,7 @@ def _parse_activity_events(text):
         elif line.startswith(("• ", "× ")):
             ok = line[0] == "•"
             title = line[2:].strip()
-            events.append({"title": title, "ok": ok})
+            actions.append({"title": title, "ok": ok})
         elif line.startswith("+") and "ms " in line:
             parts = line.split(None, 2)
             if len(parts) >= 3:
@@ -1580,10 +1586,17 @@ def _parse_activity_events(text):
                 kind = parts[1]
                 detail = parts[2] if len(parts) > 2 else ""
                 if kind == "tool_call":
-                    events.append({
+                    timed_events.append({
                         "title": detail, "ok": True, "elapsed_ms": elapsed,
                     })
-    return clean, events, stats
+    if actions:
+        timing_iter = iter(timed_events)
+        for action in actions:
+            te = next(timing_iter, None)
+            if te:
+                action["elapsed_ms"] = te.get("elapsed_ms")
+        return clean, actions, stats
+    return clean, timed_events, stats
 
 
 def _render_tool_rows(events, box, width):
