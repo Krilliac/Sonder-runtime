@@ -367,6 +367,15 @@ from sonder_runtime.domain.approvals_limit import (
 from sonder_runtime.domain.callable_inspection import (
     callable_accepts_keyword as _callable_accepts_keyword,
 )
+from sonder_runtime.domain.fanout_worker_identity import FANOUT_WORKER_INSTANCE as _FANOUT_WORKER_INSTANCE
+
+
+def _fanout_worker_id():
+    return "fanout-%s-%d-%d" % (
+        _FANOUT_WORKER_INSTANCE, os.getpid(), threading.get_ident(),
+    )
+
+
 from sonder_runtime.adapters.cloud_fallback import (
     chat_request_with_cloud_fallback as _chat_request_with_cloud_fallback_policy,
     extra_usage_fallback as _extra_usage_fallback_policy,
@@ -22076,22 +22085,6 @@ def _fanout_models(scope):
 
 
 
-_FANOUT_WORKER_INSTANCE = uuid.uuid4().hex
-
-
-def _fanout_worker_id():
-    """Return a globally unique durable-receipt lease owner identifier.
-
-    A fanout database may be intentionally shared by several runtime hosts.
-    PID/thread pairs are only process-local and can collide across hosts (or
-    after a quick PID reuse), which would let two workers impersonate one
-    lease owner.  The random instance token is created once per import/process
-    and remains stable for its worker's lifetime while fencing every other
-    runtime instance.
-    """
-    return "fanout-%s-%d-%d" % (
-        _FANOUT_WORKER_INSTANCE, os.getpid(), threading.get_ident(),
-    )
 
 
 
