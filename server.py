@@ -322,6 +322,7 @@ from sonder_runtime.adapters.model_response_metadata import (
 )
 from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
 from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
+from sonder_runtime.domain.campaign_prompt import campaign_prompt as _campaign_prompt_policy
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -6628,30 +6629,8 @@ _CAMPAIGN_TASKS = [
 
 
 def _campaign_prompt(language, task_name, task_text, repair_note=""):
-    fence = grounding._LANG_FENCE.get(language, language)
-    repair = ("\nPrevious attempt failed:\n%s\nFix it." % repair_note) if repair_note else ""
-    language_note = ""
-    if language == "powershell" and task_name == "string":
-        language_note = (
-            " PowerShell arrays print one item per line; when building a string from "
-            "characters, reverse by index/order and join explicitly with -join; do not "
-            "sort the characters."
-        )
-    if language == "powershell" and task_name == "list":
-        language_note = (
-            " In PowerShell, use Measure-Object -Sum or a simple loop to sum numeric "
-            "arrays; do not use Invoke-Expression for arithmetic."
-        )
-    if language == "cpp" and task_name == "string":
-        language_note = (
-            " In C++, include <algorithm> before using std::reverse, or reverse the "
-            "string manually."
-        )
-    return (
-        "Write a complete runnable %s program for this task: %s.\n"
-        "Return only one ```%s code block. Do not use interactive input. "
-        "The program must terminate quickly.%s%s" % (
-            language, task_text, fence, language_note, repair)
+    return _campaign_prompt_policy(
+        language, task_name, task_text, repair_note, fences=grounding._LANG_FENCE,
     )
 
 
