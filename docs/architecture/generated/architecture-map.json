@@ -587,7 +587,7 @@
       ]
     },
     {
-      "file_count": 147,
+      "file_count": 150,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -623,6 +623,7 @@
         "sonder_runtime/domain/cancellation_tree.py",
         "sonder_runtime/domain/chat_template_policy.py",
         "sonder_runtime/domain/cloud_access.py",
+        "sonder_runtime/domain/cloud_agent_tool_policy.py",
         "sonder_runtime/domain/cloud_model_policy.py",
         "sonder_runtime/domain/cloud_thinking_budget.py",
         "sonder_runtime/domain/cloud_tier_policy.py",
@@ -662,12 +663,14 @@
         "sonder_runtime/domain/fanout_residency.py",
         "sonder_runtime/domain/fanout_worker_identity.py",
         "sonder_runtime/domain/health_formatting.py",
+        "sonder_runtime/domain/identifier_resolution.py",
         "sonder_runtime/domain/improvement_report_formatting.py",
         "sonder_runtime/domain/inference_profiles.py",
         "sonder_runtime/domain/interaction_footer.py",
         "sonder_runtime/domain/launcher_health.py",
         "sonder_runtime/domain/learning_tier.py",
         "sonder_runtime/domain/loop_actions.py",
+        "sonder_runtime/domain/loop_result_formatting.py",
         "sonder_runtime/domain/loop_retry_policy.py",
         "sonder_runtime/domain/master_timeout.py",
         "sonder_runtime/domain/mcp_runtime_formatting.py",

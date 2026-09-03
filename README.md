@@ -511,3 +511,7 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Three-Hundred-Forty-Fifth Slice: fanout worker id construction now delegates to sonder_runtime.domain.fanout_worker_identity.fanout_worker_id, removing duplicated logic from the root _fanout_worker_id delegate.
 - WP1 Three-Hundred-Forty-Sixth Slice: agent help text tool-name parsing now lives in sonder_runtime.domain.agent_help_parsing, preserving the root _agent_help_advertised_tools alias.
 - WP1 Three-Hundred-Forty-Seventh Slice: agent mutation record convenience wrapper now lives in sonder_runtime.adapters.agent_work_coverage.mutation_record, preserving the root _agent_mutation_record alias.
+- WP1 Three-Hundred-Forty-Eighth Slice: loop result formatting now lives in sonder_runtime.domain.loop_result_formatting, preserving the root _loop_text_result identity-preserving alias.
+- WP1 Three-Hundred-Forty-Ninth Slice: identifier resolution now lives in sonder_runtime.domain.identifier_resolution, preserving the root _resolve_session and _resolve_project compatibility delegates.
+- WP1 Three-Hundred-Fiftieth Slice: cloud agent tool policy now lives in sonder_runtime.domain.cloud_agent_tool_policy, preserving the root _cloud_agent_tool_policy_error compatibility delegate.
+- WP1 Three-Hundred-Fifty-First Slice: schema coverage annotation now lives in sonder_runtime.domain.schema_policy.with_schema_coverage, preserving the root _with_schema_coverage identity-preserving alias.

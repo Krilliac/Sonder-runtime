@@ -402,6 +402,16 @@ from sonder_runtime.domain.agent_mutation_policy import (
 from sonder_runtime.domain.schema_policy import (
     format_schema_gaps as _format_schema_gaps,
     leading_json_object as _leading_json_object_policy,
+    with_schema_coverage as _with_schema_coverage,
+)
+from sonder_runtime.domain.loop_result_formatting import (
+    loop_text_result as _loop_text_result,
+)
+from sonder_runtime.domain.identifier_resolution import (
+    resolve_identifier as _resolve_identifier_impl,
+)
+from sonder_runtime.domain.cloud_agent_tool_policy import (
+    cloud_agent_tool_policy_error as _cloud_agent_tool_policy_error_impl,
 )
 from sonder_runtime.platform.model_retry_policy import (
     hosted_overflow_retry_enabled as _hosted_overflow_retry_enabled,
@@ -1953,12 +1963,7 @@ def _internal_generate_for_route(model, cloud):
 
 def _resolve_session(session):
     """"" -> DEFAULT_SESSION (memory on by default); "none" -> None (single turn)."""
-    s = (session or "").strip()
-    if s == "":
-        return DEFAULT_SESSION
-    if s.lower() == "none":
-        return None
-    return s
+    return _resolve_identifier_impl(session, DEFAULT_SESSION)
 
 
 @contextlib.contextmanager
@@ -2001,12 +2006,7 @@ def _release_persistent_session_turn(claim):
 
 def _resolve_project(project):
     """Same convention as sessions: "" -> DEFAULT_PROJECT, "none" -> None."""
-    p = (project or "").strip()
-    if p == "":
-        return DEFAULT_PROJECT
-    if p.lower() == "none":
-        return None
-    return p
+    return _resolve_identifier_impl(project, DEFAULT_PROJECT)
 
 
 # The mutable, disk-backed parts of the system prompt, pinned for one turn.
@@ -4636,18 +4636,6 @@ def _schema_coverage_gaps(value, schema):
     except Exception as exc:
         return [("$", "coverage could not be determined: %s" % exc)]
 
-
-def _with_schema_coverage(text, gaps):
-    """Append what the check could not verify, or return `text` untouched.
-
-    A fully-checkable schema -- the common `type`/`required`/`properties`/
-    `items` case -- returns byte-for-byte clean JSON. Anything less carries the
-    shortfall with it, because a caller who cannot see that the check was
-    partial will read its silence as a pass.
-    """
-    if not gaps:
-        return text
-    return "%s\n[schema_unverified: %s]" % (text, _format_schema_gaps(gaps))
 
 
 def _require_schema_match(text, schema):
@@ -13633,17 +13621,6 @@ def game_generation_campaign(
     return output
 
 
-def _loop_text_result(action_type, text):
-    text = text or ""
-    first_line = next((line for line in text.splitlines() if line.strip()), "")
-    return {
-        "ok": not text.startswith("ERROR:"),
-        "type": action_type,
-        "summary": first_line[:200],
-        "output": text,
-    }
-
-
 def _loop_verdict_result(action_type, text, success_prefix):
     return _loop_verdict_result_policy(
         action_type, text, success_prefix, text_result=_loop_text_result,
@@ -18023,21 +18000,11 @@ def _agent_run_tool_refusal(
 
 def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
     """Keep host-data denial absolute; unsafe bypasses nested models only."""
-    if tool_name in _CLOUD_AGENT_LOCAL_ONLY_TOOLS:
-        return (
-            "ERROR: HOST POLICY: local-only tool '%s' is disabled inside a "
-            "hosted agent so private workspace or machine data cannot enter "
-            "the hosted model transcript." % tool_name
-        )
-    if tool_name in _CLOUD_AGENT_NESTED_MODEL_TOOLS:
-        if unsafe is True:
-            return ""
-        return (
-            "ERROR: HOST POLICY: nested model-spawning tool '%s' is disabled "
-            "inside a hosted agent so all hosted output remains in one "
-            "bounded ledger." % tool_name
-        )
-    return ""
+    return _cloud_agent_tool_policy_error_impl(
+        tool_name, unsafe=unsafe,
+        local_only_tools=_CLOUD_AGENT_LOCAL_ONLY_TOOLS,
+        nested_model_tools=_CLOUD_AGENT_NESTED_MODEL_TOOLS,
+    )
 
 
 
