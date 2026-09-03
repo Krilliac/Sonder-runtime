@@ -502,3 +502,8 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Three-Hundred-Thirty-Sixth Slice: approval listing limit parsing now lives in sonder_runtime.domain.approvals_limit, preserving the root _approvals_limit compatibility alias.
 - WP1 Three-Hundred-Thirty-Seventh Slice: callable keyword inspection now lives in sonder_runtime.domain.callable_inspection, preserving the root _callable_accepts_keyword compatibility alias.
 - WP1 Three-Hundred-Thirty-Eighth Slice: fanout worker identity now lives in sonder_runtime.domain.fanout_worker_identity, preserving the root _FANOUT_WORKER_INSTANCE alias and _fanout_worker_id compatibility delegate.
+- WP1 Three-Hundred-Thirty-Ninth Slice: runtime policy update JSON parsing now lives in sonder_runtime.domain.runtime_update_parsing, preserving the root _runtime_update_object alias.
+- WP1 Three-Hundred-Fortieth Slice: execution-decision summary header formatting now lives in sonder_runtime.domain.execution_route_formatting, preserving the root _execution_route_header compatibility delegate.
+- WP1 Three-Hundred-Forty-First Slice: agent tool observation quality classification now lives in sonder_runtime.domain.agent_observation_quality, preserving the root _agent_observation_ok alias.
+- WP1 Three-Hundred-Forty-Second Slice: agent run-created-paths key normalization now lives in sonder_runtime.domain.agent_path_keys, preserving the root _agent_created_path_key alias.
+- WP1 Three-Hundred-Forty-Third Slice: agent model-escalation identity key now lives in sonder_runtime.domain.agent_escalation_identity, preserving the root _agent_escalation_key alias.
