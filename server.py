@@ -323,6 +323,7 @@ from sonder_runtime.adapters.model_response_metadata import (
 from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
 from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
 from sonder_runtime.domain.campaign_prompt import campaign_prompt as _campaign_prompt_policy
+from sonder_runtime.domain.automation.command_programs import command_programs as _autopilot_command_programs
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -21073,25 +21074,6 @@ def _autopilot_allowed_tools(run: dict) -> frozenset | None:
         allowed = allowed & _PROJECT_BOUND_AGENT_TOOLS
     return allowed
 
-
-def _autopilot_command_programs(value) -> list[str]:
-    if value in (None, ""):
-        return []
-    try:
-        payload = json.loads(value) if isinstance(value, str) else value
-    except (TypeError, ValueError):
-        return ["(invalid)"]
-    if isinstance(payload, dict):
-        payload = payload.get("commands") or []
-    if not isinstance(payload, list):
-        return ["(invalid)"]
-    programs = []
-    for item in payload:
-        command = item.get("cmd") if isinstance(item, dict) else item
-        if not isinstance(command, list) or not command:
-            return ["(invalid)"]
-        programs.append(os.path.basename(str(command[0])).lower())
-    return programs
 
 
 def _autopilot_tool_policy(run: dict):
