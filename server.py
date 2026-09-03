@@ -5870,7 +5870,6 @@ def _answer_with_history_impl(
             # observer is an in-process metadata hook, never model input.
             pass
 
-    _observe_target(model, tier_label, cloud)
     # The default OpenAI ``model`` (sonder) may step to a stronger bound local
     # model when its first model fails or answers nothing (tier_escalation);
     # any explicit model field is a routing contract and stays one attempt.
@@ -5901,8 +5900,10 @@ def _answer_with_history_impl(
                 rung.model, rung.cloud, rung.augment, rung.tier,
             )
             following = escalation_plan.next_rung(attempt)
-            if attempt:
-                _observe_target(model, tier_label, cloud)
+            # Every attempt reports its own target, so the receipt names the
+            # model that answered -- including a pre-routed first attempt,
+            # which is not the route the request resolved to.
+            _observe_target(model, tier_label, cloud)
             effective_system = _build_system("", trace, "", model=model, cloud=cloud)
             # Honor LEARN_TIERS here too. Serve conversation memory is client-side (the app
             # resends history each request), so a non-learning model can skip capture entirely:

@@ -318,6 +318,22 @@ def test_served_chat_steps_up_and_reports_the_target_that_answered(monkeypatch):
     assert observed == [("m-code", "sonder", False), ("m-general", "general", False)]
 
 
+def test_served_chat_reports_a_pre_routed_reasoning_target(monkeypatch):
+    """Measured 2026-09-03: the receipt named the default route while the
+    reasoning model answered."""
+    calls, _discarded = _install_chat_fakes(monkeypatch, {"m-reasoning": "proved"})
+    observed = []
+
+    out = server._answer_with_history_impl(
+        REASONING_PROMPT, [], tier="", raise_model_errors=True,
+        target_observer=lambda model, label, cloud: observed.append((model, label, cloud)),
+    )
+
+    assert "proved" in out
+    assert [call["model"] for call in calls] == ["m-reasoning"]
+    assert observed == [("m-reasoning", "reasoning", False)]
+
+
 def test_served_chat_with_an_explicit_model_field_raises_its_own_failure(monkeypatch):
     calls, _discarded = _install_chat_fakes(
         monkeypatch, {"m-code": ModelCallError("protocol", "first")},

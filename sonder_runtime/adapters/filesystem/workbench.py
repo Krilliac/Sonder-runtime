@@ -407,7 +407,7 @@ def read_line_range(
 ):
     target = _resolve(path, extra_roots=extra_roots, bypass=bypass)
     if not target.is_file():
-        raise FileNotFoundError("image file not found: %s" % target)
+        raise FileNotFoundError("file not found: %s" % target)
     start = _bounded_int(start_line, 1, 1, 10_000_000)
     end = _bounded_int(end_line, start + 199, 1, 10_000_000)
     if end < start:

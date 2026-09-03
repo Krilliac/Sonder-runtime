@@ -47,6 +47,14 @@ observable execution metadata is returned separately as `sonder_activity`.
 
 The supported chat subset currently includes `model`, `messages`, `stream`,
 `session`, `project`, `context_size`, and the consented location fields.
+`project` scopes durable facts. On a local-open deployment (no caller
+authentication) it also reaches routed natural work unchanged, so a value
+naming an existing directory is the workspace the workbench agent runs in.
+On an authenticated deployment the served route namespaces `session` and
+`project` to opaque per-principal ids before routing, so routed work runs
+with no workspace and relative paths do not reach the client's directory
+(measured in `../architecture/evidence/MODEL-TRIALS-2026-09-03.md`, which
+records this as a decision for the owner).
 
 Non-streaming responses populate standard OpenAI `usage` from the current
 request's observed model counters. For an SSE response, request an additional
