@@ -348,6 +348,46 @@ from sonder_runtime.adapters.agent_work_coverage import (
     verification_covers as _agent_verification_covers,
 )
 from sonder_runtime.adapters.repo_repair_runner import run_pytest as _repo_repair_pytest
+from sonder_runtime.domain.model_catalog import (
+    catalog_names as _catalog_names,
+    catalog_records as _catalog_records,
+    catalog_revision as _catalog_revision,
+    installed_records as _installed_catalog_records,
+    resolve_record as _resolve_catalog_record,
+)
+from sonder_runtime.domain.project_scope_keys import (
+    project_scoped_path_key as _project_scoped_path_key,
+)
+from sonder_runtime.domain.automation.selfmod_test_commands import (
+    selfmod_test_commands as _selfmod_test_commands,
+)
+from sonder_runtime.domain.approvals_limit import (
+    approvals_limit as _approvals_limit,
+)
+from sonder_runtime.domain.callable_inspection import (
+    callable_accepts_keyword as _callable_accepts_keyword,
+)
+from sonder_runtime.domain.fanout_worker_identity import FANOUT_WORKER_INSTANCE as _FANOUT_WORKER_INSTANCE
+
+
+def _fanout_worker_id():
+    return "fanout-%s-%d-%d" % (
+        _FANOUT_WORKER_INSTANCE, os.getpid(), threading.get_ident(),
+    )
+
+
+from sonder_runtime.adapters.cloud_fallback import (
+    chat_request_with_cloud_fallback as _chat_request_with_cloud_fallback_policy,
+    extra_usage_fallback as _extra_usage_fallback_policy,
+)
+from sonder_runtime.domain.fanout_residency import dispatch_residency_reason as _dispatch_residency_reason_policy
+from sonder_runtime.adapters.session_turn_claims import (
+    acquire_session_turn as _acquire_session_turn_policy,
+    release_session_turn_claim as _release_session_turn_claim_policy,
+)
+from sonder_runtime.adapters.code_repair_persistence import (
+    persist_verified_code_repair as _persist_verified_code_repair_policy,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -603,16 +643,7 @@ def discovered_models():
     operator's Ollama endpoint currently advertises, but cannot turn an
     arbitrary string into a backend request.
     """
-    payload = _get("/api/tags")
-    raw = payload.get("models", []) if isinstance(payload, dict) else []
-    names, seen = [], set()
-    for item in raw if isinstance(raw, list) else []:
-        name = str(item.get("name") or item.get("model") or "").strip() if isinstance(item, dict) else ""
-        key = name.casefold()
-        if name and key not in seen:
-            names.append(name)
-            seen.add(key)
-    return sorted(names, key=str.casefold)
+    return _catalog_names(_get("/api/tags"))
 
 
 def discovered_model_records():
@@ -622,19 +653,7 @@ def discovered_model_records():
     Unknown records deliberately remain eligible; fanout excludes only models
     which the operator's catalog positively identifies as non-generative.
     """
-    payload = _get("/api/tags")
-    raw = payload.get("models", []) if isinstance(payload, dict) else []
-    records, seen = [], set()
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("model") or "").strip()
-        key = name.casefold()
-        if not name or key in seen:
-            continue
-        seen.add(key)
-        records.append((name, item))
-    return sorted(records, key=lambda row: row[0].casefold())
+    return _catalog_records(_get("/api/tags"))
 
 
 def _cache_model_revision(model):
@@ -650,23 +669,11 @@ def _cache_model_revision(model):
     requested = str(model or "").strip().casefold()
     if not requested:
         return ""
-    candidates = {requested}
-    if ":" not in requested:
-        candidates.add(requested + ":latest")
     try:
         records = discovered_model_records()
     except Exception:
         return ""
-    for name, record in records:
-        advertised = str(name or "").strip().casefold()
-        if advertised not in candidates:
-            continue
-        record = record if isinstance(record, dict) else {}
-        details = record.get("details") if isinstance(record.get("details"), dict) else {}
-        digest = str(record.get("digest") or details.get("digest") or "").strip()
-        if digest:
-            return digest
-    return ""
+    return _catalog_revision(requested, records)
 
 
 def _inventory_rows(payload, endpoint):
@@ -679,10 +686,7 @@ def resolve_discovered_model_record(selector):
     wanted = str(selector or "").strip().casefold()
     if not wanted:
         return None
-    for name, record in discovered_model_records():
-        if name.casefold() == wanted:
-            return name, record
-    return None
+    return _resolve_catalog_record(wanted, discovered_model_records())
 
 
 def resolve_discovered_model(selector):
@@ -820,21 +824,10 @@ def _remember_unsupported_think_option(model) -> None:
 
 
 def _cloud_extra_usage_fallback(model, error):
-    """Return the plan-covered Kimi fallback for an unfunded K3 request.
-
-    Ollama currently bills Kimi K3 only against the separate extra-usage
-    balance, even for Pro/Max accounts.  A 402 is therefore a deterministic
-    model-availability decision, not a transient transport failure.  Honor an
-    explicit K3 selection, but let opted-in cloud work consume the account's
-    ordinary resettable allowance through K2.7 when that balance is empty.
-    """
-    if not isinstance(error, ModelCallError) or error.status != 402:
-        return None
-    if not str(model or "").strip().casefold().startswith("kimi-k3:"):
-        return None
-    if str(model).strip().casefold() == CLOUD_EXTRA_USAGE_FALLBACK_MODEL.casefold():
-        return None
-    return CLOUD_EXTRA_USAGE_FALLBACK_MODEL
+    """Return the plan-covered Kimi fallback for an unfunded K3 request."""
+    return _extra_usage_fallback_policy(
+        model, error, fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
+    )
 
 
 def _chat_request_with_cloud_fallback(
@@ -842,48 +835,16 @@ def _chat_request_with_cloud_fallback(
     accept_native_tool_calls=False, compact_cloud_reasoning=False,
     allow_cloud_fallback=True,
 ):
-    """Make one cloud request, optionally falling back once on K3 HTTP 402.
-
-    A normal single-model request may use the documented K3-to-K2.7
-    availability fallback.  Durable fanout rows are different: each row is an
-    immutable, caller-visible target and must never attribute another model's
-    response (or spend) to it.  Those callers pass ``allow_cloud_fallback``
-    false so the requested target's provider error is recorded directly.
-    """
-    try:
-        out, content = _chat_request(
-            payload,
-            model=model,
-            cloud=True,
-            timeout=timeout,
-            cancel_check=cancel_check,
-            accept_native_tool_calls=accept_native_tool_calls,
-            idempotent=True,
-        )
-        return out, content, model
-    except ModelCallError as error:
-        if not allow_cloud_fallback:
-            raise
-        fallback = _cloud_extra_usage_fallback(model, error)
-        if fallback is None:
-            raise
-
-    fallback_payload = dict(payload)
-    fallback_payload["model"] = fallback
-    fallback_payload.pop("think", None)
-    _apply_cloud_thinking_policy(
-        fallback_payload, fallback, compact=compact_cloud_reasoning,
-    )
-    out, content = _chat_request(
-        fallback_payload,
-        model=fallback,
-        cloud=True,
-        timeout=timeout,
-        cancel_check=cancel_check,
+    """Make one cloud request, optionally falling back once on K3 HTTP 402."""
+    return _chat_request_with_cloud_fallback_policy(
+        payload, model=model, timeout=timeout, cancel_check=cancel_check,
         accept_native_tool_calls=accept_native_tool_calls,
-        idempotent=True,
+        compact_cloud_reasoning=compact_cloud_reasoning,
+        allow_cloud_fallback=allow_cloud_fallback,
+        chat_request=_chat_request,
+        apply_thinking_policy=_apply_cloud_thinking_policy,
+        fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
     )
-    return out, content, fallback
 
 
 if _is_cloud_model_name(TIERS["code"]):
@@ -2010,78 +1971,13 @@ def _serialized_session_turn(session_id):
 
 def _acquire_persistent_session_turn(session_id):
     """Acquire a DB-backed session claim before reading remembered history."""
-    owner_state, owner_identity = process_liveness.probe_process(os.getpid())
-    if (
-        owner_state != process_liveness.PROCESS_ALIVE
-        or not owner_identity
-    ):
-        return None, "ERROR: session owner identity is unavailable."
-    try:
-        conn = _open_db()
-    except Exception:
-        return None, "ERROR: session turn coordination is unavailable."
-    claim_token = memory_store.new_id()
-    deadline = time.monotonic() + _SESSION_TURN_CLAIM_WAIT_SECONDS
-    while True:
-        try:
-            claimed = memory_store.claim_session_turn(
-                conn,
-                session_id,
-                claim_token,
-                owner_pid=os.getpid(),
-                owner_identity=owner_identity,
-            )
-        except Exception:
-            conn.close()
-            return None, "ERROR: session turn coordination is unavailable."
-        if claimed:
-            return {
-                "conn": conn,
-                "session_id": session_id,
-                "claim_token": claim_token,
-                "owner_pid": os.getpid(),
-                "owner_identity": owner_identity,
-            }, ""
-        if time.monotonic() >= deadline:
-            conn.close()
-            session_label = str(session_id).replace("\r", " ").replace("\n", " ")[:120]
-            return None, (
-                "ERROR: session '%s' already has a turn in progress; retry shortly."
-                % session_label
-            )
-        time.sleep(0.05)
+    return _acquire_session_turn_policy(
+        session_id, open_db=_open_db, claim_wait_seconds=_SESSION_TURN_CLAIM_WAIT_SECONDS,
+    )
 
 
 def _release_persistent_session_turn(claim):
-    if not claim:
-        return
-    conn = claim["conn"]
-    for attempt in range(3):
-        try:
-            memory_store.release_session_turn(
-                conn, claim["session_id"], claim["claim_token"],
-            )
-            break
-        except Exception:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            if attempt == 2:
-                memory_store.abandon_session_turn_claim(
-                    claim["session_id"], claim["claim_token"],
-                    claim["owner_pid"], claim["owner_identity"],
-                )
-                return
-            time.sleep(0.05)
-            try:
-                conn = _open_db()
-            except Exception:
-                continue
-    try:
-        conn.close()
-    except Exception:
-        pass
+    return _release_session_turn_claim_policy(claim, open_db=_open_db)
 
 
 def _resolve_project(project):
@@ -2549,50 +2445,6 @@ def _training_command(arg: str) -> str:
         )
     return adaptive_training.command_text(text)
 
-
-def _selfmod_test_commands(run, explicit_tests):
-    import shlex
-    workspace = Path(run["workspace_path"])
-    declared_python = sorted(path for path in run["files"] if path.lower().endswith(".py"))
-    present_python = [path for path in declared_python if (workspace / path).is_file()]
-    absent_python = [path for path in declared_python if not (workspace / path).is_file()]
-    if present_python:
-        syntax = [sys.executable, "-m", "py_compile", *present_python]
-    elif declared_python:
-        # `.is_file()` used to empty this list silently and the required syntax
-        # check degraded to `print('no Python syntax targets')` -- exit 0,
-        # recorded as passing. The list empties exactly when the candidate
-        # DELETED its declared modules, and deletion is the shape an automated
-        # repair loop is most likely to produce, so the one change that most
-        # needed a syntax gate was the one that skipped it.
-        syntax = [sys.executable, "-c", "raise SystemExit(%r)" % (
-            "selfmod syntax gate: every declared Python target is absent from the "
-            "candidate workspace (%s). A deletion-only change has nothing to compile "
-            "in place, and an empty target set is a refusal, not a pass. Re-scope the "
-            "run so a surviving module carries the change, or take the deletion "
-            "through an explicit maintenance review."
-            % ", ".join(absent_python)
-        )]
-    else:
-        syntax = [sys.executable, "-c", "raise SystemExit(%r)" % (
-            "selfmod syntax gate: this run declares no Python file (%s), so the "
-            "required syntax check has nothing to compile. An empty target set is a "
-            "refusal, not a pass." % (", ".join(run["files"]) or "no files")
-        )]
-    targeted = shlex.split(explicit_tests[0], posix=os.name != "nt") if explicit_tests else [sys.executable, "-c", "raise SystemExit('explicit reproducing/targeted test required')"]
-    regression = [sys.executable, "-m", "pytest", "-q"]
-    # `smoke` is deliberately NOT built here. It used to be
-    #     python -c "import pathlib; assert pathlib.Path('.').is_dir(); ..."
-    # run with the candidate workspace as cwd -- a required gate that could not
-    # fail. It is now selfmod.record_smoke(), which imports the candidate in a
-    # child process and must return a SHA-256 receipt over the bytes it loaded.
-    # It lives in selfmod.py because the receipt has to be computed by the
-    # recording process from the workspace, and never handed to the probe.
-    commands = [("syntax", syntax), ("targeted", targeted), ("regression", regression)]
-    if run["maintenance_authorized"]:
-        security = shlex.split(explicit_tests[1], posix=os.name != "nt") if len(explicit_tests) > 1 else [sys.executable, "-c", "raise SystemExit('explicit protected security test required')"]
-        commands.append(("security", security))
-    return commands
 
 
 def _selfmod_agent_policy(run):
@@ -4021,44 +3873,9 @@ def _persist_verified_code_repair(
     interaction_id, expected, repaired_response, repair_usage,
 ):
     """Replace a captured broken response only while its learning state is unchanged."""
-    if not interaction_id or not expected or not isinstance(repair_usage, dict):
-        return False
-    try:
-        repair_tokens_in = int(repair_usage["tokens_in"])
-        repair_tokens_out = int(repair_usage["tokens_out"])
-        original_tokens_in = int(expected.get("tokens_in") or 0)
-        original_tokens_out = int(expected.get("tokens_out") or 0)
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return False
-    if min(
-        repair_tokens_in, repair_tokens_out,
-        original_tokens_in, original_tokens_out,
-    ) < 0:
-        return False
-    original_source = str(expected.get("token_source") or "").strip().lower()
-    repair_source = str(repair_usage.get("token_source") or "").strip().lower()
-    if original_source == repair_source == "ollama":
-        token_source = "ollama+code-repair"
-    elif original_source == repair_source == "estimated":
-        token_source = "estimated+code-repair"
-    else:
-        token_source = "mixed+code-repair"
-    try:
-        conn = _open_db()
-        try:
-            return memory_store.replace_interaction_response_cas(
-                conn,
-                interaction_id,
-                expected=expected,
-                response=repaired_response,
-                tokens_in=original_tokens_in + repair_tokens_in,
-                tokens_out=original_tokens_out + repair_tokens_out,
-                token_source=token_source,
-            )
-        finally:
-            conn.close()
-    except Exception:
-        return False
+    return _persist_verified_code_repair_policy(
+        interaction_id, expected, repaired_response, repair_usage, open_db=_open_db,
+    )
 
 
 def _apply_code_gate(reply, interaction_id=None, regenerate=None):
@@ -4603,18 +4420,6 @@ def _format_model_call_error(error: ModelCallError) -> str:
         display=_ollama_display(),
     )
 
-
-def _callable_accepts_keyword(callable_obj, name: str) -> bool:
-    """Keep narrow test/extension doubles compatible with new optional seams."""
-    try:
-        parameters = inspect.signature(callable_obj).parameters.values()
-    except (TypeError, ValueError):
-        return True
-    return any(
-        parameter.name == name
-        or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
 
 
 def _post(
@@ -7982,15 +7787,6 @@ def _approval_authority(token) -> tuple[str, str]:
         "prompt), a developer token, or SONDER_ALLOW_PERMISSION_EDITS=1."
     )
 
-
-def _approvals_limit(arg: str) -> int:
-    text = str(arg or "").strip()
-    if not text:
-        return 20
-    try:
-        return max(1, min(int(text), 200))
-    except ValueError:
-        return 20
 
 
 def _approve_command(arg: str, *, operator_approved: bool = False) -> str:
@@ -18238,36 +18034,6 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
 
 
 
-def _project_scoped_path_key(tool_name):
-    if tool_name == "ensemble_codegen_build_loop":
-        return "project_dir"
-    if tool_name == "archive_extract":
-        return "destination"
-    if tool_name == "fetch_artifact":
-        # Its download target is `dest`; there is no `path` parameter, so the
-        # generic branch was reading a missing key, falling back to ".", and
-        # passing unconditionally. Latent rather than live today (this tool is
-        # neither advertised nor dispatchable), but it arms the moment anyone
-        # gives it a dispatch branch -- which is exactly what this task just
-        # did for twenty-three of its neighbours.
-        return "dest"
-    if tool_name in {
-        "file_find", "text_search", "script_search", "scaffold_project",
-        "repo_status", "repo_diff", "text_patch", "archive_create",
-        # Developer-workflow tools (harness_tools.py) all take "root", not
-        # "path" -- without this, a project-bound run would silently
-        # rebase a nonexistent "path" key while the real "root" argument
-        # (and its escape-check) went untouched.
-        "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
-        "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
-        "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
-        "git_merge", "git_cherry_pick",
-        "build_run", "build_clean",
-        "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
-    }:
-        return "root"
-    return "path"
-
 
 
 def _project_scope_args(tool_name, args, project):
@@ -21418,18 +21184,7 @@ def _route_work_request(prompt: str, project: str = "") -> str | None:
 
 def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
     """Read one coherent local catalog snapshot for policy validation."""
-    payload = _get("/api/tags")
-    rows = payload.get("models", []) if isinstance(payload, dict) else []
-    records, seen = [], set()
-    for item in rows if isinstance(rows, list) else []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("model") or "").strip()
-        key = name.casefold()
-        if name and key not in seen:
-            seen.add(key)
-            records.append((name, item))
-    return tuple(records)
+    return _installed_catalog_records(_get("/api/tags"))
 
 
 def _runtime_installed_models() -> set[str]:
@@ -22330,22 +22085,6 @@ def _fanout_models(scope):
 
 
 
-_FANOUT_WORKER_INSTANCE = uuid.uuid4().hex
-
-
-def _fanout_worker_id():
-    """Return a globally unique durable-receipt lease owner identifier.
-
-    A fanout database may be intentionally shared by several runtime hosts.
-    PID/thread pairs are only process-local and can collide across hosts (or
-    after a quick PID reuse), which would let two workers impersonate one
-    lease owner.  The random instance token is created once per import/process
-    and remains stable for its worker's lifetime while fencing every other
-    runtime instance.
-    """
-    return "fanout-%s-%d-%d" % (
-        _FANOUT_WORKER_INSTANCE, os.getpid(), threading.get_ident(),
-    )
 
 
 
@@ -22418,29 +22157,10 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
 
 
 def _fanout_dispatch_residency_reason(limits, model):
-    """Return a no-load fence refusal for a selected resident-only target.
-
-    A durable fanout may wait in the queue or be explicitly resumed long after
-    planning.  Its original ``/api/ps`` snapshot therefore cannot authorize a
-    later model load.  Recheck immediately before the provider closure exists;
-    a missing or unavailable row is a skipped receipt, never a fallback load.
-    """
-    if limits.get("selection_profile") != "loaded-local-chat":
-        return ""
-    try:
-        payload = _get("/api/ps")
-        rows = payload.get("models", []) if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise ValueError("invalid Ollama /api/ps response")
-        resident = {
-            str(row.get("name") or "").strip().casefold()
-            for row in rows if isinstance(row, dict) and str(row.get("name") or "").strip()
-        }
-    except Exception:
-        return "could not verify model residency at dispatch"
-    if str(model or "").strip().casefold() not in resident:
-        return "model is no longer resident at dispatch"
-    return ""
+    """Return a no-load fence refusal for a selected resident-only target."""
+    return _dispatch_residency_reason_policy(
+        limits, model, fetch_resident=lambda: _get("/api/ps"),
+    )
 
 
 def _fanout_snapshot_allows(run, model):
