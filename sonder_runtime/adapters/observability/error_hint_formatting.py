@@ -70,10 +70,15 @@ def error_hint(text) -> str:
             return "HTTP %s is usually transient; retry shortly." % status
 
     # _gate_tools() refusal: "refused <cmd>: <reason> (mode: <mode>)".
-    if value.startswith("refused ") and "(mode: plan)" in value:
+    if value.startswith("refused ") and "(mode: " in value:
+        if "(mode: plan)" in value:
+            return (
+                "/permissions changes the mode · "
+                "/mode manual asks per action instead"
+            )
         return (
-            "plan mode refuses mutating commands; /mode shows every mode and "
-            "/mode manual asks per action instead."
+            "/permissions changes the mode · "
+            "a rule can allow specific paths"
         )
 
     return ""
