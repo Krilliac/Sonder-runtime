@@ -349,36 +349,64 @@ def _strip(text):
     return sonder_repl._ANSI_RE.sub("", text)
 
 
-def test_banner_rows_stay_aligned_when_values_are_coloured(monkeypatch):
-    """The box is padded to a computed width, so any padding that counts ANSI
-    escape bytes frays the right edge as soon as a field is coloured -- and it
-    only shows in a real terminal, never in piped test output."""
+def test_header_lines_pack_coloured_segments_like_plain_ones(monkeypatch):
+    """The header packs segments to the terminal width by their printed
+    width, so a coloured value must pack exactly like a plain one -- padding
+    that counts escape bytes only shows in a real terminal, never in piped
+    test output."""
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
-    rows = [
-        ("model", sonder_repl._paint("sonder:latest", sonder_repl._Ansi.cyan), ()),
-        ("endpoint", "http://127.0.0.1:11435", (sonder_repl._Ansi.green,)),
-        ("a-much-longer-label", "x", ()),
-    ]
-    lines = _strip(sonder_repl._banner(rows)).splitlines()
-    widths = {len(line) for line in lines}
-    assert len(widths) == 1, "every banner line must print the same width: %r" % (
-        sorted(widths),
-    )
-    assert lines[0].startswith(("╭", "+")) and lines[-1].startswith(("╰", "+"))
+    plain = [("model sonder:latest", ()), ("endpoint http://127.0.0.1:11435", ()),
+             ("directory ~/src", ()), ("persona coder", ())]
+    coloured = [(text, (sonder_repl._Ansi.cyan,)) for text, _ in plain]
+    plain_lines = sonder_repl._header_lines(plain, width=60)
+    coloured_lines = sonder_repl._header_lines(coloured, width=60)
+    assert [_strip(line) for line in coloured_lines] == plain_lines
+    assert len(plain_lines) == 2, plain_lines
+    assert all(len(line) <= 60 for line in plain_lines)
+    assert plain_lines[0] == "model sonder:latest   endpoint http://127.0.0.1:11435"
 
 
-def test_banner_falls_back_to_ascii_when_the_console_cannot_encode_it(monkeypatch):
-    """A legacy Windows code page cannot encode U+256D. A decorative header
-    must not be able to take the REPL launch down with a UnicodeEncodeError."""
+def test_header_never_splits_a_segment_that_is_wider_than_the_line():
+    lines = sonder_repl._header_lines([("a" * 70, ()), ("b", ())], width=60)
+    assert lines == ["a" * 70, "b"]
+
+
+def test_header_falls_back_to_ascii_when_the_console_cannot_encode_it(monkeypatch):
+    """A legacy Windows code page cannot encode U+25C8 or U+276F. A decorative
+    header must not be able to take the REPL launch down with a
+    UnicodeEncodeError."""
     class _Cp437:
         encoding = "cp437"
 
     monkeypatch.setattr(sonder_repl.sys, "stdout", _Cp437())
     glyphs = sonder_repl._box_chars()
-    assert glyphs["tl"] == "+" and glyphs["h"] == "-"
+    assert glyphs["tl"] == "+" and glyphs["h"] == "-" and glyphs["prompt"] == ">"
     monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
-    text = sonder_repl._banner([("model", "x", ())])
+    monkeypatch.setattr(sonder_repl.server, "TIERS", {"code": "x"}, raising=False)
+    text = sonder_repl._startup_banner(None, "coder", "default")
     text.encode("cp437")  # must not raise
+    assert "* sonder" in text
+
+
+def test_status_line_keeps_the_muted_tone_after_a_coloured_span(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", True)
+    title = "Sonder code  ·  %s  ·  ctx~12k/32k" % sonder_repl._paint(
+        "mode manual", sonder_repl._Ansi.cyan,
+    )
+    line = sonder_repl._status_line(title)
+    assert line.startswith(sonder_repl._Ansi.muted)
+    assert line.endswith(sonder_repl._Ansi.reset)
+    # After the mode's own reset the muted tone is re-applied, so the context
+    # figures that follow it are not printed in the terminal's default colour.
+    assert sonder_repl._Ansi.reset + sonder_repl._Ansi.muted + "  ·  ctx" in line
+    assert _strip(line) == _strip(title)
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    assert sonder_repl._status_line("plain") == "plain"
+
+
+def test_plain_prompt_is_the_gutter_glyph(monkeypatch):
+    monkeypatch.setattr(sonder_repl._Ansi, "enabled", False)
+    assert sonder_repl._prompt_glyph() in ("❯ ", "> ")
 
 
 def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
