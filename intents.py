@@ -105,6 +105,16 @@ _WORK_DIRECT_RE = re.compile(
 _PATH_LIKE_RE = re.compile(
     r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
 )
+# Summarising or describing a *named file* needs the file, so it is workspace
+# work even though the same verbs on a topic ("summarize this conversation")
+# stay chat.  Measured 2026-09-03: "Summarize README.md in one sentence."
+# reached the plain chat route and the model could only answer that it cannot
+# read files.  The target must look like a file (a path, or a name with a
+# letter extension of two or more characters, so "e.g." and "3.14" stay chat).
+_WORK_FILE_READ_RE = re.compile(r"\b(summarize|summarise|describe|outline)\b")
+_FILE_LIKE_RE = re.compile(
+    r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\b[\w-]+\.[a-zA-Z]{2,8}\b)"
+)
 
 # This is deliberately narrower than a generic "security" or "sandbox"
 # classifier.  Security reviews and tests remain legitimate workspace work.
@@ -286,7 +296,7 @@ def classify_work(text):
     if _WORK_DIRECT_RE.search(candidate):
         return True
     if not _WORK_ACTION_RE.search(candidate):
-        return False
+        return bool(_WORK_FILE_READ_RE.search(candidate) and _FILE_LIKE_RE.search(value))
     return bool(_WORK_TARGET_RE.search(candidate) or _PATH_LIKE_RE.search(value))
 
 
