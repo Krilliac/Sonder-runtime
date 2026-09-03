@@ -307,6 +307,10 @@ from sonder_runtime.domain.loop_actions import (
     loop_action_tool as _loop_action_tool,
     loop_verdict_result as _loop_verdict_result_policy,
 )
+from sonder_runtime.domain.serve_selection import (
+    allow_cloud_fallback_for_target as _allow_cloud_fallback_for_target,
+    explicit_serve_selection as _explicit_serve_selection,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -2214,22 +2218,6 @@ def _serve_target(tier, strict):
     return None, False, True, None
 
 
-def _allow_cloud_fallback_for_target(tier_label):
-    """Whether an availability fallback may replace this resolved target.
-
-    A configured cloud *tier* is an operator-selected route and can use its
-    documented K3-to-K2.7 availability fallback. A ``model:<name>`` label came
-    from an exact user-supplied live-catalog selector, so it must never spend
-    tokens on, or return a response from, a different model.
-    """
-    return not str(tier_label or "").casefold().startswith("model:")
-
-
-def _explicit_serve_selection(tier, model_override):
-    """Whether a call names its own target instead of the default route."""
-    if str(model_override or "").strip():
-        return True
-    return str(tier or "").strip().lower() not in ("", "sonder", "local")
 
 
 def _latest_runnable_block(history):
