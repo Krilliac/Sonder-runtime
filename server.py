@@ -302,6 +302,11 @@ from sonder_runtime.domain.fanout_receipts import (
 from sonder_runtime.domain.model_response_detail import (
     empty_model_response_detail as _empty_model_response_detail,
 )
+from sonder_runtime.domain.loop_actions import (
+    LOOP_ACTION_TOOLS as _LOOP_ACTION_TOOLS,
+    loop_action_tool as _loop_action_tool,
+    loop_verdict_result as _loop_verdict_result_policy,
+)
 from sonder_runtime.domain.thinking_policy import (
     strip_inline_thinking as _strip_inline_thinking,
     thinking_exhausted_budget as _thinking_exhausted_budget,
@@ -13963,30 +13968,9 @@ def _loop_text_result(action_type, text):
 
 
 def _loop_verdict_result(action_type, text, success_prefix):
-    result = _loop_text_result(action_type, text)
-    result["ok"] = bool(text) and text.startswith(success_prefix)
-    return result
-
-
-# `_loop_dispatch` action types are mostly tool names already; these are the
-# ones that are not, so the gate below decides on the tool that actually runs
-# rather than on a name `risk_of` has never heard of.
-_LOOP_ACTION_TOOLS = {
-    "code": "run_code",
-    "project": "run_project",
-    "artifact": "artifact_generate",
-    "artifact_check": "artifact_ground",
-    "game_reference": "game_reference_suite",
-    "game": "game_generate_and_test",
-    "work": "workbench_agent",
-    "agent": "workbench_agent",
-    "improvement_report": "system_improvement_report",
-    "profile_status": "system_profile_text",
-    "emotion_status": "emotion_vector_status",
-    "emotion_update": "update_emotion_vectors",
-    "emotion_tune": "tune_emotion_vectors",
-    "learning_health": "learning_health_status",
-}
+    return _loop_verdict_result_policy(
+        action_type, text, success_prefix, text_result=_loop_text_result,
+    )
 
 # Single source for the public loop vocabulary.  It deliberately includes
 # aliases implemented by `_loop_dispatch`; hiding aliases makes clients think
@@ -13996,11 +13980,6 @@ _LOOP_ACTION_TYPES = (
     "code", "run_code", "project", "run_project", "artifact", "artifact_generate", "assetgen", "artifact_ground", "artifact_check", "game_reference", "game_reference_suite", "game", "game_generate", "game_generate_and_test", "game_campaign", "game_generation_campaign", "offload", "sonder", "status", "diagnostics", "context_health", "learning_health", "memory_quality_report", "memory_quality_repair", "memory_privacy_review", "memory_privacy_repair", "memory_embedding_backfill", "memory_interaction_embedding_backfill", "improvement_report", "system_improvement_report", "master_status", "agent_status", "master_capacity", "agent_capacity", "master_cancel", "agent_cancel", "master_retry", "agent_retry", "master", "master_orchestrate", "work", "agent", "workbench_agent", "workspace_inventory", "directory_tree", "directory_create", "file_read_range", "text_search", "script_search", "program_search", "workspace_run", "script_run", "artifact_risk_inspect", "process_list", "process_memory_risk_inspect", "image_inspect", "data_inspect", "checklist_create", "checklist_update", "checklist_show", "file_policy", "file_find", "file_read", "file_write", "file_copy", "file_move", "file_edit", "file_delete", "self_heal_check", "self_heal_repair", "profile_status", "emotion_status", "emotion_update", "emotion_tune", "learn_preference", "preferences_status", "memory_search", "ground_artifact", "apply_learned", "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup", "unload", "sleep",
 )
 
-
-def _loop_action_tool(action_type):
-    """The tool a loop action really runs, for the permission gate."""
-    name = str(action_type or "").strip().lower()
-    return _canonical_agent_tool_name(_LOOP_ACTION_TOOLS.get(name, name))
 
 
 def _loop_permission_refusal(action_type):
