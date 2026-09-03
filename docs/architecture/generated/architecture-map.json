@@ -574,12 +574,14 @@
       ]
     },
     {
-      "file_count": 109,
+      "file_count": 117,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
         "sonder_runtime/domain/agent_mutation_policy.py",
         "sonder_runtime/domain/agents/__init__.py",
+        "sonder_runtime/domain/agents/decision_parsing.py",
+        "sonder_runtime/domain/agents/observation_prompt.py",
         "sonder_runtime/domain/agents/roles.py",
         "sonder_runtime/domain/approval.py",
         "sonder_runtime/domain/artifact_risk_policy.py",
@@ -622,14 +624,18 @@
         "sonder_runtime/domain/extensions/__init__.py",
         "sonder_runtime/domain/extensions/artifact.py",
         "sonder_runtime/domain/extensions/manifest.py",
+        "sonder_runtime/domain/fanout_admission.py",
         "sonder_runtime/domain/fanout_policy.py",
+        "sonder_runtime/domain/fanout_redaction.py",
         "sonder_runtime/domain/health_formatting.py",
+        "sonder_runtime/domain/improvement_report_formatting.py",
         "sonder_runtime/domain/inference_profiles.py",
         "sonder_runtime/domain/interaction_footer.py",
         "sonder_runtime/domain/launcher_health.py",
         "sonder_runtime/domain/learning_tier.py",
         "sonder_runtime/domain/loop_retry_policy.py",
         "sonder_runtime/domain/master_timeout.py",
+        "sonder_runtime/domain/mcp_runtime_formatting.py",
         "sonder_runtime/domain/memory/__init__.py",
         "sonder_runtime/domain/memory/rules.py",
         "sonder_runtime/domain/memory/wp6_typed.py",
@@ -642,6 +648,7 @@
         "sonder_runtime/domain/model_usage_formatting.py",
         "sonder_runtime/domain/multimodal_scheduler.py",
         "sonder_runtime/domain/native_tool_policy.py",
+        "sonder_runtime/domain/natural_model_request.py",
         "sonder_runtime/domain/ollama_policy.py",
         "sonder_runtime/domain/permission_context.py",
         "sonder_runtime/domain/promotion/__init__.py",
@@ -685,7 +692,8 @@
         "sonder_runtime/domain/training/models.py",
         "sonder_runtime/domain/training/reproducible.py",
         "sonder_runtime/domain/updates/__init__.py",
-        "sonder_runtime/domain/updates/models.py"
+        "sonder_runtime/domain/updates/models.py",
+        "sonder_runtime/domain/updates/runtime_update_formatting.py"
       ]
     },
     {
