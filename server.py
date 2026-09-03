@@ -364,6 +364,9 @@ from sonder_runtime.domain.automation.selfmod_test_commands import (
 from sonder_runtime.domain.approvals_limit import (
     approvals_limit as _approvals_limit,
 )
+from sonder_runtime.domain.callable_inspection import (
+    callable_accepts_keyword as _callable_accepts_keyword,
+)
 from sonder_runtime.adapters.cloud_fallback import (
     chat_request_with_cloud_fallback as _chat_request_with_cloud_fallback_policy,
     extra_usage_fallback as _extra_usage_fallback_policy,
@@ -4408,18 +4411,6 @@ def _format_model_call_error(error: ModelCallError) -> str:
         display=_ollama_display(),
     )
 
-
-def _callable_accepts_keyword(callable_obj, name: str) -> bool:
-    """Keep narrow test/extension doubles compatible with new optional seams."""
-    try:
-        parameters = inspect.signature(callable_obj).parameters.values()
-    except (TypeError, ValueError):
-        return True
-    return any(
-        parameter.name == name
-        or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
 
 
 def _post(
