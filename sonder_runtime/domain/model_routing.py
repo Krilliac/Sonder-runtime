@@ -12,3 +12,16 @@ def is_cloud_model_name(model) -> bool:
     """
     name = (model or "").lower()
     return "-cloud" in name or name.endswith(":cloud")
+
+
+def is_cloud_tier(tier, model=None, *, cloud_tiers=(), tier_map=None) -> bool:
+    """Return whether a tier routes to cloud infrastructure.
+
+    Checks the tier name against the provided cloud-tier set, falling back
+    to lexical model-name classification on the resolved model.
+    """
+    if tier in cloud_tiers:
+        return True
+    if model is None:
+        model = (tier_map or {}).get(tier, "")
+    return is_cloud_model_name(model)

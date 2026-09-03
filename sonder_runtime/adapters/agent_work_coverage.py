@@ -301,6 +301,12 @@ def mutation_records(tool_name, args):
     return [record]
 
 
+def mutation_record(tool_name, args) -> dict:
+    """Return the first mutation record, or a default empty-path record."""
+    records = mutation_records(tool_name, args)
+    return records[0] if records else {"tool": tool_name, "path": ""}
+
+
 def validation_covers(tool_name, args, mutations, observation=""):
     """Require validators to touch changed disk state, not equivalent draft code."""
     args = args if isinstance(args, dict) else {}
