@@ -497,3 +497,4 @@ WP1 Eighty-Sixth Slice: fleet persistence now resolves its database and principa
 - WP1 Three-Hundred-Thirty-First Slice: the pure fanout no-load residency fence now lives in `sonder_runtime.domain.fanout_residency`, preserving the root `_fanout_dispatch_residency_reason` delegate.
 - WP1 Three-Hundred-Thirty-Second Slice: database-backed session turn claims now live in `sonder_runtime.adapters.session_turn_claims`, preserving the root `_acquire_persistent_session_turn` and `_release_persistent_session_turn` delegates.
 - WP1 Three-Hundred-Thirty-Third Slice: compare-and-swap persistence of a verified code repair now lives in `sonder_runtime.adapters.code_repair_persistence`, preserving the root `_persist_verified_code_repair` delegate.
+- WP1 Three-Hundred-Thirty-Fourth Slice: project-scoped path key lookup now lives in sonder_runtime.domain.project_scope_keys, preserving the root _project_scoped_path_key compatibility alias.
