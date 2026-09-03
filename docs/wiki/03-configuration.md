@@ -186,6 +186,10 @@ affects the default).
 `SONDER_REASONING` / `SONDER_VISION` also accept `none` (or `off`) to leave
 that specialist tier unbound, in which case reasoning/vision work falls back
 to a base tier.
+`SONDER_MODEL_ESCALATION` (default on; `0`/`off` disables) lets the default
+route step up to the next distinct bound local model when its first model
+fails or answers nothing, at most twice per turn; explicit tiers and model
+pins never move ([Tiers & Gateway](08-model-tiers-and-gateway.md)).
 
 ### Context sizing
 
