@@ -205,6 +205,36 @@ class TestCompositionService(unittest.TestCase):
         self.assertEqual(len(bindings), 1)
         self.assertEqual(bindings[0]["target_id"], "auto-test123")
 
+    def test_goal_to_autopilot_passes_request_owner(self):
+        import goal_store
+        import composition
+
+        goal = goal_store.set_goal("owned objective", "c1; c2")
+        with mock.patch(
+            "sonder_runtime.adapters.persistence.autopilot_store.create_run",
+            return_value={"id": "auto-owned", "status": "ready"},
+        ) as mock_create:
+            composition.goal_to_autopilot(goal, request_owner="user@example.com")
+
+        mock_create.assert_called_once()
+        self.assertEqual(mock_create.call_args.kwargs["request_owner"], "user@example.com")
+
+    def test_mission_start_passes_request_owner(self):
+        import composition
+
+        with mock.patch(
+            "sonder_runtime.adapters.persistence.autopilot_store.create_run",
+            return_value={"id": "auto-mission-owned", "status": "ready"},
+        ) as mock_create:
+            result = composition.mission_start(
+                "owned mission", "step a; step b",
+                auto=True, request_owner="owner@test.com",
+            )
+
+        self.assertIsNotNone(result["autopilot"])
+        mock_create.assert_called_once()
+        self.assertEqual(mock_create.call_args.kwargs["request_owner"], "owner@test.com")
+
     def test_on_autopilot_terminal_updates_goal(self):
         import goal_store
         import composition
@@ -241,108 +271,6 @@ class TestCompositionService(unittest.TestCase):
         updated = goal_store.get_active()
         notes = updated.get("notes", [])
         self.assertTrue(any("autopilot failed" in n.get("text", "") for n in notes))
-
-    def test_plan_to_workflow(self):
-        import composition
-        steps = [
-            {"title": "write tests"},
-            {"title": "implement feature"},
-            {"title": "run validation"},
-        ]
-        result = composition.plan_to_workflow(steps, "my-workflow", goal_id="g-test")
-        self.assertEqual(result["workflow_name"], "my-workflow")
-        self.assertEqual(result["action_count"], 3)
-        self.assertEqual(result["actions"][0]["type"], "sonder")
-
-    def test_on_workflow_complete_notes_goal(self):
-        import goal_store
-        import composition
-        from sonder_runtime.adapters.persistence import composition_store
-
-        goal = goal_store.set_goal("workflow objective")
-        composition_store.bind("goal", goal["id"], "workflow", "test-workflow")
-
-        effects = composition.on_workflow_complete(
-            "test-workflow", {"ok": True},
-        )
-        self.assertTrue(effects["goal_noted"])
-        updated = goal_store.get_active()
-        notes = updated.get("notes", [])
-        self.assertTrue(any("workflow" in n.get("text", "") for n in notes))
-
-    def test_selfmod_observations_to_goals(self):
-        import composition
-        observations = [
-            {"description": "refactor the loop module", "severity": "low"},
-            {"description": "fix import cycle", "files": ["a.py", "b.py"]},
-            {"description": ""},
-        ]
-        result = composition.selfmod_observations_to_goals(observations)
-        self.assertEqual(result["proposed"], 2)
-        self.assertEqual(result["skipped"], 1)
-
-    def test_training_to_campaign(self):
-        import composition
-        task = {
-            "id": "train-001",
-            "prompt": "Write fizzbuzz",
-            "language": "python",
-            "assert_checks": ["def fizzbuzz"],
-        }
-        result = composition.training_to_campaign(task)
-        self.assertEqual(result["task_id"], "train-001")
-        self.assertEqual(result["language"], "python")
-        self.assertEqual(len(result["phases"]), 4)
-        self.assertIn("generate", result["phases"])
-
-    def test_fleet_evidence_to_goal(self):
-        import goal_store
-        import composition
-        goal = goal_store.set_goal(
-            "ship feature",
-            "all tests pass; docs updated; reviewed",
-        )
-        fleet_results = [
-            {"output": "All tests pass - 42/42 green"},
-            {"output": "docs updated with the new API reference"},
-        ]
-        result = composition.fleet_evidence_to_goal(fleet_results, goal["id"])
-        self.assertEqual(result["criteria_matched"], 2)
-        self.assertEqual(result["criteria_total"], 3)
-        self.assertEqual(len(result["unmatched"]), 1)
-
-    def test_preferences_to_emotion_adjustments(self):
-        import composition
-        lessons = [
-            {"text": "user prefers concise responses"},
-            {"text": "be more friendly and warm"},
-            {"text": "always be precise with numbers"},
-        ]
-        result = composition.preferences_to_emotion_adjustments(lessons)
-        adj = result["adjustments"]
-        self.assertGreater(adj.get("brevity", 0), 0)
-        self.assertGreater(adj.get("warmth", 0), 0)
-        self.assertGreater(adj.get("precision", 0), 0)
-        self.assertFalse(result["applied"])
-
-    def test_autopilot_outcomes_to_memory(self):
-        import composition
-        from sonder_runtime.adapters.persistence import composition_store
-
-        run = {
-            "id": "auto-mem-test",
-            "objective": "test memory bridge",
-            "plan": [
-                {"id": "task-01", "title": "inspect", "kind": "inspect", "status": "passed"},
-                {"id": "task-02", "title": "implement", "kind": "implement", "status": "failed"},
-                {"id": "task-03", "title": "validate", "kind": "validate", "status": "pending"},
-            ],
-        }
-        result = composition.autopilot_outcomes_to_memory(run)
-        self.assertEqual(result["recorded"], 2)
-        self.assertEqual(result["total_tasks"], 3)
-        bindings = composition_store.lookup_targets("autopilot", "auto-mem-test", "memory")
-        self.assertEqual(len(bindings), 2)
 
     def test_composition_status(self):
         import composition
@@ -486,6 +414,57 @@ class TestServerIntegration(unittest.TestCase):
         result = server.control_command("/autopilot start --goal")
         self.assertIn("active goal", result)
 
+    def test_mission_start_auto_passes_request_owner(self):
+        import server
+        with mock.patch(
+            "sonder_runtime.adapters.persistence.autopilot_store.create_run",
+            return_value={"id": "auto-mission-owner", "status": "ready"},
+        ) as mock_create, mock.patch(
+            "server._launch_autopilot",
+            return_value=True,
+        ):
+            server.control_command(
+                "/mission start --auto build feature",
+                autopilot_request_owner="mission-owner@test.com",
+            )
+        mock_create.assert_called_once()
+        self.assertEqual(mock_create.call_args.kwargs["request_owner"], "mission-owner@test.com")
+
+    def test_goal_set_auto_passes_request_owner(self):
+        import server
+        with mock.patch(
+            "sonder_runtime.adapters.persistence.autopilot_store.create_run",
+            return_value={"id": "auto-goal-owner", "status": "ready"},
+        ) as mock_create, mock.patch(
+            "server._launch_autopilot",
+            return_value=True,
+        ):
+            server.control_command(
+                "/goal set --auto run the tests --criteria all green",
+                operator_approved=True,
+                autopilot_request_owner="goal-owner@test.com",
+            )
+        mock_create.assert_called_once()
+        self.assertEqual(mock_create.call_args.kwargs["request_owner"], "goal-owner@test.com")
+
+    def test_autopilot_goal_flag_passes_request_owner(self):
+        import server
+        import goal_store
+        goal_store.set_goal("goal for owner test", "pass tests")
+        with mock.patch(
+            "sonder_runtime.adapters.persistence.autopilot_store.create_run",
+            return_value={"id": "auto-ap-owner", "status": "ready"},
+        ) as mock_create, mock.patch(
+            "server._launch_autopilot",
+            return_value=True,
+        ):
+            server.control_command(
+                "/autopilot start --goal",
+                autopilot_request_owner="ap-owner@test.com",
+            )
+        mock_create.assert_called_once()
+        self.assertEqual(mock_create.call_args.kwargs["request_owner"], "ap-owner@test.com")
+
 
 class TestEndToEnd(unittest.TestCase):
     """Full lifecycle: mission start -> status -> complete."""
@@ -530,7 +509,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIsNone(post_status["goal"])
 
     def test_goal_autopilot_workflow_chain(self):
-        """Goal -> Autopilot -> Terminal -> Goal note + Memory."""
+        """Goal -> Autopilot -> Plan -> Terminal -> Goal note."""
         import goal_store
         import composition
         from sonder_runtime.adapters.persistence import composition_store
@@ -547,11 +526,6 @@ class TestEndToEnd(unittest.TestCase):
         plan_result = composition.goal_to_plan(goal)
         self.assertEqual(plan_result["step_count"], 2)
 
-        wf = composition.plan_to_workflow(
-            plan_result["steps"], "chain-workflow", goal_id=goal["id"],
-        )
-        self.assertEqual(wf["action_count"], 2)
-
         effects = composition.on_autopilot_terminal({
             "id": "auto-chain",
             "status": "completed",
@@ -563,45 +537,8 @@ class TestEndToEnd(unittest.TestCase):
         })
         self.assertTrue(effects["goal_updated"])
 
-        mem = composition.autopilot_outcomes_to_memory({
-            "id": "auto-chain",
-            "objective": "chain test",
-            "plan": [
-                {"id": "t-01", "title": "A", "kind": "implement", "status": "passed"},
-                {"id": "t-02", "title": "B", "kind": "validate", "status": "passed"},
-            ],
-        })
-        self.assertEqual(mem["recorded"], 2)
-
         status = composition.composition_status()
         self.assertTrue(status["active_bindings"] >= 1)
-
-    def test_selfmod_training_persona_bridges(self):
-        """SelfMod -> Goals, Training -> Campaign, Preferences -> Emotion."""
-        import composition
-
-        sm = composition.selfmod_observations_to_goals([
-            {"description": "dead code in loop.py", "severity": "low"},
-            {"description": "unused import in server.py", "files": ["server.py"]},
-        ])
-        self.assertEqual(sm["proposed"], 2)
-
-        tc = composition.training_to_campaign({
-            "id": "t-fizz",
-            "prompt": "FizzBuzz",
-            "language": "python",
-            "assert_checks": ["def fizzbuzz"],
-        })
-        self.assertEqual(tc["language"], "python")
-        self.assertEqual(len(tc["phases"]), 4)
-
-        pe = composition.preferences_to_emotion_adjustments([
-            {"text": "be more concise and direct"},
-            {"text": "I prefer creative solutions"},
-        ])
-        self.assertGreater(pe["adjustments"].get("brevity", 0), 0)
-        self.assertGreater(pe["adjustments"].get("creativity", 0), 0)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -2353,6 +2353,7 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
             ap_result = _composition.goal_to_autopilot(
                 active, policy=policy, allow_web=allow_web,
                 project=_resolve_project(project) or "",
+                request_owner=request_owner or "",
             )
             if ap_result.get("error"):
                 return "autopilot request failed: %s" % ap_result["error"]
@@ -2688,7 +2689,7 @@ def refresh_goal_proposals(scope: str = "") -> dict:
     return {"proposed": proposed, "skipped": skipped, "error": ""}
 
 
-def _goal_command(arg: str) -> str:
+def _goal_command(arg: str, request_owner: str = "") -> str:
     """User-facing goal bookkeeping.
 
     Slash commands originate only from the user's own chat input, so this
@@ -2737,6 +2738,7 @@ def _goal_command(arg: str) -> str:
             if auto:
                 ap = _composition.goal_to_autopilot(
                     goal, project=_resolve_project(project) if 'project' in dir() else "",
+                    request_owner=request_owner,
                 )
                 if ap.get("error"):
                     lines.append("autopilot: %s" % ap["error"])
@@ -2801,7 +2803,7 @@ def _goal_command(arg: str) -> str:
         return "ERROR: %s" % exc
 
 
-def _mission_command(arg: str, project: str = "") -> str:
+def _mission_command(arg: str, project: str = "", request_owner: str = "") -> str:
     """Unified goal+autopilot+task composition command."""
     text = str(arg or "status").strip() or "status"
     action, _, rest = text.partition(" ")
@@ -2845,6 +2847,7 @@ def _mission_command(arg: str, project: str = "") -> str:
                 policy=policy,
                 allow_web=allow_web,
                 project=_resolve_project(project) or "",
+                request_owner=request_owner,
             )
             lines = ["mission started"]
             lines.append(_format_goal(result["goal"]))
@@ -3170,9 +3173,9 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/approve":
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
-        return _goal_command(arg)
+        return _goal_command(arg, request_owner=autopilot_request_owner or "")
     if cmd in ("/mission",):
-        return _mission_command(arg, project=project)
+        return _mission_command(arg, project=project, request_owner=autopilot_request_owner or "")
     if cmd in ("/ensemble",):
         if not arg.strip():
             return "usage: /ensemble <question>   (polls several local tiers, then compounds one answer)"

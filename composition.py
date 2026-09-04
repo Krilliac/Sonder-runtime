@@ -12,13 +12,28 @@ bridge introduces new state beyond what the binding store tracks.
 """
 from __future__ import annotations
 
-import json
+import functools
 import logging
-import time
 
 logger = logging.getLogger(__name__)
 
+# --- call-tracking decorator for auditing bridge usage ---
+_call_counts: dict[str, int] = {}
 
+
+def _track_call(fn):
+    """Increment a per-function counter on each call.
+
+    Usage data lives in ``composition._call_counts`` keyed by function name.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        _call_counts[fn.__name__] = _call_counts.get(fn.__name__, 0) + 1
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@_track_call
 def mission_start(
     objective: str,
     criteria: str = "",
@@ -29,6 +44,7 @@ def mission_start(
     tier: str = "auto",
     allow_web: bool = True,
     project: str = "",
+    request_owner: str = "",
 ) -> dict:
     """Set a goal, optionally decompose into tasks, optionally launch autopilot.
 
@@ -53,12 +69,14 @@ def mission_start(
     if auto:
         ap_result = goal_to_autopilot(
             goal, policy=policy, tier=tier, allow_web=allow_web, project=project,
+            request_owner=request_owner,
         )
         result["autopilot"] = ap_result
 
     return result
 
 
+@_track_call
 def mission_status(scope: str = "") -> dict:
     """Unified view: active goal + bound autopilot runs + linked tasks."""
     import goal_store
@@ -104,6 +122,7 @@ def mission_status(scope: str = "") -> dict:
     return result
 
 
+@_track_call
 def goal_to_autopilot(
     goal: dict,
     *,
@@ -111,6 +130,7 @@ def goal_to_autopilot(
     tier: str = "auto",
     allow_web: bool = True,
     project: str = "",
+    request_owner: str = "",
 ) -> dict:
     """Launch autopilot bound to a goal's objective and criteria."""
     from sonder_runtime.adapters.persistence import (
@@ -136,6 +156,7 @@ def goal_to_autopilot(
         run = autopilot_store.create_run(
             objective_with_criteria,
             project=project,
+            request_owner=request_owner,
             tier=tier,
             policy=policy,
             allow_web=allow_web,
@@ -155,6 +176,7 @@ def goal_to_autopilot(
     return {"run_id": run["id"], "goal_id": goal_id, "status": run.get("status")}
 
 
+@_track_call
 def goal_to_plan(goal: dict) -> dict:
     """Decompose goal criteria into a task plan."""
     from sonder_runtime.adapters.persistence import composition_store
@@ -185,35 +207,7 @@ def goal_to_plan(goal: dict) -> dict:
     }
 
 
-def plan_to_workflow(steps: list, workflow_name: str, goal_id: str = "") -> dict:
-    """Serialize task plan steps as a named workflow's actions."""
-    from sonder_runtime.adapters.persistence import composition_store
-
-    actions = []
-    for step in steps:
-        title = step.get("title", "") if isinstance(step, dict) else str(step)
-        actions.append({
-            "type": "sonder",
-            "text": title,
-        })
-
-    if goal_id:
-        composition_store.bind(
-            source_type="task",
-            source_id="plan:%s" % goal_id,
-            target_type="workflow",
-            target_id=workflow_name,
-            kind="produces",
-            metadata={"action_count": len(actions)},
-        )
-
-    return {
-        "workflow_name": workflow_name,
-        "actions": actions,
-        "action_count": len(actions),
-    }
-
-
+@_track_call
 def on_autopilot_terminal(run: dict) -> dict:
     """Called when an autopilot run reaches a terminal state.
 
@@ -258,249 +252,7 @@ def on_autopilot_terminal(run: dict) -> dict:
     return effects
 
 
-def on_workflow_complete(
-    workflow_name: str,
-    result: dict,
-    task_id: str = "",
-) -> dict:
-    """Called when a workflow run completes. Updates bound goal/task."""
-    import goal_store
-    from sonder_runtime.adapters.persistence import composition_store
-
-    effects = {"goal_noted": False, "bindings_closed": 0}
-
-    bindings = composition_store.lookup_sources(
-        "workflow", workflow_name,
-    )
-
-    ok = result.get("ok", False)
-    for binding in bindings:
-        if binding["source_type"] == "goal":
-            goal = goal_store.get_active()
-            if goal and goal["id"] == binding["source_id"]:
-                status_word = "succeeded" if ok else "failed"
-                goal_store.add_note(
-                    "workflow '%s' %s" % (workflow_name, status_word),
-                )
-                effects["goal_noted"] = True
-
-        if binding["source_type"] == "task":
-            pass
-
-        status = "completed" if ok else "broken"
-        composition_store.complete_binding(binding["id"], reason="workflow %s" % status)
-        effects["bindings_closed"] += 1
-
-    return effects
-
-
-def autopilot_outcomes_to_memory(run: dict) -> dict:
-    """Record autopilot task outcomes as learning signals.
-
-    Maps autopilot plan tasks with their pass/fail status into the memory
-    subsystem so future runs benefit from accumulated experience.
-    """
-    from sonder_runtime.adapters.persistence import composition_store
-
-    plan = run.get("plan", [])
-    recorded = 0
-    for task in plan:
-        task_status = task.get("status", "")
-        if task_status in ("passed", "failed"):
-            composition_store.bind(
-                source_type="autopilot",
-                source_id=run.get("id", ""),
-                target_type="memory",
-                target_id="outcome:%s:%s" % (run.get("id", ""), task.get("id", "")),
-                kind="produces",
-                metadata={
-                    "task_title": task.get("title", "")[:200],
-                    "task_kind": task.get("kind", ""),
-                    "task_status": task_status,
-                    "objective": run.get("objective", "")[:500],
-                },
-            )
-            recorded += 1
-
-    return {"recorded": recorded, "total_tasks": len(plan)}
-
-
-def selfmod_observations_to_goals(observations: list[dict]) -> dict:
-    """Convert selfmod observations into goal proposals.
-
-    SelfMod in observe mode identifies improvement opportunities.  This bridge
-    feeds them into the goal proposal queue for user review.
-    """
-    import goal_store
-
-    proposed = 0
-    skipped = 0
-    for obs in observations:
-        description = obs.get("description", "")
-        if not description:
-            skipped += 1
-            continue
-        objective = "selfmod: %s" % description[:2000]
-        criteria = []
-        if obs.get("files"):
-            criteria.append("affects files: %s" % ", ".join(
-                str(f)[:100] for f in obs["files"][:5]
-            ))
-        if obs.get("severity"):
-            criteria.append("severity: %s" % obs["severity"])
-        result = goal_store.propose(objective, criteria, source="selfmod")
-        if result:
-            proposed += 1
-        else:
-            skipped += 1
-
-    return {"proposed": proposed, "skipped": skipped}
-
-
-def training_to_campaign(task_spec: dict) -> dict:
-    """Wrap a training task specification as a campaign execution descriptor.
-
-    Maps training task fields (prompt, expected_output, language, assert_checks)
-    into the campaign generate-compile-execute-record pipeline shape.
-    """
-    from sonder_runtime.adapters.persistence import composition_store
-
-    task_id = task_spec.get("id", "training-task")
-    prompt = task_spec.get("prompt", "")
-    language = task_spec.get("language", "python")
-    checks = task_spec.get("assert_checks", [])
-
-    campaign_descriptor = {
-        "task_id": task_id,
-        "prompt": prompt,
-        "language": language,
-        "checks": checks,
-        "phases": ["generate", "compile", "execute", "record"],
-    }
-
-    composition_store.bind(
-        source_type="training",
-        source_id=task_id,
-        target_type="campaign",
-        target_id="campaign:%s" % task_id,
-        kind="drives",
-        metadata={"language": language, "check_count": len(checks)},
-    )
-
-    return campaign_descriptor
-
-
-def fleet_evidence_to_goal(
-    fleet_results: list[dict],
-    goal_id: str,
-) -> dict:
-    """Map fleet provenance evidence to goal criteria verification.
-
-    Fleet workers produce provenance-tagged results with objective markers.
-    This bridge checks those markers against the goal's success criteria.
-    """
-    import goal_store
-    from sonder_runtime.adapters.persistence import composition_store
-
-    goal = goal_store.get_active()
-    if not goal or goal["id"] != goal_id:
-        return {"error": "goal not found or not active"}
-
-    criteria = goal.get("criteria", [])
-    matched = []
-    unmatched = list(criteria)
-
-    for result in fleet_results:
-        output = str(result.get("output", "")).lower()
-        for criterion in list(unmatched):
-            keywords = criterion.lower().split()
-            if all(kw in output for kw in keywords[:3]):
-                matched.append(criterion)
-                unmatched.remove(criterion)
-
-    if matched:
-        goal_store.add_note(
-            "fleet evidence matched %d/%d criteria: %s"
-            % (len(matched), len(criteria), "; ".join(matched[:3]))
-        )
-
-    composition_store.bind(
-        source_type="fleet",
-        source_id="fleet-evidence",
-        target_type="goal",
-        target_id=goal_id,
-        kind="tracks",
-        metadata={
-            "matched": len(matched),
-            "total": len(criteria),
-            "unmatched": unmatched[:5],
-        },
-    )
-
-    return {
-        "goal_id": goal_id,
-        "criteria_matched": len(matched),
-        "criteria_total": len(criteria),
-        "matched": matched,
-        "unmatched": unmatched,
-    }
-
-
-def preferences_to_emotion_adjustments(preference_lessons: list[dict]) -> dict:
-    """Analyze preference lessons and suggest emotion vector adjustments.
-
-    Maps natural language preference patterns to the 19 emotion vector
-    dimensions.  Returns suggestions only — the caller decides whether to apply.
-    """
-    PREFERENCE_VECTOR_MAP = {
-        "concise": {"brevity": 0.3, "directness": 0.2},
-        "brief": {"brevity": 0.3, "directness": 0.2},
-        "short": {"brevity": 0.2},
-        "verbose": {"brevity": -0.3},
-        "detailed": {"brevity": -0.2, "precision": 0.2},
-        "thorough": {"brevity": -0.2, "rigor": 0.2},
-        "friendly": {"warmth": 0.3, "empathy": 0.2},
-        "warm": {"warmth": 0.3},
-        "professional": {"directness": 0.2, "precision": 0.2, "warmth": -0.1},
-        "formal": {"directness": 0.2, "playfulness": -0.2},
-        "casual": {"playfulness": 0.2, "warmth": 0.2},
-        "creative": {"creativity": 0.3, "initiative": 0.2},
-        "careful": {"rigor": 0.2, "skepticism": 0.1},
-        "bold": {"confidence": 0.2, "initiative": 0.2},
-        "patient": {"patience": 0.3, "calm": 0.2},
-        "direct": {"directness": 0.3, "brevity": 0.1},
-        "encouraging": {"encouragement": 0.3, "warmth": 0.1},
-        "precise": {"precision": 0.3, "rigor": 0.2},
-        "curious": {"curiosity": 0.3},
-        "urgent": {"urgency": 0.3, "brevity": 0.1},
-        "humble": {"humility": 0.3},
-        "transparent": {"transparency": 0.3},
-        "skeptical": {"skepticism": 0.3},
-        "calm": {"calm": 0.3, "patience": 0.2},
-        "adaptable": {"adaptability": 0.3},
-    }
-
-    adjustments = {}
-    matched_preferences = []
-
-    for lesson in preference_lessons:
-        text = str(lesson.get("text", lesson.get("content", ""))).lower()
-        for keyword, vectors in PREFERENCE_VECTOR_MAP.items():
-            if keyword in text:
-                matched_preferences.append(keyword)
-                for vector, delta in vectors.items():
-                    adjustments[vector] = adjustments.get(vector, 0.0) + delta
-
-    for vector in adjustments:
-        adjustments[vector] = max(-1.0, min(1.0, adjustments[vector]))
-
-    return {
-        "adjustments": adjustments,
-        "matched_preferences": matched_preferences,
-        "applied": False,
-    }
-
-
+@_track_call
 def composition_status() -> dict:
     """Overview of all active cross-subsystem bindings."""
     from sonder_runtime.adapters.persistence import composition_store
@@ -518,6 +270,7 @@ def composition_status() -> dict:
     }
 
 
+@_track_call
 def format_mission_status(data: dict) -> str:
     """Human-readable mission status combining goal + autopilot + tasks."""
     lines = []
@@ -561,6 +314,7 @@ def format_mission_status(data: dict) -> str:
     return "\n".join(lines)
 
 
+@_track_call
 def format_composition_status(data: dict) -> str:
     """Human-readable composition status."""
     lines = [
@@ -582,9 +336,7 @@ def format_composition_status(data: dict) -> str:
 
 
 __all__ = [
-    "autopilot_outcomes_to_memory",
     "composition_status",
-    "fleet_evidence_to_goal",
     "format_composition_status",
     "format_mission_status",
     "goal_to_autopilot",
@@ -592,9 +344,4 @@ __all__ = [
     "mission_start",
     "mission_status",
     "on_autopilot_terminal",
-    "on_workflow_complete",
-    "plan_to_workflow",
-    "preferences_to_emotion_adjustments",
-    "selfmod_observations_to_goals",
-    "training_to_campaign",
 ]

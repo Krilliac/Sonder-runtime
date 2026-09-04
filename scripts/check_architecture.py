@@ -71,6 +71,148 @@ ROOT_LEGACY_MODULES = {"server"}
 # always allowed; adding one requires an explicit architecture-policy change
 # and must never happen as an accidental convenience import.
 ROOT_LEGACY_MODULE_LIMIT = 1
+
+# Every root-level .py file at the time this allowlist was established.
+# New root modules require an explicit architecture-policy decision; adding a
+# file to this set is a reviewed exception, not an accidental convenience.
+# This is the counterpart of RETIRED_ROOT_MODULES: retired entries must stay
+# removed, and new entries must be explicitly added here.
+ROOT_MODULE_ALLOWLIST = frozenset({
+    "adaptive_training.py",
+    "admin_auth.py",
+    "archive_create.py",
+    "artifact_grounding.py",
+    "assetgen.py",
+    "autopilot_controller.py",
+    "autopilot_store.py",
+    "bootstrap_engine.py",
+    "build_personal_dataset.py",
+    "calibration.py",
+    "code_improve.py",
+    "code_runner.py",
+    "codegen_loop.py",
+    "command_catalog.py",
+    "command_recovery.py",
+    "command_registry.py",
+    "command_router.py",
+    "compiler_cache.py",
+    "composition.py",
+    "conftest.py",
+    "consult.py",
+    "context_policy.py",
+    "contribute.py",
+    "creative_router.py",
+    "curriculum_run.py",
+    "curriculum_store.py",
+    "data_convert.py",
+    "debug_dump.py",
+    "domain_grounding.py",
+    "durable_locks.py",
+    "emotion_vectors.py",
+    "endless_train.py",
+    "engine_bundle.py",
+    "environment_probe.py",
+    "eval_duel.py",
+    "eval_harness.py",
+    "eval_models.py",
+    "eval_retrieval.py",
+    "eval_solver.py",
+    "export_lessons.py",
+    "export_training_data.py",
+    "fanout_prompt_vault.py",
+    "fanout_store.py",
+    "feedback.py",
+    "fleet_provenance.py",
+    "fleet_store.py",
+    "game_forge.py",
+    "game_ladder.py",
+    "git_history.py",
+    "git_tools.py",
+    "goal_store.py",
+    "grounded_extraction.py",
+    "grounded_outcomes.py",
+    "grounding.py",
+    "harness_tools.py",
+    "import_autofix.py",
+    "intents.py",
+    "isolated_runner.py",
+    "json_patch_tool.py",
+    "json_schema_verifier.py",
+    "learning_health.py",
+    "lesson_decay.py",
+    "lesson_pruner.py",
+    "local_service_probe.py",
+    "master_orchestrator.py",
+    "media_assets.py",
+    "memory_quality.py",
+    "memory_store.py",
+    "model_assets.py",
+    "node_verifier.py",
+    "ollama_lifecycle.py",
+    "ooxml_assets.py",
+    "orchestrator.py",
+    "permission_modes.py",
+    "permission_rules.py",
+    "personas.py",
+    "preference_learning.py",
+    "project_scaffold.py",
+    "promotion_eval.py",
+    "pull_community.py",
+    "qlora_train.py",
+    "queued_actions.py",
+    "refinement_transactions.py",
+    "reflection.py",
+    "reloadable_mcp.py",
+    "request_cache.py",
+    "retriever.py",
+    "ruff_verifier.py",
+    "safe_update.py",
+    "seed_merge.py",
+    "self_curriculum.py",
+    "self_heal.py",
+    "selfmod.py",
+    "selfmod_recover.py",
+    "served_action_receipts.py",
+    "server.py",
+    "setup_alias.py",
+    "slash_menu.py",
+    "solver.py",
+    "sonder_client.py",
+    "sonder_config.py",
+    "sonder_doctor.py",
+    "sonder_hardware.py",
+    "sonder_headless.py",
+    "sonder_health.py",
+    "sonder_launcher.py",
+    "sonder_logging.py",
+    "sonder_paths.py",
+    "sonder_service_state.py",
+    "sonder_shutdown.py",
+    "sonder_speculation.py",
+    "sonder_version.py",
+    "sql_verifier.py",
+    "sqlite_mutate.py",
+    "store_integrity.py",
+    "summarizer.py",
+    "symbol_index.py",
+    "system_profile.py",
+    "tier_router.py",
+    "tool_capabilities.py",
+    "tool_contract.py",
+    "toolchain_status.py",
+    "training_data.py",
+    "training_tasks.py",
+    "tune_min_sim.py",
+    "unsafe_lab.py",
+    "verifiers.py",
+    "web_intents.py",
+    "web_tools.py",
+})
+# Shrink-only ratchet: the count of root .py files must not grow beyond this
+# baseline.  Removing a root module is always allowed; adding one requires
+# both an architecture-policy review and an explicit allowlist entry above.
+ROOT_MODULE_ALLOWLIST_LIMIT = 129
+
 WEB_SEARCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_search"
 WEB_SEARCH_COMPATIBILITY_ROOT = Path("web_tools.py")
 WEB_FETCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_fetch"
@@ -438,6 +580,24 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
         violations.append(
             "ROOT_LEGACY_MODULES grew from its ratchet limit of %d to %d"
             % (ROOT_LEGACY_MODULE_LIMIT, len(ROOT_LEGACY_MODULES))
+        )
+    # Root-module allowlist ratchet: every root .py file must be explicitly
+    # listed and the total count must not grow beyond the recorded baseline.
+    root_py_files = sorted(
+        p.relative_to(REPO_ROOT)
+        for p in tracked_files
+        if len(p.relative_to(REPO_ROOT).parts) == 1
+        and p.suffix == ".py"
+    )
+    unlisted = [f for f in root_py_files if f.name not in ROOT_MODULE_ALLOWLIST]
+    for f in unlisted:
+        violations.append(
+            f"{f}: new root module not in ROOT_MODULE_ALLOWLIST"
+        )
+    if len(root_py_files) > ROOT_MODULE_ALLOWLIST_LIMIT:
+        violations.append(
+            "root .py file count grew from its ratchet limit of %d to %d"
+            % (ROOT_MODULE_ALLOWLIST_LIMIT, len(root_py_files))
         )
     root_web_path = REPO_ROOT / WEB_SEARCH_COMPATIBILITY_ROOT
     package_web_path = REPO_ROOT / "sonder_runtime" / "adapters" / "web_search.py"
