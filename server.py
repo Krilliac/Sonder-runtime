@@ -1137,6 +1137,7 @@ from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
 from sonder_runtime.adapters.learning_tier_formatting import (
     format_learning_tiers,
 )
+from sonder_runtime.application import composition as _composition
 _CAMPAIGN_LEARN_LOCK = threading.Lock()
 _AUTOPILOT_THREADS_LOCK = threading.RLock()
 _AUTOPILOT_THREADS = {}
@@ -2323,6 +2324,7 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
         policy = "workspace"
         allow_web = True
         adaptive = True
+        bind_goal = False
         while rest.startswith("--"):
             option, _, remaining = rest.partition(" ")
             if option == "--observe":
@@ -2331,13 +2333,36 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
                 allow_web = False
             elif option == "--static":
                 adaptive = False
+            elif option == "--goal":
+                bind_goal = True
             else:
                 return "ERROR: unknown autopilot option '%s'." % option
             rest = remaining.strip()
-        if not rest:
+        if not rest and not bind_goal:
             return (
-                "usage: /autopilot %s [--observe] [--no-web] [--static] <objective>"
+                "usage: /autopilot %s [--observe] [--no-web] [--static] "
+                "[--goal] <objective>"
                 % action
+            )
+        if bind_goal:
+            import goal_store as _gs
+            active = _gs.get_active()
+            if not active:
+                return "ERROR: --goal requires an active goal (use /goal set first)."
+            objective = rest or active["objective"]
+            ap_result = _composition.goal_to_autopilot(
+                active, policy=policy, allow_web=allow_web,
+                project=_resolve_project(project) or "",
+            )
+            if ap_result.get("error"):
+                return "autopilot request failed: %s" % ap_result["error"]
+            launched = _launch_autopilot(ap_result["run_id"])
+            prefix = "autopilot bound to goal %s" % active["id"]
+            if not launched:
+                prefix = "autopilot already active"
+            return "%s\n  run: %s\n  objective: %s\n  use /autopilot status %s" % (
+                prefix, ap_result["run_id"], active["objective"][:120],
+                ap_result["run_id"],
             )
         return _autopilot_start(
             objective=rest,
@@ -2368,11 +2393,12 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
         return (
             "autopilot commands:\n"
             "  /autopilot status [id]\n"
-            "  /autopilot plan [--observe] [--no-web] [--static] <objective>\n"
-            "  /autopilot run [--observe] [--no-web] [--static] <objective>\n"
+            "  /autopilot plan [--observe] [--no-web] [--static] [--goal] <objective>\n"
+            "  /autopilot run [--observe] [--no-web] [--static] [--goal] <objective>\n"
             "  /autopilot resume|pause|cancel <id>\n"
             "  /autopilot steer|clarify <id> <message>   (owner-scoped note; "
-            "clarify also requests a pause)"
+            "clarify also requests a pause)\n"
+            "  --goal: bind to the active goal (use /goal set first)"
         )
     return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
 
@@ -2680,13 +2706,47 @@ def _goal_command(arg: str) -> str:
         if action in ("show", "status"):
             return _format_goal(goal_store.get_active())
         if action == "set":
-            objective, _, criteria = rest.partition("--criteria")
+            auto = False
+            plan = False
+            tokens = rest
+            while tokens.startswith("--"):
+                option, _, tokens = tokens.partition(" ")
+                if option == "--auto":
+                    auto = True
+                elif option == "--plan":
+                    plan = True
+                elif option == "--criteria":
+                    tokens = "--criteria " + tokens
+                    break
+                else:
+                    return "ERROR: unknown goal option '%s'." % option
+                tokens = tokens.strip()
+            objective, _, criteria = tokens.partition("--criteria")
             if not objective.strip():
-                return "usage: /goal set <objective> [--criteria a; b; c]"
+                return "usage: /goal set [--auto] [--plan] <objective> [--criteria a; b; c]"
             goal = goal_store.set_goal(
                 objective.strip(), criteria.strip(), origin="user",
             )
-            return "goal set\n" + _format_goal(goal)
+            lines = ["goal set", _format_goal(goal)]
+            if plan and goal.get("criteria"):
+                plan_result = _composition.goal_to_plan(goal)
+                if plan_result.get("error"):
+                    lines.append("plan: %s" % plan_result["error"])
+                else:
+                    lines.append("plan: %d steps decomposed" % plan_result["step_count"])
+            if auto:
+                ap = _composition.goal_to_autopilot(
+                    goal, project=_resolve_project(project) if 'project' in dir() else "",
+                )
+                if ap.get("error"):
+                    lines.append("autopilot: %s" % ap["error"])
+                else:
+                    _launch_autopilot(ap["run_id"])
+                    lines.append(
+                        "autopilot: %s started (use /autopilot status %s)"
+                        % (ap["run_id"], ap["run_id"])
+                    )
+            return "\n".join(lines)
         if action == "note":
             if not rest:
                 return "usage: /goal note <progress note>"
@@ -2738,6 +2798,97 @@ def _goal_command(arg: str) -> str:
             "proposals|adopt <id>|decline <id>|history]"
         )
     except goal_store.GoalError as exc:
+        return "ERROR: %s" % exc
+
+
+def _mission_command(arg: str, project: str = "") -> str:
+    """Unified goal+autopilot+task composition command."""
+    text = str(arg or "status").strip() or "status"
+    action, _, rest = text.partition(" ")
+    action = action.lower()
+    rest = rest.strip()
+
+    try:
+        if action in ("status", "show"):
+            data = _composition.mission_status()
+            return _composition.format_mission_status(data)
+
+        if action == "start":
+            auto = False
+            plan = False
+            policy = "workspace"
+            allow_web = True
+            while rest.startswith("--"):
+                option, _, remaining = rest.partition(" ")
+                if option == "--auto":
+                    auto = True
+                elif option == "--plan":
+                    plan = True
+                elif option == "--observe":
+                    policy = "observe"
+                elif option == "--no-web":
+                    allow_web = False
+                else:
+                    return "ERROR: unknown mission option '%s'." % option
+                rest = remaining.strip()
+            objective, _, criteria = rest.partition("--criteria")
+            if not objective.strip():
+                return (
+                    "usage: /mission start [--auto] [--plan] [--observe] "
+                    "[--no-web] <objective> [--criteria a; b; c]"
+                )
+            result = _composition.mission_start(
+                objective.strip(),
+                criteria.strip(),
+                auto=auto,
+                plan=plan,
+                policy=policy,
+                allow_web=allow_web,
+                project=_resolve_project(project) or "",
+            )
+            lines = ["mission started"]
+            lines.append(_format_goal(result["goal"]))
+            if result.get("plan"):
+                p = result["plan"]
+                if p.get("error"):
+                    lines.append("plan: %s" % p["error"])
+                else:
+                    lines.append("plan: %d steps decomposed from criteria" % p["step_count"])
+            if result.get("autopilot"):
+                ap = result["autopilot"]
+                if ap.get("error"):
+                    lines.append("autopilot: %s" % ap["error"])
+                else:
+                    lines.append(
+                        "autopilot: %s created (use /autopilot status %s)"
+                        % (ap["run_id"], ap["run_id"])
+                    )
+                    _launch_autopilot(ap["run_id"])
+            return "\n".join(lines)
+
+        if action in ("done", "complete"):
+            import goal_store
+            goal = goal_store.complete(rest, actor="user")
+            from sonder_runtime.adapters.persistence import composition_store
+            composition_store.close_all_for("goal", goal["id"], status="completed")
+            return "mission completed: %s" % goal["objective"]
+
+        if action in ("abandon", "drop"):
+            import goal_store
+            goal = goal_store.abandon(rest, actor="user")
+            from sonder_runtime.adapters.persistence import composition_store
+            composition_store.close_all_for("goal", goal["id"], status="broken")
+            return "mission abandoned: %s" % goal["objective"]
+
+        if action == "bindings":
+            data = _composition.composition_status()
+            return _composition.format_composition_status(data)
+
+        return (
+            "usage: /mission [status|start [--auto] [--plan] [--observe] "
+            "<objective> [--criteria ...]|done [reason]|abandon [reason]|bindings]"
+        )
+    except Exception as exc:
         return "ERROR: %s" % exc
 
 
@@ -3020,6 +3171,8 @@ def control_command(prompt: str, history=None, session="", project="",
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
         return _goal_command(arg)
+    if cmd in ("/mission",):
+        return _mission_command(arg, project=project)
     if cmd in ("/ensemble",):
         if not arg.strip():
             return "usage: /ensemble <question>   (polls several local tiers, then compounds one answer)"
@@ -20591,6 +20744,9 @@ def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool, reques
             activity_tracker.set_result_summary(
                 "%s: %s" % (result.get("status", "unknown"), result.get("summary", ""))
             )
+            if result.get("status") in ("completed", "failed", "cancelled"):
+                with contextlib.suppress(Exception):
+                    _composition.on_autopilot_terminal(result)
     except Exception as exc:
         # execute_run persists model/tool failures whenever it owns the run. A
         # claim conflict is observable but must never steal or overwrite state.
@@ -20815,6 +20971,57 @@ def autopilot_cancel(run_id: str) -> str:
 def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
     """Inspect one persistent autonomous run or the controller ledger."""
     return _autopilot_status(run_id, include_finished=include_finished)
+
+
+@mcp.tool()
+def mission_start(
+    objective: str,
+    criteria: str = "",
+    auto: bool = False,
+    plan: bool = False,
+    policy: str = "workspace",
+    tier: str = "auto",
+    allow_web: bool = True,
+    project: str = "",
+) -> str:
+    """Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.
+
+    Bridges Goal, Task, and Autopilot subsystems into unified execution.
+    Use --auto to immediately launch autopilot toward the goal.
+    Use --plan to decompose goal criteria into a task plan.
+    """
+    _maybe_live_reload()
+    result = _composition.mission_start(
+        objective, criteria, auto=auto, plan=plan,
+        policy=policy, tier=tier, allow_web=allow_web, project=project,
+    )
+    if result.get("autopilot", {}).get("run_id"):
+        _launch_autopilot(result["autopilot"]["run_id"])
+    lines = ["mission started"]
+    lines.append(_format_goal(result.get("goal")))
+    p = result.get("plan")
+    if p:
+        lines.append("plan: %s" % (p.get("error") or "%d steps" % p.get("step_count", 0)))
+    ap = result.get("autopilot")
+    if ap:
+        lines.append("autopilot: %s" % (ap.get("error") or ap.get("run_id", "")))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def mission_status() -> str:
+    """Show unified mission status: active goal + bound autopilot + linked tasks."""
+    _maybe_live_reload()
+    data = _composition.mission_status()
+    return _composition.format_mission_status(data)
+
+
+@mcp.tool()
+def composition_bindings() -> str:
+    """Show active cross-subsystem composition bindings."""
+    _maybe_live_reload()
+    data = _composition.composition_status()
+    return _composition.format_composition_status(data)
 
 
 def _execution_route_model(

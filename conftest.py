@@ -65,10 +65,10 @@ def _cleanup_test_state() -> None:
     if _cleanup_complete:
         return
     _cleanup_complete = True
-    temp_root = Path(tempfile.gettempdir()).resolve()
     try:
+        temp_root = Path(tempfile.gettempdir()).resolve()
         _TEST_STATE_ROOT.relative_to(temp_root)
-    except ValueError:
+    except (ValueError, NotImplementedError):
         return
     if _TEST_STATE_ROOT.name.startswith("sonder-pytest-"):
         shutil.rmtree(_TEST_STATE_ROOT, ignore_errors=True)
