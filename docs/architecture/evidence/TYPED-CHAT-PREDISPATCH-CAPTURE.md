@@ -56,6 +56,7 @@ Tests use SQLite fixtures and fake gateways; no live model or remote worker.
 
 ```text
 python -m pytest -q tests/test_chat_session_capture.py tests/test_session_split_capture.py tests/test_chat_crash_durability.py tests/test_session_repair.py tests/test_session_replay.py tests/test_remaining_session_durable_replay.py tests/test_live_session_capture.py tests/test_session_capture_once.py tests/test_loop_session_facade.py tests/production/test_session_continuity_wiring.py
+python -m pytest -q tests/test_session_application_integration.py
 python scripts/select_regression_tests.py --since 9338622651bfc88fb80c0bd09e5949b9e8b1081c --format args
 ```
 
@@ -72,9 +73,22 @@ above, passed **207 tests**. The selector is an iteration aid, not proof that al
 changed behavior is covered. Independent task and whole-change reviews found no
 remaining blocking issue after the legacy-tool fix.
 
-Architecture, evidence-ledger, error-signal, doc-link, history-privacy, and both
-offline golden-evaluation gates are required before integration. History privacy
-retains the repository's known baseline debt; passing means no new debt.
+The first complete Windows run at `a3fdff90` reported **12,470 passed, 57 failed,
+59 skipped**. It exposed an existing integration fixture asserting the superseded
+contract that provider failures leave no events. Updating that fixture to assert
+the failed attempt, correlated identities, unchanged success prefix and reopened
+six-event stream gives **84 passing focused tests** including that fixture.
+
+Rerunning all 57 original failure nodes on unchanged base and the corrected tree
+gave **49 failed, 8 passed on both**, with the same failed node IDs. The 49 include
+Windows SQLite cleanup, shell/process and path-case failures. Seven other initial
+failures passed in both targeted reruns; larger-suite ordering remains under
+investigation. This comparison is not a green full-suite claim.
+
+Architecture, evidence-ledger, error-signal, doc-link and history-privacy gates
+passed after the change. Both offline golden-evaluation lanes passed during
+validation. History privacy retains seven known baseline debts; passing means
+no new debt. Complete-suite/CI validation remains a separate integration gate.
 
 ## Remaining scope
 
