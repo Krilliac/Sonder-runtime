@@ -761,3 +761,27 @@ def test_resume_consumes_known_response_without_another_provider_call(env):
     assert len(model.requests) == 1
     assert len(service.reports("parent", context)["reports"]) == 1
     assert service.inspect(lane, context)["lane"]["status"] == "completed"
+
+
+def test_rejected_known_tool_response_can_be_corrected_without_reparsing_forever(env):
+    service, _, _, model, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    replies = iter(['{"tool":"not_granted","arguments":{}}', "Corrected answer"])
+
+    def generate(request, ctx):
+        model.requests.append((request, ctx))
+        return ModelResponse(next(replies), "fake", "code", tokens_out=3)
+
+    model.generate = generate
+    service.run_pending(lane, context)
+    assert service.inspect(lane, context)["lane"]["status"] == "failed"
+    service.control(
+        lane,
+        "resume",
+        command_id="correct",
+        content="Use only permitted tools",
+        context=context,
+    )
+    service.run_pending(lane, context)
+    assert len(model.requests) == 2
+    assert service.inspect(lane, context)["lane"]["status"] == "completed"
