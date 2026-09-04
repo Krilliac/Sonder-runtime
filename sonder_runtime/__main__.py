@@ -591,6 +591,9 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     )
     if include_typed_runtime:
         os.environ["SONDER_QUEUE_DEPTH"] = str(config.capacity.queue_depth)
+        os.environ["SONDER_SPECULATION_SLOTS"] = str(
+            config.capacity.model_generations
+        )
         os.environ["SONDER_METRICS"] = "1" if config.observability.metrics_enabled else "0"
     if config.secrets.api_key:
         os.environ["SONDER_API_KEY"] = config.secrets.api_key
@@ -650,6 +653,15 @@ def cmd_serve(args) -> int:
         config.ollama.workers,
         allow_remote=config.ollama.allow_remote,
         trusted_origins=config.ollama.trusted_origins,
+        failure_threshold=config.ollama.worker_failure_threshold,
+        cooldown_seconds=config.ollama.worker_cooldown_seconds,
+        admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
+        capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
+        probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
+    )
+    from sonder_runtime.adapters.inference import ollama_vision
+    ollama_vision.configure_typed_request_timeout(
+        config.ollama.request_timeout_seconds,
     )
     from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
         require_epoch_2,
@@ -679,6 +691,17 @@ def cmd_serve(args) -> int:
     except sonder_migrations.MigrationError as exc:
         print(f"migration failed, refusing to bind: {exc}", file=sys.stderr)
         return 1
+
+    try:
+        from sonder_runtime.adapters.persistence.operations_store import OperationsStore
+        pruned = OperationsStore().prune_events(
+            config.observability.audit_retention_days
+        )
+        if pruned:
+            print(f"pruned {pruned} audit events older than "
+                  f"{config.observability.audit_retention_days} days")
+    except Exception:
+        pass
 
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
@@ -775,6 +798,11 @@ def cmd_mcp(args) -> int:
         config.ollama.workers,
         allow_remote=config.ollama.allow_remote,
         trusted_origins=config.ollama.trusted_origins,
+        failure_threshold=config.ollama.worker_failure_threshold,
+        cooldown_seconds=config.ollama.worker_cooldown_seconds,
+        admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
+        capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
+        probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
     )
     McpCommand(build_legacy_server_mcp_runtime()).execute(lambda: None)
     return 0

@@ -60,6 +60,11 @@ _METRIC_OVERFLOW_LABEL = "overflow"
 _configured_workers: tuple[str, ...] | None = None
 _configured_allow_remote: bool | None = None
 _configured_trusted_origins: tuple[str, ...] | None = None
+_configured_failure_threshold: int | None = None
+_configured_cooldown_seconds: float | None = None
+_configured_admission_timeout_ms: int | None = None
+_configured_capability_ttl_seconds: int | None = None
+_configured_probe_timeout_ms: int | None = None
 _configuration_lock = threading.RLock()
 
 
@@ -220,6 +225,11 @@ def configure_typed_workers(
     *,
     allow_remote: bool,
     trusted_origins: tuple[str, ...] = (),
+    failure_threshold: int | None = None,
+    cooldown_seconds: int | None = None,
+    admission_timeout_ms: int | None = None,
+    capability_ttl_seconds: int | None = None,
+    probe_timeout_ms: int | None = None,
 ) -> None:
     logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
     logger.info(f"configuring {len(worker_origins)} typed Ollama worker(s), allow_remote={allow_remote}")
@@ -232,19 +242,35 @@ def configure_typed_workers(
         for origin in tuple(worker_origins)
     )
     global _configured_workers, _configured_allow_remote, _configured_trusted_origins
+    global _configured_failure_threshold, _configured_cooldown_seconds
+    global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
+    global _configured_probe_timeout_ms
     with _configuration_lock:
         _configured_workers = normalized
         _configured_allow_remote = allow_remote
         _configured_trusted_origins = trusted_origins
+        _configured_failure_threshold = failure_threshold
+        _configured_cooldown_seconds = cooldown_seconds
+        _configured_admission_timeout_ms = admission_timeout_ms
+        _configured_capability_ttl_seconds = capability_ttl_seconds
+        _configured_probe_timeout_ms = probe_timeout_ms
 
 
 def reset_typed_workers() -> None:
     logger.info("typed Ollama worker configuration reset")
     global _configured_workers, _configured_allow_remote, _configured_trusted_origins
+    global _configured_failure_threshold, _configured_cooldown_seconds
+    global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
+    global _configured_probe_timeout_ms
     with _configuration_lock:
         _configured_workers = None
         _configured_allow_remote = None
         _configured_trusted_origins = None
+        _configured_failure_threshold = None
+        _configured_cooldown_seconds = None
+        _configured_admission_timeout_ms = None
+        _configured_capability_ttl_seconds = None
+        _configured_probe_timeout_ms = None
 
 
 def has_configured_remote_workers(environment=None) -> bool:
@@ -1210,7 +1236,13 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         typed_workers = _configured_workers
         typed_allow_remote = _configured_allow_remote
         typed_trusted_origins = _configured_trusted_origins
-    if environment is None and typed_workers is not None and typed_allow_remote is not None:
+        typed_failure = _configured_failure_threshold
+        typed_cooldown = _configured_cooldown_seconds
+        typed_admission = _configured_admission_timeout_ms
+        typed_ttl = _configured_capability_ttl_seconds
+        typed_probe = _configured_probe_timeout_ms
+    use_typed = environment is None and typed_workers is not None and typed_allow_remote is not None
+    if use_typed:
         worker_origins = typed_workers
         allow_remote = typed_allow_remote
         trusted_origins = typed_trusted_origins or ()
@@ -1225,33 +1257,41 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
             v.strip() for v in raw_trusted.replace(";", ",").split(",") if v.strip()
         )
         logger.debug(f"from_environment: using env config, workers={len(worker_origins)}, allow_remote={allow_remote}")
-    cooldown = _positive_int(
-        env,
-        "SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS",
-        int(_DEFAULT_COOLDOWN_SECONDS),
-        maximum=int(_MAX_COOLDOWN_SECONDS),
+    cooldown = (
+        typed_cooldown if use_typed and typed_cooldown is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS",
+            int(_DEFAULT_COOLDOWN_SECONDS), maximum=int(_MAX_COOLDOWN_SECONDS),
+        )
     )
-    admission_ms = _positive_int(
-        env,
-        "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS",
-        int(_DEFAULT_ADMISSION_TIMEOUT_SECONDS * 1000),
-        maximum=int(_MAX_ADMISSION_TIMEOUT_SECONDS * 1000),
+    admission_ms = (
+        typed_admission if use_typed and typed_admission is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS",
+            int(_DEFAULT_ADMISSION_TIMEOUT_SECONDS * 1000),
+            maximum=int(_MAX_ADMISSION_TIMEOUT_SECONDS * 1000),
+        )
     )
-    probe_timeout_ms = _positive_int(
-        env, "SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS", 2000,
-        maximum=30_000,
+    probe_timeout_ms = (
+        typed_probe if use_typed and typed_probe is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS", 2000,
+            maximum=30_000,
+        )
+    )
+    failure_threshold = (
+        typed_failure if use_typed and typed_failure is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD",
+            _DEFAULT_FAILURE_THRESHOLD, maximum=_MAX_FAILURE_THRESHOLD,
+        )
     )
     return OllamaWorkerPool(
         primary_origin,
         worker_origins,
         allow_remote=allow_remote,
         trusted_origins=trusted_origins,
-        failure_threshold=_positive_int(
-            env,
-            "SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD",
-            _DEFAULT_FAILURE_THRESHOLD,
-            maximum=_MAX_FAILURE_THRESHOLD,
-        ),
+        failure_threshold=failure_threshold,
         cooldown_seconds=cooldown,
         max_inflight_per_worker=_positive_int(
             env, "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT,
@@ -1262,11 +1302,13 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
             maximum=_MAX_QUEUE_DEPTH,
         ),
         admission_timeout_seconds=admission_ms / 1000.0,
-        capability_ttl_seconds=_positive_int(
-            env,
-            "SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS",
-            int(_DEFAULT_CAPABILITY_TTL_SECONDS),
-            maximum=int(_MAX_CAPABILITY_TTL_SECONDS),
+        capability_ttl_seconds=(
+            typed_ttl if use_typed and typed_ttl is not None
+            else _positive_int(
+                env, "SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS",
+                int(_DEFAULT_CAPABILITY_TTL_SECONDS),
+                maximum=int(_MAX_CAPABILITY_TTL_SECONDS),
+            )
         ),
         capability_prober=_default_capability_prober(
             allow_remote=allow_remote, timeout=probe_timeout_ms / 1000.0,

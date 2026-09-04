@@ -14,6 +14,14 @@ from . import ollama_endpoint
 
 logger = logging.getLogger(__name__)
 
+_configured_request_timeout: float = 300.0
+
+
+def configure_typed_request_timeout(seconds: int | None) -> None:
+    global _configured_request_timeout
+    if seconds is not None:
+        _configured_request_timeout = max(1.0, float(seconds))
+
 
 class OllamaVisionGateway:
     """Send one image-bearing request to a loopback Ollama endpoint."""
@@ -88,7 +96,7 @@ class OllamaVisionGateway:
             headers={"Content-Type": "application/json"}, method="POST",
         )
         try:
-            with ollama_endpoint.open_url(request, timeout=timeout or 300.0) as response:
+            with ollama_endpoint.open_url(request, timeout=timeout or _configured_request_timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except Exception as exc:
             logger.warning(

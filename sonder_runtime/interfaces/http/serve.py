@@ -165,6 +165,10 @@ server = _InjectedLegacyRuntime()
 DEFAULT_PORT = 11435
 CONFIGURED_PORT = DEFAULT_PORT
 _LOCAL_LOG_TAIL_BYTES = 64 * 1024
+_TRUSTED_PROXY_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.ip_network("127.0.0.1/32"),
+    ipaddress.ip_network("::1/128"),
+)
 _HEALTH_STATUS_FACADE = HealthStatusFacade()
 _CONTROL_PLANE_FACADE = ControlPlaneFacade()
 _A2A_AGENT_CARD_FACADE = A2AAgentCardFacade()
@@ -780,6 +784,14 @@ def configure_typed_config(config) -> None:
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
     )
     TRAIN_MAX_N = max(1, server_config.train_max_n)
+    global _HEALTH_STATUS_FACADE, _TRUSTED_PROXY_NETWORKS
+    _HEALTH_STATUS_FACADE = HealthStatusFacade(
+        metrics_path=config.observability.metrics_path,
+    )
+    _TRUSTED_PROXY_NETWORKS = tuple(
+        ipaddress.ip_network(cidr, strict=False)
+        for cidr in server_config.trusted_proxy_cidrs
+    )
 _HTTP_SESSION_STATES = OrderedDict()
 _HTTP_SESSION_STATES_LOCK = threading.RLock()
 
@@ -3563,6 +3575,25 @@ class Handler(BaseHTTPRequestHandler):
     def _peer(self):
         return self.client_address[0] if self.client_address else ""
 
+    def _client_ip(self):
+        """Resolve client IP through X-Forwarded-For when peer is a trusted proxy."""
+        peer = self._peer()
+        if not peer:
+            return peer
+        try:
+            peer_addr = ipaddress.ip_address(peer)
+        except ValueError:
+            return peer
+        if not any(peer_addr in net for net in _TRUSTED_PROXY_NETWORKS):
+            return peer
+        xff = self.headers.get("X-Forwarded-For", "")
+        if not xff:
+            return peer
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if not parts:
+            return peer
+        return parts[0]
+
     def _correlation(self):
         if not getattr(self, "_correlation_id", ""):
             self._correlation_id = sonder_lifecycle.new_correlation_id()
@@ -3570,7 +3601,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_auth_error(self, reason="invalid-credentials"):
         _serve_logger.debug(f"_send_auth_error: peer={self._peer()!r}, reason={reason!r}")
-        sonder_lifecycle.get().record_auth_failure(self._peer(), reason)
+        sonder_lifecycle.get().record_auth_failure(self._client_ip(), reason)
         self._send_json_payload({
             "error": {"message": "authentication required", "type": "auth",
                       "code": "UNAUTHENTICATED",
@@ -3579,10 +3610,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_rate_limited(self):
         """Token-bucket authentication-failure limiter (admission step 3)."""
-        if sonder_lifecycle.get().auth_attempt_allowed(self._peer()):
+        client = self._client_ip()
+        if sonder_lifecycle.get().auth_attempt_allowed(client):
             return False
-        _serve_logger.error(f"auth rate limit exceeded for peer={self._peer()!r}")
-        _serve_logger.debug(f"_auth_rate_limited: rate-limited peer={self._peer()!r}")
+        _serve_logger.error(f"auth rate limit exceeded for client={client!r}")
+        _serve_logger.debug(f"_auth_rate_limited: rate-limited client={client!r}")
         if (
             self.command == "POST"
             and _request_route(self.path) == "/v1/chat/completions"

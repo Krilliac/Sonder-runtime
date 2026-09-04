@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.persistence.fleet_registry import FleetStoreRegistryAdapter
 from ..adapters.persistence.session_repository import SQLiteSessionRepository
+from ..adapters.persistence.durable_continuation import SQLiteDurableContinuationRepository
 from ..adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+from ..adapters.subagents import LocalSubagentProvider
 from ..adapters.persistence.sqlite.workflow_checkpoints import SQLiteWorkflowCheckpointRepository
 from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.process_termination import ProcessTreeSupervisor
@@ -78,6 +80,10 @@ from ..application.capabilities.jobs import JobRegistryService, ResumableWorkflo
 from ..application.jobs.durable_registry import JobRecoveryReport
 from ..application.jobs.session_lifecycle import JobRegistryLifecycleAdapter, JobSessionLifecycleRecorder
 from ..application.agent_registry.unified import UnifiedAgentRegistryService
+from ..application.agents.delegation_service import DelegationService
+from ..application.agents.durable_lineage import DurableLineageQuery
+from ..application.agents.workflow_integration import AgentWorkflowService
+from ..application.subagents.durable_continuation import DurableContinuationService
 from ..application.evaluation_history import EvaluationHistoryService
 from ..application.inspection import InspectionService
 from ..application.recall import RecallService
@@ -190,6 +196,9 @@ class Application:
     compute_scheduler: ComputePlacementScheduler | None = None
     compute_job_worker: Callable[[], ComputeJobWorker] | None = None
     compute_service: Callable[[], ComputeFabricService] | None = None
+    delegation_service: Callable[[], DelegationService] | None = None
+    agent_workflow_service: Callable[[], AgentWorkflowService] | None = None
+    lineage_query: Callable[[], DurableLineageQuery] | None = None
     # The typed tool boundary: the read-only workbench family runs through it
     # on every surface, with the runtime's permission modes as its evaluator
     # and operations-grade durable receipts (see bootstrap/typed_tools.py).
@@ -324,6 +333,11 @@ def build_application(
             config.ollama.workers,
             allow_remote=config.ollama.allow_remote,
             trusted_origins=config.ollama.trusted_origins,
+            failure_threshold=config.ollama.worker_failure_threshold,
+            cooldown_seconds=config.ollama.worker_cooldown_seconds,
+            admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
+            capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
+            probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
         )
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
@@ -431,6 +445,12 @@ def build_application(
     compute_scheduler = ComputePlacementScheduler(
         snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
     )
+    continuation_repository: SQLiteDurableContinuationRepository | None = None
+    continuation_service: DurableContinuationService | None = None
+    subagent_provider: LocalSubagentProvider | None = None
+    delegation: DelegationService | None = None
+    agent_workflow: AgentWorkflowService | None = None
+    lineage: DurableLineageQuery | None = None
 
     def get_session_repository() -> SessionRepository:
         nonlocal session_repository
@@ -739,6 +759,42 @@ def build_application(
             agent_registry = UnifiedAgentRegistryService(FleetStoreRegistryAdapter())
             agent_registry.register_workbench_modes()
         return agent_registry
+
+    def _noop_runner(state, save, control):
+        return ""
+
+    def get_delegation_service() -> DelegationService:
+        nonlocal continuation_repository, continuation_service, subagent_provider, delegation
+        if delegation is None:
+            from ..platform.paths import state_path
+            db_path = state_path("child-sessions.db", "SONDER_CHILD_SESSIONS_DB")
+            logger.debug(f"lazy-init delegation subsystem at {db_path!r}")
+            continuation_repository = SQLiteDurableContinuationRepository(db_path)
+            continuation_service = DurableContinuationService(continuation_repository)
+            subagent_provider = LocalSubagentProvider(
+                continuation_service, _noop_runner,
+            )
+            delegation = DelegationService(subagent_provider, events)
+            logger.info("delegation service initialized")
+        return delegation
+
+    def get_agent_workflow_service() -> AgentWorkflowService:
+        nonlocal agent_workflow
+        if agent_workflow is None:
+            agent_workflow = AgentWorkflowService(get_delegation_service())
+            logger.info("agent workflow service initialized")
+        return agent_workflow
+
+    def get_lineage_query() -> DurableLineageQuery:
+        nonlocal lineage
+        if lineage is None:
+            get_delegation_service()
+            lineage = DurableLineageQuery(
+                jobs=get_job_registry(),
+                children=continuation_repository,
+            )
+            logger.info("lineage query service initialized")
+        return lineage
 
     def get_extension_registry() -> ExtensionRegistry:
         nonlocal extension_registry
@@ -1060,6 +1116,19 @@ def build_application(
             })
         return tuple(rows)
 
+    def lineage_section():
+        try:
+            query = get_lineage_query()
+            nodes = query.snapshot(limit=200)
+            return tuple(
+                {"node_id": n.node_id, "parent_id": n.parent_id, "root_id": n.root_id,
+                 "kind": n.kind, "status": n.status, "depth": n.depth}
+                for n in nodes
+            )
+        except Exception:
+            logger.debug("lineage section snapshot failed", exc_info=True)
+            return ()
+
     default_control_plane_service = control_plane_snapshot_service or ControlPlaneSnapshotService({
         "sessions": session_section,
         "plans": task_section,
@@ -1076,6 +1145,7 @@ def build_application(
         "health": provider_section,
         "startup_authorities": startup_authority_section,
         "compute_fabric": compute_fabric_section,
+        "lineage": lineage_section,
     })
 
     # Bounded process-local counters/recent events decorate the durable
@@ -1178,6 +1248,9 @@ def build_application(
         compute_scheduler=compute_scheduler,
         compute_job_worker=get_compute_job_worker,
         compute_service=get_compute_service,
+        delegation_service=get_delegation_service,
+        agent_workflow_service=get_agent_workflow_service,
+        lineage_query=get_lineage_query,
     )
 
 

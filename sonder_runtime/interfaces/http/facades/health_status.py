@@ -57,13 +57,16 @@ class HealthStatusRoute:
 class HealthStatusFacade:
     """Classify and render lifecycle health/status routes."""
 
-    _ROUTES = {
+    _STATIC_ROUTES = {
         "/live": False,
         "/ready": True,
         "/health": True,
         "/version": True,
-        "/metrics": True,
     }
+
+    def __init__(self, *, metrics_path: str = "/metrics") -> None:
+        self._metrics_path = metrics_path
+        self._ROUTES = {**self._STATIC_ROUTES, metrics_path: True}
 
     def route(self, path: str) -> HealthStatusRoute | None:
         """Return a route description, or ``None`` for unrelated paths."""
@@ -74,7 +77,7 @@ class HealthStatusFacade:
         logger.debug(f"HealthStatusFacade.route: matched path={normalized!r}, requires_auth={requires_auth}")
         media_type = (
             "text/plain; version=0.0.4; charset=utf-8"
-            if normalized == "/metrics"
+            if normalized == self._metrics_path
             else "application/json"
         )
         return HealthStatusRoute(normalized, requires_auth, media_type)
