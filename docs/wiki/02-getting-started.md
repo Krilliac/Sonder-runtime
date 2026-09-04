@@ -86,6 +86,35 @@ Full walkthrough: [install-server-private](../runbooks/install-server-private.md
 Remote access is a TLS reverse proxy in front of the loopback listener —
 never a direct public bind ([secure-remote-access](../runbooks/secure-remote-access.md)).
 
+## WSL2 deployment (Linux inside Windows)
+
+Sonder runs inside WSL2 (Ubuntu 24.04+) the same as native Linux. Key
+differences:
+
+- **Resource limits** — set `memory`, `processors`, and `swap` in
+  `C:\Users\<you>\.wslconfig` under `[wsl2]`.
+- **systemd** — requires `systemd=true` in `/etc/wsl.conf`. Both Ollama
+  and Sonder systemd units work normally once enabled.
+- **Port access from the Windows host** — WSL2 uses NAT. Forward ports
+  with `netsh interface portproxy` if external machines need to reach
+  services inside WSL. The WSL2 IP changes on reboot; automate the
+  forwarding rule in a startup task.
+- **Ollama GPU access** — WSL2 passes through the host GPU automatically
+  with an up-to-date Windows driver. Verify with `ollama ps` after loading
+  a model.
+
+See [multi-node-ollama](../runbooks/multi-node-ollama.md) for using a WSL2
+node as a remote Ollama worker in a multi-machine pool.
+
+## Multi-node Ollama pools
+
+A single coordinator can route inference across Ollama instances on
+multiple machines.  Add remote workers in `[ollama].workers` with
+`allow_remote = true`.  On private LANs, `trusted_origins` accepts
+CIDRs where HTTP (non-TLS) workers are allowed.
+
+Full walkthrough: [multi-node-ollama](../runbooks/multi-node-ollama.md).
+
 ## First-run sanity checks
 
 ```bash
