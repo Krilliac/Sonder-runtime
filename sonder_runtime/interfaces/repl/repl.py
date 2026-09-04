@@ -516,6 +516,13 @@ def _named_command_gate(cmd, argument=""):
         tools = command_catalog.console_tools().get(cmd, ())
     except command_catalog.CatalogUnavailable as exc:
         return False, "refused %s: %s" % (cmd, exc)
+    if cmd == "/lanes":
+        # LaneConsoleFacade separates reads from effects and gates effects with
+        # their prepared principal/root/payload. A coarse gate here would consume
+        # a one-shot approval before that exact command reaches its own gate.
+        if set(tools) != {"agent_lane"}:
+            return False, "refused /lanes: scoped command catalog is unavailable"
+        return True, ""
     # Workspace creation is implemented by a nested REPL helper, so it is not
     # visible to the catalog's top-level branch scanner.  Keep its filesystem
     # mutation in the same single choke-point gate as every other command.

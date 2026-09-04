@@ -360,6 +360,7 @@ def test_real_ledger_approves_identical_console_retry_once(env, ledger, monkeypa
     )
     monkeypatch.setattr(repl, "_console_has_operator", lambda: False)
     command = "message " + lane + " exact retry content"
+    assert repl._named_command_gate("/lanes", command)[0]
     first = repl._lanes_command(command)
     assert "refused" in first
     pending = ledger.pending()
@@ -370,10 +371,17 @@ def test_real_ledger_approves_identical_console_retry_once(env, ledger, monkeypa
         "/approve " + call_id + " 120", operator_approved=True
     )
     assert "approved agent_lane" in approved
+    assert repl._named_command_gate("/lanes", command)[0]
     assert "Recorded message" in repl._lanes_command(command)
+    assert repl._named_command_gate("/lanes", command)[0]
     assert "refused" in repl._lanes_command(command)
     messages = env[0].inspect(lane, env[-2])["messages"]
     assert sum(message["content"] == "exact retry content" for message in messages) == 1
+
+
+def test_lane_outer_gate_refuses_missing_scoped_catalog(monkeypatch):
+    monkeypatch.setattr(repl.command_catalog, "console_tools", lambda: {})
+    assert not repl._named_command_gate("/lanes", "list")[0]
 
 
 def test_console_reads_and_control_prechecks_do_not_fetch_message_bodies(
