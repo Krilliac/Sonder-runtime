@@ -614,23 +614,7 @@ class AgentLaneService:
     def reports(self, parent_session_id, context, *, cursor=0, limit=50):
         _bounds(cursor, limit)
         with self.store.transaction() as tx:
-            reports = []
-            for _, lane in tx.lanes(context.principal_id, parent_session_id, limit=256):
-                for m in tx.messages(lane["id"], report=True):
-                    if m["sequence"] > cursor:
-                        reports.append(
-                            dict(
-                                id=m["id"],
-                                lane_id=lane["id"],
-                                attempt_id=m["attempt_id"],
-                                source_sequence=m["source_sequence"],
-                                sequence=m["sequence"],
-                                summary=m["content"],
-                                artifacts=list(m["artifacts"]),
-                                acknowledged=m["acknowledged"],
-                            )
-                        )
-        reports.sort(key=lambda r: r["sequence"])
+            reports = tx.report_page(context.principal_id, parent_session_id, cursor, limit + 1)
         page = reports[:limit]
         return dict(
             reports=page,
