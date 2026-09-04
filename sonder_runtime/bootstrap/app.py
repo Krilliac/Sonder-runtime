@@ -310,7 +310,9 @@ def build_application(
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
         from ..adapters.inference import ollama_pool
         ollama_pool.configure_typed_workers(
-            config.ollama.workers, allow_remote=config.ollama.allow_remote,
+            config.ollama.workers,
+            allow_remote=config.ollama.allow_remote,
+            trusted_origins=config.ollama.trusted_origins,
         )
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")

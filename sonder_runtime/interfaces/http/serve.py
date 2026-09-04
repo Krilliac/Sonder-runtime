@@ -745,6 +745,8 @@ def configure_typed_config(config) -> None:
     HOST = server_config.host
     REQUIRE_ACCOUNT = server_config.require_account
     AUTH_MODE = server_config.auth_mode
+    if AUTH_MODE == "api-key" and not API_KEY and _is_loopback_host(HOST):
+        AUTH_MODE = "local-open"
     CORS_ORIGINS = frozenset(server_config.cors_origins)
     TLS_TERMINATED_BY_PROXY = server_config.tls_terminated_by_proxy
     ALLOW_REGISTRATION = server_config.allow_registration

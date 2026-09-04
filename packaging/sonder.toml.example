@@ -35,6 +35,10 @@ sqlite_busy_timeout_ms = 5000
 [ollama]
 url = "http://127.0.0.1:11434"
 allow_remote = false
+# workers = ["http://10.0.0.2:11434"]
+# Private-network CIDRs where HTTP (non-TLS) Ollama workers are accepted.
+# Without this, remote workers must use HTTPS.  Use only on isolated LANs.
+# trusted_origins = ["10.0.0.0/8", "192.168.0.0/16"]
 startup_timeout_seconds = 60
 request_timeout_seconds = 300
 

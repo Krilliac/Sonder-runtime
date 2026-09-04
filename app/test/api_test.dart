@@ -29,7 +29,7 @@ void main() {
       );
     });
     final result = await http.runWithClient(
-      () => const SonderApi(
+      () => SonderApi(
         baseUrl: 'https://host.test',
         apiKey: 'key',
       ).fetchExtensionRegistry(),
@@ -359,7 +359,7 @@ void main() {
     });
 
     await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').systemInfo(),
+      () => SonderApi(baseUrl: 'http://sonder.test').systemInfo(),
       () => client,
     );
 
@@ -377,7 +377,7 @@ void main() {
     });
 
     final result = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test')
+      () => SonderApi(baseUrl: 'http://sonder.test')
           .register('person', 'password123'),
       () => client,
     );
@@ -423,7 +423,7 @@ void main() {
     });
 
     final output = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').chat(const [
+      () => SonderApi(baseUrl: 'http://sonder.test').chat(const [
         ChatMessage(role: Role.user, content: 'weather in my area'),
       ], allowApproximateLocation: true),
       () => client,
@@ -464,7 +464,7 @@ void main() {
       });
 
       final output = await http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test').chat(const [
+        () => SonderApi(baseUrl: 'http://sonder.test').chat(const [
           ChatMessage(role: Role.user, content: 'weather in Tokyo'),
         ], allowApproximateLocation: true),
         () => client,
@@ -1067,7 +1067,7 @@ void main() {
       });
 
       final reply = await http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test')
+        () => SonderApi(baseUrl: 'http://sonder.test')
             .chatDetailed(const [ChatMessage(role: Role.user, content: 'hi')]),
         () => client,
       );
@@ -1093,7 +1093,7 @@ void main() {
     });
 
     final reply = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test')
+      () => SonderApi(baseUrl: 'http://sonder.test')
           .chatDetailed(const [ChatMessage(role: Role.user, content: 'hi')]),
       () => client,
     );
@@ -1141,7 +1141,7 @@ void main() {
       );
 
       final reply = await http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+        () => SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
           const [ChatMessage(role: Role.user, content: 'hi')],
         ),
         () => client,
@@ -1180,7 +1180,7 @@ void main() {
 
       await http.runWithClient(
         () =>
-            const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(const [
+            SonderApi(baseUrl: 'http://sonder.test').chatDetailed(const [
           ChatMessage(role: Role.user, content: 'first'),
           ChatMessage(
             role: Role.assistant,
@@ -1220,7 +1220,7 @@ void main() {
 
       await expectLater(
         http.runWithClient(
-          () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+          () => SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
             const [ChatMessage(role: Role.user, content: 'hello')],
             model: 'nomic-embed-text:latest',
           ),
@@ -1258,7 +1258,7 @@ void main() {
 
       await expectLater(
         http.runWithClient(
-          () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+          () => SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
             const [ChatMessage(role: Role.user, content: 'hello')],
           ),
           () => client,
@@ -1296,7 +1296,7 @@ void main() {
 
     await expectLater(
       http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+        () => SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
           const [ChatMessage(role: Role.user, content: 'hello')],
         ),
         () => client,
@@ -1320,7 +1320,7 @@ void main() {
 
       await expectLater(
         http.runWithClient(
-          () => const SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
+          () => SonderApi(baseUrl: 'http://sonder.test').chatDetailed(
             const [ChatMessage(role: Role.user, content: 'hello')],
           ),
           () => client,
@@ -1352,7 +1352,7 @@ void main() {
     });
 
     final output = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test')
+      () => SonderApi(baseUrl: 'http://sonder.test')
           .chat(const [ChatMessage(role: Role.user, content: 'hi')]),
       () => client,
     );
@@ -1431,7 +1431,7 @@ void main() {
     });
 
     final catalog = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test/').fetchCommands(),
+      () => SonderApi(baseUrl: 'http://sonder.test/').fetchCommands(),
       () => client,
     );
 
@@ -1491,7 +1491,7 @@ void main() {
     });
 
     final catalog = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
+      () => SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
       () => client,
     );
 
@@ -1512,7 +1512,7 @@ void main() {
     final failing = MockClient((request) async => http.Response('nope', 503));
     await expectLater(
       http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
+        () => SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
         () => failing,
       ),
       throwsA(isA<SonderException>()),
@@ -1521,7 +1521,7 @@ void main() {
     final unauthorized = MockClient((request) async => http.Response('', 401));
     await expectLater(
       http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
+        () => SonderApi(baseUrl: 'http://sonder.test').fetchCommands(),
         () => unauthorized,
       ),
       throwsA(isA<SonderException>()),
@@ -1548,7 +1548,7 @@ void main() {
     });
 
     final matches = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test')
+      () => SonderApi(baseUrl: 'http://sonder.test')
           .completeCommands('/ta', limit: 5),
       () => client,
     );
@@ -1570,7 +1570,7 @@ void main() {
     });
 
     final text = await http.runWithClient(
-      () => const SonderApi(baseUrl: 'http://sonder.test')
+      () => SonderApi(baseUrl: 'http://sonder.test')
           .commandHelp('/task_plan'),
       () => client,
     );
@@ -1615,7 +1615,7 @@ void main() {
 
     final mode = await http.runWithClient(
       () =>
-          const SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
+          SonderApi(baseUrl: 'http://sonder.test').fetchPermissionMode(),
       () => client,
     );
 
@@ -1647,7 +1647,7 @@ void main() {
       );
 
       final mode = await http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test')
+        () => SonderApi(baseUrl: 'http://sonder.test')
             .fetchPermissionMode(),
         () => client,
       );
@@ -1667,7 +1667,7 @@ void main() {
       // A record that names no mode at all is not a mode: usable is false, so
       // the caller hides the indicator rather than rendering a blank one.
       final empty = await http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test')
+        () => SonderApi(baseUrl: 'http://sonder.test')
             .fetchPermissionMode(),
         () => MockClient((request) async => http.Response('{}', 200)),
       );
@@ -1680,7 +1680,7 @@ void main() {
     'permission mode reports an absent route as unsupported, not as a mode',
     () async {
       final missing = await http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test')
+        () => SonderApi(baseUrl: 'http://sonder.test')
             .fetchPermissionMode(),
         () => MockClient((request) async => http.Response('', 404)),
       );
@@ -1689,7 +1689,7 @@ void main() {
       // Anything else is a failure, never a silently-invented mode.
       await expectLater(
         http.runWithClient(
-          () => const SonderApi(baseUrl: 'http://sonder.test')
+          () => SonderApi(baseUrl: 'http://sonder.test')
               .fetchPermissionMode(),
           () => MockClient((request) async => http.Response('nope', 503)),
         ),
@@ -1697,7 +1697,7 @@ void main() {
       );
       await expectLater(
         http.runWithClient(
-          () => const SonderApi(baseUrl: 'http://sonder.test')
+          () => SonderApi(baseUrl: 'http://sonder.test')
               .fetchPermissionMode(),
           () => MockClient((request) async => http.Response('', 401)),
         ),
@@ -1729,7 +1729,7 @@ void main() {
       });
 
       final mode = await http.runWithClient(
-        () => const SonderApi(baseUrl: 'http://sonder.test')
+        () => SonderApi(baseUrl: 'http://sonder.test')
             .setPermissionMode('plan'),
         () => client,
       );
@@ -1743,7 +1743,7 @@ void main() {
       // A rejected name surfaces the server's own wording.
       await expectLater(
         http.runWithClient(
-          () => const SonderApi(baseUrl: 'http://sonder.test')
+          () => SonderApi(baseUrl: 'http://sonder.test')
               .setPermissionMode('nope'),
           () => MockClient(
             (request) async => http.Response(

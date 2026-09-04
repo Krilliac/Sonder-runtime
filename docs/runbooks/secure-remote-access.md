@@ -32,6 +32,24 @@ proxy in front of that loopback listener.
 5. Confirm the plaintext port is unreachable remotely:
    `curl -m 3 http://<server-ip>:11435/live` must fail to connect.
 
+## Private-network Ollama workers (trusted_origins)
+
+For Ollama worker pools on a physically isolated LAN (direct Ethernet,
+isolated VLAN), `[ollama].trusted_origins` accepts CIDR ranges where HTTP
+workers are allowed without TLS.  This does **not** relax the Sonder
+listener rules above — it only affects outbound connections to Ollama
+workers in the pool.  See `multi-node-ollama.md` for the full setup.
+
+```toml
+[ollama]
+allow_remote = true
+workers = ["http://10.77.0.2:11434"]
+trusted_origins = ["10.77.0.0/24"]
+```
+
+On shared or routable networks, use the TLS proxy path instead and omit
+`trusted_origins`.
+
 ## Never do
 
 - Never port-forward 11435 directly.
