@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 248,
+      "file_count": 250,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -84,6 +84,7 @@
         "sonder_runtime/adapters/command_parsing.py",
         "sonder_runtime/adapters/command_surface.py",
         "sonder_runtime/adapters/compute_fabric/__init__.py",
+        "sonder_runtime/adapters/compute_fabric/artifact_transfer.py",
         "sonder_runtime/adapters/compute_fabric/http_client.py",
         "sonder_runtime/adapters/compute_fabric/local_snapshot.py",
         "sonder_runtime/adapters/config_validation.py",
@@ -193,6 +194,7 @@
         "sonder_runtime/adapters/pdf_risk.py",
         "sonder_runtime/adapters/persistence/__init__.py",
         "sonder_runtime/adapters/persistence/agent_lanes.py",
+        "sonder_runtime/adapters/persistence/artifact_transfer.py",
         "sonder_runtime/adapters/persistence/autopilot_repository.py",
         "sonder_runtime/adapters/persistence/autopilot_store.py",
         "sonder_runtime/adapters/persistence/checkpoint_store.py",
@@ -297,7 +299,7 @@
       ]
     },
     {
-      "file_count": 273,
+      "file_count": 275,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -314,6 +316,7 @@
         "sonder_runtime/application/architecture/ownership_catalog.py",
         "sonder_runtime/application/artifacts/__init__.py",
         "sonder_runtime/application/artifacts/immutable_manifest.py",
+        "sonder_runtime/application/artifacts/transfer.py",
         "sonder_runtime/application/automation/__init__.py",
         "sonder_runtime/application/automation/automation_service.py",
         "sonder_runtime/application/backup/__init__.py",
@@ -427,6 +430,7 @@
         "sonder_runtime/application/ports/archive_create.py",
         "sonder_runtime/application/ports/archive_create_limits.py",
         "sonder_runtime/application/ports/artifact_store.py",
+        "sonder_runtime/application/ports/artifact_transfer.py",
         "sonder_runtime/application/ports/backup.py",
         "sonder_runtime/application/ports/clock.py",
         "sonder_runtime/application/ports/command_catalog.py",
@@ -774,7 +778,7 @@
       ]
     },
     {
-      "file_count": 43,
+      "file_count": 44,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -794,6 +798,7 @@
         "sonder_runtime/interfaces/http/facades/a2a.py",
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
         "sonder_runtime/interfaces/http/facades/agent_lanes.py",
+        "sonder_runtime/interfaces/http/facades/artifact_transfer.py",
         "sonder_runtime/interfaces/http/facades/compute_fabric.py",
         "sonder_runtime/interfaces/http/facades/control_plane.py",
         "sonder_runtime/interfaces/http/facades/extensions.py",

@@ -4313,7 +4313,7 @@
       "name": "/lanes",
       "native": true,
       "params": [],
-      "risk": "safe",
+      "risk": "execution",
       "summary": "inspect and control durable agent conversations",
       "tool": ""
     },
@@ -9429,7 +9429,7 @@
     "events": 43,
     "tools": 212
   },
-  "digest": "b4a52f2b16e5fd95ed65b485b05d6623f08525b0939d9b5ec4d511be15a78467",
+  "digest": "89fe5802512108a8af267f6a7d0d64481d5c3c9812b56a6ff936de46c4c1cb21",
   "events": [
     {
       "name": "session.started",
