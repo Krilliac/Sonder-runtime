@@ -330,7 +330,9 @@ class SubprocessJobProvider:
                 else:
                     self._memory_tokens.pop(request.identity.job_id, None)
             current = self._registry.poll(request.identity.job_id)
-            if capacity_dispatched and containment is not None and containment.complete:
+            # A throwing launcher has not returned a process handle; retain
+            # the durable reservation unless containment proves the scope empty.
+            if capacity_dispatched and containment is not None and cleanup_complete:
                 self._release_capacity(request.identity.job_id)
             if cleanup_complete:
                 self._processes.pop(request.identity.job_id, None)

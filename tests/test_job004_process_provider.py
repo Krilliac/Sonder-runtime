@@ -153,6 +153,44 @@ def test_failed_launch_retains_capacity_until_exit_and_containment_proven(cleanu
     provider.wait("after-proven-cleanup")
 
 
+def test_failed_launch_retains_worker_reservation_until_root_exit(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from sonder_runtime.application.compute_fabric.capacity import WorkerBudget
+    from sonder_runtime.application.errors import CapacityExceeded
+
+    class LiveProcess(_Process):
+        exited = False
+
+        def wait(self, timeout=None):
+            if not self.exited:
+                raise subprocess.TimeoutExpired("fixture", timeout)
+            return 0
+
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    budget = WorkerBudget("host", 100, 1)
+    reservation = registry.reserve_capacity(budget, "failed-worker-launch", "a" * 64, 100)
+    process = LiveProcess()
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: process,
+        memory_limiter=_ScopedLimiter(_ScopedToken(ProcessContainmentResult(True))),
+        process_identity_resolver=lambda pid: "identity", platform_name="posix",
+    )
+    monkeypatch.setattr(provider, "_schedule_deadline", lambda *args: None)
+    def fail(*args):
+        raise RuntimeError("identity lookup failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, "_process_identity_resolver", fail)
+        with pytest.raises(RuntimeError, match="identity lookup failed"):
+            provider.start(replace(_request("failed-worker-launch"),
+                                   require_job_scope=True, capacity_token=reservation.token))
+    with pytest.raises(CapacityExceeded):
+        registry.reserve_capacity(budget, "second", "b" * 64, 100)
+    process.exited = True
+    assert provider.cancel("failed-worker-launch").cleanup_completed
+    assert registry.reserve_capacity(budget, "second", "b" * 64, 100)
+
+
 class _Process:
     pid = 77
 
