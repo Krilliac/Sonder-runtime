@@ -597,6 +597,12 @@ def request_cancel(selector: str, request_owner: str | None = None) -> dict | No
             )
             message = "cancellation requested; active task result will be discarded"
         else:
+            # State machine is the single source of truth for valid
+            # transitions.
+            if row["status"] != "cancelled" and not _sm.autopilot_can_transition(
+                row["status"], "cancelled"
+            ):
+                return _row_dict(found)
             conn.execute(
                 """
                 UPDATE autopilot_runs
@@ -809,6 +815,18 @@ def finish_run(
                     "completion refused: %s" % evidence_reason, now,
                 )
                 return None
+        # State machine is the single source of truth for valid transitions.
+        current_row = conn.execute(
+            "SELECT status FROM autopilot_runs WHERE id=? AND owner_id=? "
+            "AND status IN ('planning', 'running')",
+            (run_id, owner_id),
+        ).fetchone()
+        if current_row is not None and current_row["status"] != status:
+            if not _sm.autopilot_can_transition(current_row["status"], status):
+                raise ValueError(
+                    "autopilot state machine does not allow %s -> %s"
+                    % (current_row["status"], status)
+                )
         cursor = conn.execute(
             """
             UPDATE autopilot_runs
@@ -839,6 +857,13 @@ def finish_run(
 
 
 def reconcile_stale_runs(now: float | None = None) -> int:
+    # State machine is the single source of truth for valid transitions.
+    for src in ("planning", "running"):
+        if not _sm.autopilot_can_transition(src, "interrupted"):
+            raise ValueError(
+                "autopilot state machine does not allow %s -> interrupted"
+                % src
+            )
     current = float(now or time.time())
     host = socket.gethostname()
     changed = 0

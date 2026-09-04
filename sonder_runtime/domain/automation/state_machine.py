@@ -23,8 +23,8 @@ AUTOPILOT_ALL = AUTOPILOT_ACTIVE + AUTOPILOT_RESUMABLE + AUTOPILOT_TERMINAL
 # resumable or failed state is explicit; terminal states never leave.
 _AUTOPILOT_TRANSITIONS: dict[str, frozenset[str]] = {
     "ready": frozenset({"planning", "running", "cancelled", "paused"}),
-    "planning": frozenset({"running", "paused", "blocked", "failed",
-                           "interrupted", "cancelled"}),
+    "planning": frozenset({"running", "paused", "blocked", "completed",
+                           "failed", "interrupted", "cancelled"}),
     "running": frozenset({"paused", "blocked", "completed", "failed",
                           "interrupted", "cancelled", "planning"}),
     "paused": frozenset({"running", "cancelled", "planning"}),

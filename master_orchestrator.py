@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+import sonder_runtime.domain.events as events
 import sonder_runtime.domain.fleet_pressure as fleet_pressure
 import fleet_provenance
 
@@ -1080,6 +1081,12 @@ def _start_agent(agent_id: str, activity: str, **changes) -> bool:
     _sync_local(stored)
     _event(agent_id, activity)
     _notify_snapshot_subscribers(agent_id, "start")
+    with contextlib.suppress(Exception):
+        events.emit(
+            events.FLEET_AGENT_STARTED, "fleet", agent_id,
+            {"task": (stored.get("task") or "")[:500],
+             "mode": stored.get("mode") or ""},
+        )
     return True
 
 
@@ -1243,6 +1250,21 @@ def _finish(
             except Exception as exc:
                 _remember_store_error(exc)
     _notify_snapshot_subscribers(agent_id, "finish")
+    with contextlib.suppress(Exception):
+        _duration = (
+            (stored.get("finished_ts") or 0) - (stored.get("started_ts") or 0)
+            if stored else 0
+        )
+        if error:
+            events.emit(
+                events.FLEET_AGENT_FAILED, "fleet", agent_id,
+                {"error": str(error)},
+            )
+        else:
+            events.emit(
+                events.FLEET_AGENT_DONE, "fleet", agent_id,
+                {"result": (output or "")[:500], "duration": _duration},
+            )
     return final
 
 
