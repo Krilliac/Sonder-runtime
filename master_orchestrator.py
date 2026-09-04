@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
+import sonder_runtime.domain.fleet_pressure as fleet_pressure
 import fleet_provenance
 
 
@@ -38,6 +39,24 @@ if "_WORKER_LOCAL" not in globals():
     _WORKER_LOCAL = threading.local()
 if "_WORKER_FAILED" not in globals():
     _WORKER_FAILED = object()
+
+# --- Optimistic reservation counter -----------------------------------------
+# Bridges the gap between scheduling a new agent and the durable ledger
+# reflecting it.  Without this, capacity() reads stale snapshot counts and
+# over-dispatches, causing a thundering-herd when many agents queue at once.
+if "_RESERVED_SLOTS" not in globals():
+    _RESERVED_SLOTS = 0
+
+# --- Convergent snapshot pub-sub --------------------------------------------
+# Callbacks invoked on every fleet state transition (finish, cancel, start).
+# Each receives a full snapshot dict so subscribers see convergent state
+# regardless of event ordering -- eliminates delta-ordering bugs.
+if "_SNAPSHOT_SUBSCRIBERS" not in globals():
+    _SNAPSHOT_SUBSCRIBERS: list = []
+
+# --- Fleet pressure tracker -------------------------------------------------
+if "_PRESSURE_TRACKER" not in globals():
+    _PRESSURE_TRACKER = fleet_pressure.PressureTracker()
 if "_OWNER_ID" not in globals():
     _OWNER_ID = "owner-%s-%s" % (os.getpid(), uuid.uuid4().hex[:12])
     _OWNER_STARTED_TS = time.time()
@@ -535,6 +554,10 @@ def capacity(
         limits["gpu_vram"] = int(gpu_slots)
     if _FLEET_WORKER_CAP is not None:
         limits["fleet_workers"] = int(_FLEET_WORKER_CAP)
+    with _LOCK:
+        reserved = _RESERVED_SLOTS
+    if reserved > 0:
+        limits["reserved_capacity"] = max(1, int(requested) - reserved)
     # Ollama's own batching width is the hard ceiling on REAL concurrency --
     # handing it more concurrent requests than it will batch just queues them.
     ollama_parallel = ollama_parallel_limit()
@@ -902,11 +925,71 @@ def _prune_local(finished_retention: int = 500) -> None:
             _AGENTS.pop(row["id"], None)
 
 
+def subscribe_fleet_snapshots(callback) -> None:
+    """Register a callback invoked on every fleet state transition.
+
+    ``callback(snapshot_dict, trigger_agent_id, trigger_event)`` receives
+    a full fleet snapshot -- convergent state, not a delta -- so late or
+    reordered subscriptions always see the correct current picture.
+    """
+    with _LOCK:
+        _SNAPSHOT_SUBSCRIBERS.append(callback)
+
+
+def unsubscribe_fleet_snapshots(callback) -> None:
+    with _LOCK:
+        try:
+            _SNAPSHOT_SUBSCRIBERS.remove(callback)
+        except ValueError:
+            pass
+
+
+def _notify_snapshot_subscribers(agent_id: str, event: str) -> None:
+    with _LOCK:
+        subscribers = list(_SNAPSHOT_SUBSCRIBERS)
+    if not subscribers:
+        return
+    try:
+        snap = fleet_store.snapshot(include_finished=False, limit=ABSOLUTE_MAX_AGENTS + 1)
+    except Exception as exc:
+        _remember_store_error(exc)
+        return
+    _PRESSURE_TRACKER.update(
+        snap.get("active_model_calls") or 0,
+        snap.get("worker_slots_total") or max(1, snap.get("running_agents", 1)),
+    )
+    snap["pressure"] = {
+        "ewma": _PRESSURE_TRACKER.ewma,
+        "band": _PRESSURE_TRACKER.band,
+    }
+    for cb in subscribers:
+        try:
+            cb(snap, agent_id, event)
+        except Exception:
+            pass
+
+
+def fleet_pressure_band() -> str:
+    return _PRESSURE_TRACKER.band
+
+
+def fleet_pressure_sample() -> fleet_pressure.PressureSample:
+    return _PRESSURE_TRACKER.current()
+
+
+def reserved_slot_count() -> int:
+    with _LOCK:
+        return _RESERVED_SLOTS
+
+
 def _new_agent(
     role: str, task: str, parent_id: str = "", metadata: dict | None = None,
 ) -> str:
     _ensure_owner()
     metadata = dict(metadata or {})
+    with _LOCK:
+        global _RESERVED_SLOTS
+        _RESERVED_SLOTS += 1
     agent_id = "%s-%s" % (role, uuid.uuid4().hex[:12])
     now = _now()
     row = {
@@ -996,6 +1079,7 @@ def _start_agent(agent_id: str, activity: str, **changes) -> bool:
         return False
     _sync_local(stored)
     _event(agent_id, activity)
+    _notify_snapshot_subscribers(agent_id, "start")
     return True
 
 
@@ -1147,6 +1231,9 @@ def _finish(
         drift_metrics=drift_metrics,
     )
     _sync_local(stored)
+    with _LOCK:
+        global _RESERVED_SLOTS
+        _RESERVED_SLOTS = max(0, _RESERVED_SLOTS - 1)
     if stored:
         _event(agent_id, stored.get("activity") or "finished")
         if stored.get("role") == "master":
@@ -1155,6 +1242,7 @@ def _finish(
                 _prune_local()
             except Exception as exc:
                 _remember_store_error(exc)
+    _notify_snapshot_subscribers(agent_id, "finish")
     return final
 
 
