@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
+import uuid
 
 from ..application.context import OperationContext
 from ..application.ports.subagents import (
@@ -73,6 +75,8 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
     def spawn(self, request: SubagentRequest, context: OperationContext) -> SubagentHandle:
         """Apply request ceilings around the concrete local runner."""
         self._local_service.require_parent(request.parent_id)
+        if request.child_id is None:
+            request = replace(request, child_id="child-" + uuid.uuid4().hex)
         budget = request.budget
         runner = self._runner_factory(request, context) if self._runner_factory else self._runner
 

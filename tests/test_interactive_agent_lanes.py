@@ -681,3 +681,35 @@ def test_model_dispatch_requires_verified_parent_binding(env):
         )["lanes"]
         == []
     )
+
+
+def test_legacy_runner_binding_receives_the_durable_child_identity(tmp_path):
+    from sonder_runtime.adapters.subagents import LocalSubagentProvider
+    from sonder_runtime.application.subagents.durable_continuation import (
+        DurableContinuationService,
+    )
+    from sonder_runtime.adapters.persistence.durable_continuation import (
+        SQLiteDurableContinuationRepository,
+    )
+    from sonder_runtime.application.ports.subagents import (
+        SubagentRequest,
+        SubagentBudget,
+    )
+
+    durable = DurableContinuationService(
+        SQLiteDurableContinuationRepository(tmp_path / "children.db")
+    )
+    seen = []
+
+    def bind(request, context):
+        seen.append(request.child_id)
+        return lambda state, save, control: "result"
+
+    provider = LocalSubagentProvider(durable, runner_factory=bind)
+    provider.register_root("parent", SubagentBudget(max_steps=2))
+    handle = provider.spawn(
+        SubagentRequest("parent", "task", SubagentBudget(max_steps=1)),
+        local_owner_context(correlation_id="bind"),
+    )
+    handle.result(5)
+    assert seen == [handle.child_id]
