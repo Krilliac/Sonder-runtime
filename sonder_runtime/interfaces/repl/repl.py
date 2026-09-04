@@ -1313,6 +1313,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /improve           show the next system improvement checklist
   /master [mode] ... run orchestration: ask, inline, delegate, or fleet
   /agents            show live master/subagent activity
+  /lanes [help]      inspect and control durable agent conversations
   /fanouts [N|active]  list safe recent durable model-fanout summaries
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
@@ -1750,6 +1751,33 @@ def _format_fanout_summaries(payload):
         )
     lines.append("  use /model_fanout_status run_id=<id> for an authorized full receipt")
     return "\n".join(lines)
+
+
+def _approve_lane_command(arguments):
+    """Approve the exact console command without consuming piped input."""
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import terminal_text
+    decision = permission_policy.decide_for_caller(
+        "agent_lane", interactive=_console_has_operator(), gate_control_exempt=False,
+        surface="repl", arguments=arguments,
+    )
+    if decision is None or decision.action == permission_policy.allow_action():
+        return True, ""
+    if decision.action == permission_policy.deny_action():
+        return False, decision.reason
+    if not _console_has_operator():
+        return False, "interactive approval unavailable; use an operator console or an exact one-shot approval"
+    detail = terminal_text(json.dumps(arguments, ensure_ascii=False, indent=2),
+                           width=shutil.get_terminal_size((80, 24)).columns, limit=20000)
+    if _confirm("run this lane action?\n" + detail + "\n" + terminal_text(decision.reason)):
+        return True, ""
+    return False, "operator declined"
+
+
+def _lanes_command(arg):
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import LaneConsoleFacade
+    return LaneConsoleFacade(lambda: server._application(), _approve_lane_command).run(
+        arg, width=shutil.get_terminal_size((80, 24)).columns,
+    )
 
 
 def _fanout_recent_command(arg):
@@ -2586,6 +2614,8 @@ def main(*, machine_output=False):
                 print(server.preference_command(arg))
             elif cmd in ("/improve", "/improvements"):
                 print(server.system_improvement_report(session=session_id, project=project))
+            elif cmd == "/lanes":
+                print(_lanes_command(arg))
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
             elif cmd == "/fanouts":
