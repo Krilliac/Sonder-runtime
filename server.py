@@ -5128,6 +5128,9 @@ def _offload_impl(
     return with_footer(response, iid)
 
 
+from sonder_runtime.interfaces import standalone_agent_lanes as _standalone_lanes
+
+
 def _agent_lane_context():
     from sonder_runtime.application.context import local_owner_context
     application = _application()
@@ -15871,6 +15874,7 @@ def access_request_preview(path: str, mode: str = "read") -> str:
 
 
 AGENT_TOOL_HELP = """Available tools:
+- agent_lane: {"action": "spawn|list|inspect|send_message|wait|interrupt|resume|cancel|reports|ack", "payload": {}} -- parent authority is inherited from this run. Spawn payload: command_id, task, workspace_root (within the configured project grant), optional title/tier/max_steps/max_output_tokens/max_wall_seconds. Other actions use lane_id; send_message uses command_id/content; controls use command_id; ack uses report_id/command_id. Never supply parent identity or tokens.
 - run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10} -- source snippet only; never pass a shell command such as `cargo --version`
 - run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
 - artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, AVI video, MIDI score, captions, textured humanoid 3D mascot with full morph frames and sequenced Idle Walk Run clips", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,animation,video,music,midi,captions,timeline,web,model,rigged_model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
@@ -17016,6 +17020,7 @@ def _agent_dispatch(
     tool_name, args, allow_web=True, read_only=False, allow_location=False,
     repository_extra_roots="",
 ):
+    lane_read_only = read_only
     unsafe = unsafe_lab.active()
     if unsafe:
         # The acknowledgement is specifically permission to remove model-loop
@@ -17058,7 +17063,18 @@ def _agent_dispatch(
             "host-selected project root."
         )
         return refusal
-    gate_error = _agent_permission_gate_error(tool_name, args)
+    gate_arguments = args
+    if tool_name == "agent_lane":
+        refusal = _agent_run_tool_refusal(tool_name, read_only=lane_read_only)
+        if refusal:
+            lane_refusal = "ERROR: HOST POLICY: agent_lane requires " + refusal
+            return lane_refusal
+        try:
+            gate_arguments = _standalone_lanes.current().prepare(args)
+        except (ValueError, TypeError, PermissionError) as exc:
+            lane_refusal = "ERROR: HOST POLICY: " + str(exc)
+            return lane_refusal
+    gate_error = _agent_permission_gate_error(tool_name, gate_arguments)
     if gate_error:
         return gate_error
     root_refusal = _agent_project_root_refusal(
@@ -17116,6 +17132,12 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
+    if tool_name == "agent_lane":
+        try:
+            return json.dumps(_standalone_lanes.current().execute(args), ensure_ascii=False)
+        except Exception as exc:
+            lane_failure = "ERROR: agent_lane " + type(exc).__name__ + ": " + str(exc)
+            return lane_failure
     if tool_name == "toolchain_status":
         return toolchain_status(
             name=args.get("name", ""),
@@ -18189,7 +18211,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
     _PROJECT_SCOPED_PATH_TOOLS
     | _PROJECT_SCOPED_EXECUTION_TOOLS
     | frozenset({
-        "ground_artifact", "program_search",
+        "agent_lane", "ground_artifact", "program_search",
         "web_search", "web_fetch",
         "weather_lookup", "approximate_location_lookup", "memory_search",
         "file_policy", "task_create", "task_list", "task_update", "task_show",
@@ -18212,6 +18234,7 @@ _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "ensemble_codegen_build_loop",
 })
 _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
+    "agent_lane",
     "environment_status", "toolchain_status", "hardware_profile", "file_policy",
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
@@ -18259,6 +18282,10 @@ def _agent_run_tool_refusal(
     exact defect shape this function exists to prevent.  No caller reads the
     text: both use it as a predicate.
     """
+    if _canonical_agent_tool_name(tool_name) == "agent_lane":
+        controller = _standalone_lanes.current()
+        if read_only or cloud or controller is None or not controller.available:
+            return "an active local write-enabled standalone controller"
     if _canonical_agent_tool_name(tool_name) in _AGENT_SYSTEM_OPERATOR_TOOLS:
         return "system operation"
     if unsafe:
@@ -18962,7 +18989,7 @@ def _agent_impl(*args, **kwargs) -> str:
     instructions. See _stable_system_context; a nested call under an already
     pinned turn reuses the outer reading.
     """
-    with _stable_system_context():
+    with _stable_system_context(), _standalone_lanes.model_loop_scope():
         return _agent_turn(*args, **kwargs)
 
 
@@ -19005,6 +19032,7 @@ def _agent_turn(
     # failure can never be mistaken for it.
     escalation_key = _agent_escalation_key(tier, prompt)
     _take_agent_model_failure()
+    lane_read_only = read_only
     unsafe = unsafe_lab.active()
     if unsafe:
         # Unsafe lab mode is for a disposable host where the model is the
@@ -19028,6 +19056,9 @@ def _agent_turn(
         return "unknown tier '%s'. Valid: sonder, %s." % (tier, _valid_tier_names())
     if model is None:
         return "`sonder:latest` Ollama alias not found."
+    controller = _standalone_lanes.current()
+    if controller is not None:
+        controller.restrict(read_only=lane_read_only, cloud=cloud)
     project_scope, project_error = _agent_project_scope(project)
     if project_error:
         if return_host_receipt:
@@ -19221,6 +19252,8 @@ def _agent_turn(
 
     def ensure_not_cancelled():
         if cancel_check is not None and _cancel_requested(cancel_check):
+            if _standalone_lanes.current() is not None:
+                _standalone_lanes.current().request_cancel()
             raise ModelCallError(
                 "cancelled",
                 "agent call cancelled before another model/tool action",
@@ -19268,6 +19301,9 @@ def _agent_turn(
         Not a relaxation: the added satisfying condition is a host-observed
         passing verifier whose root covers every mutated path.
         """
+        controller = _standalone_lanes.current()
+        if controller is not None and controller.delegated_work:
+            return False
         return validation_ok or verification_ok
 
     def finish_final(final):
@@ -19358,6 +19394,19 @@ def _agent_turn(
                     detail="claimed completion without a change or a validation",
                     vacuous=True,
                 )
+        controller = _standalone_lanes.current()
+        if controller is not None and controller.delegated_work:
+            metadata = controller.report_metadata()
+            final = (
+                "UNVERIFIED: delegated work requires verification after child activity is quiescent. "
+                "This run does not certify the child's workspace changes.\n\n"
+                "Unverified model summary:\n" + final +
+                "\n\n=== DELEGATED WORK METADATA ===\n" + json.dumps(metadata, sort_keys=True)
+            )
+            if validation_failed:
+                final = _AGENT_VALIDATION_FAILED_LINE + "\n" + final
+            model_summary = "delegated work requires independent verification"
+            activity_tracker.set_response_status("unverified", model_summary)
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
@@ -20226,15 +20275,17 @@ def agent(
         model=tier,
         project=project,
     ) as response:
-        result = _agent_impl(
-            prompt,
-            tier=tier,
-            max_steps=max_steps,
-            allow_web=allow_web,
-            auto_checklist=bool(checklist),
-            project=project,
-            allow_location=bool(allow_location),
-        )
+        project_scope, _project_error = _agent_project_scope(project)
+        with _standalone_lanes.controller_scope(_application, project=project_scope):
+            result = _agent_impl(
+                prompt,
+                tier=tier,
+                max_steps=max_steps,
+                allow_web=allow_web,
+                auto_checklist=bool(checklist),
+                project=project,
+                allow_location=bool(allow_location),
+            )
     # Keep the report bound to this invocation's span.  Once an outer span
     # closes, ``latest()`` is a process-global last-completed value; another
     # MCP/HTTP request can complete in the small gap before this formatting

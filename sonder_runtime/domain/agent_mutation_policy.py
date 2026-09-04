@@ -18,6 +18,8 @@ WORK_MUTATION_TOOLS = frozenset({
 def invocation_mutates(tool_name, args):
     """Return whether this invocation can change persistent workspace state."""
     args = args if isinstance(args, dict) else {}
+    if tool_name == "agent_lane":
+        return args.get("action") in {"spawn", "send_message", "message", "resume"}
     if tool_name not in WORK_MUTATION_TOOLS:
         return False
     if tool_name == "file_delete":
