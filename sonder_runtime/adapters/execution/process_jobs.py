@@ -291,8 +291,10 @@ class SubprocessJobProvider:
             ):
                 resume_process(process)
             with self._timer_lock:
-                self._processes[request.identity.job_id] = process
+                # A consumer may complete a process as soon as it is visible.
+                # Its capacity lease must already be available for release.
                 self._process_slot_owners[request.identity.job_id] = lease
+                self._processes[request.identity.job_id] = process
             self._limits[request.identity.job_id] = request.max_descendants
             if memory_token is not None:
                 self._memory_tokens[request.identity.job_id] = memory_token
