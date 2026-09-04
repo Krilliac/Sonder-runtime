@@ -1763,7 +1763,10 @@ def _approve_lane_command(arguments):
     if decision is None or decision.action == permission_policy.allow_action():
         return True, ""
     if decision.action == permission_policy.deny_action():
-        return False, decision.reason
+        reason = decision.reason
+        if getattr(decision, "call_id", "") and getattr(decision, "source", "") == "unattended":
+            reason += "\nApprove once: /approve " + decision.call_id
+        return False, reason
     if not _console_has_operator():
         return False, "interactive approval unavailable; use an operator console or an exact one-shot approval"
     detail = terminal_text(json.dumps(arguments, ensure_ascii=False, indent=2),

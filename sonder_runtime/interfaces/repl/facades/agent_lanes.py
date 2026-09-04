@@ -164,8 +164,14 @@ class LaneConsoleFacade:
             )
         return terminal_text(text, width=width)
 
-    def _lane(self, service, context, lane_id, cursor=0):
-        result = service.inspect(lane_id, context, cursor=cursor, limit=PAGE_SIZE)
+    def _lane(self, service, context, lane_id, cursor=None):
+        result = service.read_view(
+            context,
+            lane_id=lane_id,
+            cursor=cursor or 0,
+            limit=PAGE_SIZE,
+            transcript=cursor is not None,
+        )
         if not self._inside(result["lane"], context):
             raise PermissionError(
                 "lane is outside the current configured workspace roots"
@@ -190,23 +196,16 @@ class LaneConsoleFacade:
 
     def _run(self, service, context, action, args):
         if action == "list":
-            result = service.list(context, cursor=args["cursor"], limit=PAGE_SIZE)
-            rows = []
-            for listed in result["lanes"]:
-                try:
-                    lane = service.inspect(listed["id"], context, limit=1)["lane"]
-                except (PermissionError, KeyError):
-                    continue
-                if self._inside(lane, context):
-                    rows.append(lane)
+            result = service.read_view(context, cursor=args["cursor"], limit=PAGE_SIZE)
+            rows = [lane for lane in result["lanes"] if self._inside(lane, context)]
             text = "\n\n".join(self._summary(lane) for lane in rows)
             if not rows:
                 text = (
                     "No visible lanes on this page."
-                    if result["lanes"] or args["cursor"]
+                    if result["source_count"] or args["cursor"]
                     else "No durable lanes yet."
                 )
-            if len(rows) != len(result["lanes"]):
+            if len(rows) != result["source_count"]:
                 text += "\nPage filtered to current workspace roots; hidden rows still advance the cursor."
             return (
                 text
@@ -217,7 +216,7 @@ class LaneConsoleFacade:
             service,
             context,
             args["lane_id"],
-            args.get("cursor", 0) if action == "show" else 0,
+            args.get("cursor", 0) if action == "show" else None,
         )
         lane = lane_result["lane"]
         if action == "show":
@@ -288,6 +287,7 @@ class LaneConsoleFacade:
             "workspace_roots": [str(root) for root in context.workspace_roots],
             "principal_id": context.principal_id,
             "author": "user",
+            "remote_ollama_allowed": context.remote_ollama_allowed,
             "command_id": "console-" + uuid.uuid4().hex,
         }
         if action == "message":
@@ -301,16 +301,22 @@ class LaneConsoleFacade:
             raise ValueError(
                 "exact approval detail exceeds display bound; shorten the message"
             )
-        allowed, reason = self._approve(json.loads(encoded))
+        approval_arguments = json.loads(encoded)
+        # A transport attempt nonce is not part of the operator's semantic grant.
+        # Keeping it out lets an unchanged unattended retry consume its approval.
+        approval_arguments.pop("command_id")
+        allowed, reason = self._approve(approval_arguments)
         if not allowed:
             return "Lane action refused: " + str(reason)
         command = json.loads(encoded)
         if context.expired or context.cancellation.cancelled:
             raise PermissionError("console request expired or cancelled")
+        current_config = self._factory().config
         configured = tuple(
-            Path(root).resolve()
-            for root in self._factory().config.state.workspace_roots
+            Path(root).resolve() for root in current_config.state.workspace_roots
         )
+        if current_config.ollama.allow_remote != context.remote_ollama_allowed:
+            raise PermissionError("remote model permission changed after approval")
         if set(configured) != set(context.workspace_roots):
             raise PermissionError("configured workspace roots changed after approval")
         live = self._lane(service, context, command["lane_id"])["lane"]

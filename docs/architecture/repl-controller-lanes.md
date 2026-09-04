@@ -22,8 +22,10 @@ claim that the worker has acknowledged it or stopped an in-flight effect.
 List, show and reports distinguish no records on this page, unavailable service,
 unknown identifiers, and access refusal. Next-page commands use service cursors.
 
-List pages contain at most 20 source rows. Each row is reauthorized by the
-service, then checked against current configured workspace roots. Hidden rows
+List pages contain at most 20 source rows. Each row is authorized by the
+service, then checked against current configured workspace roots. The lightweight
+metadata path loads no mailbox bodies or events; show requests one bounded event
+page. Unread report counts use SQL aggregation across all retained reports. Hidden rows
 still advance the source cursor and the display names that filtering. Report
 pages discover the actual parent from an authorized selected lane, filter its
 parent report stream to that lane, and retain that stream's cursor. A filtered
@@ -36,6 +38,9 @@ supplies production composition. Console context has local user authorship and
 only existing configured workspace roots. No MCP/model parent bearer is accepted
 or exposed. Message, interrupt, resume, cancel and ack pass the existing
 permission decision engine with exact action/target/content/grant arguments.
+Approval identity excludes the fresh host dispatch command ID, so an unchanged
+unattended retry consumes an operator-issued one-shot approval. Each actual
+dispatch still retains its unique idempotency ID.
 The immutable serialized command that produced approval is the one executed.
 Roots and request authority are rechecked after approval. Oversized confirmation
 detail is refused instead of silently approving undisplayed content.
