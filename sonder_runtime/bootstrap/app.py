@@ -401,7 +401,7 @@ def build_application(
         from ..domain.common.errors import InvalidInput
 
         raise InvalidInput(str(exc)) from exc
-    logger.info(f"provider bindings resolved, provider={provider_bindings.default_provider!r}")
+    logger.info(f"provider bindings resolved, provider={provider_bindings.default_generation_provider!r}")
     logger.debug("building model gateway")
     gateway = build_model_gateway(
         provider_bindings,

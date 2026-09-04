@@ -306,7 +306,7 @@ class DurableLoopControl:
         decision = retry_decision(failure_code, status=status, attempt=attempt, max_attempts=max_attempts, outcome_known=outcome_known, effect=effect, idempotency_key=idempotency_key, retry_after_seconds=retry_after_seconds, deadline_seconds=deadline_seconds)
         if decision.action is ReplayAction.RETRY:
             logger.warning(f"retry scheduled: operation_id={operation_id!r}, attempt={attempt}/{max_attempts}, failure_code={failure_code!r}, delay_cap={decision.backoff.cap_for_attempt(1):.1f}s")
-        elif decision.action is ReplayAction.FAIL and attempt > 1:
+        elif decision.action is ReplayAction.DO_NOT_RETRY and attempt > 1:
             logger.error(f"retry exhausted, failing: operation_id={operation_id!r}, attempt={attempt}/{max_attempts}, failure_code={failure_code!r}")
             logger.warning(f"retry exhausted, failing: operation_id={operation_id!r}, attempt={attempt}/{max_attempts}, failure_code={failure_code!r}")
         self.ledger.record(operation_id, decision, attempt=attempt, failure_code=failure_code)
