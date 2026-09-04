@@ -18,6 +18,7 @@ from ..context import OperationContext
 logger = logging.getLogger(__name__)
 from ..ports.model_gateway import InferenceTelemetry, ModelGateway, ModelRequest
 from ..session.capture import CapturedTurn, SessionCaptureService
+from ...domain.common.errors import IntegrityFailure, InternalFailure, SonderError
 from ...domain.common.ids import SessionId, TurnId, new_id
 
 
@@ -78,23 +79,39 @@ class ChatService:
             history=tuple(command.history),
             options=options,
         )
-        logger.debug(f"ChatService.complete: sending request to gateway, tier={command.tier!r}")
-        response = self._gateway.generate(request, context)
-        capture = None
-        if self._capture is None and self._capture_factory is not None:
-            logger.warning(f"session capture service not pre-initialized, falling back to factory for tier={command.tier!r}")
-            self._capture = self._capture_factory()
-        if self._capture is not None:
+        capture_service = self._capture
+        if capture_service is None and self._capture_factory is not None:
+            capture_service = self._capture_factory()
+        pending = None
+        if capture_service is not None:
             session_id = command.session_id or SessionId.new()
             turn_id = command.turn_id or TurnId.new()
-            capture = self._capture.capture_turn(
+            pending = capture_service.begin_request(
                 session_id.serialize(),
                 turn_id.serialize(),
                 request,
                 request_id=new_id("request"),
                 user_message=command.content,
-                model_response=response.text,
             )
+        logger.debug(f"ChatService.complete: sending request to gateway, tier={command.tier!r}")
+        try:
+            response = self._gateway.generate(request, context)
+        except Exception as model_error:
+            if pending is not None:
+                code = (
+                    model_error.code
+                    if isinstance(model_error, SonderError)
+                    else InternalFailure.code
+                )
+                try:
+                    capture_service.fail_request(pending, error_code=code)
+                except Exception as capture_error:
+                    raise IntegrityFailure("could not persist model failure") from capture_error
+            raise
+
+        capture = None
+        if pending is not None:
+            capture = capture_service.complete_request(pending, model_response=response.text)
         if response.duration_ms and response.duration_ms > 30_000:
             logger.warning(f"slow inference response: model={response.model!r}, duration_ms={response.duration_ms}, tier={command.tier!r}")
         logger.debug(f"ChatService.complete: response model={response.model!r}, duration_ms={response.duration_ms}, tokens_in={response.tokens_in}, tokens_out={response.tokens_out}, captured={capture is not None}")

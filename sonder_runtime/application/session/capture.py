@@ -14,7 +14,11 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ...domain.common.errors import IntegrityFailure, InvalidInput
+from ...domain.common.errors import (
+    Cancelled, CapacityExceeded, ConcurrencyConflict, Conflict,
+    DeadlineExceeded, DependencyUnavailable, Forbidden, IntegrityFailure,
+    InternalFailure, InvalidInput, MigrationRequired, NotFound, Unauthenticated,
+)
 from ..ports.model_gateway import ModelRequest
 from ..ports.session_repository import SessionEvent, SessionRepository
 from .durable_replay import DurableReplayResult, crash_safe_replay
@@ -23,6 +27,23 @@ from .query_export import SessionExport, SessionQueryEngine
 
 _MAX_TOOLS = 256
 _MAX_PAYLOAD_BYTES = 2_000_000
+_FAILURE_CODES = frozenset({
+    error.code for error in (
+        Cancelled, CapacityExceeded, ConcurrencyConflict, Conflict,
+        DeadlineExceeded, DependencyUnavailable, Forbidden, IntegrityFailure,
+        InternalFailure, InvalidInput, MigrationRequired, NotFound, Unauthenticated,
+    )
+})
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedRequest:
+    """Committed admission for one internal, single-attempt model request."""
+
+    session_id: str
+    turn_id: str
+    request_id: str
+    appended: tuple[SessionEvent, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,8 +237,73 @@ class SessionCaptureService:
             _required_text(model_response, "model_response")
             appended.append(self._repository.append(
                 session_id, "model.response",
-                {"content": model_response, "turn_id": turn_id},
+                {"content": model_response, "turn_id": turn_id,
+                 "request_id": request_id},
             ))
+        return self._finalize_capture(session_id, turn_id, tuple(appended))
+
+    def begin_request(
+        self,
+        session_id: str,
+        turn_id: str,
+        request: ModelRequest,
+        *,
+        request_id: str,
+        user_message: str | None = None,
+    ) -> CapturedRequest:
+        """Commit request intent and optional input before model dispatch.
+
+        Validate admission before the first write. If a later append fails,
+        preserve the committed prefix as evidence of unresolved admission.
+        """
+        session_id = _required_text(session_id, "session_id")
+        turn_id = _required_text(turn_id, "turn_id")
+        request_id = _required_text(request_id, "request_id")
+        if not isinstance(request, ModelRequest):
+            raise InvalidInput("request must be ModelRequest")
+        if user_message is not None:
+            _required_text(user_message, "user_message")
+        payload = _snapshot_payload(
+            request, request_id=request_id, turn_id=turn_id, tools=(), ui_facts={},
+        )
+        appended = [self._repository.append(session_id, "model.requested", payload)]
+        if user_message is not None:
+            appended.append(self._repository.append(
+                session_id, "user.message",
+                {"content": user_message, "turn_id": turn_id, "request_id": request_id},
+            ))
+        return CapturedRequest(session_id, turn_id, request_id, tuple(appended))
+
+    def complete_request(
+        self, pending: CapturedRequest, *, model_response: str,
+    ) -> CapturedTurn:
+        """Commit the successful output for this admitted model attempt."""
+        _required_text(model_response, "model_response")
+        event = self._repository.append(
+            pending.session_id, "model.response",
+            {"content": model_response, "turn_id": pending.turn_id,
+             "request_id": pending.request_id},
+        )
+        return self._finalize_capture(
+            pending.session_id, pending.turn_id, (*pending.appended, event),
+        )
+
+    def fail_request(
+        self, pending: CapturedRequest, *, error_code: str,
+    ) -> SessionEvent:
+        """Commit only correlation identities and an allowlisted failure code."""
+        if not isinstance(error_code, str) or error_code not in _FAILURE_CODES:
+            raise InvalidInput("error_code must be a known domain error code")
+        return self._repository.append(
+            pending.session_id, "model.failed",
+            {"turn_id": pending.turn_id, "request_id": pending.request_id,
+             "error_code": error_code},
+        )
+
+    def _finalize_capture(
+        self, session_id: str, turn_id: str, appended: tuple[SessionEvent, ...],
+    ) -> CapturedTurn:
+        """Verify the committed stream using the existing replay/export bounds."""
         try:
             replay = crash_safe_replay(
                 self._repository, session_id, max_events=self._replay_limit,
@@ -236,4 +322,4 @@ class SessionCaptureService:
         return CapturedTurn(session_id, turn_id, tuple(appended), replay, exported)
 
 
-__all__ = ["CapturedTool", "CapturedTurn", "SessionCaptureService"]
+__all__ = ["CapturedRequest", "CapturedTool", "CapturedTurn", "SessionCaptureService"]
