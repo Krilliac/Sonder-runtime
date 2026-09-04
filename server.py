@@ -1140,6 +1140,29 @@ from sonder_runtime.adapters.learning_tier_formatting import (
 _CAMPAIGN_LEARN_LOCK = threading.Lock()
 _AUTOPILOT_THREADS_LOCK = threading.RLock()
 _AUTOPILOT_THREADS = {}
+_MAX_AUTOPILOT_RUNS: int | None = None
+
+
+def configure_autopilot_capacity(max_runs: int) -> None:
+    global _MAX_AUTOPILOT_RUNS
+    if max_runs < 1:
+        raise ValueError("max_autopilot_runs must be >= 1")
+    _MAX_AUTOPILOT_RUNS = int(max_runs)
+
+
+def configure_capacity(
+    *,
+    autopilot_runs: int,
+    fleet_workers: int,
+    training_jobs: int,
+) -> None:
+    configure_autopilot_capacity(autopilot_runs)
+    import master_orchestrator
+    master_orchestrator.configure_fleet_worker_cap(fleet_workers)
+    import adaptive_training
+    adaptive_training.configure_training_capacity(training_jobs)
+
+
 _SESSION_TURN_LOCKS_LOCK = threading.Lock()
 _SESSION_TURN_LOCKS = {}
 _SESSION_TURN_CLAIM_WAIT_SECONDS = max(
@@ -20585,6 +20608,10 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner
         current = _AUTOPILOT_THREADS.get(run_id)
         if current is not None and current.is_alive():
             return False
+        if _MAX_AUTOPILOT_RUNS is not None:
+            alive = sum(1 for t in _AUTOPILOT_THREADS.values() if t.is_alive())
+            if alive >= _MAX_AUTOPILOT_RUNS:
+                return False
         thread = threading.Thread(
             target=_autopilot_thread_main,
             args=(run_id, int(max_cycles), bool(plan_only), request_owner),

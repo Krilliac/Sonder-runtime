@@ -131,6 +131,16 @@ def configure_control_plane_service(service):
     return service
 
 
+_THIN_HANDLERS: dict = {}
+
+
+def configure_thin_handlers(handlers: dict) -> None:
+    """Register SPEC-5 thin HTTP handlers by path."""
+    global _THIN_HANDLERS
+    _THIN_HANDLERS = dict(handlers)
+    _serve_logger.info(f"SPEC-5 thin handlers configured: {sorted(_THIN_HANDLERS)}")
+
+
 def _legacy_runtime():
     runtime = _LEGACY_RUNTIME
     if runtime is None:
@@ -5304,6 +5314,30 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json_payload({"ok": True, "message": out})
+            return
+        thin_handler = _THIN_HANDLERS.get(path)
+        if thin_handler is not None:
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            content_lengths = self.headers.get_all("Content-Length") or ()
+            raw_length = content_lengths[0] if content_lengths else "0"
+            length = int(raw_length) if raw_length.strip().isdigit() else 0
+            raw_body = self.rfile.read(length) if length > 0 else b""
+            self._request_body_consumed = True
+            class _Req:
+                method = "POST"
+                def __init__(self, p, b, h):
+                    self._path = p; self._body = b; self._headers = h
+                @property
+                def path(self): return self._path
+                @property
+                def body(self): return self._body
+                @property
+                def headers(self): return self._headers
+            hdrs = {k: v for k, v in self.headers.items()}
+            resp = thin_handler.handle(_Req(path, raw_body, hdrs))
+            self._send_json_payload(resp.body, status=resp.status)
             return
         if path != "/v1/chat/completions":
             _serve_logger.debug(f"do_POST: unrecognized path={path!r}, returning 404")

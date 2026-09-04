@@ -339,6 +339,8 @@ class RuntimeLifecycle:
         admission_timeout_seconds: float = 10.0,
         drain_deadline_seconds: float = 25.0,
         owner_max_inflight: int | None = None,
+        ollama_probe_interval_seconds: float | None = None,
+        ollama_probe_timeout_seconds: float | None = None,
         startup_reconciler: Callable[[], int] | None = None,
         graceful_drain_coordinator: GracefulDrainCoordinator | None = None,
         graceful_drain_observations: Callable[[], Iterable[StartupObservation]] | None = None,
@@ -375,6 +377,8 @@ class RuntimeLifecycle:
         self._queue_depth = queue_depth or _env_int("SONDER_QUEUE_DEPTH", 32)
         self._admission_timeout = admission_timeout_seconds
         self._drain_deadline_seconds = drain_deadline_seconds
+        self._ollama_probe_interval = ollama_probe_interval_seconds or 15.0
+        self._ollama_probe_timeout = ollama_probe_timeout_seconds or 5.0
         self._slots = threading.BoundedSemaphore(self._max_concurrent)
         self._waiters = 0
         self._active_requests = 0
@@ -596,12 +600,13 @@ class RuntimeLifecycle:
             self.tracker.transition(ProcessState.MIGRATING, "legacy start")
             self.tracker.transition(ProcessState.READY, "legacy start adopted")
 
-    def begin_ollama_probe(self, *, interval_seconds: float = 15.0) -> None:
+    def begin_ollama_probe(self, *, interval_seconds: float | None = None) -> None:
         if self._probe_thread is not None:
             return
+        interval = interval_seconds if interval_seconds is not None else self._ollama_probe_interval
 
         def probe_loop() -> None:
-            while not self._probe_stop.wait(interval_seconds):
+            while not self._probe_stop.wait(interval):
                 self.probe_ollama_once()
 
         self.probe_ollama_once()
@@ -610,7 +615,8 @@ class RuntimeLifecycle:
         )
         self._probe_thread.start()
 
-    def probe_ollama_once(self, timeout: float = 5.0) -> bool:
+    def probe_ollama_once(self, timeout: float | None = None) -> bool:
+        timeout = timeout if timeout is not None else self._ollama_probe_timeout
         url = _ollama_url().rstrip("/") + "/api/tags"
         try:
             with urllib.request.urlopen(
@@ -1149,6 +1155,7 @@ def get() -> RuntimeLifecycle:
             if config is None:
                 _instance = RuntimeLifecycle()
             else:
+                startup_timeout = config.ollama.startup_timeout_seconds
                 _instance = RuntimeLifecycle(
                     max_concurrent_requests=config.capacity.http_requests,
                     queue_depth=config.capacity.queue_depth,
@@ -1157,6 +1164,8 @@ def get() -> RuntimeLifecycle:
                         config.server.owner_max_inflight
                         or max(1, (config.capacity.http_requests + config.capacity.queue_depth) // 4)
                     ),
+                    ollama_probe_interval_seconds=max(1.0, startup_timeout / 4),
+                    ollama_probe_timeout_seconds=max(1.0, startup_timeout / 12),
                 )
         return _instance
 

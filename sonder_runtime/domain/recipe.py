@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import re
@@ -71,7 +71,7 @@ class RecipeManifest:
     description: str
     instructions: str
     extensions: tuple[str, ...] = ()
-    parameters: Mapping[str, str] = MappingProxyType({})
+    parameters: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     steps: tuple[RecipeStep, ...] = ()
 
     def __post_init__(self) -> None:

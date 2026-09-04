@@ -28,6 +28,12 @@ from ..adapters.persistence.sqlite.workflow_checkpoints import SQLiteWorkflowChe
 from ..adapters.process_probe import ProcessProbeAdapter
 from ..adapters.process_termination import ProcessTreeSupervisor
 from ..adapters.execution.process_jobs import SubprocessJobProvider
+from ..application.execution.world_providers import (
+    ContainerWorldConfig,
+    GuardedContainerWorld,
+    ConfiguredRemoteWorld,
+    RemoteWorldConfig,
+)
 from ..adapters.execution.durable_output import DurableExecutionOutput, SQLiteSpillStore
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.tool_executor import ToolExecutorAdapter
@@ -203,6 +209,8 @@ class Application:
     # on every surface, with the runtime's permission modes as its evaluator
     # and operations-grade durable receipts (see bootstrap/typed_tools.py).
     tools: ToolApplicationFacade | None = None
+    container_world_provider: Any | None = None
+    remote_world_provider: Any | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -552,6 +560,7 @@ def build_application(
                 process_cleanup=process_cleanup,
                 lifecycle=get_job_service()._lifecycle,
                 output=spill_output,
+                max_concurrent_processes=effective_config.capacity.tool_processes,
             )
         return process_job_provider
 
@@ -1251,6 +1260,10 @@ def build_application(
         delegation_service=get_delegation_service,
         agent_workflow_service=get_agent_workflow_service,
         lineage_query=get_lineage_query,
+        container_world_provider=GuardedContainerWorld(
+            ContainerWorldConfig(world_id="default-container", image="sonder-sandbox:latest"),
+        ),
+        remote_world_provider=None,
     )
 
 

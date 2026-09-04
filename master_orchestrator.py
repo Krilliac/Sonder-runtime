@@ -60,6 +60,7 @@ DEFAULT_MAX_WORKERS = 8
 # runs opt-in without changing the conservative hardware-derived default.
 STANDARD_MAX_WORKERS = 16
 ABSOLUTE_MAX_WORKERS = 64
+_FLEET_WORKER_CAP: int | None = None
 _MAX_WORKER_COUNT_DIGITS = 64
 RAM_RESERVE_BYTES = int(1.5 * 1024 ** 3)
 # A "worker" is a Python thread that POSTs to Ollama and waits -- the model
@@ -83,6 +84,13 @@ REPOSITORY_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "text_search", "script_search", "image_inspect",
 })
+
+
+def configure_fleet_worker_cap(max_workers: int) -> None:
+    global _FLEET_WORKER_CAP
+    if max_workers < 1:
+        raise ValueError("fleet_workers must be >= 1")
+    _FLEET_WORKER_CAP = int(max_workers)
 
 
 @dataclass(frozen=True)
@@ -525,6 +533,8 @@ def capacity(
     }
     if gpu_slots > 0:
         limits["gpu_vram"] = int(gpu_slots)
+    if _FLEET_WORKER_CAP is not None:
+        limits["fleet_workers"] = int(_FLEET_WORKER_CAP)
     # Ollama's own batching width is the hard ceiling on REAL concurrency --
     # handing it more concurrent requests than it will batch just queues them.
     ollama_parallel = ollama_parallel_limit()

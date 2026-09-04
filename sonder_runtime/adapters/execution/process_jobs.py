@@ -46,6 +46,7 @@ class SubprocessJobProvider:
         process_probe=probe_process,
         timer_factory=threading.Timer,
         cleanup_retry_seconds: float = 1.0,
+        max_concurrent_processes: int | None = None,
     ) -> None:
         if not all(callable(getattr(registry, name, None)) for name in (
             "start", "attach_process", "poll", "transition", "append_output", "stream",
@@ -87,11 +88,21 @@ class SubprocessJobProvider:
         self._output_failures: dict[str, str] = {}
         self._output_failure_lock = threading.Lock()
         self._timer_lock = threading.RLock()
+        self._max_concurrent_processes = max_concurrent_processes
+        self._process_slots: threading.BoundedSemaphore | None = (
+            threading.BoundedSemaphore(max_concurrent_processes)
+            if max_concurrent_processes is not None and max_concurrent_processes >= 1
+            else None
+        )
         self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
         if not isinstance(request, ProcessJobRequest):
             raise TypeError("request must be a ProcessJobRequest")
+        if self._process_slots is not None and not self._process_slots.acquire(blocking=False):
+            raise RuntimeError(
+                f"tool process capacity exhausted ({self._max_concurrent_processes} concurrent)"
+            )
         environment = runtime_logging.child_environment()
         environment.update(request.environment)
         launch_options: dict[str, Any] = {
@@ -251,15 +262,18 @@ class SubprocessJobProvider:
         except Exception as exc:
             if process is not None:
                 self._abort_unregistered(process)
-            containment = self._quiesce_containment(
-                request.identity.job_id, force=True,
-            )
+                containment = self._quiesce_containment(
+                    request.identity.job_id, force=True,
+                )
+            else:
+                containment = None
             cleanup_complete = containment is None or containment.complete
-            if cleanup_complete and memory_token is not None:
+            if memory_token is not None and cleanup_complete:
                 try:
                     memory_token.close()
                 except Exception:
-                    cleanup_complete = False
+                    if process is not None:
+                        cleanup_complete = False
                 else:
                     self._memory_tokens.pop(request.identity.job_id, None)
             current = self._registry.poll(request.identity.job_id)
@@ -376,10 +390,12 @@ class SubprocessJobProvider:
         )
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record(record)
-        self._processes.pop(job_id, None)
+        had_process = self._processes.pop(job_id, None) is not None
         self._limits.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
+        if had_process and self._process_slots is not None:
+            self._process_slots.release()
         if containment is None:
             self._release_memory_limit(job_id)
         return ProcessJobWait(record, exit_code)
@@ -719,8 +735,10 @@ class SubprocessJobProvider:
         return True
 
     def _forget_local_job(self, job_id: str) -> None:
-        self._processes.pop(job_id, None)
+        had_process = self._processes.pop(job_id, None) is not None
         self._limits.pop(job_id, None)
+        if had_process and self._process_slots is not None:
+            self._process_slots.release()
         self._unresolved_scopes.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
