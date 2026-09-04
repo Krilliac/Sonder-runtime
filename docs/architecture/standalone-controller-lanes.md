@@ -5,7 +5,9 @@ The local `agent` entrypoint (and workbench routes that invoke it) exposes
 capability for that invocation, lazily on its first admitted lane command. The
 model receives only `action` and `payload`; it cannot select a parent, principal,
 workspace grant, approval, or bearer. Permission approval is bound to the host
-run ID, effective workspace roots, and canonical command arguments. Bearers are
+run ID, effective workspace roots, and canonical command arguments. Dispatch
+executes the same immutable prepared command after approval; it rechecks live
+authority and rejects changed canonical workspace resolution. Bearers are
 never included in tool output, model prompts, or report metadata.
 
 Supported actions are `spawn`, `list`, `inspect`, `send_message` (`message`),
@@ -36,6 +38,9 @@ the authenticated user surfaces.
 Any run that admits or ambiguously attempts spawn, steering, or resume reports
 `delegated-work-verification-required`. Its summary is explicitly unverified;
 child output and parent checks racing child writes do not certify completion.
+Normal completion and every returned early outcome (including model/parse errors,
+step exhaustion, and missing evidence) include the same delegated-work standing.
+Existing failure markers and failed validation receipts remain failures.
 The report includes host-generated JSON with run ID, parent ID, and exact child
 IDs/revisions/statuses (or an explicit unavailable state). A future verifier must
 establish quiescence and validate the same durable revisions before this

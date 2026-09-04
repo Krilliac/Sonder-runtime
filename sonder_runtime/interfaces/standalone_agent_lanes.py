@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
 import uuid
@@ -54,6 +56,17 @@ _FORBIDDEN = frozenset(
 
 def current():
     return _CURRENT.get()
+
+
+@dataclass(frozen=True)
+class PreparedLaneCommand:
+    """Host-owned immutable snapshot; callers receive detached approval arguments."""
+
+    owner: object
+    encoded: str
+
+    def approval_arguments(self):
+        return json.loads(self.encoded)
 
 
 class StandaloneLaneController:
@@ -149,8 +162,26 @@ class StandaloneLaneController:
             "principal_id": self._context.principal_id,
         }
 
+    def prepare_command(self, arguments):
+        return PreparedLaneCommand(
+            self, json.dumps(self.prepare(arguments), allow_nan=False)
+        )
+
     def execute(self, arguments):
-        safe = self.prepare(arguments)
+        # Trusted convenience path; model dispatch must approve a prepared snapshot.
+        return self.execute_prepared(self.prepare_command(arguments))
+
+    def execute_prepared(self, prepared):
+        if not isinstance(prepared, PreparedLaneCommand) or prepared.owner is not self:
+            raise PermissionError("prepared lane command belongs to another controller")
+        self._initialize()  # live cancellation/restriction check, no argument rewriting
+        if self._context.expired:
+            raise PermissionError("standalone lane controller grant expired")
+        safe = prepared.approval_arguments()
+        if safe["action"] == "spawn":
+            root = Path(safe["payload"]["workspace_root"])
+            if root.resolve() != root:
+                raise PermissionError("approved lane workspace resolution changed")
         service = lane_service(self._application)
         if self._parent is None:
             self._parent = service.open_model_parent(self._context)
@@ -166,6 +197,24 @@ class StandaloneLaneController:
             self._context,
             parent_session_id=parent,
             bound_parent_session_id=parent,
+        )
+
+    def report_outcome(self, output):
+        text = str(output or "")
+        # Preserve failure markers consumed by existing callers.
+        first = text.splitlines()[0] if text else ""
+        failure = (
+            first
+            if first.startswith(("ERROR", "EVIDENCE_REQUIRED", "VALIDATION_FAILED"))
+            else ""
+        )
+        return ((failure + "\n") if failure else "") + (
+            "UNVERIFIED: delegated work requires verification after child activity is quiescent. "
+            "This run does not certify the child's workspace changes.\n\n"
+            "Unverified model outcome:\n"
+            + text
+            + "\n\n=== DELEGATED WORK METADATA ===\n"
+            + json.dumps(self.report_metadata(), sort_keys=True)
         )
 
     def report_metadata(self):
