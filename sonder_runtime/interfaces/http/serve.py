@@ -3955,6 +3955,77 @@ class Handler(BaseHTTPRequestHandler):
         if len(content_lengths) > 1:
             raise HTTPRequestError(400, "multiple Content-Length headers are not supported")
 
+    def _handle_agent_lane_request(self, method, path, payload=None):
+        """Bind lane commands to authenticated identity and configured scope."""
+        if path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
+            return False
+        auth = self._request_auth_context()
+        if not auth.get("authorized"):
+            self._send_auth_error()
+            return True
+        from dataclasses import replace
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.domain.common.errors import SonderError
+
+        try:
+            application = default_app()
+            factory = getattr(application, "agent_lanes", None)
+            if not callable(factory):
+                raise DependencyUnavailable("agent conversations are unavailable")
+            query_values = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True, max_num_fields=16,
+            )
+            if any(len(values) != 1 for values in query_values.values()):
+                raise InvalidInput("query fields must occur only once")
+            query = {key: values[0] for key, values in query_values.items()}
+            context = sonder_lifecycle.get().operation_context(self._correlation(), auth)
+            account = auth.get("account")
+            if account is not None:
+                identity = _account_identity(account)
+                if not identity:
+                    raise PermissionError("authenticated account identity is unavailable")
+                principal = "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            else:
+                # Local-open and the sole deployment API key address the same
+                # operator conversations as native MCP. Accounts never alias it.
+                principal = "owner"
+            state = getattr(getattr(application, "config", None), "state", None)
+            roots = tuple(Path(root).resolve() for root in getattr(state, "workspace_roots", ())) \
+                if _admin_authorized(auth) else ()
+            context = replace(context, principal_id=principal, workspace_roots=roots)
+            from sonder_runtime.interfaces.http.facades.agent_lanes import dispatch_agent_lane_route
+            result = dispatch_agent_lane_route(
+                factory(), method, path, payload or {}, query, context,
+            )
+            if result is None:
+                self._send_not_found()
+            else:
+                self._send_json_payload(result.body, status=result.status_code)
+        except (SonderError, ValueError, TypeError, PermissionError) as error:
+            code = getattr(error, "code", "INVALID_INPUT")
+            if isinstance(error, PermissionError):
+                code = "FORBIDDEN"
+            status = {
+                "UNAUTHENTICATED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404,
+                "CONFLICT": 409, "CONCURRENCY_CONFLICT": 409,
+                "CAPACITY_EXCEEDED": 429, "DEPENDENCY_UNAVAILABLE": 503,
+                "INTEGRITY_FAILURE": 503, "INTERNAL_FAILURE": 503,
+                "DEADLINE_EXCEEDED": 408, "CANCELLED": 409,
+            }.get(code, 400)
+            self._send_json_payload(
+                {"error": {"code": code, "message": str(error), "type": "agent_lane_error"}},
+                status=status,
+            )
+        except Exception:
+            _serve_logger.exception("agent lane request failed, correlation=%r", self._correlation())
+            self._send_json_payload(
+                {"error": {"code": "DEPENDENCY_UNAVAILABLE",
+                           "message": "agent conversations are unavailable", "type": "server_error"}},
+                status=503,
+            )
+        return True
+
     def do_GET(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
@@ -3994,6 +4065,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if self._auth_rate_limited():
+            return
+        if self._handle_agent_lane_request("GET", path):
             return
         if path == "/v1/compute/snapshot":
             context = self._request_auth_context()
@@ -4871,6 +4944,8 @@ class Handler(BaseHTTPRequestHandler):
             operation_context(self._correlation(), context)
             if callable(operation_context) else None
         )
+        if self._handle_agent_lane_request("POST", path, req):
+            return
         compute_route = _compute_job_route(path)
         if compute_route is not None and compute_route[0] in ("submit", "cancel"):
             if not context["authorized"]:

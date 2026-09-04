@@ -364,6 +364,7 @@ NON_TOOL_WORK = {"sleep": "safe"}
 # makes unattended policy fail by deliberate class instead of "unclassified".
 NATIVE_MCP_WORK = {
     "compute_submit": "execution",
+    "agent_lane": "execution",
     "compute_cancel": "mutation",
 }
 
@@ -499,6 +500,7 @@ _MATRIX = {
 # so this module stays importable on its own; a drift test cross-checks it
 # against server's own execution sets.
 EXECUTION_TOOLS = frozenset({
+    "agent_lane",
     "workspace_run", "script_run", "run_code", "run_project", "isolated_run",
     "build_run", "build_clean", "test_run", "lint_run", "format_code",
     "typecheck_run", "dependency_add", "dependency_remove", "dependency_update",

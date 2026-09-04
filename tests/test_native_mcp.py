@@ -87,6 +87,7 @@ class _Jobs:
 
 def test_native_catalog_is_bounded_and_deterministic():
     assert [item.name for item in native_tool_registry().list_all()] == [
+        "agent_lane",
         "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect",
         "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit", "data_inspect", "data_query", "dependency_inventory",
         "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
@@ -122,7 +123,7 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
     }
     canonical_native = native_names - compatibility_aliases - {
         "vision_analyze", "compute_submit", "compute_status", "compute_cancel",
-        "compute_artifact_fetch",
+        "compute_artifact_fetch", "agent_lane",
     }
     assert canonical_native == packaged_executor | packaged_inspections
     assert len(canonical_native) == 40

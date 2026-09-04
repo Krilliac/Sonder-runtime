@@ -438,7 +438,19 @@ _INSPECTION_TOOLS = (
         }, "required": ["left", "right"], "additionalProperties": False},
     ),
 )
-_NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS
+_AGENT_LANE_TOOL = ToolDescriptor(
+    "agent_lane", "Create, inspect and control durable independent agent conversations",
+    {"type": "object", "properties": {
+        "action": {"type": "string", "enum": [
+            "spawn", "list", "inspect", "send_message", "wait", "interrupt",
+            "resume", "cancel", "reports", "ack",
+        ]},
+        "payload": {"type": "object", "maxProperties": 32},
+        "parent_session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "parent_lane_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    }, "required": ["action", "payload", "parent_session_id"], "additionalProperties": False},
+)
+_NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,)
 # Only the inspections the inspection service can run go to it. The catalog
 # groups the web, weather, location, process and artifact tools with the
 # inspections for presentation, but they run through the packaged executor;
@@ -725,6 +737,35 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             workspace_roots=roots,
             timeout_seconds=60.0,
         )
+        if canonical_name == "agent_lane":
+            from ..adapters.security.permission_policy import permission_policy
+            from ..domain.common.errors import SonderError
+
+            decision = permission_policy.decide_for_caller(
+                canonical_name, interactive=False, gate_control_exempt=False,
+                surface="native-mcp",
+            )
+            if decision is not None and decision.action != permission_policy.allow_action():
+                return {"output": "agent control denied by runtime permission policy",
+                        "isError": True, "error": "permission_denied", "evidence": {}}
+            factory = getattr(application, "agent_lanes", None)
+            if not callable(factory):
+                return {"output": "agent conversations are unavailable", "isError": True,
+                        "error": "DEPENDENCY_UNAVAILABLE", "evidence": {}}
+            try:
+                from ..interfaces.agent_lanes import dispatch_agent_lane_tool
+                result = dispatch_agent_lane_tool(
+                    factory(), canonical_arguments["action"], canonical_arguments["payload"],
+                    context, parent_session_id=canonical_arguments["parent_session_id"],
+                    parent_lane_id=canonical_arguments.get("parent_lane_id"),
+                )
+                return {"output": json.dumps(result, ensure_ascii=False), "isError": False,
+                        "error": None, "evidence": {"tool": canonical_name}}
+            except (SonderError, ValueError, TypeError) as error:
+                return {"output": str(error), "isError": True,
+                        "error": getattr(error, "code", "INVALID_INPUT"), "evidence": {}}
+            finally:
+                permission_policy.forget_spent_approval()
         if canonical_name in _COMPUTE_NAMES:
             logger.debug(f"routing to compute handler: {canonical_name!r}")
             if canonical_name in {"compute_submit", "compute_cancel"}:

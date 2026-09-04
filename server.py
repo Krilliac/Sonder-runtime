@@ -5078,6 +5078,42 @@ def _offload_impl(
 
 
 @mcp.tool()
+def agent_lane(action: str, payload: dict, parent_session_id: str,
+               parent_lane_id: str = "") -> str:
+    """Spawn, inspect, message or control a durable independent agent conversation.
+
+    Actions: spawn, list, inspect, send_message, wait, interrupt, resume,
+    cancel, reports, ack. Parent identity is checked against the caller's
+    owned sessions; payload cannot supply a different principal or author.
+    """
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.interfaces.agent_lanes import dispatch_agent_lane_tool
+    from sonder_runtime.domain.common.errors import Forbidden, DependencyUnavailable
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
+    decision = lane_policy.decide_for_caller(
+        "agent_lane", interactive=False, gate_control_exempt=False, surface="mcp",
+    )
+    if decision is not None and decision.action != lane_policy.allow_action():
+        raise Forbidden("agent control denied by runtime permission policy")
+    application = _application()
+    factory = getattr(application, "agent_lanes", None)
+    if not callable(factory):
+        raise DependencyUnavailable("agent conversations are unavailable")
+    context = local_owner_context(
+        correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
+        workspace_roots=tuple(Path(root) for root in application.config.state.workspace_roots),
+        timeout_seconds=60.0,
+    )
+    try:
+        return json.dumps(dispatch_agent_lane_tool(
+            factory(), action, payload, context, parent_session_id=parent_session_id,
+            parent_lane_id=parent_lane_id or None,
+        ), ensure_ascii=False)
+    finally:
+        lane_policy.forget_spent_approval()
+
+
+@mcp.tool()
 def cloud_opt_in(action: str = "status") -> str:
     """Show, enable, or revoke process-local hosted/cloud model consent.
 
