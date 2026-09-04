@@ -290,7 +290,7 @@ class LaneTransaction:
             "WHERE l.principal=? AND m.report=1 AND m.sequence>?"
         )
         parameters = [principal, cursor]
-        if parent_session:
+        if parent_session is not None:
             page_sql += " AND l.parent_session=?"
             parameters.append(parent_session)
         page_sql += " ORDER BY m.sequence LIMIT ?"

@@ -183,3 +183,12 @@ def test_reports_sequence_index_installs_idempotently_on_existing_history(env):
             "SELECT name FROM sqlite_master WHERE name='agent_lane_reports_sequence'"
         ).fetchone()
     assert env[0].reports("parent", env[-2], limit=1)["reports"][0]["id"] == ids[0]
+
+def test_empty_parent_scope_does_not_mean_all_parents(env):
+    lane, ids = seed(env, parent="valid-parent", count=3)
+    service, _, _, _, context, _ = env
+    assert service.reports("", context) == {
+        "reports": [], "next_cursor": 0, "has_more": False,
+    }
+    assert [row["id"] for row in service.reports(None, context)["reports"]] == ids
+    assert [row["id"] for row in service.reports("valid-parent", context)["reports"]] == ids
