@@ -1580,15 +1580,24 @@ def prune(
     )
     now = time.time()
     with _write_transaction() as conn:
+        # Interactive lanes retain their mailbox until explicit acknowledgement
+        # and session retention. Legacy fleet TTL pruning must not delete them.
+        lane_mailbox = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_lane_messages'"
+        ).fetchone()
+        retained_clause = (
+            " AND message_id NOT IN (SELECT message_id FROM agent_lane_messages)"
+            if lane_mailbox else ""
+        )
         conn.execute(
             "UPDATE fleet_messages SET status='expired' "
-            "WHERE status='queued' AND expires_ts<=?",
+            "WHERE status='queued' AND expires_ts<=?" + retained_clause,
             (now,),
         )
         before = conn.total_changes
         conn.execute(
             "DELETE FROM fleet_messages WHERE status IN ('delivered', 'expired') "
-            "AND COALESCE(delivered_ts, queued_ts)<?",
+            "AND COALESCE(delivered_ts, queued_ts)<?" + retained_clause,
             (now - message_retention_seconds,),
         )
         deleted_messages = conn.total_changes - before
@@ -1598,7 +1607,7 @@ def prune(
             DELETE FROM fleet_agents
             WHERE id IN (
                 SELECT id FROM fleet_agents
-                WHERE status NOT IN ('queued', 'running')
+                WHERE status NOT IN ('queued', 'running') AND role<>'agent_lane'
                 ORDER BY updated_ts DESC LIMIT -1 OFFSET ?
             )
               AND id NOT IN (
