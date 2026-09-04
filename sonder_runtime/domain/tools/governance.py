@@ -12,10 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from fnmatch import fnmatch
-from pathlib import Path
 from typing import Any
-
-import yaml
 
 
 class Verdict(StrEnum):
@@ -116,21 +113,19 @@ class PolicyEngine:
         return Verdict.DENY, self._DEFAULT_REASON
 
     # ------------------------------------------------------------------
-    # YAML loaders
+    # Structured loaders
     # ------------------------------------------------------------------
 
     @classmethod
-    def load_yaml(cls, path: str | Path) -> PolicyEngine:
-        """Load policies from a YAML file on disk."""
-        text = Path(path).read_text(encoding="utf-8")
-        return cls.load_yaml_string(text)
+    def load_from_dict(cls, data: dict) -> PolicyEngine:
+        """Load policies from a pre-parsed dictionary.
 
-    @classmethod
-    def load_yaml_string(cls, yaml_str: str) -> PolicyEngine:
-        """Load policies from a YAML string."""
-        data = yaml.safe_load(yaml_str)
+        Accepts the structure that ``yaml.safe_load`` or ``json.loads``
+        would produce.  YAML/JSON parsing is the caller's responsibility
+        so this module stays free of third-party imports.
+        """
         if not isinstance(data, dict) or "policies" not in data:
-            raise GovernanceInputError("YAML must contain a top-level 'policies' key")
+            raise GovernanceInputError("data must contain a top-level 'policies' key")
         raw_policies = data["policies"]
         if not isinstance(raw_policies, list):
             raise GovernanceInputError("'policies' must be a list")

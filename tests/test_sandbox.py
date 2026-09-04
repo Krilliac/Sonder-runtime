@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 import unittest
 
-from sonder_runtime.domain.execution.sandbox import (
+from sonder_runtime.adapters.execution.sandbox import (
     IsolationLevel,
     SandboxPolicy,
     SandboxResult,

@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sonder_runtime.domain.automation.checkpoint import (
-    Checkpoint,
+from sonder_runtime.domain.automation.checkpoint import Checkpoint
+from sonder_runtime.adapters.persistence.checkpoint_store import (
     CheckpointStore,
     can_resume,
     resume_point,

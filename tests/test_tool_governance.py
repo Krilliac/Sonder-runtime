@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from sonder_runtime.domain.tools.governance import (
     GovernanceInputError,
@@ -278,11 +279,11 @@ policies:
 
 class TestYAMLLoading:
     def test_load_yaml_string(self):
-        engine = PolicyEngine.load_yaml_string(_SAMPLE_YAML)
+        engine = PolicyEngine.load_from_dict(yaml.safe_load(_SAMPLE_YAML))
         assert len(engine.policies) == 3
 
     def test_loaded_policies_evaluate_correctly(self):
-        engine = PolicyEngine.load_yaml_string(_SAMPLE_YAML)
+        engine = PolicyEngine.load_from_dict(yaml.safe_load(_SAMPLE_YAML))
 
         # Allowed read.
         verdict, _ = engine.evaluate("file.read")
@@ -302,26 +303,26 @@ class TestYAMLLoading:
         assert verdict is Verdict.DENY
 
     def test_load_single_tool_string(self):
-        engine = PolicyEngine.load_yaml_string("""\
+        engine = PolicyEngine.load_from_dict(yaml.safe_load("""\
 policies:
   - name: deny-exec
     tools: "shell.exec"
     verdict: deny
-""")
+"""))
         verdict, _ = engine.evaluate("shell.exec")
         assert verdict is Verdict.DENY
 
     def test_missing_policies_key_raises(self):
         with pytest.raises(GovernanceInputError, match="top-level"):
-            PolicyEngine.load_yaml_string("rules: []")
+            PolicyEngine.load_from_dict(yaml.safe_load("rules: []"))
 
     def test_policies_not_list_raises(self):
         with pytest.raises(GovernanceInputError, match="must be a list"):
-            PolicyEngine.load_yaml_string("policies: not-a-list")
+            PolicyEngine.load_from_dict(yaml.safe_load("policies: not-a-list"))
 
     def test_policy_entry_not_mapping_raises(self):
         with pytest.raises(GovernanceInputError, match="must be a mapping"):
-            PolicyEngine.load_yaml_string("policies:\n  - just-a-string")
+            PolicyEngine.load_from_dict(yaml.safe_load("policies:\n  - just-a-string"))
 
 
 # ------------------------------------------------------------------
