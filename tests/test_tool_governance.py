@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-import yaml
 
 from sonder_runtime.domain.tools.governance import (
     GovernanceInputError,
@@ -256,34 +255,38 @@ class TestPolicyEngine:
 # ------------------------------------------------------------------
 
 
-_SAMPLE_YAML = """\
-policies:
-  - name: allow-read-tools
-    tools: ["file.read", "file.list", "file.search"]
-    verdict: allow
-    priority: 10
+_SAMPLE_DICT = {
+    "policies": [
+        {
+            "name": "allow-read-tools",
+            "tools": ["file.read", "file.list", "file.search"],
+            "verdict": "allow",
+            "priority": 10,
+        },
+        {
+            "name": "deny-network-by-default",
+            "tools": ["network.*", "http.*"],
+            "verdict": "deny",
+            "reason": "Network access requires explicit approval",
+        },
+        {
+            "name": "approve-file-writes",
+            "tools": ["file.write", "file.delete"],
+            "verdict": "require_approval",
+            "conditions": {"path_prefix": "/workspace/"},
+            "reason": "File modifications need human approval",
+        },
+    ]
+}
 
-  - name: deny-network-by-default
-    tools: ["network.*", "http.*"]
-    verdict: deny
-    reason: "Network access requires explicit approval"
 
-  - name: approve-file-writes
-    tools: ["file.write", "file.delete"]
-    verdict: require_approval
-    conditions:
-      path_prefix: "/workspace/"
-    reason: "File modifications need human approval"
-"""
-
-
-class TestYAMLLoading:
-    def test_load_yaml_string(self):
-        engine = PolicyEngine.load_from_dict(yaml.safe_load(_SAMPLE_YAML))
+class TestDictLoading:
+    def test_load_from_dict(self):
+        engine = PolicyEngine.load_from_dict(_SAMPLE_DICT)
         assert len(engine.policies) == 3
 
     def test_loaded_policies_evaluate_correctly(self):
-        engine = PolicyEngine.load_from_dict(yaml.safe_load(_SAMPLE_YAML))
+        engine = PolicyEngine.load_from_dict(_SAMPLE_DICT)
 
         # Allowed read.
         verdict, _ = engine.evaluate("file.read")
@@ -303,26 +306,25 @@ class TestYAMLLoading:
         assert verdict is Verdict.DENY
 
     def test_load_single_tool_string(self):
-        engine = PolicyEngine.load_from_dict(yaml.safe_load("""\
-policies:
-  - name: deny-exec
-    tools: "shell.exec"
-    verdict: deny
-"""))
+        engine = PolicyEngine.load_from_dict({
+            "policies": [
+                {"name": "deny-exec", "tools": "shell.exec", "verdict": "deny"},
+            ]
+        })
         verdict, _ = engine.evaluate("shell.exec")
         assert verdict is Verdict.DENY
 
     def test_missing_policies_key_raises(self):
         with pytest.raises(GovernanceInputError, match="top-level"):
-            PolicyEngine.load_from_dict(yaml.safe_load("rules: []"))
+            PolicyEngine.load_from_dict({"rules": []})
 
     def test_policies_not_list_raises(self):
         with pytest.raises(GovernanceInputError, match="must be a list"):
-            PolicyEngine.load_from_dict(yaml.safe_load("policies: not-a-list"))
+            PolicyEngine.load_from_dict({"policies": "not-a-list"})
 
     def test_policy_entry_not_mapping_raises(self):
         with pytest.raises(GovernanceInputError, match="must be a mapping"):
-            PolicyEngine.load_from_dict(yaml.safe_load("policies:\n  - just-a-string"))
+            PolicyEngine.load_from_dict({"policies": ["just-a-string"]})
 
 
 # ------------------------------------------------------------------
