@@ -111,6 +111,7 @@ class SubprocessJobProvider:
             else None
         )
         self._process_slot_owners: dict[str, _ProcessSlotLease] = {}
+        self._failed_launches: set[str] = set()
         self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
@@ -124,14 +125,12 @@ class SubprocessJobProvider:
         try:
             return self._start_reserved(request, lease)
         except BaseException:
-            # Preparation/registration can fail before a process exists. The
-            # start frame owns the slot until registered process ownership is
-            # installed; the lease also tolerates cleanup racing this unwind.
+            # A launched process with unresolved teardown retains its lease.
+            # Only pre-launch or proven-clean failures return local capacity.
             with self._timer_lock:
-                if self._process_slot_owners.get(request.identity.job_id) is lease:
-                    self._process_slot_owners.pop(request.identity.job_id, None)
-                    self._processes.pop(request.identity.job_id, None)
-            lease.release()
+                retained = self._process_slot_owners.get(request.identity.job_id) is lease
+            if not retained:
+                lease.release()
             raise
 
     def _start_reserved(self, request, lease):
@@ -295,15 +294,29 @@ class SubprocessJobProvider:
             if memory_token is not None:
                 self._memory_tokens[request.identity.job_id] = memory_token
             self._start_output_readers(request.identity.job_id, process)
-        except Exception as exc:
+        except BaseException as exc:
             if process is not None:
-                self._abort_unregistered(process)
-                containment = self._quiesce_containment(
-                    request.identity.job_id, force=True,
-                )
+                # Publish unresolved ownership before cleanup can itself fail.
+                with self._timer_lock:
+                    self._failed_launches.add(request.identity.job_id)
+                    self._process_slot_owners[request.identity.job_id] = lease
+                    self._processes[request.identity.job_id] = process
+                try:
+                    process_exited = self._abort_unregistered(process)
+                except Exception:
+                    process_exited = False
+                try:
+                    containment = self._quiesce_containment(
+                        request.identity.job_id, force=True,
+                    )
+                except Exception:
+                    containment = ProcessContainmentResult(
+                        False, detail="process launch containment cleanup failed",
+                    )
             else:
+                process_exited = True
                 containment = None
-            cleanup_complete = containment is None or containment.complete
+            cleanup_complete = process_exited and (containment is None or containment.complete)
             if memory_token is not None and cleanup_complete:
                 try:
                     memory_token.close()
@@ -314,6 +327,9 @@ class SubprocessJobProvider:
                     self._memory_tokens.pop(request.identity.job_id, None)
             current = self._registry.poll(request.identity.job_id)
             if cleanup_complete:
+                self._processes.pop(request.identity.job_id, None)
+                self._failed_launches.discard(request.identity.job_id)
+                self._release_process_slot(request.identity.job_id)
                 self._limits.pop(request.identity.job_id, None)
                 self._discard_deadline(request.identity.job_id)
                 if not current.is_terminal:
@@ -427,6 +443,7 @@ class SubprocessJobProvider:
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record(record)
         self._processes.pop(job_id, None)
+        self._failed_launches.discard(job_id)
         self._limits.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
@@ -445,6 +462,10 @@ class SubprocessJobProvider:
 
     def _cancel_owned(self, job_id: str, reason: str) -> JobCancellationResult:
         limit = self._limits.get(job_id, 64)
+        process_exited = True
+        if job_id in self._failed_launches:
+            process = self._processes.get(job_id)
+            process_exited = process is not None and self._abort_unregistered(process)
         unresolved_scope = self._unresolved_scopes.get(job_id)
         if unresolved_scope is not None and not self._restore_scope_owner(
             job_id, unresolved_scope,
@@ -464,7 +485,7 @@ class SubprocessJobProvider:
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
             return result
         containment = self._quiesce_containment(job_id, force=True)
-        if containment is not None and not containment.complete:
+        if not process_exited or (containment is not None and not containment.complete):
             records = self._jobs.request_cancellation(
                 job_id,
                 reason,
@@ -473,7 +494,8 @@ class SubprocessJobProvider:
             result = JobCancellationResult(
                 records,
                 cleanup_completed=False,
-                detail=containment.detail or "job scope cleanup is incomplete",
+                detail=(containment.detail if containment is not None else "")
+                or "process exit or job scope cleanup is incomplete",
             )
         elif containment is not None:
             current = self._registry.poll(job_id)
@@ -771,6 +793,7 @@ class SubprocessJobProvider:
 
     def _forget_local_job(self, job_id: str) -> None:
         self._processes.pop(job_id, None)
+        self._failed_launches.discard(job_id)
         self._limits.pop(job_id, None)
         self._release_process_slot(job_id)
         self._unresolved_scopes.pop(job_id, None)
@@ -864,15 +887,16 @@ class SubprocessJobProvider:
             raise KeyError(f"no live process for job {job_id!r}") from exc
 
     @staticmethod
-    def _abort_unregistered(process: Any) -> None:
+    def _abort_unregistered(process: Any) -> bool:
         try:
             process.kill()
         except (AttributeError, OSError):
             pass
         try:
-            process.wait(timeout=1)
+            exit_code = process.wait(timeout=1)
         except (AttributeError, OSError, subprocess.TimeoutExpired):
-            pass
+            return False
+        return isinstance(exit_code, int) and not isinstance(exit_code, bool)
 
 
 __all__ = ["SubprocessJobProvider"]
