@@ -81,6 +81,7 @@ _COMPUTE_TOOLS = (
             "idempotent": _BOOL,
             "allow_remote": _BOOL,
             "allow_local_fallback": _BOOL,
+            "placement_policy": {"type": "string", "enum": ["local-only", "prefer-remote", "rank-all"]},
         }, "required": [
             "request_id", "workload", "catalog_entry_id", "workspace_mapping",
             "allow_remote",
@@ -529,7 +530,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
 
     def compute_result(name: str, arguments: dict) -> dict:
         from ..application.compute_fabric.jobs import DigestBoundInput, RemoteJobEnvelope
-        from ..domain.compute_fabric import WorkloadKind, WorkloadRequest
+        from ..domain.compute_fabric import PlacementPolicy, WorkloadKind, WorkloadRequest
 
         service_factory = getattr(application, "compute_service", None)
         if not callable(service_factory):
@@ -554,6 +555,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     workspace_mapping=workspace,
                     allow_remote=allow_remote,
                     allow_local_fallback=allow_local_fallback,
+                    placement_policy=(PlacementPolicy(arguments["placement_policy"])
+                                      if "placement_policy" in arguments else None),
                     idempotent=idempotent,
                 )
                 environment = arguments.get("environment", {})
@@ -761,9 +764,10 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 )
                 return {"output": json.dumps(result, ensure_ascii=False), "isError": False,
                         "error": None, "evidence": {"tool": canonical_name}}
-            except (SonderError, ValueError, TypeError) as error:
+            except (SonderError, ValueError, TypeError, PermissionError) as error:
                 return {"output": str(error), "isError": True,
-                        "error": getattr(error, "code", "INVALID_INPUT"), "evidence": {}}
+                        "error": "FORBIDDEN" if isinstance(error, PermissionError)
+                        else getattr(error, "code", "INVALID_INPUT"), "evidence": {}}
             finally:
                 permission_policy.forget_spent_approval()
         if canonical_name in _COMPUTE_NAMES:

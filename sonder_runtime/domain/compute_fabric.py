@@ -69,6 +69,12 @@ class NodeHealth(StrEnum):
     UNHEALTHY = "unhealthy"
 
 
+class PlacementPolicy(StrEnum):
+    LOCAL_ONLY = "local-only"
+    PREFER_REMOTE = "prefer-remote"
+    RANK_ALL = "rank-all"
+
+
 def _require_identity(value: str, label: str) -> str:
     if not isinstance(value, str) or not _IDENTITY.fullmatch(value):
         raise ValueError(f"{label} must be a bounded stable identity")
@@ -321,9 +327,12 @@ class WorkloadRequest:
     required_model: str | None = None
     idempotent: bool = False
     background_preferred: bool = False
+    placement_policy: PlacementPolicy | None = None
 
     def __post_init__(self) -> None:
         _require_identity(self.request_id, "request_id")
+        if self.placement_policy is not None and not isinstance(self.placement_policy, PlacementPolicy):
+            raise ValueError("placement_policy must be a PlacementPolicy or None")
         if not isinstance(self.kind, WorkloadKind):
             raise ValueError("kind must be a WorkloadKind")
         for values, label in (
@@ -384,6 +393,8 @@ class WorkloadRequest:
     def as_dict(self) -> dict[str, Any]:
         return {
             "request_id": self.request_id,
+            # Preserve historical request digests when no new policy is supplied.
+            **({"placement_policy": self.placement_policy.value} if self.placement_policy is not None else {}),
             "kind": self.kind.value,
             "required_capabilities": sorted(item.value for item in self.required_capabilities),
             "any_capabilities": sorted(item.value for item in self.any_capabilities),
@@ -500,7 +511,7 @@ class ComputePlacementScheduler:
             return reject("stale")
         if request.kind not in snapshot.effective_workloads:
             return reject("workload_not_allowed")
-        if request.local_only and not node.local:
+        if (request.local_only or request.placement_policy is PlacementPolicy.LOCAL_ONLY) and not node.local:
             return reject("local_only")
         if not node.local and not request.allow_remote:
             return reject("remote_not_allowed")
@@ -589,6 +600,7 @@ __all__ = [
     "NodeResources",
     "NodeSnapshot",
     "PlacementDecision",
+    "PlacementPolicy",
     "WorkloadKind",
     "WorkloadRequest",
 ]

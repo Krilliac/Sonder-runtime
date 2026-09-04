@@ -68,6 +68,17 @@ def test_native_lane_tool_is_execution_class():
     assert permission_modes.risk_of('agent_lane') == 'execution'
 
 
+def test_native_lane_scope_denial_has_stable_error(monkeypatch, tmp_path):
+    def dispatch(*args, **kwargs):
+        raise PermissionError('outside parent scope')
+    monkeypatch.setitem(sys.modules, 'sonder_runtime.interfaces.agent_lanes',
+                        SimpleNamespace(dispatch_agent_lane_tool=dispatch))
+    monkeypatch.setattr(permission_policy, 'decide_for_caller', lambda *a, **k: SimpleNamespace(action='allow'))
+    result = invoke(app(tmp_path), {'action': 'inspect', 'payload': {'lane_id': 'other'},
+                                   'parent_session_id': 'parent'})
+    assert result['result']['error'] == 'FORBIDDEN'
+
+
 def test_legacy_mcp_exposes_same_lane_service_without_cloud_consent(monkeypatch, tmp_path):
     import server
     captured = []

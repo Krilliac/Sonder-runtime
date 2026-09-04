@@ -21,6 +21,7 @@ from ...domain.compute_fabric import (
     CandidateDecision,
     ComputePlacementScheduler,
     PlacementDecision,
+    PlacementPolicy,
     WorkloadRequest,
     NodeHealth,
 )
@@ -248,9 +249,15 @@ class ComputeFabricService:
         now = self._now()
         snapshots = self._registry.list_snapshots(now=now)
         self._observe_inventory(snapshots, now=now)
-        if request.local_only or not request.allow_remote:
+        if request.local_only or not request.allow_remote or request.placement_policy is PlacementPolicy.LOCAL_ONLY:
             candidates = tuple(item for item in snapshots if item.node.local)
             decision = self._scheduler.place(request, candidates, now=now)
+            if decision.selected_node_id is None:
+                self._observe_rejection(decision)
+            return decision
+
+        if request.placement_policy is PlacementPolicy.RANK_ALL:
+            decision = self._scheduler.place(request, snapshots, now=now)
             if decision.selected_node_id is None:
                 self._observe_rejection(decision)
             return decision
@@ -316,6 +323,7 @@ class ComputeFabricService:
             raise ValueError(
                 f"{request.kind.value} workloads require digest-bound input artifacts"
             )
+        profiled = self._profiled(request)
         with self._lock:
             existing = self._placements.get(request.request_id)
         if existing is not None:
@@ -326,8 +334,9 @@ class ComputeFabricService:
                 raise Conflict(
                     "controller identity is already bound to another compute request"
                 )
+            if existing.placement.request_digest != profiled.digest():
+                raise Conflict("controller identity is already bound to another placement policy")
             return self.status(request.request_id)
-        profiled = self._profiled(request)
         placement = self._place(profiled)
         node_id = placement.selected_node_id
         if node_id is None:
