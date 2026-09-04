@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 
 import 'agent_lanes.dart';
+import 'agent_command_id.dart';
 import 'api.dart';
 import 'theme.dart';
 
@@ -19,9 +19,7 @@ class _PendingCommand {
   final String? content;
   bool sending = false;
   String? error;
-  _PendingCommand(this.action, this.content)
-      : id =
-            'ui-${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
+  _PendingCommand(this.action, this.content) : id = newAgentCommandId();
 }
 
 class _AgentScreenState extends State<AgentScreen> {
@@ -160,14 +158,15 @@ class _AgentScreenState extends State<AgentScreen> {
   }
 
   Future<void> _watch(String id, int generation) async {
-    var first = true;
     while (mounted && generation == _generation) {
       try {
         final previous = _snapshots[id];
         final snapshot = await widget.api.agentInspect(
           id,
           cursor: previous?.nextCursor ?? 0,
-          wait: !first && !(previous?.hasMore ?? false),
+          // Closing a browser request does not release a server-side wait.
+          // Short reads keep rapid lane switches out of the shared wait cap.
+          wait: false,
         );
         if (!mounted || generation != _generation) return;
         setState(() {
@@ -179,10 +178,9 @@ class _AgentScreenState extends State<AgentScreen> {
           }
           _detailError = null;
         });
-        first = false;
         unawaited(_loadReports(id));
         if (!snapshot.hasMore) {
-          await _delay(const Duration(milliseconds: 500));
+          await _delay(const Duration(seconds: 2));
         }
       } catch (_) {
         if (!mounted || generation != _generation) return;
@@ -191,7 +189,6 @@ class _AgentScreenState extends State<AgentScreen> {
               'Connection lost. Saved conversation remains here; reconnecting…',
         );
         await _delay(const Duration(seconds: 5));
-        first = true;
       }
     }
   }
