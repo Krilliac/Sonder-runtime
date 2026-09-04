@@ -85,6 +85,33 @@ def test_failed_start_returns_single_capacity_slot(failure, monkeypatch):
     provider.wait("valid-after-cancellation")
 
 
+def test_process_publication_already_has_releasable_capacity_lease():
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: _Process(), memory_limiter=_MemoryLimiter(),
+        max_concurrent_processes=1, process_identity_resolver=lambda pid: "stable",
+        platform_name="posix",
+    )
+    completed = []
+
+    class FinishAtPublication(dict):
+        def __setitem__(self, job_id, process):
+            super().__setitem__(job_id, process)
+            if job_id == "finish-at-publication":
+                # Deterministically yield to a consumer at first visibility,
+                # before the publishing assignment returns to start().
+                completed.append(provider.wait(job_id).record.status)
+
+    provider._processes = FinishAtPublication()
+    provider.start(_request("finish-at-publication"))
+    assert completed == [JobStatus.SUCCEEDED]
+    assert "finish-at-publication" not in provider._process_slot_owners
+    provider.start(_request("after-publication-race"))
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("no-overbooking"))
+    provider.wait("after-publication-race")
+
+
 class _Process:
     pid = 77
 
