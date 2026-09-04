@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import 'api.dart';
 import 'agent_screen.dart';
+import 'workspace_ui.dart';
 import 'chat_store.dart';
 import 'models.dart';
 import 'safety_colors.dart';
@@ -807,6 +807,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         pageBuilder: (_, __, ___) => SettingsScreen(
           settings: widget.settings,
           onChanged: widget.onSettingsChanged,
+          onNavigate: _navigateWorkspace,
         ),
         transitionsBuilder: (_, __, ___, child) => child,
       ),
@@ -823,10 +824,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _openSystem() async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => SystemScreen(settings: widget.settings),
+        builder: (_) => SystemScreen(settings: widget.settings, onNavigate: _navigateWorkspace),
       ),
     );
   }
+
+  void _navigateWorkspace(WorkspaceDestination destination) {
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    switch (destination) {
+      case WorkspaceDestination.chat:
+        return;
+      case WorkspaceDestination.agents:
+        unawaited(_openAgents());
+      case WorkspaceDestination.runtime:
+        unawaited(_openSystem());
+      case WorkspaceDestination.settings:
+        unawaited(_openSettings());
+    }
+  }
+
+  Future<void> _openAgents() => Navigator.of(context).push<void>(
+    MaterialPageRoute(builder: (_) => AgentScreen(api: _api, onNavigate: _navigateWorkspace)),
+  );
 
   Future<void> _openThreadSwitcher(bool desktop) async {
     if (!desktop) {
@@ -883,7 +902,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           onSelect: _switchThread,
           onDelete: _deleteThread,
           embedded: desktop,
-          onOpenAgents: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => AgentScreen(api: _api))),
+          onNavigate: _navigateWorkspace,
           serverUrl: widget.settings.serverUrl,
           connected: _systemInfo != null,
           onOpenCommands: desktop ? _openCommandBrowser : null,
@@ -1016,7 +1035,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   itemBuilder: (_, i) => Center(
                                     child: ConstrainedBox(
                                       constraints: const BoxConstraints(
-                                        maxWidth: 760,
+                                        maxWidth: conversationWidth,
                                       ),
                                       child: _Turn(
                                         message: _messages[i],
@@ -1322,7 +1341,7 @@ class _ChatDrawer extends StatelessWidget {
   final bool embedded;
   final String serverUrl;
   final bool connected;
-  final VoidCallback? onOpenAgents;
+  final ValueChanged<WorkspaceDestination>? onNavigate;
   final VoidCallback? onOpenCommands;
   final VoidCallback? onOpenSystem;
   final VoidCallback? onOpenSettings;
@@ -1336,7 +1355,7 @@ class _ChatDrawer extends StatelessWidget {
     this.embedded = false,
     this.serverUrl = '',
     this.connected = false,
-    this.onOpenAgents,
+    this.onNavigate,
     this.onOpenCommands,
     this.onOpenSystem,
     this.onOpenSettings,
@@ -1441,15 +1460,11 @@ class _ChatDrawer extends StatelessWidget {
                       },
                     ),
             ),
-            if (onOpenAgents != null)
-              ListTile(
-                leading: const Icon(Icons.account_tree_outlined),
-                title: const Text('Agent conversations'),
-                onTap: () {
-                  if (!embedded) Navigator.of(context).pop();
-                  onOpenAgents!();
-                },
-              ),
+            if (onNavigate != null)
+              WorkspaceNavigation(current: WorkspaceDestination.chat, onSelected: (destination) {
+                if (!embedded) Navigator.of(context).pop();
+                onNavigate!(destination);
+              }),
             if (projects.isNotEmpty) ...[
               Divider(height: 1, color: tokens.hairline),
               Padding(
@@ -1499,7 +1514,7 @@ class _ChatDrawer extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(8, 6, 12, 8),
                 child: Row(
                   children: [
-                    IconButton(
+                    if (onNavigate == null) IconButton(
                       tooltip: 'System',
                       onPressed: onOpenSystem,
                       icon: const Icon(Icons.dashboard_customize_outlined),
@@ -1509,7 +1524,7 @@ class _ChatDrawer extends StatelessWidget {
                       onPressed: onOpenCommands,
                       icon: const Icon(Icons.bolt_outlined),
                     ),
-                    IconButton(
+                    if (onNavigate == null) IconButton(
                       tooltip: 'Settings',
                       onPressed: onOpenSettings,
                       icon: const Icon(Icons.settings_outlined),
@@ -1965,41 +1980,6 @@ class _AssistantContent extends StatelessWidget {
     final activityRaw =
         markerIndex < 0 ? '' : content.substring(markerIndex).trim();
     final parsed = _parseActivityBlock(activityRaw);
-    final body = Theme.of(context).textTheme.bodyMedium?.copyWith(
-          color: error ? tokens.text : color,
-        );
-    final markdownStyle =
-        MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-      p: body,
-      strong: body?.copyWith(fontWeight: FontWeight.w600),
-      h1: Theme.of(context).textTheme.titleLarge,
-      h2: Theme.of(context).textTheme.titleMedium,
-      h3: Theme.of(context).textTheme.titleSmall,
-      a: body?.copyWith(
-        color: tokens.accent,
-        decoration: TextDecoration.underline,
-        decorationColor: tokens.accent.withValues(alpha: 0.5),
-      ),
-      code: tokens.mono(13, color: tokens.text).copyWith(
-        backgroundColor: tokens.raised,
-      ),
-      codeblockPadding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-      codeblockDecoration: BoxDecoration(
-        color: tokens.panel,
-        borderRadius: BorderRadius.circular(SonderRadius.row),
-        border: Border.all(color: tokens.hairline),
-      ),
-      blockquoteDecoration: BoxDecoration(
-        border: Border(left: BorderSide(color: tokens.hairlineStrong, width: 2)),
-      ),
-      blockquotePadding: const EdgeInsets.fromLTRB(14, 2, 0, 2),
-      horizontalRuleDecoration: BoxDecoration(
-        border: Border(top: BorderSide(color: tokens.hairline)),
-      ),
-      blockSpacing: 10,
-      listIndent: 22,
-    );
-
     final hasToolCalls = parsed.toolCalls.isNotEmpty;
     final effectiveStats = parsed.stats.isNotEmpty
         ? parsed.stats
@@ -2014,12 +1994,7 @@ class _AssistantContent extends StatelessWidget {
           _ToolCallSection(calls: parsed.toolCalls, stats: effectiveStats),
           const SizedBox(height: 10),
         ],
-        MarkdownBody(
-          data: answer,
-          selectable: true,
-          softLineBreak: true,
-          styleSheet: markdownStyle,
-        ),
+        ConversationContent(content: answer, color: error ? tokens.text : color),
         if (reasoning.trim().isNotEmpty) ...[
           const SizedBox(height: 8),
           _CollapsedDetail(
@@ -2829,7 +2804,7 @@ class _InputBar extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 760),
+            constraints: const BoxConstraints(maxWidth: conversationWidth),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [

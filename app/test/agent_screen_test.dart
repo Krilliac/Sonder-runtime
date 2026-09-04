@@ -1,10 +1,52 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/agent_lanes.dart';
 import 'package:sonder_runtime/agent_screen.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/theme.dart';
+import 'package:sonder_runtime/workspace_ui.dart';
+
+class SearchAgents extends FakeAgents {
+  @override
+  Map<String, dynamic> lane(String id) => {
+        ...super.lane(id),
+        'parent_session_id': 'parent-conversation-exact-full-id',
+        'status': id == 'a' ? 'running' : 'completed',
+        'unread_reports': id == 'b' ? 1 : 0,
+      };
+  @override
+  Future<AgentLanePage> agentLanes(
+          {int cursor = 0, String? parentSessionId}) async =>
+      AgentLanePage.fromJson({
+        'lanes': [lane('a'), lane('b')],
+        'has_more': true,
+        'next_cursor': 2,
+      });
+}
+
+class FailingReads extends FakeAgents {
+  Object? failure = SonderException('Authentication failed', httpStatus: 401);
+  int attempts = 0;
+  @override
+  Future<AgentSnapshot> agentInspect(String id,
+      {int cursor = 0, bool wait = false}) {
+    attempts++;
+    if (failure != null) return Future.error(failure!);
+    return super.agentInspect(id, cursor: cursor, wait: wait);
+  }
+}
+
+class LongTitleAgents extends ReportingAgents {
+  @override
+  Map<String, dynamic> lane(String id) => {
+        ...super.lane(id),
+        'title':
+            'Review the parser and preserve a detailed explanation of every compatibility decision for the next conversation',
+        'parent_session_id': 'parent-conversation-exact-full-id',
+      };
+}
 
 class FakeAgents extends SonderApi {
   FakeAgents() : super(baseUrl: 'http://unused');
@@ -114,6 +156,132 @@ Future<void> open(WidgetTester tester, FakeAgents api,
 }
 
 void main() {
+  testWidgets(
+      'long titles and reports remain usable at narrow width with large text',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: const TextScaler.linear(1.3)),
+            child: child!),
+        home: AgentScreen(api: LongTitleAgents())));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Review the parser').first);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Send to agent'), findsOneWidget);
+    expect(find.textContaining('Parent conversation ·'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('loaded search, unread filter and exact parent context',
+      (tester) async {
+    await open(tester, SearchAgents());
+    expect(find.text('Search loaded conversations'), findsOneWidget);
+    await tester.enterText(find.byKey(const Key('agent-search')), 'parser');
+    await tester.pumpAndSettle();
+    expect(find.text('Docs agent'), findsNothing);
+    expect(find.text('Load more conversations'), findsOneWidget);
+    await tester.tap(find.byTooltip('Clear search'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Filter agent status'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Unread reports').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Parser agent'), findsNothing);
+    expect(find.text('Docs agent'), findsOneWidget);
+    await tester.tap(find.text('Parent · parent-c…l-id'));
+    await tester.pumpAndSettle();
+    expect(find.text('parent-conversation-exact-full-id'), findsOneWidget);
+    expect(find.text('Copy ID'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets('authentication read failure stops polling and offers settings',
+      (tester) async {
+    final api = FailingReads();
+    WorkspaceDestination? destination;
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home:
+            AgentScreen(api: api, onNavigate: (value) => destination = value)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('needs authentication'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    await tester.pump(const Duration(seconds: 30));
+    expect(api.attempts, 1);
+    await tester.tap(find.text('Open Settings'));
+    await tester.pumpAndSettle();
+    expect(destination, WorkspaceDestination.settings);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+      'transient reads stop after three attempts and explicit retry recovers',
+      (tester) async {
+    final api = FailingReads()..failure = TimeoutException('offline');
+    await open(tester, api);
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    expect(api.attempts, 3);
+    await tester.pump(const Duration(seconds: 30));
+    expect(api.attempts, 3);
+    api.failure = null;
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(find.text('Task for a'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets(
+      'keyboard send targets selected agent and leaving protects drafts',
+      (tester) async {
+    final api = FakeAgents();
+    WorkspaceDestination? destination;
+    await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home:
+            AgentScreen(api: api, onNavigate: (value) => destination = value)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    final composer = find.byWidgetPredicate((widget) =>
+        widget is TextField &&
+        widget.decoration?.labelText == 'Message this agent');
+    await tester.enterText(composer, 'Keyboard followup');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(api.calls, hasLength(1));
+    await tester.enterText(composer, 'Keep this draft');
+    await tester.tap(find.byTooltip('Workspace navigation'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Settings'));
+    await tester.pumpAndSettle();
+    expect(destination, isNull);
+    await tester.tap(find.text('Keep editing'));
+    await tester.pumpAndSettle();
+    expect(find.text('Keep this draft'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('sending a followup creates a web-safe command ID',
       (tester) async {
     final api = FakeAgents();
@@ -121,7 +289,10 @@ void main() {
     await tester.tap(find.text('Parser agent'));
     await tester.pumpAndSettle();
     await tester.enterText(
-        find.byType(TextField), 'Keep the parser correction');
+        find.byWidgetPredicate((widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Message this agent'),
+        'Keep the parser correction');
     await tester.pump();
     await tester.tap(find.byTooltip('Send to agent'));
     await tester.pumpAndSettle();
@@ -212,13 +383,21 @@ void main() {
     await tester.tap(find.text('Parser agent'));
     await tester.pumpAndSettle();
     expect(find.text('Task for a'), findsOneWidget);
-    await tester.enterText(find.byType(TextField), 'Parser correction');
+    await tester.enterText(
+        find.byWidgetPredicate((widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Message this agent'),
+        'Parser correction');
     await tester.tap(find.text('Docs agent'));
     await tester.pumpAndSettle();
     expect(find.text('Task for a'), findsNothing);
     expect(find.text('Task for b'), findsOneWidget);
     expect(find.text('Parser correction'), findsNothing);
-    await tester.enterText(find.byType(TextField), 'Docs correction');
+    await tester.enterText(
+        find.byWidgetPredicate((widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Message this agent'),
+        'Docs correction');
     await tester.tap(find.text('Parser agent'));
     await tester.pumpAndSettle();
     expect(find.text('Parser correction'), findsOneWidget);

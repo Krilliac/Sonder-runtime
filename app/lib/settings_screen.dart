@@ -3,17 +3,20 @@ import 'package:flutter/material.dart';
 import 'api.dart';
 import 'settings.dart';
 import 'theme.dart';
+import 'workspace_ui.dart';
 
 /// Connection settings: server URL, API key, theme, plus a "Test connection"
 /// button that hits /v1/models so the user gets immediate feedback.
 class SettingsScreen extends StatefulWidget {
   final Settings settings;
   final ValueChanged<Settings> onChanged;
+  final ValueChanged<WorkspaceDestination>? onNavigate;
 
   const SettingsScreen({
     super.key,
     required this.settings,
     required this.onChanged,
+    this.onNavigate,
   });
 
   @override
@@ -121,6 +124,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Navigator.of(context).pop();
   }
 
+  Future<void> _navigate(WorkspaceDestination destination) async {
+    if (!await _confirmDiscard() || !mounted) return;
+    widget.onNavigate?.call(destination);
+  }
+
   void _changeBool(ValueChanged<bool> change, bool value) {
     setState(() {
       change(value);
@@ -156,11 +164,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     try {
       final models = await api.listModels();
+      if (!mounted) return;
       setState(() {
         _statusOk = true;
         _status = 'Connected. Models: ${models.join(", ")}';
       });
     } on SonderException catch (e) {
+      if (!mounted) return;
       setState(() {
         _statusOk = false;
         _status = e.message;
@@ -231,6 +241,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     try {
       await Settings.clearApiKey();
+      if (!mounted) return;
       _key.clear();
       _password.clear();
       if (!mounted) return;
@@ -259,12 +270,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       if (register) {
         final msg = await api.register(_username.text, _password.text);
+        if (!mounted) return;
         setState(() {
           _statusOk = true;
           _status = msg;
         });
       } else {
         final token = await api.login(_username.text, _password.text);
+        if (!mounted) return;
         setState(() {
           _key.text = token;
           _password.clear();
@@ -273,6 +286,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         });
       }
     } on SonderException catch (e) {
+      if (!mounted) return;
       setState(() {
         _statusOk = false;
         _status = e.message;
@@ -324,7 +338,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -351,6 +364,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ],
         ),
         actions: [
+          if (widget.onNavigate != null)
+            WorkspaceMenu(current: WorkspaceDestination.settings, onSelected: _navigate),
           Tooltip(
             message: 'Return to main chat',
             child: TextButton.icon(
@@ -589,34 +604,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           if (_status != null) ...[
             const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: (_statusOk ? cs.primaryContainer : cs.errorContainer),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    _statusOk ? Icons.check_circle : Icons.error_outline,
-                    color:
-                        _statusOk ? cs.onPrimaryContainer : cs.onErrorContainer,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _status!,
-                      style: TextStyle(
-                        color: _statusOk
-                            ? cs.onPrimaryContainer
-                            : cs.onErrorContainer,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            WorkspaceNotice(message: _status!, tone: _statusOk ? NoticeTone.success : NoticeTone.warning),
           ],
           const _GroupLabel('Appearance'),
           Padding(
