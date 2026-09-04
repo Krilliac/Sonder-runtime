@@ -9069,6 +9069,12 @@
       "type": "tuple[str, ...]"
     },
     {
+      "default": [],
+      "field": "trusted_origins",
+      "section": "ollama",
+      "type": "tuple[str, ...]"
+    },
+    {
       "default": 1,
       "field": "worker_max_inflight",
       "section": "ollama",
@@ -9255,11 +9261,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 310,
-    "configuration": 75,
+    "configuration": 76,
     "events": 43,
     "tools": 208
   },
-  "digest": "271c6d04d930e175775944e375893f32f3a1b6c9d011084709aeb97f852de7a9",
+  "digest": "f2b60d0e6bb99b0902b7e02d0cf67b496bee85ccc28d8b3e814ff6d07369b9dc",
   "events": [
     {
       "name": "session.started",
@@ -9733,7 +9739,7 @@
     "server.py": "ae161f3022a929072e184bab18fd21ffa26f5d564a9f98bd93412dca0bec579f",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "1634c0aea94d705017ae2ab96b8ed2d1b3f52313571b56f559fa950c07c23e8c"
+    "sonder_runtime/platform/config.py": "66eab0b6a4ccb7981242d73ed7eba2198f5cb4f8fbd0d621935e6a73c678ef50"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [

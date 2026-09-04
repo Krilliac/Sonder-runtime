@@ -112,6 +112,7 @@ class OllamaConfig:
     url: str = "http://127.0.0.1:11434"
     allow_remote: bool = False
     workers: tuple[str, ...] = ()
+    trusted_origins: tuple[str, ...] = ()
     worker_max_inflight: int = 1
     worker_queue_depth: int = 32
     worker_admission_timeout_ms: int = 1_000
@@ -312,6 +313,25 @@ def _is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _host_in_trusted_origins(
+    host: str, trusted_origins: tuple[str, ...],
+) -> bool:
+    """Return whether *host* falls within any configured trusted CIDR."""
+    if not trusted_origins:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    for cidr in trusted_origins:
+        try:
+            if addr in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -643,6 +663,15 @@ def _apply_environment(
         ollama = replace(
             ollama, allow_remote=_env_bool(env["SONDER_ALLOW_REMOTE_OLLAMA"])
         )
+    if env.get("SONDER_TRUSTED_ORIGINS", "").strip():
+        ollama = replace(
+            ollama,
+            trusted_origins=tuple(
+                value.strip()
+                for value in env["SONDER_TRUSTED_ORIGINS"].replace(";", ",").split(",")
+                if value.strip()
+            ),
+        )
     ollama = replace(
         ollama,
         worker_max_inflight=_env_int(
@@ -814,6 +843,14 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if not Path(root).expanduser().is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
 
+    for cidr in config.ollama.trusted_origins:
+        try:
+            ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            errors.append(
+                f"[ollama].trusted_origins entry invalid CIDR: {cidr!r}"
+            )
+
     try:
         parts = urlsplit(config.ollama.url)
         ollama_port = parts.port
@@ -833,7 +870,13 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             f"[ollama].url host {parts.hostname!r} is not loopback and "
             "allow_remote is false (remote-Ollama consent gate)"
         )
-    elif not _is_loopback_host(parts.hostname) and parts.scheme != "https":
+    elif (
+        not _is_loopback_host(parts.hostname)
+        and parts.scheme != "https"
+        and not _host_in_trusted_origins(
+            parts.hostname, config.ollama.trusted_origins,
+        )
+    ):
         errors.append(
             "[ollama].url remote Ollama must use https so prompts and "
             "embeddings are protected in transit"
@@ -870,7 +913,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 errors.append(
                     "[ollama].workers remote entries require the remote-Ollama consent gate"
                 )
-            elif worker_parts.scheme != "https":
+            elif (
+                worker_parts.scheme != "https"
+                and not _host_in_trusted_origins(
+                    worker_parts.hostname, config.ollama.trusted_origins,
+                )
+            ):
                 errors.append("[ollama].workers remote entries must use https")
 
     if len(config.ollama.workers) > 15:

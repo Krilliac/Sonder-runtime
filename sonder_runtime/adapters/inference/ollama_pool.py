@@ -152,7 +152,30 @@ def _metric_label(index: int) -> str:
     return "w%d" % index if index < _MAX_METRIC_WORKERS else _METRIC_OVERFLOW_LABEL
 
 
-def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
+def _host_in_trusted_origins(
+    host: str, trusted_origins: tuple[str, ...],
+) -> bool:
+    if not trusted_origins:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    for cidr in trusted_origins:
+        try:
+            if addr in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def validate_worker_origin(
+    origin: str,
+    *,
+    allow_remote: bool,
+    trusted_origins: tuple[str, ...] = (),
+) -> str:
     """Normalize one worker origin under the Ollama trust policy."""
     normalized = ollama_policy.normalize(origin)
     parsed = urlsplit(normalized)
@@ -175,14 +198,28 @@ def validate_worker_origin(origin: str, *, allow_remote: bool) -> str:
             raise ValueError(
                 "remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1"
             )
-        if parsed.scheme.casefold() != "https":
+        if (
+            parsed.scheme.casefold() != "https"
+            and not _host_in_trusted_origins(parsed.hostname or "", trusted_origins)
+        ):
             raise ValueError("remote worker endpoints must use https")
     return normalized.rstrip("/")
 
 
-def configure_typed_workers(worker_origins: tuple[str, ...], *, allow_remote: bool) -> None:
-    normalized = tuple(validate_worker_origin(origin, allow_remote=allow_remote)
-                       for origin in tuple(worker_origins))
+def configure_typed_workers(
+    worker_origins: tuple[str, ...],
+    *,
+    allow_remote: bool,
+    trusted_origins: tuple[str, ...] = (),
+) -> None:
+    normalized = tuple(
+        validate_worker_origin(
+            origin,
+            allow_remote=allow_remote,
+            trusted_origins=trusted_origins,
+        )
+        for origin in tuple(worker_origins)
+    )
     global _configured_workers, _configured_allow_remote
     with _configuration_lock:
         _configured_workers = normalized

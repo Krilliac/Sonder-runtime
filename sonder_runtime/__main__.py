@@ -564,6 +564,7 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
         "1" if config.ollama.allow_remote else "0"
     )
+    os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
     os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
     os.environ["SONDER_LIVE_RELOAD"] = "1" if config.features.live_reload else "0"
     os.environ["SONDER_EXPOSE_REASONING"] = (
@@ -618,7 +619,9 @@ def cmd_serve(args) -> int:
     ollama_endpoint.configure_typed_endpoint(config.ollama.url)
     from sonder_runtime.adapters.inference import ollama_pool
     ollama_pool.configure_typed_workers(
-        config.ollama.workers, allow_remote=config.ollama.allow_remote,
+        config.ollama.workers,
+        allow_remote=config.ollama.allow_remote,
+        trusted_origins=config.ollama.trusted_origins,
     )
     from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
         require_epoch_2,

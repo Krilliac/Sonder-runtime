@@ -84,6 +84,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String _currentThreadId = '';
   String _project = 'default';
   bool _sending = false;
+  bool _cancelling = false;
   bool _loadingThreads = true;
   Timer? _statusTimer;
   SystemInfo? _systemInfo;
@@ -633,6 +634,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'Say `/verbose on` or `/verbose off` — plain English works too.';
   }
 
+  void _cancelSend() {
+    if (!_sending || _cancelling) return;
+    setState(() => _cancelling = true);
+    _api.cancelChat();
+  }
+
   Future<void> _send([String? preset]) async {
     final text = (preset ?? _input.text).trim();
     if (text.isEmpty || _sending) return;
@@ -678,25 +685,37 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           responseMetadata: reply.metadata,
         );
       });
-    } on SonderException catch (e) {
+    } catch (e) {
       setState(() {
-        final diagnostics = <String>[
-          if (e.diagnosticText.isNotEmpty) e.diagnosticText,
-          if (_verboseErrors && e.cause != null) 'cause: ${e.cause}',
-        ];
-        _messages[_messages.length - 1] = ChatMessage(
-          role: Role.assistant,
-          // Diagnostics stay separate from content so they remain available
-          // locally without being copied into later model-visible history.
-          content: e.message,
-          error: true,
-          diagnostic: diagnostics.join('\n'),
-        );
+        if (_cancelling) {
+          _messages.removeLast();
+          _messages.removeLast();
+        } else if (e is SonderException) {
+          final diagnostics = <String>[
+            if (e.diagnosticText.isNotEmpty) e.diagnosticText,
+            if (_verboseErrors && e.cause != null) 'cause: ${e.cause}',
+          ];
+          _messages[_messages.length - 1] = ChatMessage(
+            role: Role.assistant,
+            content: e.message,
+            error: true,
+            diagnostic: diagnostics.join('\n'),
+          );
+        } else {
+          _messages[_messages.length - 1] = ChatMessage(
+            role: Role.assistant,
+            content: 'Request failed: $e',
+            error: true,
+          );
+        }
       });
     } finally {
       if (mounted) {
         await _saveCurrentThread();
-        setState(() => _sending = false);
+        setState(() {
+          _sending = false;
+          _cancelling = false;
+        });
         _refreshStatus();
         // A turn can be the thing that changes the mode (or a terminal session
         // may have changed it mid-turn), so re-read rather than wait out the
@@ -1010,6 +1029,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           focusNode: _inputFocus,
                           sending: _sending,
                           onSend: () => _send(),
+                          onCancel: _cancelSend,
                           paletteMatches: _paletteMatches,
                           paletteSelected: _paletteSelected,
                           paletteGrouped: _paletteGrouped,
@@ -2753,6 +2773,7 @@ class _InputBar extends StatelessWidget {
   final FocusNode focusNode;
   final bool sending;
   final VoidCallback onSend;
+  final VoidCallback onCancel;
   final List<SonderCommand> paletteMatches;
   final int paletteSelected;
   final bool paletteGrouped;
@@ -2772,6 +2793,7 @@ class _InputBar extends StatelessWidget {
     required this.focusNode,
     required this.sending,
     required this.onSend,
+    required this.onCancel,
     required this.paletteMatches,
     required this.paletteSelected,
     required this.paletteGrouped,
@@ -2919,16 +2941,10 @@ class _InputBar extends StatelessWidget {
                               height: 32,
                               child: FloatingActionButton.small(
                                 heroTag: null,
-                                onPressed: sending ? null : onSend,
-                                tooltip: 'Send',
+                                onPressed: sending ? onCancel : onSend,
+                                tooltip: sending ? 'Stop' : 'Send',
                                 child: sending
-                                    ? const SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      )
+                                    ? const Icon(Icons.stop, size: 18)
                                     : const Icon(Icons.arrow_upward, size: 18),
                               ),
                             ),
