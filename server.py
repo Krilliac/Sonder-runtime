@@ -161,7 +161,9 @@ import autopilot_controller
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
-from sonder_runtime.application.session.provider_attempts import dispatch_provider
+from sonder_runtime.application.session.provider_attempts import (
+    complete_scoped_provider_request, deferred_provider_request_scope, dispatch_provider,
+)
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
@@ -1873,6 +1875,44 @@ def _typed_tool(tool_name, arguments, *, token="", approval="", extra_roots=""):
     return json.loads(receipt.output)
 
 
+def _capture_named_provider_request(function):
+    """Bind only this owning caller's named session; preserve explicit opt-outs.
+
+    Admission is deferred until provider dispatch, so control/cache-only paths
+    retain their prior capture behavior. The initial command stays distinct
+    from the final augmented payload recorded by the transport boundary.
+    """
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        session = values.get("session", "")
+        named = bool(str(session or "").strip()) or function.__name__ == "_sonder_impl_serialized"
+        session_id = _resolve_session(session) if named and values.get("capture_session", True) else None
+
+        def admit():
+            from sonder_runtime.application.ports.model_gateway import ModelRequest
+            from sonder_runtime.domain.common.ids import new_id
+
+            capture = _application().session_capture_service()
+            pending = capture.begin_request(
+                str(session_id), new_id("turn"),
+                ModelRequest(prompt=values["prompt"], tier=values.get("tier") or "sonder",
+                             system=values.get("system", ""), history=tuple(values.get("history") or ()),
+                             options={key: values[key] for key in ("temperature", "num_predict", "num_ctx") if key in values}),
+                request_id=new_id("request"), user_message=values["prompt"],
+            )
+            return capture, pending
+
+        with deferred_provider_request_scope(admit if session_id is not None else None):
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
 def _capture_durable_session_turn(
     session_id, prompt, history, model, system, tier, response, request_id=None,
 ):
@@ -1887,6 +1927,9 @@ def _capture_durable_session_turn(
     """
     if session_id is None:
         return None
+    captured = complete_scoped_provider_request(session_id, response)
+    if captured is not None:
+        return captured
     from sonder_runtime.application.ports.model_gateway import ModelRequest
     from sonder_runtime.domain.common.ids import new_id
 
@@ -5448,6 +5491,7 @@ def _route_chat_web(prompt, session, project, location_consent):
     return reply
 
 
+@_capture_named_provider_request
 def _sonder_impl_serialized(
     prompt: str,
     system: str = "",
@@ -5875,6 +5919,7 @@ def sonder(
     return _append_activity(result, response=response, replace=True)
 
 
+@_capture_named_provider_request
 def _answer_with_history_impl(
     prompt,
     history,

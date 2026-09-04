@@ -191,3 +191,184 @@ def test_oversized_admission_stops_before_transport_and_scope_resets(tmp_path):
     assert calls == []
     assert dispatch_provider("ollama", "/api/chat", {}, lambda: "unconfigured") == "unconfigured"
 
+
+def test_deferred_owner_admits_only_on_dispatch_and_completes_once(tmp_path):
+    from sonder_runtime.application.session.provider_attempts import deferred_provider_request_scope, complete_scoped_provider_request, dispatch_provider
+
+    admissions = []
+
+    def admit():
+        admissions.append(1)
+        _, capture, pending = owner(tmp_path)
+        return capture, pending
+
+    with deferred_provider_request_scope(admit):
+        assert complete_scoped_provider_request("session", "cached") is None
+    assert admissions == []
+    with deferred_provider_request_scope(admit):
+        dispatch_provider("ollama", "/api/chat", {}, lambda: {"message": {"content": "candidate"}})
+        result = complete_scoped_provider_request("session", "selected")
+        assert complete_scoped_provider_request("session", "selected") is result
+    assert admissions == [1]
+    assert [m.content for m in result.replay.replay.transcript] == ["selected"]
+
+
+def test_named_legacy_history_admits_before_final_dispatch(tmp_path, monkeypatch):
+    import io
+    import types
+    import server
+
+    repository = SQLiteSessionRepository(tmp_path / "session.db")
+    capture = SessionCaptureService(repository)
+    monkeypatch.setattr(server, "_application", lambda: types.SimpleNamespace(session_capture_service=lambda: capture))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_serve_target", lambda *a: ("fixture", False, False, "general"))
+    monkeypatch.setattr(server, "_should_learn", lambda *a: False)
+    monkeypatch.setattr(server, "_auto_model_context", lambda *a: 1024)
+    monkeypatch.setattr(server, "_build_system", lambda *a, **k: "effective system")
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+
+    def send(req, **kwargs):
+        assert repository.read_range("named")[-1].event_type == "provider.requested"
+        return io.BytesIO(b'{"message":{"content":"legacy answer"}}')
+
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", send)
+    result = server._answer_with_history_impl("hello", [], session="named", tier="general")
+    assert "legacy answer" in result
+    events = repository.read_range("named")
+    assert [e.event_type for e in events] == ["model.requested", "user.message", "provider.requested", "provider.responded", "model.response"]
+    assert events[0].payload["request_id"] == events[2].payload["request_id"]
+
+
+def test_served_scope_carries_http_identity_to_single_completion(tmp_path, monkeypatch):
+    import types
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.interfaces.http import serve
+    from sonder_runtime.application.session.provider_attempts import dispatch_provider
+
+    repository = SQLiteSessionRepository(tmp_path / "session.db")
+    capture = SessionCaptureService(repository)
+    monkeypatch.setattr(bootstrap_app, "default_app", lambda: types.SimpleNamespace(session_capture_service=lambda: capture))
+
+    def answer(*args, **kwargs):
+        assert kwargs["capture_session"] is False
+        return dispatch_provider("ollama", "/api/chat", {"model": "fixture"}, lambda: "answer")
+
+    monkeypatch.setattr(serve.server, "answer_with_history", answer)
+    turn = serve._run_prompt("hello", session="http-session", return_result=True, capture_request_id="http-request", capture_turn_id="http-turn")
+    events = repository.read_range("http-session")
+    assert [e.event_type for e in events] == ["model.requested", "user.message", "provider.requested", "provider.responded"]
+    assert events[2].payload["request_id"] == "http-request"
+    serve._capture_live_session_turn(session_id="http-session", prompt="hello", history=[], model="fixture", content=turn.content,
+                                     request_id="http-request", turn_id="http-turn", stream=False, provider_capture=turn.provider_capture)
+    events = repository.read_range("http-session")
+    assert [e.event_type for e in events].count("model.requested") == 1
+    assert [e.event_type for e in events].count("model.response") == 1
+
+
+def test_served_cache_hit_has_no_provider_admission(tmp_path, monkeypatch):
+    from sonder_runtime.interfaces.http import serve
+
+    monkeypatch.setattr(serve.server, "answer_with_history", lambda *a, **k: "cached answer")
+    turn = serve._run_prompt("hello", session="http-session", return_result=True, capture_request_id="http-request", capture_turn_id="http-turn")
+    assert turn.provider_capture is None
+
+
+def test_openai_embedding_inside_chat_scope_is_not_generation_evidence(tmp_path):
+    from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleConfig, OpenAICompatibleGateway
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.session.provider_attempts import provider_attempt_scope
+
+    repository, capture, pending = owner(tmp_path)
+    gateway = OpenAICompatibleGateway(OpenAICompatibleConfig(base_url="http://127.0.0.1:8080", embed_model="fixture"),
+        transport=lambda *a: {"data": [{"embedding": [0.1, 0.2]}]})
+    with provider_attempt_scope(capture, pending):
+        gateway.embed(["hello"], local_owner_context(correlation_id="test"))
+    assert [e.event_type for e in repository.read_range("session")] == ["model.requested"]
+
+
+def test_successful_wire_response_exceeding_capture_bound_is_unresolved_without_retry(tmp_path, monkeypatch):
+    import io
+    import server
+    from sonder_runtime.application.session.provider_attempts import provider_attempt_scope
+
+    repository, capture, pending = owner(tmp_path)
+    calls = []
+
+    def send(*args, **kwargs):
+        calls.append(1)
+        return io.BytesIO(json.dumps({"message": {"content": "x" * 2_000_001}}).encode())
+
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", send)
+    monkeypatch.setenv("SONDER_LOCAL_RETRIES", "2")
+    with pytest.raises(IntegrityFailure), provider_attempt_scope(capture, pending):
+        server._chat_request({"model": "fixture", "messages": []}, model="fixture", timeout=20)
+    assert calls == [1]
+    assert [e.event_type for e in repository.read_range("session")] == ["model.requested", "provider.requested"]
+
+
+@pytest.mark.parametrize("scoped", [True, False])
+def test_nonlearning_offload_uses_explicit_owner_without_inventing_session(tmp_path, monkeypatch, scoped):
+    import contextlib
+    import io
+    import server
+    from sonder_runtime.application.session.provider_attempts import provider_attempt_scope
+
+    repository, capture, pending = owner(tmp_path)
+    monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
+    monkeypatch.setitem(server.TIERS, "fast", "fixture")
+    monkeypatch.setattr(server, "_auto_model_context", lambda *a: 1024)
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", lambda *a, **k: io.BytesIO(b'{"message":{"content":"answer"}}'))
+    with provider_attempt_scope(capture, pending) if scoped else contextlib.nullcontext():
+        assert server._offload_impl("hello", tier="fast", learn=False) == "answer"
+    assert [e.event_type for e in repository.read_range("session")] == (
+        ["model.requested", "provider.requested", "provider.responded"] if scoped else ["model.requested"])
+
+
+def test_structured_validation_rejection_retains_provider_success_and_schema(tmp_path, monkeypatch):
+    import io
+    import types
+    import server
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.interfaces.http import serve
+
+    repository = SQLiteSessionRepository(tmp_path / "session.db")
+    capture = SessionCaptureService(repository)
+    monkeypatch.setattr(bootstrap_app, "default_app", lambda: types.SimpleNamespace(session_capture_service=lambda: capture))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_serve_target", lambda *a: ("fixture", False, False, "general"))
+    monkeypatch.setattr(server, "_auto_model_context", lambda *a: 1024)
+    monkeypatch.setattr(server, "_build_system", lambda *a, **k: "effective system")
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", lambda *a, **k: io.BytesIO(b'{"message":{"content":"{}"}}'))
+    schema = {"type": "object", "required": ["value"], "properties": {"value": {"type": "string"}}}
+    with pytest.raises(server.ModelCallError, match="validation failed"):
+        serve._run_structured_prompt("hello", [], "general", schema, session="http-session", capture_request_id="http-request", capture_turn_id="http-turn")
+    events = repository.read_range("http-session")
+    assert events[2].payload["payload"]["format"] == schema
+    assert events[-1].event_type == "provider.responded"
+    assert all(e.event_type != "model.response" for e in events)
+
+
+@pytest.mark.parametrize("session", ["named", "none"])
+def test_standalone_learning_owner_preserves_explicit_session_optout(tmp_path, monkeypatch, session):
+    import io
+    import types
+    import server
+
+    repository = SQLiteSessionRepository(tmp_path / "session.db")
+    capture = SessionCaptureService(repository)
+    monkeypatch.setattr(server, "_application", lambda: types.SimpleNamespace(session_capture_service=lambda: capture))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server, "_serve_target", lambda *a: ("fixture", False, False, "general"))
+    monkeypatch.setattr(server, "_auto_model_context", lambda *a: 1024)
+    monkeypatch.setattr(server, "_build_system", lambda *a, **k: "effective system")
+    monkeypatch.setattr(server, "_maybe_title", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_capture_preferences", lambda *a, **k: None)
+    monkeypatch.setattr(server.embeddings, "embed", lambda *a: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+    monkeypatch.setattr(server.ollama_endpoint, "open_url", lambda *a, **k: io.BytesIO(b'{"message":{"content":"standalone answer"}}'))
+    assert "standalone answer" in server._sonder_impl_serialized("hello", tier="general", session=session)
+    events = repository.read_range("named")
+    assert [e.event_type for e in events] == (
+        ["model.requested", "user.message", "provider.requested", "provider.responded", "model.response"] if session == "named" else [])
+

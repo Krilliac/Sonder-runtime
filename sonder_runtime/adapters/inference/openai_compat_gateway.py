@@ -303,10 +303,13 @@ class OpenAICompatibleGateway:
         logger.debug(f"OpenAICompatibleGateway._post: url={url!r}, timeout={timeout}")
         transport = self._transport or self._default_transport
         try:
-            data = dispatch_provider(
-                "openai-compatible", path, payload,
-                lambda: transport(url, payload, self._headers(cfg), timeout),
-            )
+            if path == "/v1/chat/completions":
+                data = dispatch_provider(
+                    "openai-compatible", path, payload,
+                    lambda: transport(url, payload, self._headers(cfg), timeout),
+                )
+            else:
+                data = transport(url, payload, self._headers(cfg), timeout)
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", 0)
             if code in (401, 403):
