@@ -417,6 +417,15 @@ def claim_run(
         if row["status"] in ACTIVE_STATUSES and row.get("owner_id") != owner_id:
             return None
         next_status = "planning" if not json.loads(row.get("plan_json") or "[]") else "running"
+        # State machine is the single source of truth for valid transitions.
+        current_status = row["status"]
+        if current_status != next_status and not _sm.autopilot_can_transition(
+            current_status, next_status
+        ):
+            raise ValueError(
+                "autopilot state machine does not allow %s -> %s"
+                % (current_status, next_status)
+            )
         cursor = conn.execute(
             """
             UPDATE autopilot_runs
@@ -505,6 +514,19 @@ def save_progress(
         values.append(_clamp_text(last_error, MAX_ERROR_CHARS))
     values.extend([run_id, owner_id])
     with _write_transaction() as conn:
+        # State machine is the single source of truth for valid transitions.
+        if status is not None:
+            existing = conn.execute(
+                "SELECT status FROM autopilot_runs WHERE id=? AND owner_id=? "
+                "AND status IN ('planning', 'running') AND cancel_requested=0",
+                (run_id, owner_id),
+            ).fetchone()
+            if existing is not None and existing["status"] != status:
+                if not _sm.autopilot_can_transition(existing["status"], status):
+                    raise ValueError(
+                        "autopilot state machine does not allow %s -> %s"
+                        % (existing["status"], status)
+                    )
         cursor = conn.execute(
             "UPDATE autopilot_runs SET %s WHERE id=? AND owner_id=? "
             "AND status IN ('planning', 'running') AND cancel_requested=0"
@@ -536,6 +558,12 @@ def request_pause(selector: str, request_owner: str | None = None) -> dict | Non
             )
             message = "pause requested; active task will finish first"
         else:
+            # State machine is the single source of truth for valid
+            # transitions.
+            if row["status"] != "paused" and not _sm.autopilot_can_transition(
+                row["status"], "paused"
+            ):
+                return _row_dict(found)
             conn.execute(
                 """
                 UPDATE autopilot_runs
