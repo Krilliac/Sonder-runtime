@@ -572,13 +572,12 @@ def test_a_saved_workflow_replay_meets_the_same_per_action_gate(monkeypatch, tmp
     per-action permission gate must hold on replay exactly as it does for a
     live `/loop` payload: `plan` refuses the dangerous-class action.
 
-    The store is rehomed to tmp the way `test_workflows.py` does it -- the
-    default store is the workspace root's `workflows.json`, a tracked file
-    this test must not touch.
+    Bind the runtime home to tmp so this saved workflow cannot contaminate
+    the shared test-session workflow store.
     """
-    from sonder_runtime.adapters.filesystem import workflow_store
+    from sonder_runtime.platform import paths as runtime_paths
 
-    monkeypatch.setattr(workflow_store, "workspace_root", lambda: str(tmp_path))
+    runtime_paths.configure_home(tmp_path)
     monkeypatch.delenv("SONDER_WORKFLOWS", raising=False)
     saved = server.workflow_save(
         "contract_probe_flow",
