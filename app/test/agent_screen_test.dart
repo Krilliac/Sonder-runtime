@@ -9,6 +9,7 @@ import 'package:sonder_runtime/theme.dart';
 class FakeAgents extends SonderApi {
   FakeAgents() : super(baseUrl: 'http://unused');
   final calls = <String>[];
+  final inspections = <({String id, int cursor, bool wait})>[];
   bool failCommand = false;
   String status = 'running';
   Map<String, dynamic> lane(String id) => {
@@ -27,6 +28,7 @@ class FakeAgents extends SonderApi {
   @override
   Future<AgentSnapshot> agentInspect(String id,
       {int cursor = 0, bool wait = false}) async {
+    inspections.add((id: id, cursor: cursor, wait: wait));
     if (wait) return Completer<AgentSnapshot>().future;
     return AgentSnapshot.fromJson({
       'lane': lane(id),
@@ -112,6 +114,46 @@ Future<void> open(WidgetTester tester, FakeAgents api,
 }
 
 void main() {
+  testWidgets('sending a followup creates a web-safe command ID',
+      (tester) async {
+    final api = FakeAgents();
+    await open(tester, api);
+    await tester.tap(find.text('Parser agent'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byType(TextField), 'Keep the parser correction');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send to agent'));
+    await tester.pumpAndSettle();
+    expect(api.calls, hasLength(1));
+    expect(api.calls.single, matches(r'^a/messages/ui-[0-9a-f]{32}$'));
+    expect(find.text('Keep the parser correction'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+
+  testWidgets(
+      'switching agents refreshes cursors without occupying long-poll slots',
+      (tester) async {
+    final api = FakeAgents();
+    await open(tester, api);
+    for (final name in ['Parser agent', 'Docs agent', 'Parser agent']) {
+      await tester.tap(find.text(name).first);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+    }
+    expect(api.inspections.where((request) => request.wait), isEmpty);
+    expect(api.inspections.where((request) => request.cursor == 1), isNotEmpty);
+    final beforeClosing = api.inspections.length;
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 6));
+    expect(api.inspections.length, beforeClosing);
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
   testWidgets(
       'reports to external parent remain scoped and require explicit mark read',
       (tester) async {
