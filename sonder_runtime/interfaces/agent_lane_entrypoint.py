@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-from ..domain.common.errors import DependencyUnavailable
+from ..application.errors import DependencyUnavailable
 
 
 ACTIONS = frozenset({

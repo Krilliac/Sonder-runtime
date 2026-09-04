@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from . import fleet_store
+from .fleet_store import _ensure_schema as _ensure_fleet_schema
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_lanes (
@@ -337,7 +337,7 @@ class SQLiteAgentLaneStore:
         self.path = str(Path(path).resolve())
         self.sessions = sessions
         self._projection_lock = threading.RLock()
-        fleet_store._ensure_schema(self.path)
+        _ensure_fleet_schema(self.path)
         with self.connect() as conn:
             conn.executescript(_SCHEMA)
 

@@ -1,7 +1,6 @@
 """Authenticated HTTP transport mapping for interactive agent lanes."""
 
 from dataclasses import dataclass
-from urllib.parse import unquote
 from ....application.errors import CapacityExceeded
 
 
@@ -30,7 +29,11 @@ def dispatch_agent_lane_route(service, method, path, payload, query, context):
             )
         ):
             raise PermissionError("authority is inherited from authenticated context")
-        parts = [unquote(p) for p in path[len(prefix) :].strip("/").split("/") if p]
+        # Generated lane/report IDs contain only URI-safe characters. Reject
+        # encoded path aliases instead of changing their scoped identity here.
+        if "%" in path:
+            raise ValueError("encoded agent route identifiers are not supported")
+        parts = [p for p in path[len(prefix) :].strip("/").split("/") if p]
 
         def q(name, default=None):
             value = query.get(name, default)
