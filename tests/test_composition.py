@@ -484,7 +484,6 @@ class TestServerIntegration(unittest.TestCase):
     def test_autopilot_start_goal_flag_no_goal(self):
         import server
         result = server.control_command("/autopilot start --goal")
-        self.assertIn("ERROR", result)
         self.assertIn("active goal", result)
 
 

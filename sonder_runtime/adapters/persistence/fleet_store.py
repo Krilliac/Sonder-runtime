@@ -831,8 +831,6 @@ def finish_agent(
             final_error = _clamp_text(error, MAX_ERROR_CHARS)
             marker = output
             tokens_out = max(0, (len(output or "") + 3) // 4)
-        if not _sm.fleet_can_transition(current["status"], status):
-            return current, current.get("output") or ""
         conn.execute(
             """
             UPDATE fleet_agents

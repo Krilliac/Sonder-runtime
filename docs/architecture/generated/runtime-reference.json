@@ -1511,6 +1511,16 @@
     },
     {
       "aliases": [],
+      "category": "agents",
+      "name": "/composition_bindings",
+      "native": false,
+      "params": [],
+      "risk": "ask",
+      "summary": "Show active cross-subsystem composition bindings.",
+      "tool": "composition_bindings"
+    },
+    {
+      "aliases": [],
       "category": "chat",
       "name": "/consult",
       "native": true,
@@ -4929,6 +4939,85 @@
       "risk": "safe",
       "summary": "Search local lessons, facts, sessions, and recent interactions.",
       "tool": "memory_search"
+    },
+    {
+      "aliases": [],
+      "category": "agents",
+      "name": "/mission",
+      "native": true,
+      "params": [],
+      "risk": "ask",
+      "summary": "",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "agents",
+      "name": "/mission_start",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "objective",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "criteria",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "auto",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": false,
+          "name": "plan",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "workspace",
+          "name": "policy",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "auto",
+          "name": "tier",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": true,
+          "name": "allow_web",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "project",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.",
+      "tool": "mission_start"
+    },
+    {
+      "aliases": [],
+      "category": "agents",
+      "name": "/mission_status",
+      "native": false,
+      "params": [],
+      "risk": "ask",
+      "summary": "Show unified mission status: active goal + bound autopilot + linked tasks.",
+      "tool": "mission_status"
     },
     {
       "aliases": [],
@@ -9260,12 +9349,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 310,
+    "commands": 314,
     "configuration": 76,
     "events": 43,
-    "tools": 208
+    "tools": 211
   },
-  "digest": "58c669d6a85d4a928124c6d2ab3e376916c897e4638ae0c84dbbb4581fb15b17",
+  "digest": "8a8b4701df0b98381ab3c40103343bb5af806a8b8e46a17e17d4866a1625b52d",
   "events": [
     {
       "name": "session.started",
@@ -9736,7 +9825,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "9f3f53c998a89b580321b95c053d67e44b03541225d8eef355ede4fd60dbd755",
+    "server.py": "e42418037d0edb674c38069da6723b9aff6032fd10fec4e90ad67149a291fb5e",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "66eab0b6a4ccb7981242d73ed7eba2198f5cb4f8fbd0d621935e6a73c678ef50"
@@ -10902,6 +10991,15 @@
       "parameters": {
         "properties": {},
         "title": "compiler_cache_statusArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Show active cross-subsystem composition bindings.",
+      "name": "composition_bindings",
+      "parameters": {
+        "properties": {},
+        "title": "composition_bindingsArguments",
         "type": "object"
       }
     },
@@ -13575,6 +13673,67 @@
           "query"
         ],
         "title": "memory_searchArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Start a composed mission: set a goal, optionally decompose into tasks, optionally launch autopilot.\n\n    Bridges Goal, Task, and Autopilot subsystems into unified execution.\n    Use --auto to immediately launch autopilot toward the goal.\n    Use --plan to decompose goal criteria into a task plan.\n    ",
+      "name": "mission_start",
+      "parameters": {
+        "properties": {
+          "allow_web": {
+            "default": true,
+            "title": "Allow Web",
+            "type": "boolean"
+          },
+          "auto": {
+            "default": false,
+            "title": "Auto",
+            "type": "boolean"
+          },
+          "criteria": {
+            "default": "",
+            "title": "Criteria",
+            "type": "string"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "plan": {
+            "default": false,
+            "title": "Plan",
+            "type": "boolean"
+          },
+          "policy": {
+            "default": "workspace",
+            "title": "Policy",
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "title": "Project",
+            "type": "string"
+          },
+          "tier": {
+            "default": "auto",
+            "title": "Tier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "objective"
+        ],
+        "title": "mission_startArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Show unified mission status: active goal + bound autopilot + linked tasks.",
+      "name": "mission_status",
+      "parameters": {
+        "properties": {},
+        "title": "mission_statusArguments",
         "type": "object"
       }
     },
