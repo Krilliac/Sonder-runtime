@@ -154,7 +154,7 @@ class SQLiteDurableContinuationRepository:
             if current is None or (expected_revision is not None and current.revision != expected_revision):
                 return None
             if current.status in TERMINAL_SUBAGENT_STATUSES and status not in TERMINAL_SUBAGENT_STATUSES:
-                return current
+                return None
             connection.execute(
                 "UPDATE durable_child_session SET status=?,revision=revision+1,usage_json=?,result_json=?,"
                 "recovery_required=? WHERE child_id=? AND revision=?",
@@ -163,6 +163,22 @@ class SQLiteDurableContinuationRepository:
                  int(current.recovery_required if recovery_required is None else recovery_required),
                  child_id, current.revision),
             )
+            return self._select(connection, child_id)
+
+    def claim_resume(self, child_id: str, *, expected_revision: int) -> DurableChildSession | None:
+        """Claim one recoverable failure without resurrecting other terminal states."""
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                "UPDATE durable_child_session SET status=?,revision=revision+1,"
+                "result_json=NULL,recovery_required=0 "
+                "WHERE child_id=? AND revision=? AND status IN (?,?) "
+                "AND recovery_required=1 AND cancellation_requested=0",
+                (SubagentStatus.RUNNING.value, child_id, expected_revision,
+                 SubagentStatus.FAILED.value, SubagentStatus.TIMED_OUT.value),
+            )
+            if changed.rowcount != 1:
+                return None
             return self._select(connection, child_id)
 
     def request_cancel(self, child_id: str, *, reason: str) -> bool:

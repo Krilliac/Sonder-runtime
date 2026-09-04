@@ -65,6 +65,9 @@ class DurableContinuationRepository(Protocol):
     def update(self, child_id: str, *, status: SubagentStatus, expected_revision: int | None = None,
                usage: SubagentUsage | None = None, result: SubagentResult | None = None,
                recovery_required: bool | None = None) -> DurableChildSession | None: ...
+    def claim_resume(self, child_id: str, *, expected_revision: int) -> DurableChildSession | None:
+        """Atomically claim eligible recovery as RUNNING, clearing its old result."""
+        ...
     def request_cancel(self, child_id: str, *, reason: str) -> bool: ...
     def list_active(self) -> tuple[DurableChildSession, ...]: ...
 
@@ -213,10 +216,29 @@ class DurableContinuationService:
             else:
                 self._admitted_roots.pop(root_id, None)
 
-    def _start(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
+    def _start(self, child_id: str, context: OperationContext, runner: Runner, *,
+               resuming: bool = False) -> SubagentHandle:
         record = self._require(child_id)
-        updated = self._repository.update(child_id, status=SubagentStatus.RUNNING, recovery_required=False)
-        if updated is None:
+        if resuming and (
+            not record.recovery_required
+            or record.status not in {SubagentStatus.FAILED, SubagentStatus.TIMED_OUT}
+        ):
+            raise InvalidSubagentRequest("child session is not recoverable")
+        if record.cancellation_requested:
+            raise InvalidSubagentRequest("cancelled child session cannot be started")
+        if resuming:
+            updated = self._repository.claim_resume(child_id, expected_revision=record.revision)
+        else:
+            updated = self._repository.update(
+                child_id, status=SubagentStatus.RUNNING,
+                expected_revision=record.revision, recovery_required=False,
+            )
+        if (
+            updated is None or updated.status is not SubagentStatus.RUNNING
+            or updated.revision != record.revision + 1
+            or updated.recovery_required or updated.cancellation_requested
+            or updated.result is not None
+        ):
             raise RuntimeError("child session state changed before launch")
         control = DurableCancellation(self._repository, child_id)
         with self._lock:
@@ -245,6 +267,8 @@ class DurableContinuationService:
         try:
             if context.expired:
                 raise TimeoutError("operation deadline expired")
+            if control.cancelled or context.cancellation.cancelled:
+                raise _Cancelled(control.reason)
             output = runner(state, save, control)
             if control.cancelled or context.cancellation.cancelled:
                 raise _Cancelled(control.reason)
@@ -272,12 +296,7 @@ class DurableContinuationService:
             self._release(record.lineage.chain[0])
 
     def resume(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
-        record = self._require(child_id)
-        if not record.recovery_required:
-            raise InvalidSubagentRequest("child session is not recoverable")
-        if record.cancellation_requested:
-            raise InvalidSubagentRequest("cancelled child session cannot be resumed")
-        return self._start(child_id, context, runner)
+        return self._start(child_id, context, runner, resuming=True)
 
     def recover_after_restart(self) -> tuple[str, ...]:
         recovered: list[str] = []
