@@ -255,6 +255,41 @@
       "tool": "admin_whoami"
     },
     {
+      "aliases": [],
+      "category": "system",
+      "name": "/agent_lane",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "action",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "payload",
+          "required": true,
+          "type": "obj"
+        },
+        {
+          "default": "",
+          "name": "parent_session_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "parent_token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Control independent agent conversations with scoped parent authority.",
+      "tool": "agent_lane"
+    },
+    {
       "aliases": [
         "/cancelagents"
       ],
@@ -8925,6 +8960,12 @@
     },
     {
       "default": null,
+      "field": "deployment",
+      "section": "root",
+      "type": "DeploymentConfig"
+    },
+    {
+      "default": null,
       "field": "features",
       "section": "root",
       "type": "FeaturesConfig"
@@ -9048,6 +9089,30 @@
       "field": "queue_depth",
       "section": "capacity",
       "type": "int"
+    },
+    {
+      "default": "single-host",
+      "field": "profile",
+      "section": "deployment",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "preferred_primary",
+      "section": "deployment",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "automatic_takeover",
+      "section": "deployment",
+      "type": "bool"
+    },
+    {
+      "default": false,
+      "field": "automatic_failback",
+      "section": "deployment",
+      "type": "bool"
     },
     {
       "default": false,
@@ -9349,12 +9414,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 314,
-    "configuration": 76,
+    "commands": 315,
+    "configuration": 81,
     "events": 43,
-    "tools": 211
+    "tools": 212
   },
-  "digest": "fbf5ece369d8efdfceb74ed5cacdf6841a8a8d30ce94b891f5230fdbc004d685",
+  "digest": "31665e180dbf93c549533ba9aa1a89d7b13eac58bf9441d740cedb20d1551ea1",
   "events": [
     {
       "name": "session.started",
@@ -9825,10 +9890,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "04be65a053012ceb53a80d7528f0b1c44fd8e3c84f5c4749296e6baf92ae8c3f",
+    "server.py": "a3087913d4cda487808a666458a71f3d9d1cfbede2efb69d5ff9fb815166cb84",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "66eab0b6a4ccb7981242d73ed7eba2198f5cb4f8fbd0d621935e6a73c678ef50"
+    "sonder_runtime/platform/config.py": "8545fe1afd0ca40edb4f763c9bbb097a57c7de6395276c4e912473e9ff296abb"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
@@ -10064,6 +10129,39 @@
           "prompt"
         ],
         "title": "agentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Control independent agent conversations with scoped parent authority.\n\n    Call open_parent with an empty payload first; retain its parent_session_id\n    and parent_token for subsequent commands. Never place the token in tasks,\n    messages or files. Actions also include rotate_parent and revoke_parent.\n    Other actions: spawn, list, inspect, send_message, wait, interrupt, resume,\n    cancel, reports and ack. Existing sessions cannot be claimed by name.\n    ",
+      "name": "agent_lane",
+      "parameters": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "default": "",
+            "title": "Parent Session Id",
+            "type": "string"
+          },
+          "parent_token": {
+            "default": "",
+            "title": "Parent Token",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "payload"
+        ],
+        "title": "agent_laneArguments",
         "type": "object"
       }
     },

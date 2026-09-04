@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 243,
+      "file_count": 247,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -90,6 +90,7 @@
         "sonder_runtime/adapters/content_services.py",
         "sonder_runtime/adapters/context_formatting.py",
         "sonder_runtime/adapters/context_planning.py",
+        "sonder_runtime/adapters/conversational_subagents.py",
         "sonder_runtime/adapters/embedding_cache.py",
         "sonder_runtime/adapters/embeddings.py",
         "sonder_runtime/adapters/eval_history_reader.py",
@@ -190,6 +191,7 @@
         "sonder_runtime/adapters/optional_slash_menu_impl.py",
         "sonder_runtime/adapters/pdf_risk.py",
         "sonder_runtime/adapters/persistence/__init__.py",
+        "sonder_runtime/adapters/persistence/agent_lanes.py",
         "sonder_runtime/adapters/persistence/autopilot_repository.py",
         "sonder_runtime/adapters/persistence/autopilot_store.py",
         "sonder_runtime/adapters/persistence/checkpoint_store.py",
@@ -199,6 +201,7 @@
         "sonder_runtime/adapters/persistence/fanout_store.py",
         "sonder_runtime/adapters/persistence/fleet_registry.py",
         "sonder_runtime/adapters/persistence/fleet_store.py",
+        "sonder_runtime/adapters/persistence/lane_owner.py",
         "sonder_runtime/adapters/persistence/migration_rehearsal.py",
         "sonder_runtime/adapters/persistence/migrations.py",
         "sonder_runtime/adapters/persistence/operations_store.py",
@@ -222,6 +225,7 @@
         "sonder_runtime/adapters/persistence/sqlite/selfmod.py",
         "sonder_runtime/adapters/persistence/sqlite/training.py",
         "sonder_runtime/adapters/persistence/sqlite/updates.py",
+        "sonder_runtime/adapters/persistence/sqlite/worker_capacity.py",
         "sonder_runtime/adapters/persistence/sqlite/workflow_checkpoints.py",
         "sonder_runtime/adapters/persistence/sqlite_factory.py",
         "sonder_runtime/adapters/persistence/tool_audit.py",
@@ -292,7 +296,7 @@
       ]
     },
     {
-      "file_count": 270,
+      "file_count": 273,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -302,6 +306,7 @@
         "sonder_runtime/application/agents/__init__.py",
         "sonder_runtime/application/agents/delegation_service.py",
         "sonder_runtime/application/agents/durable_lineage.py",
+        "sonder_runtime/application/agents/interactive_lanes.py",
         "sonder_runtime/application/agents/lineage_delegation.py",
         "sonder_runtime/application/agents/presets.py",
         "sonder_runtime/application/agents/workflow_integration.py",
@@ -328,6 +333,7 @@
         "sonder_runtime/application/compaction/session_service.py",
         "sonder_runtime/application/compute_fabric/__init__.py",
         "sonder_runtime/application/compute_fabric/artifact_spool.py",
+        "sonder_runtime/application/compute_fabric/capacity.py",
         "sonder_runtime/application/compute_fabric/jobs.py",
         "sonder_runtime/application/compute_fabric/refresh.py",
         "sonder_runtime/application/compute_fabric/registry.py",
@@ -519,6 +525,7 @@
         "sonder_runtime/application/session/fork.py",
         "sonder_runtime/application/session/http_facade.py",
         "sonder_runtime/application/session/projections.py",
+        "sonder_runtime/application/session/provider_attempts.py",
         "sonder_runtime/application/session/query_export.py",
         "sonder_runtime/application/session/repair.py",
         "sonder_runtime/application/session/replay.py",
@@ -591,7 +598,7 @@
       ]
     },
     {
-      "file_count": 166,
+      "file_count": 168,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -655,6 +662,7 @@
         "sonder_runtime/domain/control_history.py",
         "sonder_runtime/domain/control_timeout.py",
         "sonder_runtime/domain/deadline_scheduler.py",
+        "sonder_runtime/domain/deployment_topology.py",
         "sonder_runtime/domain/distillation_policy.py",
         "sonder_runtime/domain/doctor_result.py",
         "sonder_runtime/domain/doctor_specs.py",
@@ -759,16 +767,19 @@
         "sonder_runtime/domain/updates/models.py",
         "sonder_runtime/domain/updates/runtime_update_formatting.py",
         "sonder_runtime/domain/updates/stash_formatting.py",
-        "sonder_runtime/domain/work_stealing.py"
+        "sonder_runtime/domain/work_stealing.py",
+        "sonder_runtime/domain/worker_capacity.py"
       ]
     },
     {
-      "file_count": 38,
+      "file_count": 41,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
         "sonder_runtime/interfaces/a2a/__init__.py",
         "sonder_runtime/interfaces/a2a/jsonrpc.py",
+        "sonder_runtime/interfaces/agent_lane_entrypoint.py",
+        "sonder_runtime/interfaces/agent_lanes.py",
         "sonder_runtime/interfaces/cli/__init__.py",
         "sonder_runtime/interfaces/cli/commands.py",
         "sonder_runtime/interfaces/cli/extensions.py",
@@ -780,6 +791,7 @@
         "sonder_runtime/interfaces/http/facades/__init__.py",
         "sonder_runtime/interfaces/http/facades/a2a.py",
         "sonder_runtime/interfaces/http/facades/a2a_jsonrpc.py",
+        "sonder_runtime/interfaces/http/facades/agent_lanes.py",
         "sonder_runtime/interfaces/http/facades/compute_fabric.py",
         "sonder_runtime/interfaces/http/facades/control_plane.py",
         "sonder_runtime/interfaces/http/facades/extensions.py",
