@@ -165,6 +165,14 @@ class ComputeConfig:
 
 
 @dataclass(frozen=True)
+class DeploymentConfig:
+    profile: str = "single-host"
+    preferred_primary: str = ""
+    automatic_takeover: bool = False
+    automatic_failback: bool = False
+
+
+@dataclass(frozen=True)
 class FeaturesConfig:
     cloud: bool = False
     web: bool = False
@@ -231,6 +239,7 @@ class SonderConfig:
     state: StateConfig = field(default_factory=StateConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
+    deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     capacity: CapacityConfig = field(default_factory=CapacityConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -247,6 +256,7 @@ class SonderConfig:
         }
         for section in (
             "server",
+            "deployment",
             "state",
             "ollama",
             "features",
@@ -366,6 +376,7 @@ def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
 
 _SECTION_TYPES = {
     "server": ServerConfig,
+    "deployment": DeploymentConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -783,7 +794,43 @@ def _apply_environment(
     )
 
 
+def deployment_errors(config: SonderConfig) -> list[str]:
+    """Validate only implemented topology promises, including typed startup."""
+    deployment = config.deployment
+    errors: list[str] = []
+    if deployment.profile not in ("single-host", "pooled-pair"):
+        errors.append(
+            "[deployment].profile must be single-host or pooled-pair; "
+            "HA/quorum provider integration is not available"
+        )
+    members = (config.compute.node_id, *(node.node_id for node in config.compute.nodes))
+    if deployment.profile == "pooled-pair" and (len(members) != 2 or len(set(members)) != 2):
+        errors.append("[deployment].pooled-pair requires one local node and exactly one distinct configured compute peer")
+    if not isinstance(deployment.preferred_primary, str) or (
+        deployment.preferred_primary and deployment.preferred_primary not in members
+    ):
+        errors.append("[deployment].preferred_primary must name a configured member")
+    for setting in ("automatic_takeover", "automatic_failback"):
+        value = getattr(deployment, setting)
+        if not isinstance(value, bool):
+            errors.append(f"[deployment].{setting} must be a boolean")
+        elif value:
+            errors.append(
+                f"[deployment].{setting} is unavailable: independent old-owner fencing, "
+                "acknowledged durable-state replication, and worker ownership-epoch enforcement "
+                "are not integrated"
+            )
+    return errors
+
+
+def validate_deployment(config: SonderConfig) -> None:
+    errors = deployment_errors(config)
+    if errors:
+        raise ConfigError(errors)
+
+
 def _validate(config: SonderConfig, errors: list[str]) -> None:
+    errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
             f"unsupported configuration schema_version {config.schema_version}"

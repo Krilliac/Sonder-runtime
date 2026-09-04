@@ -42,6 +42,14 @@ allow_remote = false
 startup_timeout_seconds = 60
 request_timeout_seconds = 300
 
+[deployment]
+# Pooling computes on another PC; it does not replicate control state or elect owners.
+profile = "single-host" # or "pooled-pair" with exactly one configured compute peer
+preferred_primary = "" # optional configured member; preference grants no authority
+# True is rejected until independent fencing, acknowledged replication and epochs exist.
+automatic_takeover = false
+automatic_failback = false
+
 [compute]
 # Private-node compute is a separate consent lane from remote Ollama and cloud.
 # See docs/runbooks/compute-fabric.md before adding [[compute.nodes]] or

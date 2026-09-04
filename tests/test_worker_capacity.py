@@ -226,9 +226,10 @@ except CapacityExceeded:
     assert results.count('admitted') == 1
     assert results.count('occupied') == 3
 
-def test_production_composition_measures_and_enforces_default_exclusive_admission(tmp_path, monkeypatch):
+@pytest.mark.parametrize("deployment_profile", ["single-host", "pooled-pair"])
+def test_production_composition_measures_and_enforces_default_exclusive_admission(tmp_path, monkeypatch, deployment_profile):
     from sonder_runtime.bootstrap import app as bootstrap
-    from sonder_runtime.platform.config import SonderConfig, ComputeConfig, ComputeJobConfig
+    from sonder_runtime.platform.config import SonderConfig, ComputeConfig, ComputeJobConfig, ComputeNodeConfig, DeploymentConfig
     from sonder_runtime.adapters.compute_fabric.local_snapshot import LocalComputeSnapshotSource
     from sonder_runtime.domain.compute_fabric import NodeSnapshot, NodeResources, WorkloadKind
     from sonder_runtime.application.compute_fabric.jobs import ComputeJobWorker, RemoteJobEnvelope
@@ -243,8 +244,12 @@ def test_production_composition_measures_and_enforces_default_exclusive_admissio
     monkeypatch.setattr(bootstrap, 'SubprocessJobProvider', lambda registry, **kwargs:
         SubprocessJobProvider(registry, **kwargs, memory_limiter=_ScopedLimiter(_ScopedToken()),
             launcher=lambda *a, **kw: _Process(), process_identity_resolver=lambda pid: "test-process"))
-    config = SonderConfig(compute=ComputeConfig(jobs=(ComputeJobConfig(job_id='test',
-        workload='test', program=sys.executable, workspace_mappings=('default',)),)))
+    peers = (ComputeNodeConfig(node_id='primary', origin='https://primary:11435', workloads=('test',)),) if deployment_profile == 'pooled-pair' else ()
+    config = SonderConfig(
+        deployment=DeploymentConfig(profile=deployment_profile, preferred_primary='primary' if peers else ''),
+        compute=ComputeConfig(nodes=peers, jobs=(ComputeJobConfig(job_id='test',
+            workload='test', program=sys.executable, workspace_mappings=('default',)),)),
+    )
     app = bootstrap.build_application(config=config)
     worker = app.compute_job_worker()
     def envelope(name):
