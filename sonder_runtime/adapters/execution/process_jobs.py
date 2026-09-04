@@ -23,6 +23,22 @@ from ..extensions.memory_limits import (
 )
 
 
+class _ProcessSlotLease:
+    """One acquired semaphore slot, returned at most once across cleanup races."""
+
+    def __init__(self, semaphore):
+        self._semaphore = semaphore
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self):
+        with self._lock:
+            if not self._released:
+                self._released = True
+                if self._semaphore is not None:
+                    self._semaphore.release()
+
+
 class SubprocessJobProvider:
     """Launch one argv process and route its lifecycle through durable jobs.
 
@@ -94,6 +110,7 @@ class SubprocessJobProvider:
             if max_concurrent_processes is not None and max_concurrent_processes >= 1
             else None
         )
+        self._process_slot_owners: dict[str, _ProcessSlotLease] = {}
         self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
@@ -103,6 +120,21 @@ class SubprocessJobProvider:
             raise RuntimeError(
                 f"tool process capacity exhausted ({self._max_concurrent_processes} concurrent)"
             )
+        lease = _ProcessSlotLease(self._process_slots)
+        try:
+            return self._start_reserved(request, lease)
+        except BaseException:
+            # Preparation/registration can fail before a process exists. The
+            # start frame owns the slot until registered process ownership is
+            # installed; the lease also tolerates cleanup racing this unwind.
+            with self._timer_lock:
+                if self._process_slot_owners.get(request.identity.job_id) is lease:
+                    self._process_slot_owners.pop(request.identity.job_id, None)
+                    self._processes.pop(request.identity.job_id, None)
+            lease.release()
+            raise
+
+    def _start_reserved(self, request, lease):
         environment = runtime_logging.child_environment() if request.inherit_environment else {}
         environment.update(request.environment)
         launch_options: dict[str, Any] = {
@@ -254,7 +286,9 @@ class SubprocessJobProvider:
                 and callable(resume_process)
             ):
                 resume_process(process)
-            self._processes[request.identity.job_id] = process
+            with self._timer_lock:
+                self._processes[request.identity.job_id] = process
+                self._process_slot_owners[request.identity.job_id] = lease
             self._limits[request.identity.job_id] = request.max_descendants
             if memory_token is not None:
                 self._memory_tokens[request.identity.job_id] = memory_token
@@ -390,12 +424,11 @@ class SubprocessJobProvider:
         )
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record(record)
-        had_process = self._processes.pop(job_id, None) is not None
+        self._processes.pop(job_id, None)
         self._limits.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
-        if had_process and self._process_slots is not None:
-            self._process_slots.release()
+        self._release_process_slot(job_id)
         if containment is None:
             self._release_memory_limit(job_id)
         return ProcessJobWait(record, exit_code)
@@ -735,14 +768,19 @@ class SubprocessJobProvider:
         return True
 
     def _forget_local_job(self, job_id: str) -> None:
-        had_process = self._processes.pop(job_id, None) is not None
+        self._processes.pop(job_id, None)
         self._limits.pop(job_id, None)
-        if had_process and self._process_slots is not None:
-            self._process_slots.release()
+        self._release_process_slot(job_id)
         self._unresolved_scopes.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
         self._release_memory_limit(job_id)
+
+    def _release_process_slot(self, job_id: str) -> None:
+        with self._timer_lock:
+            lease = self._process_slot_owners.pop(job_id, None)
+        if lease is not None:
+            lease.release()
 
     def _release_memory_limit(self, job_id: str) -> None:
         token = self._memory_tokens.pop(job_id, None)
