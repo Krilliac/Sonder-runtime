@@ -727,7 +727,14 @@ class _SystemScreenState extends State<SystemScreen>
             _ExtensionRegistrySection(key: _systemExtensionsKey, status: _extensionRegistry!),
             const SizedBox(height: 12),
           ],
-          if (localInfo != null) ...[
+          if (!LocalManager.canRunLocalTools) ...[
+            const WorkspaceNotice(
+              message: 'This client cannot inspect local files or launch local processes. '
+                  'Use the desktop app for local setup. Authenticated host-launcher controls remain available when configured in Settings.',
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (localInfo != null && LocalManager.canRunLocalTools) ...[
             _Section(
               title: 'Install',
               child: Column(
@@ -1386,8 +1393,7 @@ class _SystemScreenState extends State<SystemScreen>
             'Desktop builds look for a bundled local-system folder next to the app. '
             'A sealed engine payload can include Python, Ollama, and models for offline setup; '
             'otherwise setup uses installed runtimes and may download missing components. '
-            'Runtime memory is shared through '
-            '${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. '
+            '${LocalManager.canRunLocalTools ? 'Runtime memory is shared through ${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. ' : 'This client cannot inspect the host memory directory. '}'
             'Android, iOS, and other client-only builds use the authenticated '
             'host launcher to start or stop the configured computer without '
             'exposing a remote shell.',
