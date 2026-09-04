@@ -8,17 +8,20 @@ import 'local_manager.dart';
 import 'models.dart';
 import 'settings.dart';
 import 'theme.dart';
+import 'workspace_ui.dart';
 
 class SystemScreen extends StatefulWidget {
   final Settings settings;
   final SystemInfo? initialInfo;
   final bool liveUpdates;
+  final ValueChanged<WorkspaceDestination>? onNavigate;
 
   const SystemScreen({
     super.key,
     required this.settings,
     this.initialInfo,
     this.liveUpdates = true,
+    this.onNavigate,
   });
 
   @override
@@ -666,6 +669,8 @@ class _SystemScreenState extends State<SystemScreen>
         ),
         title: const Text('System'),
         actions: [
+          if (widget.onNavigate != null)
+            WorkspaceMenu(current: WorkspaceDestination.runtime, onSelected: widget.onNavigate!),
           // No Tooltip wrapper here. The button already carries a visible
           // "Chat" label, so a hover tooltip only added a floating box in the
           // top-right corner, where it collided with the window's own Close
@@ -2957,7 +2962,9 @@ class _SystemRail extends StatelessWidget {
       minExtendedWidth: 220,
       selectedIndex: null,
       onDestinationSelected: (index) => onSelect(destinations[index].key),
-      labelType: NavigationRailLabelType.all,
+      labelType: MediaQuery.sizeOf(context).width >= 1200
+          ? NavigationRailLabelType.none
+          : NavigationRailLabelType.all,
       destinations: [
         for (final destination in destinations)
           NavigationRailDestination(
