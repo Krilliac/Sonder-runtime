@@ -725,6 +725,7 @@ def build_application(
             compute_remote_snapshot_source,
             now=lambda: datetime.now(timezone.utc),
             max_workers=8,
+            refresh_after=registry.snapshot_ttl / 2,
         )
 
     def get_compute_service() -> ComputeFabricService:
