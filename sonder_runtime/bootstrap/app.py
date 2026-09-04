@@ -325,6 +325,8 @@ def build_application(
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
+        from ..platform.config import validate_deployment
+        validate_deployment(config)
         profile = config.profile
         logger.info(f"config applied, effective profile={profile!r}")
         logger.debug(f"config supplied, effective profile={profile!r}, home={config.state.home!r}")

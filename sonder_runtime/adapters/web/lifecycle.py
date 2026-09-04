@@ -30,7 +30,8 @@ from collections import deque
 from collections.abc import Callable, Iterable
 
 from sonder_runtime.platform import version as sonder_version
-from sonder_runtime.platform.config import SonderConfig
+from sonder_runtime.platform.config import SonderConfig, validate_deployment
+from sonder_runtime.domain.deployment_topology import DeploymentStatus
 from sonder_runtime.application.lifecycle import process_state_number
 from sonder_runtime.application.context import OperationContext, local_owner_context
 from sonder_runtime.application.operations.admission_gate import (
@@ -344,7 +345,9 @@ class RuntimeLifecycle:
         startup_reconciler: Callable[[], int] | None = None,
         graceful_drain_coordinator: GracefulDrainCoordinator | None = None,
         graceful_drain_observations: Callable[[], Iterable[StartupObservation]] | None = None,
+        deployment_status: DeploymentStatus | None = None,
     ) -> None:
+        self._deployment_status = deployment_status or DeploymentStatus()
         def _env_int(name: str, default: int) -> int:
             try:
                 return max(1, int(os.environ.get(name, default)))
@@ -1045,6 +1048,7 @@ class RuntimeLifecycle:
         snapshot = self.tracker.snapshot()
         payload = snapshot.as_dict()
         payload["build"] = self._build.as_dict()
+        payload["deployment"] = self._deployment_status.as_dict()
         payload["draining"] = self.coordinator.draining
         payload["active_mutations"] = self.coordinator.active_mutations
         payload["operations_store"] = (
@@ -1134,6 +1138,8 @@ def configure(config: SonderConfig | None) -> None:
     global _configured_config
     if config is not None and not isinstance(config, SonderConfig):
         raise TypeError("config must be a SonderConfig when provided")
+    if config is not None:
+        validate_deployment(config)
     with _instance_lock:
         if _configured_config is config:
             return
@@ -1157,6 +1163,13 @@ def get() -> RuntimeLifecycle:
             else:
                 startup_timeout = config.ollama.startup_timeout_seconds
                 _instance = RuntimeLifecycle(
+                    deployment_status=DeploymentStatus(
+                        profile=config.deployment.profile,
+                        local_node=config.compute.node_id,
+                        peers=tuple(node.node_id for node in config.compute.nodes),
+                        preferred_primary=config.deployment.preferred_primary,
+                        allow_remote_compute=config.compute.allow_remote,
+                    ),
                     max_concurrent_requests=config.capacity.http_requests,
                     queue_depth=config.capacity.queue_depth,
                     metrics_enabled=config.observability.metrics_enabled,

@@ -4,6 +4,9 @@ Sonder can place one bounded, cataloged job on the local host or an explicitly
 configured private compute node. It is an orchestration plane, not a remote
 shell, shared-memory layer, hypervisor, storage server, or inference gateway.
 
+For deployment profiles and control-state ownership capabilities, see
+[deployment topology](deployment-topology.md).
+
 ## Consent boundaries
 
 The three networked execution lanes are independent:
