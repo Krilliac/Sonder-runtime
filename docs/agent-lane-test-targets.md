@@ -20,9 +20,13 @@ when the lane service is first accessed.
 }
 ```
 
-The executable must exist at an absolute path outside the writable workspace.
+The executable must exist at an absolute path outside every configured
+model-writable root. The catalog must also be outside every such root, including
+roots used by other lanes or ordinary file tools. These checks run at composition
+and again during execution.
 The workspace must exist and be absolute. A catalog contains at most 16 targets
 and 64 KiB. Limits are at most 600 seconds, 16 descendants, and 4 GiB per target.
+The serialized command snapshot is bounded to 4 KiB.
 Use dedicated test commands; do not put secrets in command arguments.
 
 A model can request only
@@ -39,6 +43,9 @@ policy. With no catalog, an empty catalog, or without an explicit tool grant,
 `compose_lane_test_tools` with a validated `LaneTestCatalog` and their existing
 durable process provider; custom lane services must explicitly include
 `run_tests` in their allowed tool subset.
+Approval receives the host-resolved argv, canonical workspace and command/catalog
+digests. Durable job metadata retains the bounded command snapshot and digests;
+receipts retain digests and canonical workspace.
 
 This is **host execution, not a filesystem sandbox**. Repository tests are code
 and execute with the runtime host's operating-system rights. A workspace grant
@@ -46,8 +53,15 @@ constrains typed file operations and the selected working directory; it does not
 contain filesystem or network access performed by test code. Enable this
 feature only where the operator has authorized executing that repository.
 
-Commands use the existing durable process provider, its restricted environment
-construction, resource controls, and process-tree cleanup. Lane cancellation,
+Commands use the existing durable process provider with a replacement environment,
+required native containment, resource controls, and process-tree cleanup. If
+strong native containment is unavailable, no process starts. The environment
+contains only a constructed executable/system PATH, system launch directory on
+Windows, temporary directories, and fixed locale/Python encoding settings.
+Ambient credentials, proxy/SSH context, Python search paths, and runtime controls
+are not inherited. Catalog-defined environment variables are not supported.
+This environment reduction does not provide filesystem or network isolation.
+Lane cancellation,
 original grant expiry, parent-grant revocation, and catalog changes cancel active
 tests. Catalog contents are hashed at composition and checked before and during
 execution; changing the catalog requires host recomposition. Lane resumes retain

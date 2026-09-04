@@ -1,6 +1,6 @@
 """Supported opt-in composition for host-configured lane test targets."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from ..adapters.lane_tests import (
     LaneTestCatalog,
     LaneTestExecutor,
@@ -28,6 +28,32 @@ class LaneTestOperationContext(OperationContext):
 def _test_context(request):
     original = default_tool_context(request)
     return LaneTestOperationContext(**vars(original), session_id=request.session_id)
+
+
+class CatalogPermissionEvaluator(PermissionModesEvaluator):
+    """Bind operator approval to the host-resolved command, not its short alias."""
+
+    def __init__(self, catalog):
+        super().__init__(policy_names={**POLICY_NAMES, "run_tests": "workspace_run"})
+        self.catalog = catalog
+
+    def authorize_request(self, request):
+        if request.tool_name == "run_tests":
+            self.catalog.require_current()
+            target = self.catalog.targets[request.arguments["target"]]
+            request = replace(
+                request,
+                arguments={
+                    **request.arguments,
+                    "configured_target": {
+                        "argv": list(target.argv),
+                        "argv_digest": target.argv_digest,
+                        "workspace_root": str(target.workspace_root),
+                        "catalog_digest": self.catalog.digest,
+                    },
+                },
+            )
+        return super().authorize_request(request)
 
 
 def compose_lane_test_tools(base, catalog, process_provider, *, audit):
@@ -60,11 +86,7 @@ def compose_lane_test_tools(base, catalog, process_provider, *, audit):
         registry,
         LaneTestExecutor(catalog, process_provider),
         policy=policy,
-        permissions=(
-            PermissionModesEvaluator(
-                policy_names={**POLICY_NAMES, "run_tests": "workspace_run"}
-            ),
-        ),
+        permissions=(CatalogPermissionEvaluator(catalog),),
         redactor=PatternOutputRedactor(Redactor().redact),
         receipts=ReceiptStore(),
         audit=audit,
