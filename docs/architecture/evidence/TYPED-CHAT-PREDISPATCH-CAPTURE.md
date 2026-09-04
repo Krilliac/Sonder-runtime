@@ -65,10 +65,9 @@ includes second-connection visibility during gateway execution, actual
 `os._exit(91)` in a child process, normal-exit control, production bootstrap,
 failure storage, identity matching, and unchanged transcript semantics. The new
 ordering, correlation, and legacy-tool regressions were observed failing before
-their respective fixes. The full repository suite remains a separate integration
-gate; this document does not claim a full-suite result.
+their respective fixes. Later integration and complete-suite results follow below.
 
-The final diff-selected set, run with `scripts/profile_tests.py --since` the base
+The initial diff-selected set, run with `scripts/profile_tests.py --since` the base
 above, passed **207 tests**. The selector is an iteration aid, not proof that all
 changed behavior is covered. Independent task and whole-change reviews found no
 remaining blocking issue after the legacy-tool fix.
@@ -82,13 +81,25 @@ six-event stream gives **84 passing focused tests** including that fixture.
 Rerunning all 57 original failure nodes on unchanged base and the corrected tree
 gave **49 failed, 8 passed on both**, with the same failed node IDs. The 49 include
 Windows SQLite cleanup, shell/process and path-case failures. Seven other initial
-failures passed in both targeted reruns; larger-suite ordering remains under
-investigation. This comparison is not a green full-suite claim.
+failures passed in both targeted reruns, indicating larger-suite ordering or
+environment sensitivity. This comparison is not a green full-suite claim.
+
+At runtime/test revision `59d88deda2cb5c5172cb17abdf3346f275122fdb`, the combined
+diff-selected suite passed **318 tests**, including a separate child-resume state
+correction. Its focused child suite passed **30 tests**. The final complete run
+(`python -m pytest -q --tb=short -n 2 --dist loadfile`) reported **12,493 passed,
+53 failed, 59 skipped**, with four subtests passed. An unchanged-base complete
+run with the same command/environment reported **12,412 passed, 63 failed,
+59 skipped**, with four subtests passed. JUnit failed-node comparison found
+**zero changed-only failures**: all 53 final failures also failed on baseline.
+These runs expose existing Windows and order-sensitive failures; the difference
+in counts is not evidence that this change fixed unrelated tests. Neither full
+suite is green, and remote CI remains a separate gate.
 
 Architecture, evidence-ledger, error-signal, doc-link and history-privacy gates
 passed after the change. Both offline golden-evaluation lanes passed during
 validation. History privacy retains seven known baseline debts; passing means
-no new debt. Complete-suite/CI validation remains a separate integration gate.
+no new debt. This does not establish a clean history or remote CI success.
 
 ## Remaining scope
 
