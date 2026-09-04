@@ -147,7 +147,7 @@ class TestCompositionService(unittest.TestCase):
         self._paths.__exit__(None, None, None)
 
     def test_mission_start_creates_goal(self):
-        from sonder_runtime.application import composition
+        import composition
         result = composition.mission_start("test objective", "criterion A; criterion B")
         goal = result["goal"]
         self.assertIsNotNone(goal)
@@ -156,7 +156,7 @@ class TestCompositionService(unittest.TestCase):
         self.assertIn("criterion A", goal.get("criteria", []))
 
     def test_mission_start_with_plan(self):
-        from sonder_runtime.application import composition
+        import composition
         result = composition.mission_start(
             "build feature", "write tests; implement code; review",
             plan=True,
@@ -165,13 +165,13 @@ class TestCompositionService(unittest.TestCase):
         self.assertEqual(result["plan"]["step_count"], 3)
 
     def test_mission_start_without_criteria_no_plan(self):
-        from sonder_runtime.application import composition
+        import composition
         result = composition.mission_start("simple goal", plan=True)
         plan = result.get("plan")
         self.assertTrue(plan is None or plan.get("error"))
 
     def test_mission_status_shows_goal(self):
-        from sonder_runtime.application import composition
+        import composition
         composition.mission_start("my objective", "a; b")
         status = composition.mission_status()
         self.assertIsNotNone(status["goal"])
@@ -179,7 +179,7 @@ class TestCompositionService(unittest.TestCase):
 
     def test_goal_to_plan_decomposes_criteria(self):
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         goal = goal_store.set_goal("fix all bugs", "lint; test; deploy")
         plan = composition.goal_to_plan(goal)
         self.assertEqual(plan["step_count"], 3)
@@ -189,7 +189,7 @@ class TestCompositionService(unittest.TestCase):
 
     def test_goal_to_autopilot_creates_binding(self):
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
 
         goal = goal_store.set_goal("automate this", "criterion 1; criterion 2")
@@ -207,7 +207,7 @@ class TestCompositionService(unittest.TestCase):
 
     def test_on_autopilot_terminal_updates_goal(self):
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
 
         goal = goal_store.set_goal("test autopilot bridge")
@@ -226,7 +226,7 @@ class TestCompositionService(unittest.TestCase):
 
     def test_on_autopilot_terminal_failure_notes(self):
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
 
         goal = goal_store.set_goal("failing objective")
@@ -243,7 +243,7 @@ class TestCompositionService(unittest.TestCase):
         self.assertTrue(any("autopilot failed" in n.get("text", "") for n in notes))
 
     def test_plan_to_workflow(self):
-        from sonder_runtime.application import composition
+        import composition
         steps = [
             {"title": "write tests"},
             {"title": "implement feature"},
@@ -256,7 +256,7 @@ class TestCompositionService(unittest.TestCase):
 
     def test_on_workflow_complete_notes_goal(self):
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
 
         goal = goal_store.set_goal("workflow objective")
@@ -271,7 +271,7 @@ class TestCompositionService(unittest.TestCase):
         self.assertTrue(any("workflow" in n.get("text", "") for n in notes))
 
     def test_selfmod_observations_to_goals(self):
-        from sonder_runtime.application import composition
+        import composition
         observations = [
             {"description": "refactor the loop module", "severity": "low"},
             {"description": "fix import cycle", "files": ["a.py", "b.py"]},
@@ -282,7 +282,7 @@ class TestCompositionService(unittest.TestCase):
         self.assertEqual(result["skipped"], 1)
 
     def test_training_to_campaign(self):
-        from sonder_runtime.application import composition
+        import composition
         task = {
             "id": "train-001",
             "prompt": "Write fizzbuzz",
@@ -297,7 +297,7 @@ class TestCompositionService(unittest.TestCase):
 
     def test_fleet_evidence_to_goal(self):
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         goal = goal_store.set_goal(
             "ship feature",
             "all tests pass; docs updated; reviewed",
@@ -312,7 +312,7 @@ class TestCompositionService(unittest.TestCase):
         self.assertEqual(len(result["unmatched"]), 1)
 
     def test_preferences_to_emotion_adjustments(self):
-        from sonder_runtime.application import composition
+        import composition
         lessons = [
             {"text": "user prefers concise responses"},
             {"text": "be more friendly and warm"},
@@ -326,7 +326,7 @@ class TestCompositionService(unittest.TestCase):
         self.assertFalse(result["applied"])
 
     def test_autopilot_outcomes_to_memory(self):
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
 
         run = {
@@ -345,7 +345,7 @@ class TestCompositionService(unittest.TestCase):
         self.assertEqual(len(bindings), 2)
 
     def test_composition_status(self):
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
         composition_store.bind("goal", "g-1", "autopilot", "a-1")
         composition_store.bind("goal", "g-1", "task", "t-1", kind="decomposes")
@@ -355,12 +355,12 @@ class TestCompositionService(unittest.TestCase):
         self.assertIn("decomposes", status["by_kind"])
 
     def test_format_mission_status_no_goal(self):
-        from sonder_runtime.application import composition
+        import composition
         text = composition.format_mission_status({"goal": None})
         self.assertIn("no active mission", text)
 
     def test_format_mission_status_with_data(self):
-        from sonder_runtime.application import composition
+        import composition
         data = {
             "goal": {
                 "id": "g-test", "status": "active",
@@ -503,7 +503,7 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_full_mission_lifecycle(self):
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
 
         result = composition.mission_start(
@@ -533,7 +533,7 @@ class TestEndToEnd(unittest.TestCase):
     def test_goal_autopilot_workflow_chain(self):
         """Goal -> Autopilot -> Terminal -> Goal note + Memory."""
         import goal_store
-        from sonder_runtime.application import composition
+        import composition
         from sonder_runtime.adapters.persistence import composition_store
 
         goal = goal_store.set_goal("chain test", "step A; step B")
@@ -579,7 +579,7 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_selfmod_training_persona_bridges(self):
         """SelfMod -> Goals, Training -> Campaign, Preferences -> Emotion."""
-        from sonder_runtime.application import composition
+        import composition
 
         sm = composition.selfmod_observations_to_goals([
             {"description": "dead code in loop.py", "severity": "low"},

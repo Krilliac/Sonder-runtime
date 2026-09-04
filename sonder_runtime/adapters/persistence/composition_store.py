@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-import sonder_paths
+from sonder_runtime.platform import paths as sonder_paths
 
 _LOCAL = threading.local()
 _SCHEMA = """

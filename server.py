@@ -1137,7 +1137,7 @@ from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
 from sonder_runtime.adapters.learning_tier_formatting import (
     format_learning_tiers,
 )
-from sonder_runtime.application import composition as _composition
+import composition as _composition
 _CAMPAIGN_LEARN_LOCK = threading.Lock()
 _AUTOPILOT_THREADS_LOCK = threading.RLock()
 _AUTOPILOT_THREADS = {}
