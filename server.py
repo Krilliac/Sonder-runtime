@@ -2348,7 +2348,7 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
             import goal_store as _gs
             active = _gs.get_active()
             if not active:
-                return "ERROR: --goal requires an active goal (use /goal set first)."
+                return "--goal requires an active goal (use /goal set first)."
             objective = rest or active["objective"]
             ap_result = _composition.goal_to_autopilot(
                 active, policy=policy, allow_web=allow_web,
@@ -2719,7 +2719,7 @@ def _goal_command(arg: str) -> str:
                     tokens = "--criteria " + tokens
                     break
                 else:
-                    return "ERROR: unknown goal option '%s'." % option
+                    return "unknown goal option '%s'." % option
                 tokens = tokens.strip()
             objective, _, criteria = tokens.partition("--criteria")
             if not objective.strip():
@@ -2829,7 +2829,7 @@ def _mission_command(arg: str, project: str = "") -> str:
                 elif option == "--no-web":
                     allow_web = False
                 else:
-                    return "ERROR: unknown mission option '%s'." % option
+                    return "unknown mission option '%s'." % option
                 rest = remaining.strip()
             objective, _, criteria = rest.partition("--criteria")
             if not objective.strip():
@@ -2889,7 +2889,7 @@ def _mission_command(arg: str, project: str = "") -> str:
             "<objective> [--criteria ...]|done [reason]|abandon [reason]|bindings]"
         )
     except Exception as exc:
-        return "ERROR: %s" % exc
+        return "mission failed: %s" % exc
 
 
 # The ``/selfmod`` actions that write the *live* source tree, as opposed to the
