@@ -268,7 +268,7 @@ class SubprocessJobProvider:
             else:
                 containment = None
             cleanup_complete = containment is None or containment.complete
-            if memory_token is not None:
+            if memory_token is not None and cleanup_complete:
                 try:
                     memory_token.close()
                 except Exception:
