@@ -161,6 +161,7 @@ import autopilot_controller
 from sonder_runtime.adapters.persistence import fanout_store
 import fanout_prompt_vault
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.session.provider_attempts import dispatch_provider
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
@@ -4641,14 +4642,21 @@ def _post(
             f"{origin}{path}", data=data,
             headers={"Content-Type": "application/json"},
         )
-        with ollama_endpoint.open_url(req, timeout=remaining) as resp:
-            raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
-            if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
-                raise ModelCallError(
-                    "protocol",
-                    "Ollama response exceeded the 16 MiB safety limit",
-                )
-            return json.loads(raw.decode("utf-8"))
+        def transport():
+            with ollama_endpoint.open_url(req, timeout=remaining) as resp:
+                raw = resp.read(_MAX_MODEL_RESPONSE_BYTES + 1)
+                if len(raw) > _MAX_MODEL_RESPONSE_BYTES:
+                    raise ModelCallError(
+                        "protocol",
+                        "Ollama response exceeded the 16 MiB safety limit",
+                    )
+                return json.loads(raw.decode("utf-8"))
+
+        # This callback runs once per selected pool worker, inside all payload
+        # transformations and local retries. Metadata probes are not inference.
+        if path in {"/api/chat", "/api/generate"}:
+            return dispatch_provider("ollama", path, json.loads(data), transport)
+        return transport()
 
     if local_only or not OLLAMA_POOL.enabled:
         return send(BASE)

@@ -20,6 +20,7 @@ from ...domain.common.errors import (
     InternalFailure, InvalidInput, MigrationRequired, NotFound, Unauthenticated,
 )
 from ..ports.model_gateway import ModelRequest
+from ...domain.common.ids import new_id
 from ..ports.session_repository import SessionEvent, SessionRepository
 from .durable_replay import DurableReplayResult, crash_safe_replay
 from .query_export import SessionExport, SessionQueryEngine
@@ -38,7 +39,7 @@ _FAILURE_CODES = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class CapturedRequest:
-    """Committed admission for one internal, single-attempt model request."""
+    """Committed admission for one logical model request, possibly retried."""
 
     session_id: str
     turn_id: str
@@ -299,6 +300,34 @@ class SessionCaptureService:
             {"turn_id": pending.turn_id, "request_id": pending.request_id,
              "error_code": error_code},
         )
+
+    def begin_provider_attempt(self, pending: CapturedRequest, *, provider: str,
+                               operation: str, payload: Mapping[str, object]) -> str:
+        """Append final dispatch evidence without creating transcript messages."""
+        attempt_id = new_id("attempt")
+        self._repository.append(pending.session_id, "provider.requested", {
+            "turn_id": pending.turn_id, "request_id": pending.request_id,
+            "attempt_id": attempt_id,
+            "provider": _required_text(provider, "provider"),
+            "operation": _required_text(operation, "operation"),
+            "payload": _json_copy(dict(payload), "provider payload"),
+        })
+        return attempt_id
+
+    def finish_provider_attempt(self, pending: CapturedRequest, attempt_id: str, *,
+                                response: object = None, error_code: str | None = None) -> SessionEvent:
+        """Persist observed response or failure, never acceptance or retry permission."""
+        payload = {"turn_id": pending.turn_id, "request_id": pending.request_id,
+                   "attempt_id": _required_text(attempt_id, "attempt_id")}
+        if error_code is not None:
+            if error_code not in _FAILURE_CODES:
+                raise InvalidInput("error_code must be a known domain error code")
+            payload["error_code"] = error_code
+            kind = "provider.failed"
+        else:
+            payload["response"] = _json_copy(response, "provider response")
+            kind = "provider.responded"
+        return self._repository.append(pending.session_id, kind, payload)
 
     def _finalize_capture(
         self, session_id: str, turn_id: str, appended: tuple[SessionEvent, ...],
