@@ -7,7 +7,7 @@ promotable.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import math
 from types import MappingProxyType
@@ -77,7 +77,7 @@ class PromotionPolicy:
     """Thresholds and safety requirements for one promotion area."""
 
     minimums: Mapping[str, float]
-    maximum_regressions: Mapping[str, float] = MappingProxyType({})
+    maximum_regressions: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
     required_provenance: tuple[str, ...] = ()
     require_holdout: bool = True
     require_rollback: bool = True
