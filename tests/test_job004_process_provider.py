@@ -35,7 +35,7 @@ def _request(job_id: str = "job-process") -> ProcessJobRequest:
     )
 
 
-@pytest.mark.parametrize("failure", ["prepare", "registry", "launch", "identity", "attach", "limits", "readers", "cleanup", "already_released"])
+@pytest.mark.parametrize("failure", ["prepare", "registry", "launch", "identity", "attach", "limits", "readers", "already_released"])
 def test_failed_start_returns_single_capacity_slot(failure, monkeypatch):
     from dataclasses import replace
     registry = DurableJobRegistry()
@@ -65,9 +65,6 @@ def test_failed_start_returns_single_capacity_slot(failure, monkeypatch):
             patch.setattr(provider._memory_limiter, "apply", fail)
         elif failure == "readers":
             patch.setattr(provider, "_start_output_readers", fail)
-        elif failure == "cleanup":
-            patch.setattr(provider, "_process_identity_resolver", fail)
-            patch.setattr(provider, "_abort_unregistered", fail)
         elif failure == "already_released":
             def release_then_fail(job_id, process):
                 provider._forget_local_job(job_id)
@@ -110,6 +107,50 @@ def test_process_publication_already_has_releasable_capacity_lease():
     with pytest.raises(RuntimeError, match="capacity exhausted"):
         provider.start(_request("no-overbooking"))
     provider.wait("after-publication-race")
+
+
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+def test_failed_launch_retains_capacity_until_exit_and_containment_proven(cleanup_raises, monkeypatch):
+    from dataclasses import replace
+
+    class LiveProcess(_Process):
+        exited = False
+
+        def wait(self, timeout=None):
+            if not self.exited:
+                raise subprocess.TimeoutExpired("fixture", timeout)
+            return 0
+
+    process = LiveProcess()
+    token = _ScopedToken(ProcessContainmentResult(False), ProcessContainmentResult(True))
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: process,
+        memory_limiter=_ScopedLimiter(token), max_concurrent_processes=1,
+        process_identity_resolver=lambda pid: "identity", platform_name="posix",
+    )
+    retries = []
+    monkeypatch.setattr(provider, "_schedule_deadline", lambda *args: retries.append(args))
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected identity/cleanup failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, "_process_identity_resolver", fail)
+        if cleanup_raises:
+            patch.setattr(provider, "_quiesce_containment", fail)
+        with pytest.raises(RuntimeError):
+            provider.start(replace(_request("unresolved-launch"), require_job_scope=True))
+    assert provider._processes["unresolved-launch"] is process
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("blocked-until-clean"))
+    # Containment becoming empty alone cannot prove the root process exited.
+    assert not provider.cancel("unresolved-launch").cleanup_completed
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("still-blocked"))
+    process.exited = True
+    assert provider.cancel("unresolved-launch").cleanup_completed
+    assert "unresolved-launch" not in provider._process_slot_owners
+    provider.start(_request("after-proven-cleanup"))
+    provider.wait("after-proven-cleanup")
 
 
 class _Process:
