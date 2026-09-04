@@ -122,6 +122,27 @@ class SQLiteSessionRepository:
             )
         return SessionEvent(session_id, sequence, event_id, event_type, occurred_at_utc, json.loads(payload_json), previous_hash, event_hash)
 
+    def append_once(self, session_id: str, event_type: str, payload: Mapping[str, object], *,
+                    event_id: str, occurred_at_utc: str) -> SessionEvent:
+        """Project an outbox event idempotently; reject conflicting identity reuse."""
+        try:
+            return self.append(session_id, event_type, payload, event_id=event_id,
+                               occurred_at_utc=occurred_at_utc)
+        except sqlite3.IntegrityError:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT session_id,sequence,event_id,event_type,occurred_at_utc,payload_json,previous_hash,event_hash "
+                    "FROM session_event WHERE event_id=?", (event_id,),
+                ).fetchone()
+            if row is None:
+                raise
+            existing = self._row_to_event(row)
+            if (existing.session_id != session_id or existing.event_type != event_type
+                    or existing.occurred_at_utc != occurred_at_utc
+                    or self._canonical_payload(existing.payload) != self._canonical_payload(payload)):
+                raise ValueError("session outbox event identity has conflicting content")
+            return existing
+
     def read_range(self, session_id: str, *, start_sequence: int = 1,
                    end_sequence: int | None = None, limit: int = 1_000) -> tuple[SessionEvent, ...]:
         _validate_bounds(start_sequence, end_sequence, limit, self._max_read_limit)

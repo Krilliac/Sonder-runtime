@@ -1,6 +1,6 @@
 """Deterministic composition root (SPEC-3 R-M8).
 
-Runtime variants are assembled here — never through import-time global
+Runtime variants are assembled here â€” never through import-time global
 initialization. Importing this module creates no directories, opens no
 databases, reads no mutable environment state, starts no threads, probes
 no hardware, and contacts no services; construction happens inside
@@ -203,6 +203,7 @@ class Application:
     compute_job_worker: Callable[[], ComputeJobWorker] | None = None
     compute_service: Callable[[], ComputeFabricService] | None = None
     delegation_service: Callable[[], DelegationService] | None = None
+    agent_lanes: Callable[[], object] | None = None
     agent_workflow_service: Callable[[], AgentWorkflowService] | None = None
     lineage_query: Callable[[], DurableLineageQuery] | None = None
     # The typed tool boundary: the read-only workbench family runs through it
@@ -357,7 +358,7 @@ def build_application(
     logger.debug("resolving legacy model provider factories")
     from .legacy_model import lazy_legacy_model_provider_factories
     target_resolver, generate_factory = lazy_legacy_model_provider_factories()
-    # SPEC-3 Phase 3: the real transport adapter behind the port — consent
+    # SPEC-3 Phase 3: the real transport adapter behind the port â€” consent
     # enforced against the OperationContext, driver errors mapped into the
     # domain taxonomy. Backend is Ollama by default, selectable via env.
     provider_registry = ScopedProviderRegistry()
@@ -457,6 +458,7 @@ def build_application(
     continuation_service: DurableContinuationService | None = None
     subagent_provider: LocalSubagentProvider | None = None
     delegation: DelegationService | None = None
+    interactive_lanes = None
     agent_workflow: AgentWorkflowService | None = None
     lineage: DurableLineageQuery | None = None
 
@@ -769,8 +771,27 @@ def build_application(
             agent_registry.register_workbench_modes()
         return agent_registry
 
-    def _noop_runner(state, save, control):
-        return ""
+    def get_agent_lanes():
+        nonlocal interactive_lanes
+        if interactive_lanes is None:
+            from ..adapters.persistence.agent_lanes import SQLiteAgentLaneStore
+            from ..adapters.persistence.fleet_store import database_path
+            from ..application.agents.interactive_lanes import AgentLaneService
+            sessions = get_session_repository()
+            def authorize_lane_grant(lane, context):
+                from ..application.context import LOCAL_OWNER
+                from ..adapters.filesystem.file_ops import allowed_roots
+                if context.principal_id != LOCAL_OWNER:
+                    raise PermissionError("account lanes require a configured live account authorizer")
+                root = Path(lane['workspace_root']).resolve()
+                if not any(root == current.resolve() or current.resolve() in root.parents
+                           for current in allowed_roots()):
+                    raise PermissionError("configured workspace grant was removed")
+            interactive_lanes = AgentLaneService(
+                SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, tools,
+                authorize_grant=authorize_lane_grant,
+            )
+        return interactive_lanes
 
     def get_delegation_service() -> DelegationService:
         nonlocal continuation_repository, continuation_service, subagent_provider, delegation
@@ -780,8 +801,12 @@ def build_application(
             logger.debug(f"lazy-init delegation subsystem at {db_path!r}")
             continuation_repository = SQLiteDurableContinuationRepository(db_path)
             continuation_service = DurableContinuationService(continuation_repository)
+            from ..adapters.conversational_subagents import conversational_runner_factory
             subagent_provider = LocalSubagentProvider(
-                continuation_service, _noop_runner,
+                continuation_service,
+                runner_factory=conversational_runner_factory(
+                    gateway, get_session_repository(), get_session_capture_service(),
+                ),
             )
             delegation = DelegationService(subagent_provider, events)
             logger.info("delegation service initialized")
@@ -1258,6 +1283,7 @@ def build_application(
         compute_job_worker=get_compute_job_worker,
         compute_service=get_compute_service,
         delegation_service=get_delegation_service,
+        agent_lanes=get_agent_lanes,
         agent_workflow_service=get_agent_workflow_service,
         lineage_query=get_lineage_query,
         container_world_provider=GuardedContainerWorld(

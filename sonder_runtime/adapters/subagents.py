@@ -52,15 +52,19 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
     def __init__(
         self,
         service: DurableContinuationService,
-        runner: Runner,
+        runner: Runner | None = None,
         *,
+        runner_factory: Callable[[SubagentRequest, OperationContext], Runner] | None = None,
         provider: str = "local",
     ) -> None:
         if provider != "local":
             raise UnsupportedSubagentProvider(
                 f"unsupported subagent provider: {provider!r}"
             )
+        if runner is None and runner_factory is None:
+            raise InvalidSubagentRequest("local provider requires a concrete runner")
         super().__init__(service, runner)
+        self._runner_factory = runner_factory
         self._local_service = service
 
     def register_root(self, root_id: str, budget: SubagentBudget) -> None:
@@ -70,6 +74,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
         """Apply request ceilings around the concrete local runner."""
         self._local_service.require_parent(request.parent_id)
         budget = request.budget
+        runner = self._runner_factory(request, context) if self._runner_factory else self._runner
 
         def bounded_runner(state, save, control):
             steps = 0
@@ -81,7 +86,7 @@ class LocalSubagentProvider(RunnerBoundSubagentProvider):
                     raise TimeoutError("subagent step budget exhausted")
                 return save(next_state, cursor)
 
-            output = self._runner(state, bounded_save, control)
+            output = runner(state, bounded_save, control)
             if not isinstance(output, str):
                 raise InvalidSubagentRequest("local runner output must be text")
             # Four UTF-8 characters is a conservative local token estimate;
