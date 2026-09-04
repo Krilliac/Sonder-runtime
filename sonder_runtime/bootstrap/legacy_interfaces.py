@@ -28,4 +28,28 @@ def configure_legacy_interfaces(runtime: ModuleType | None = None) -> None:
     logger.debug("legacy interfaces configured")
 
 
-__all__ = ["configure_legacy_interfaces"]
+def configure_legacy_capacity(
+    *,
+    autopilot_runs: int,
+    fleet_workers: int,
+    training_jobs: int,
+) -> None:
+    """Push typed capacity limits into legacy modules.
+
+    All three limits route through server.py (the only allowed root legacy
+    module) which delegates to master_orchestrator and adaptive_training
+    internally, keeping the architecture ratchet at 1 root module.
+    """
+    import server as legacy_server
+    legacy_server.configure_capacity(
+        autopilot_runs=autopilot_runs,
+        fleet_workers=fleet_workers,
+        training_jobs=training_jobs,
+    )
+    logger.info(
+        f"legacy capacity configured: autopilot_runs={autopilot_runs}, "
+        f"fleet_workers={fleet_workers}, training_jobs={training_jobs}"
+    )
+
+
+__all__ = ["configure_legacy_capacity", "configure_legacy_interfaces"]

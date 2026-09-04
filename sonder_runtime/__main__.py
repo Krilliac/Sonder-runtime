@@ -703,9 +703,26 @@ def cmd_serve(args) -> int:
     except Exception:
         pass
 
-    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
+    from sonder_runtime.bootstrap.legacy_interfaces import (
+        configure_legacy_interfaces,
+        configure_legacy_capacity,
+    )
 
     configure_legacy_interfaces()
+    configure_legacy_capacity(
+        autopilot_runs=config.capacity.autopilot_runs,
+        fleet_workers=config.capacity.fleet_workers,
+        training_jobs=config.capacity.training_jobs,
+    )
+
+    from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.interfaces.http.handlers import RecallHandler, OutcomeHandler
+    app = default_app()
+    sonder_serve.configure_thin_handlers({
+        "/v1/recall": RecallHandler(app.memory),
+        "/v1/outcome": OutcomeHandler(app.memory),
+    })
+
     sys.argv = ["python -m sonder_runtime serve", str(config.server.port)]
     sonder_serve.main(config=config)
     return 0
@@ -778,6 +795,9 @@ def cmd_mcp(args) -> int:
             print(f"migration failed: {exc}", file=sys.stderr)
             return 1
         return run_native_mcp(build_application(config=config))
+    from sonder_runtime.adapters.security import unsafe_lab
+
+    unsafe_lab.require_startup()
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
