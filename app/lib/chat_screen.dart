@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import 'api.dart';
+import 'agent_screen.dart';
 import 'chat_store.dart';
 import 'models.dart';
 import 'safety_colors.dart';
@@ -882,6 +883,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           onSelect: _switchThread,
           onDelete: _deleteThread,
           embedded: desktop,
+          onOpenAgents: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => AgentScreen(api: _api))),
           serverUrl: widget.settings.serverUrl,
           connected: _systemInfo != null,
           onOpenCommands: desktop ? _openCommandBrowser : null,
@@ -1320,6 +1322,7 @@ class _ChatDrawer extends StatelessWidget {
   final bool embedded;
   final String serverUrl;
   final bool connected;
+  final VoidCallback? onOpenAgents;
   final VoidCallback? onOpenCommands;
   final VoidCallback? onOpenSystem;
   final VoidCallback? onOpenSettings;
@@ -1333,6 +1336,7 @@ class _ChatDrawer extends StatelessWidget {
     this.embedded = false,
     this.serverUrl = '',
     this.connected = false,
+    this.onOpenAgents,
     this.onOpenCommands,
     this.onOpenSystem,
     this.onOpenSettings,
@@ -1437,6 +1441,15 @@ class _ChatDrawer extends StatelessWidget {
                       },
                     ),
             ),
+            if (onOpenAgents != null)
+              ListTile(
+                leading: const Icon(Icons.account_tree_outlined),
+                title: const Text('Agent conversations'),
+                onTap: () {
+                  if (!embedded) Navigator.of(context).pop();
+                  onOpenAgents!();
+                },
+              ),
             if (projects.isNotEmpty) ...[
               Divider(height: 1, color: tokens.hairline),
               Padding(
