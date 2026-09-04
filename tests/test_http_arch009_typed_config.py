@@ -71,7 +71,7 @@ def test_typed_main_uses_configured_port_when_environment_is_poisoned(monkeypatc
             return None
 
     lifecycle = SimpleNamespace(
-        startup=lambda: None,
+        startup=lambda **kwargs: None,
         begin_ollama_probe=lambda: None,
         coordinator=SimpleNamespace(
             add_flush_hook=lambda hook: None,
