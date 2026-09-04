@@ -20,11 +20,14 @@ Delivery:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Sequence
 
 from ....domain.common.events import DomainEvent
+
+logger = logging.getLogger(__name__)
 
 
 OUTBOX_DDL = """\
@@ -68,6 +71,11 @@ class OutboxWriter:
         self._conn = conn
 
     def append(self, event: DomainEvent) -> None:
+        logger.debug(
+            f"outbox append event_type={event.event_type!r} "
+            f"aggregate={event.aggregate_type!r}/{event.aggregate_id!r} "
+            f"seq={event.sequence}"
+        )
         self._conn.execute(
             "INSERT INTO outbox_events "
             "(id, event_type, aggregate_type, aggregate_id, sequence, "
@@ -86,6 +94,7 @@ class OutboxWriter:
         )
 
     def append_many(self, events: Sequence[DomainEvent]) -> None:
+        logger.debug(f"outbox append_many count={len(events)}")
         for event in events:
             self.append(event)
 
@@ -109,6 +118,7 @@ class OutboxDispatcher:
         self._domain = domain
 
     def dispatch_batch(self, limit: int = 100) -> int:
+        logger.debug(f"dispatch_batch domain={self._domain!r} limit={limit}")
         rows = self._source.execute(
             "SELECT id, event_type, aggregate_type, aggregate_id, "
             "       correlation_id, payload_json, created_at "
@@ -120,8 +130,15 @@ class OutboxDispatcher:
         ).fetchall()
 
         if not rows:
+            logger.debug(f"dispatch_batch domain={self._domain!r} found no unpublished events")
             return 0
 
+        logger.debug(f"dispatch_batch domain={self._domain!r} found {len(rows)} unpublished events")
+        if len(rows) >= limit:
+            logger.warning(
+                f"outbox dispatch batch is full, domain={self._domain!r}: "
+                f"fetched {len(rows)}/{limit} events — backlog may be growing"
+            )
         now = datetime.now(timezone.utc).isoformat()
         dispatched = 0
 
@@ -149,7 +166,10 @@ class OutboxDispatcher:
                 )
                 self._ops.commit()
             except sqlite3.IntegrityError:
-                pass  # UNIQUE(source_event_id) — duplicate, already projected
+                logger.warning(
+                    f"outbox duplicate dispatch detected, domain={self._domain!r} "
+                    f"event_id={event_id!r} — likely crash-recovery replay"
+                )
 
             self._source.execute(
                 "UPDATE outbox_events SET published_at = ? WHERE id = ?",
@@ -158,4 +178,7 @@ class OutboxDispatcher:
             self._source.commit()
             dispatched += 1
 
+        logger.debug(f"dispatch_batch domain={self._domain!r} dispatched={dispatched}")
+        if dispatched > 0:
+            logger.info(f"outbox dispatched {dispatched} events from domain={self._domain!r}")
         return dispatched

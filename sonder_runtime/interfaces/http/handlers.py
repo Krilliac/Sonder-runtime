@@ -19,6 +19,9 @@ from ...application.errors import (
     SonderError,
 )
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 class RequestLike(Protocol):
     @property
@@ -62,6 +65,9 @@ ERROR_STATUS = {
 
 def error_response(err: SonderError) -> Response:
     status = ERROR_STATUS.get(err.code, 500)
+    if status >= 500:
+        logger.error(f"server error response: code={err.code!r}, status={status}, retryable={err.retryable}")
+    logger.debug(f"error_response: code={err.code!r}, status={status}")
     return Response(status, {"error": err.code, "message": str(err), "retryable": err.retryable})
 
 
@@ -73,6 +79,7 @@ def context_from_request(
     correlation = request.headers.get(
         "X-Correlation-Id", uuid.uuid4().hex,
     )
+    logger.debug(f"context_from_request: method={request.method!r}, path={request.path!r}, correlation={correlation!r}")
     return local_owner_context(
         correlation_id=correlation,
         source="http",
@@ -84,6 +91,7 @@ class HealthHandler:
     """GET /health — no application service needed."""
 
     def handle(self, request: RequestLike) -> Response:
+        logger.debug("HealthHandler.handle: responding 200 ok")
         return Response(200, {"status": "ok"})
 
 
@@ -94,21 +102,25 @@ class RecallHandler:
         self._recall = recall_service
 
     def handle(self, request: RequestLike) -> Response:
+        logger.debug("RecallHandler.handle: incoming recall request")
         try:
             body = json.loads(request.body)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            logger.debug("RecallHandler.handle: bad JSON in request body")
             return Response(400, {"error": "INVALID_INPUT", "message": "bad JSON"})
 
         ctx = context_from_request(request)
         task = body.get("task", "")
         k = body.get("k", 2)
         project = body.get("project")
+        logger.debug(f"RecallHandler.handle: task={task!r}, k={k}, project={project!r}")
 
         try:
             results = self._recall.recall(task, k=k, project=project)
         except SonderError as e:
             return error_response(e)
 
+        logger.debug(f"RecallHandler.handle: returning {len(results)} results")
         return Response(200, {"results": results})
 
 
@@ -119,20 +131,25 @@ class OutcomeHandler:
         self._outcome = outcome_service
 
     def handle(self, request: RequestLike) -> Response:
+        logger.debug("OutcomeHandler.handle: incoming outcome request")
         try:
             body = json.loads(request.body)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            logger.debug("OutcomeHandler.handle: bad JSON in request body")
             return Response(400, {"error": "INVALID_INPUT", "message": "bad JSON"})
 
         interaction_id = body.get("interaction_id", "")
         signal = body.get("signal", "")
 
         if not interaction_id or not signal:
+            logger.debug("OutcomeHandler.handle: missing interaction_id or signal")
             return Response(400, {"error": "INVALID_INPUT", "message": "interaction_id and signal required"})
 
+        logger.debug(f"OutcomeHandler.handle: interaction_id={interaction_id!r}, signal={signal!r}")
         try:
             score = self._outcome.record(interaction_id, signal)
         except SonderError as e:
             return error_response(e)
 
+        logger.debug(f"OutcomeHandler.handle: recorded score={score}")
         return Response(200, {"score": score})

@@ -1,6 +1,8 @@
 """Injected local-only implementation of the application vision port."""
 from __future__ import annotations
 
+import logging
+
 from ...application.context import OperationContext
 from ...application.ports.vision_gateway import (
     VisionRequest,
@@ -8,6 +10,8 @@ from ...application.ports.vision_gateway import (
     require_vision_text,
 )
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, DependencyUnavailable
+
+logger = logging.getLogger(__name__)
 
 
 class InjectedVisionGateway:
@@ -25,10 +29,12 @@ class InjectedVisionGateway:
             raise ValueError("vision model identity must not be empty")
         self._analyze_provider = analyze
         self._model = str(model)
+        logger.info(f"InjectedVisionGateway initialized, model={self._model!r}")
 
     def analyze(self, request: VisionRequest, context: OperationContext) -> VisionResponse:
         if not isinstance(request, VisionRequest):
             raise TypeError("vision gateway requires VisionRequest")
+        logger.debug(f"InjectedVisionGateway.analyze: model={self._model!r}, tier={request.tier!r}")
         if context.expired:
             raise DeadlineExceeded("operation deadline exceeded before vision call")
         if context.cancellation is not None and context.cancellation.cancelled:
@@ -40,6 +46,16 @@ class InjectedVisionGateway:
         except (Cancelled, DeadlineExceeded, Forbidden, DependencyUnavailable):
             raise
         except Exception as exc:
+            logger.warning(
+                f"local vision provider failed for model={self._model!r}, "
+                f"tier={request.tier!r}",
+                exc_info=True,
+            )
+            logger.error(
+                f"injected vision provider failed, model={self._model!r}, "
+                f"tier={request.tier!r}",
+                exc_info=True,
+            )
             raise DependencyUnavailable("local vision provider failed") from exc
         if isinstance(value, VisionResponse):
             return VisionResponse(

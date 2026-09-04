@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import re
 import socket
 import time
@@ -21,6 +22,8 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from sonder_runtime.application.context import OperationContext
 from sonder_runtime.application.ports.event_sink import EventSink
+
+logger = logging.getLogger(__name__)
 
 
 _KNOWN_CAPABILITIES = frozenset({"read", "filesystem", "network", "mutate", "process"})
@@ -176,6 +179,14 @@ class ExternalMcpBridge:
         self._events = events
         self._secret_resolver = secret_resolver
         self._enabled_capabilities = enabled_capabilities
+        logger.debug(
+            f"ExternalMcpBridge initialized servers={sorted(self._servers)} "
+            f"capabilities={sorted(self._enabled_capabilities)}"
+        )
+        logger.info(
+            f"external MCP bridge initialized with {len(self._servers)} server(s), "
+            f"capabilities={sorted(self._enabled_capabilities)}"
+        )
 
     def safe_manifest(self) -> dict[str, Any]:
         """Return configured authority without endpoint or credential material."""
@@ -207,6 +218,8 @@ class ExternalMcpBridge:
         *,
         context: OperationContext,
     ) -> ExternalMcpCallResult:
+        logger.info(f"external MCP call starting server={server_name!r}, tool={tool_name!r}")
+        logger.debug(f"external MCP call server={server_name!r} tool={tool_name!r}")
         started = time.monotonic()
         receipt_id = uuid.uuid4().hex
         policy: ExternalMcpToolPolicy | None = None
@@ -248,13 +261,26 @@ class ExternalMcpBridge:
                 context=context,
                 deadline=deadline,
             )
+            logger.debug(
+                f"external MCP endpoint resolved remote={remote} "
+                f"addresses={len(addresses)} server={server_name!r}"
+            )
             if remote and (not server.allow_remote or not context.cloud_allowed):
+                logger.warning(
+                    f"external MCP call blocked — remote endpoint but allow_remote={server.allow_remote!r} "
+                    f"cloud_allowed={context.cloud_allowed!r}, server={server_name!r}"
+                )
                 raise ExternalMcpError(
                     "REMOTE_NOT_CONSENTED", "remote MCP requires server policy and cloud consent"
                 )
             timeout = deadline - time.monotonic()
             if timeout <= 0:
                 raise ExternalMcpError("CONTEXT_EXPIRED", "operation deadline has expired")
+            if timeout < server.timeout_seconds * 0.2:
+                logger.warning(
+                    f"external MCP call has little time remaining, server={server_name!r} "
+                    f"tool={tool_name!r} remaining={timeout:.2f}s/{server.timeout_seconds}s"
+                )
 
             credential = None
             if server.credential_env is not None:
@@ -267,16 +293,31 @@ class ExternalMcpBridge:
                 except ExternalMcpError:
                     raise
                 except Exception as exc:
+                    logger.error(
+                        f"external MCP credential resolution failed, "
+                        f"server={server_name!r}",
+                        exc_info=True,
+                    )
                     raise ExternalMcpError(
                         "CREDENTIAL_UNAVAILABLE", "external MCP credential is unavailable"
                     ) from exc
                 if not isinstance(credential, str) or not credential:
+                    logger.warning(
+                        f"external MCP credential resolved to empty/invalid value, "
+                        f"server={server_name!r} env_var={server.credential_env!r}"
+                    )
                     raise ExternalMcpError(
                         "CREDENTIAL_UNAVAILABLE", "external MCP credential is unavailable"
                     )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
+            if remaining < server.timeout_seconds * 0.2:
+                logger.warning(
+                    f"external MCP transport invoke starting with limited time, "
+                    f"server={server_name!r} tool={tool_name!r} remaining={remaining:.2f}s"
+                )
+            logger.debug(f"external MCP invoking transport server={server_name!r} tool={tool_name!r} timeout={remaining:.2f}s")
             request = McpCallRequest(
                 endpoint=urllib.parse.urlunsplit(parsed),
                 resolved_addresses=addresses,
@@ -297,6 +338,11 @@ class ExternalMcpBridge:
                 raise
             except Exception as exc:
                 # Upstream text may contain headers, URLs, arguments, or secrets.
+                logger.error(
+                    f"external MCP transport invoke failed, "
+                    f"server={server_name!r} tool={tool_name!r}",
+                    exc_info=True,
+                )
                 raise ExternalMcpError("TRANSPORT_ERROR", "external MCP transport failed") from exc
 
             try:
@@ -306,16 +352,45 @@ class ExternalMcpBridge:
                     "INVALID_RESULT", "external MCP returned an invalid result"
                 ) from exc
             result_bytes = _json_size(value, "INVALID_RESULT")
+            result_ratio = result_bytes / server.max_result_bytes if server.max_result_bytes else 1.0
+            if result_ratio >= 0.8 and result_bytes <= server.max_result_bytes:
+                logger.warning(
+                    f"external MCP result approaching size limit, server={server_name!r} "
+                    f"tool={tool_name!r}: {result_bytes}/{server.max_result_bytes} bytes "
+                    f"({result_ratio:.0%})"
+                )
             if result_bytes > server.max_result_bytes:
                 raise ExternalMcpError("RESULT_TOO_LARGE", "external MCP result exceeds the limit")
             if is_error:
                 raise ExternalMcpError("UPSTREAM_TOOL_ERROR", "external MCP tool reported an error")
+            logger.debug(
+                f"external MCP call succeeded server={server_name!r} tool={tool_name!r} "
+                f"result_bytes={result_bytes} structured={structured} "
+                f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
+            )
+            logger.info(
+                f"external MCP call completed server={server_name!r}, tool={tool_name!r}, "
+                f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
+            )
             receipt = self._receipt(
                 receipt_id, audit_server, policy, True, started, result_bytes, structured, None,
                 context,
             )
             return ExternalMcpCallResult(value=value, receipt=receipt)
         except ExternalMcpError as exc:
+            logger.error(
+                f"external MCP call failed server={server_name!r} tool={tool_name!r} "
+                f"error_code={exc.code!r} elapsed_ms={int((time.monotonic() - started) * 1000)}",
+                exc_info=True,
+            )
+            logger.debug(
+                f"external MCP call failed server={server_name!r} tool={tool_name!r} "
+                f"error_code={exc.code!r}"
+            )
+            logger.info(
+                f"external MCP call failed server={server_name!r}, tool={tool_name!r}, "
+                f"error_code={exc.code!r}"
+            )
             self._receipt(
                 receipt_id, audit_server, policy, False, started, result_bytes, structured,
                 exc.code, context,
@@ -367,7 +442,16 @@ class ExternalMcpBridge:
             # EventSink's contract is observational: a sink outage must not
             # turn a completed call into an apparent failure that callers may
             # retry.  The returned receipt remains the authoritative result.
-            pass
+            logger.error(
+                f"audit event emission failed for external MCP call, "
+                f"server={server!r} receipt_id={receipt_id!r}",
+                exc_info=True,
+            )
+            logger.critical(
+                f"audit event emission failed for external MCP call — "
+                f"security audit trail is broken, server={server!r} receipt_id={receipt_id!r}",
+                exc_info=True,
+            )
         return receipt
 
 
@@ -462,6 +546,10 @@ def _reject_secret_keys(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             if str(key).strip().lower() in _SECRET_CONFIG_KEYS:
+                logger.critical(
+                    f"security violation: secret material detected in external MCP config, "
+                    f"key={str(key).strip().lower()!r} — credentials must never appear inline in configuration"
+                )
                 raise ValueError("external MCP credentials must not appear in config")
             _reject_secret_keys(child)
     elif isinstance(value, list):
@@ -500,6 +588,7 @@ def _parse_endpoint(endpoint: str) -> urllib.parse.SplitResult:
 def _resolve_endpoint(
     endpoint: str,
 ) -> tuple[urllib.parse.SplitResult, tuple[str, ...], bool]:
+    logger.debug(f"resolving external MCP endpoint host={urllib.parse.urlsplit(endpoint).hostname!r}")
     parsed = _parse_endpoint(endpoint)
     host = (parsed.hostname or "").rstrip(".").lower()
     port = parsed.port or (443 if parsed.scheme == "https" else 80)

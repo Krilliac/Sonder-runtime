@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import ipaddress
 import importlib
+import logging
 import math
 import os
 import time
 import urllib.parse
 from typing import Sequence
+
+logger = logging.getLogger(__name__)
 
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
@@ -167,6 +170,7 @@ class OllamaGateway:
             raise ValueError("default Ollama providers must be callable")
         cls._default_target_resolver = target_resolver
         cls._default_generate_factory = generate_factory
+        logger.info("OllamaGateway default providers configured")
 
     def __init__(
         self,
@@ -185,6 +189,9 @@ class OllamaGateway:
             context_policy.default_requested()
             if session_num_ctx is None else int(session_num_ctx)
         )
+        logger.info(
+            f"OllamaGateway initialized, session_num_ctx={self._session_num_ctx}"
+        )
 
     @property
     def capabilities(self) -> frozenset[str]:
@@ -200,10 +207,12 @@ class OllamaGateway:
             raise DependencyUnavailable(
                 "Ollama gateway requires injected target and generate providers"
             )
+        logger.debug(f"OllamaGateway.generate: tier={request.tier!r}")
         target = self._target_resolver(request.tier or "sonder", False)
         if not isinstance(target, ModelTarget):
             raise DependencyUnavailable("model target provider returned invalid target")
         model, cloud, tier_label = target.model, target.cloud, target.tier_label
+        logger.debug(f"OllamaGateway.generate: resolved model={model!r}, cloud={cloud}, tier_label={tier_label!r}")
         if tier_label == "cloud-disabled":
             raise Forbidden("cloud tiers are disabled on this runtime")
         if tier_label is None:
@@ -229,6 +238,17 @@ class OllamaGateway:
             effective_system = self._system_builder(
                 "", False, "", model=model, cloud=cloud
             )
+        if not effective_system:
+            logger.warning(
+                f"no system prompt available for model={model!r}, "
+                f"tier={tier_label!r}; inference will run without system context"
+            )
+        effective_timeout = max(1, math.ceil(timeout)) if timeout is not None else None
+        logger.debug(
+            f"OllamaGateway.generate: building generate fn, model={model!r}, "
+            f"temperature={options.get('temperature', 0.2)}, num_ctx={options.get('num_ctx', self._session_num_ctx)}, "
+            f"timeout={effective_timeout}"
+        )
         gen = self._generate_factory(
             model,
             effective_system,
@@ -239,7 +259,7 @@ class OllamaGateway:
             # Keep a positive sub-second deadline bounded.  ``int(0.5)`` used
             # to become zero and the legacy transport interpreted zero as no
             # timeout at all.
-            timeout=max(1, math.ceil(timeout)) if timeout is not None else None,
+            timeout=effective_timeout,
             cancel_check=(
                 (lambda: context.cancellation.cancelled)
                 if context.cancellation is not None else None
@@ -249,6 +269,19 @@ class OllamaGateway:
         try:
             text = gen(request.prompt, list(request.history) or None)
         except ModelCallError as exc:
+            logger.debug(f"OllamaGateway.generate: ModelCallError kind={getattr(exc, 'kind', 'unknown')!r}")
+            if getattr(exc, "transient", False):
+                logger.warning(
+                    f"transient model call failure for model={model!r}, "
+                    f"kind={getattr(exc, 'kind', 'unknown')!r}: "
+                    f"{getattr(exc, 'detail', str(exc))}"
+                )
+            logger.error(
+                f"Ollama inference request failed, model={model!r}, "
+                f"tier={tier_label!r}, kind={getattr(exc, 'kind', 'unknown')!r}, "
+                f"transient={getattr(exc, 'transient', False)}",
+                exc_info=True,
+            )
             raise _map_model_error(exc) from exc
         # The transport cooperates with cancellation where possible, but the
         # token may flip between its final check and returning the response.
@@ -267,14 +300,24 @@ class OllamaGateway:
         output_count = usage.get("tokens_out")
         if output_count is None:
             output_count = usage.get("eval_count")
+        duration_ms = int((time.monotonic() - started) * 1000)
         response = ModelResponse(
             text=require_model_text(text),
             model=model,
             tier=tier_label,
-            duration_ms=int((time.monotonic() - started) * 1000),
+            duration_ms=duration_ms,
             tokens_in=optional_token_count(prompt_count, "prompt token count"),
             tokens_out=optional_token_count(output_count, "completion token count"),
             telemetry=telemetry,
+        )
+        if duration_ms > 60_000:
+            logger.warning(
+                f"slow inference: model={model!r} took {duration_ms}ms "
+                f"(>{60_000}ms threshold), tokens_out={response.tokens_out}"
+            )
+        logger.debug(
+            f"OllamaGateway.generate: completed in {duration_ms}ms, "
+            f"tokens_in={response.tokens_in}, tokens_out={response.tokens_out}"
         )
         default_registry().observe_inference("ollama", telemetry)
         return response
@@ -282,8 +325,13 @@ class OllamaGateway:
     def embed(
         self, texts: Sequence[str], context: OperationContext
     ) -> Sequence[Embedding]:
+        logger.debug(f"OllamaGateway.embed: text_count={len(texts)}")
         provider = self._embedding_provider
         if provider is None:
+            logger.warning(
+                "no embedding provider injected into OllamaGateway, "
+                "falling back to default sonder_runtime.adapters.embeddings module"
+            )
             provider = importlib.import_module(
                 "sonder_runtime.adapters.embeddings"
             )

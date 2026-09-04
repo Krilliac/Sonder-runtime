@@ -1,7 +1,10 @@
 """Pure model-tag sizing policy for local inference planning."""
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 # Ollama/Qwen spell an MoE tag as ``<total>b-a<active>b``.  Dense tags carry
@@ -51,6 +54,9 @@ def largest_model_class(usable_gb: float, footprints=MODEL_FOOTPRINTS) -> str:
         if usable_gb + 1e-9 < footprint:
             break
         chosen = label
+    if chosen == "below 3B":
+        logger.warning(f"usable VRAM ({usable_gb:.1f} GB) too low for any standard model class, only sub-3B models will fit")
+    logger.debug(f"largest_model_class: usable_gb={usable_gb:.1f} -> {chosen!r}")
     return chosen
 
 
@@ -98,7 +104,9 @@ def estimated_footprint_gb(total_params_b) -> float | None:
         return None
     if total <= 0:
         return None
-    return round(total * _Q4_GB_PER_BILLION, 1)
+    footprint = round(total * _Q4_GB_PER_BILLION, 1)
+    logger.debug(f"estimated_footprint_gb: {total_params_b}B params -> {footprint} GB (Q4)")
+    return footprint
 
 
 def params_from_model_tag(tag) -> tuple[float, float] | None:
@@ -112,6 +120,7 @@ def params_from_model_tag(tag) -> tuple[float, float] | None:
     text = str(tag or "").strip().lower()
     _name, separator, tag_part = text.rpartition(":")
     if not separator:
+        logger.debug(f"params_from_model_tag: no colon in tag {tag!r}, returning None")
         return None
     text = tag_part.strip()
     if not text:
@@ -122,6 +131,7 @@ def params_from_model_tag(tag) -> tuple[float, float] | None:
         total = float(moe.group(1))
         active = float(moe.group(2))
         if total > 0 and 0 < active <= total:
+            logger.debug(f"params_from_model_tag: MoE tag {tag!r} -> total={total}B, active={active}B")
             return total, active
         return None
 
@@ -129,5 +139,7 @@ def params_from_model_tag(tag) -> tuple[float, float] | None:
     if dense:
         total = float(dense.group(1))
         if total > 0:
+            logger.debug(f"params_from_model_tag: dense tag {tag!r} -> {total}B")
             return total, total
+    logger.debug(f"params_from_model_tag: no size found in tag {tag!r}")
     return None

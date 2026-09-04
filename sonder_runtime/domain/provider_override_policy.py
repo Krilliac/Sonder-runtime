@@ -6,9 +6,12 @@ override returns a new policy and leaves the source policy unchanged.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
+
+logger = logging.getLogger(__name__)
 
 
 def _name(value: object, label: str) -> str:
@@ -71,6 +74,8 @@ class ProviderOverridePolicy:
             raise ValueError("duplicate scoped provider override")
         object.__setattr__(self, "providers", MappingProxyType(normalized))
         object.__setattr__(self, "overrides", entries)
+        if entries:
+            logger.info(f"provider override policy initialized: {len(normalized)} base providers, {len(entries)} scoped overrides")
 
     def with_override(
         self, scope: str, provider: str, replacement: str
@@ -83,6 +88,7 @@ class ProviderOverridePolicy:
                 f"override already exists for scope {entry.scope!r} "
                 f"and provider {entry.provider!r}"
             )
+        logger.info(f"provider override added: scope={scope!r}, provider={provider!r} -> {replacement!r}")
         return ProviderOverridePolicy(self.providers, self.overrides + (entry,))
 
     def without_override(
@@ -90,6 +96,7 @@ class ProviderOverridePolicy:
     ) -> "ProviderOverridePolicy":
         scope_name = _name(scope, "scope")
         provider_name = _name(provider, "provider")
+        logger.info(f"provider override removed: scope={scope_name!r}, provider={provider_name!r}")
         return ProviderOverridePolicy(
             self.providers,
             tuple(
@@ -110,9 +117,14 @@ class ProviderOverridePolicy:
         for scope in _scopes(scopes):
             replacement = by_key.get((scope, provider_name))
             if replacement is not None:
+                logger.warning(f"provider override active: {provider_name!r} replaced by {replacement!r} in scope={scope!r}")
+                logger.info(f"provider override resolved: {provider_name!r} -> {replacement!r} in scope={scope!r}")
+                logger.debug(f"ProviderOverridePolicy.resolve: provider={provider_name!r} overridden to {replacement!r} in scope={scope!r}")
                 return replacement
         try:
-            return self.providers[provider_name]
+            resolved = self.providers[provider_name]
+            logger.debug(f"ProviderOverridePolicy.resolve: provider={provider_name!r} -> {resolved!r} (base)")
+            return resolved
         except KeyError as exc:
             raise KeyError(f"unknown provider {provider_name!r}") from exc
 

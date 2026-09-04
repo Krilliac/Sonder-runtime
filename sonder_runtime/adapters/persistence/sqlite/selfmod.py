@@ -5,10 +5,13 @@ tests, snapshots, and phase transitions.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
 from .outbox import OUTBOX_DDL
+
+logger = logging.getLogger(__name__)
 
 
 SELFMOD_DDL = """\
@@ -84,10 +87,13 @@ CREATE TABLE IF NOT EXISTS schema_epoch (
 
 
 def init_selfmod_db(db_path: Path) -> sqlite3.Connection:
+    logger.debug(f"initializing selfmod.db at {db_path!r}")
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SELFMOD_DDL)
     conn.executescript(OUTBOX_DDL)
+    logger.debug("selfmod.db schema applied successfully")
+    logger.info(f"selfmod.db initialized at {db_path}")
     return conn

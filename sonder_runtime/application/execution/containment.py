@@ -9,11 +9,14 @@ endpoint was configured.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Mapping
 
 from .world_control import IsolationClaim, IsolationTruth
+
+logger = logging.getLogger(__name__)
 
 
 class ContainerEngine(StrEnum):
@@ -48,12 +51,16 @@ class GuardedContainerPolicy:
 
     def __post_init__(self) -> None:
         if self.network_enabled:
+            logger.critical("security violation: guarded container constructed with networking enabled")
             raise ValueError("guarded container networking must be disabled")
         if self.implicit_image_pull:
+            logger.critical("security violation: guarded container constructed with implicit image pull enabled")
             raise ValueError("guarded containers cannot implicitly pull images")
         if not self.read_only_root or not self.no_new_privileges:
+            logger.critical("security violation: guarded container hardening constraints bypassed")
             raise ValueError("guarded container hardening cannot be disabled")
         if not self.drop_all_capabilities or not self.non_root_user:
+            logger.critical("security violation: guarded container privilege reduction requirements not met")
             raise ValueError("guarded container privilege reduction is required")
         if self.memory_bytes < 1 or self.cpu_seconds <= 0 or self.pids_limit < 1:
             raise ValueError("container resource limits must be positive")
@@ -151,7 +158,11 @@ class GuardedContainerContract:
         provider_id: str = "container",
         image_digest: str | None = None,
     ) -> ContainmentDecision:
+        logger.debug(f"GuardedContainerContract.assess: engine={capability.engine!r}, health={capability.health.value!r}, provider_id={provider_id!r}, has_digest={bool(image_digest)}")
+        logger.info(f"container containment assessment starting: engine={capability.engine!r}, health={capability.health.value!r}, provider_id={provider_id!r}")
         if not image_digest or not image_digest.strip():
+            logger.error(f"container admission rejected: missing image digest, provider_id={provider_id!r}")
+            logger.warning(f"container admission rejected: missing image digest, provider_id={provider_id!r}")
             return ContainmentDecision(
                 ContainmentStatus.REJECTED,
                 "container",
@@ -164,6 +175,8 @@ class GuardedContainerContract:
                 provider_id,
             )
         if not capability.usable:
+            logger.error(f"container capability unusable: engine={capability.engine!r}, health={capability.health.value!r}, provider_id={provider_id!r}")
+            logger.warning(f"container capability unusable: engine={capability.engine!r}, health={capability.health.value!r}, version={capability.version!r}, provider_id={provider_id!r}")
             return ContainmentDecision(
                 ContainmentStatus.REJECTED,
                 "container",
@@ -213,7 +226,11 @@ class RemoteWorkerBoundary:
         *,
         requested_world: str = "remote",
     ) -> ContainmentDecision:
+        logger.debug(f"RemoteWorkerBoundary.assess: worker_id={capability.worker_id!r}, health={capability.health.value!r}, requested_world={requested_world!r}, usable={capability.usable}")
+        logger.info(f"remote worker assessment starting: worker_id={capability.worker_id!r}, health={capability.health.value!r}, usable={capability.usable}")
         if not capability.usable:
+            logger.error(f"remote worker admission rejected: worker_id={capability.worker_id!r}, health={capability.health.value!r}, endpoint_configured={bool(capability.endpoint)}")
+            logger.warning(f"remote worker unhealthy: worker_id={capability.worker_id!r}, health={capability.health.value!r}, endpoint_configured={bool(capability.endpoint)}")
             return ContainmentDecision(
                 ContainmentStatus.REJECTED,
                 "remote",
@@ -226,6 +243,8 @@ class RemoteWorkerBoundary:
                 capability.worker_id,
             )
         if capability.supported_worlds and requested_world not in capability.supported_worlds:
+            logger.error(f"remote worker capability mismatch: worker_id={capability.worker_id!r}, requested_world={requested_world!r}")
+            logger.warning(f"remote worker capability mismatch: worker_id={capability.worker_id!r}, requested_world={requested_world!r}, supported_worlds={capability.supported_worlds!r}")
             return ContainmentDecision(
                 ContainmentStatus.REJECTED,
                 "remote",

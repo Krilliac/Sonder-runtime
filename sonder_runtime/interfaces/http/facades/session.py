@@ -1,9 +1,12 @@
 """Root-free HTTP routing for the typed durable-session facade."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 
 from ....application.session.http_facade import HttpSessionFacade, HttpSessionResult
+
+logger = logging.getLogger(__name__)
 
 
 def dispatch_session_route(
@@ -16,10 +19,12 @@ def dispatch_session_route(
         return None
     parts = route[len(prefix):].split("/")
     if len(parts) != 2 or not all(parts):
+        logger.debug(f"dispatch_session_route: malformed path={path!r}")
         return HttpSessionResult(404, {"error": "not_found"})
     session_id, operation = parts[0], parts[1]
     if not session_id or "/" in session_id or "\\" in session_id:
         return HttpSessionResult(404, {"error": "not_found"})
+    logger.debug(f"dispatch_session_route: session_id={session_id!r}, operation={operation!r}")
     values = query or {}
 
     def one(name: str, default: str | None = None) -> str | None:
@@ -67,7 +72,10 @@ def dispatch_session_route(
         if operation == "checkpoint":
             return facade.checkpoint(session_id)
     except ValueError:
+        logger.warning(f"session route rejected: invalid query params for session_id={session_id!r}, operation={operation!r}")
+        logger.debug(f"dispatch_session_route: invalid query params for session_id={session_id!r}, operation={operation!r}")
         return HttpSessionResult(400, {"error": "invalid_session_query"})
+    logger.debug(f"dispatch_session_route: unrecognized operation={operation!r}")
     return HttpSessionResult(404, {"error": "not_found"})
 
 

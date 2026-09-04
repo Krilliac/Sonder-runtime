@@ -21,9 +21,12 @@ forwards, which derive them from a token or approval, can.
 from __future__ import annotations
 
 import copy
+import logging
 
 from ..application.ports.tool_registry import InMemoryToolRegistry, ToolDescriptor
 from ..application.tools.resource_policy import Decision, PolicyRule, ResourcePolicy
+
+logger = logging.getLogger(__name__)
 
 READ_ONLY_TOOLS = (
     "directory_tree", "file_find", "file_read_range", "program_search",
@@ -72,6 +75,7 @@ GUARD_KNOBS = {
 
 def typed_tool_registry() -> InMemoryToolRegistry:
     """Descriptors for the admitted family, derived from the native catalog."""
+    logger.debug(f"building typed tool registry, admitted_tools={len(TYPED_TOOLS)}")
     from .native_mcp import native_tool_registry
 
     native = native_tool_registry()
@@ -79,9 +83,11 @@ def typed_tool_registry() -> InMemoryToolRegistry:
     for name in TYPED_TOOLS:
         base = native.get(name)
         if base is None:
+            logger.critical(f"native catalog no longer carries required typed tool {name!r} -- codebase is internally contradictory, typed tool gateway cannot be composed")
             raise LookupError("native catalog no longer carries %r" % name)
         schema = copy.deepcopy(base.input_schema)
         if not schema.get("properties"):
+            logger.critical(f"native descriptor {name!r} has no bounded schema -- codebase is internally contradictory, typed tool gateway cannot be composed")
             raise LookupError("native descriptor %r has no bounded schema" % name)
         properties = schema["properties"]
         for knob in GUARD_KNOBS[name]:
@@ -91,11 +97,14 @@ def typed_tool_registry() -> InMemoryToolRegistry:
             name, base.description, schema,
             effects=base.effects, execution_class=base.execution_class,
         ))
+    logger.info(f"typed tool registry built, tool_count={len(descriptors)}")
+    logger.debug(f"typed tool registry built with {len(descriptors)} descriptors")
     return InMemoryToolRegistry(descriptors)
 
 
 def typed_tool_policy() -> ResourcePolicy:
     """Allow exactly the admitted family; the default for anything else is deny."""
+    logger.debug(f"building typed tool policy, read_only={len(READ_ONLY_TOOLS)}, mutating={len(MUTATING_TOOLS)}")
     rules = [
         PolicyRule(
             "read-only:%s" % name, Decision.ALLOW, tool=name,
@@ -111,6 +120,7 @@ def typed_tool_policy() -> ResourcePolicy:
         )
         for name in MUTATING_TOOLS
     )
+    logger.info(f"typed tool policy built, rules={len(rules)}")
     return ResourcePolicy(rules)
 
 

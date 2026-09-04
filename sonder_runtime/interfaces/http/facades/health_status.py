@@ -7,8 +7,11 @@ deliberately independent of the legacy ``server`` module and model routes.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class LifecycleStatusPort(Protocol):
@@ -36,6 +39,7 @@ class HealthStatusRoute:
 
     def render(self, lifecycle: LifecycleStatusPort) -> tuple[int, Any]:
         """Render the route using only the injected lifecycle port."""
+        logger.debug(f"HealthStatusRoute.render: path={self.path!r}, requires_auth={self.requires_auth}")
         if self.path == "/live":
             return 200, lifecycle.live_payload()
         if self.path == "/ready":
@@ -46,6 +50,7 @@ class HealthStatusRoute:
             return 200, lifecycle.version_payload()
         if self.path == "/metrics":
             return 200, lifecycle.metrics.render()
+        logger.warning(f"health status route render called with unsupported path={self.path!r}")
         raise ValueError("unsupported health/status route")
 
 
@@ -66,6 +71,7 @@ class HealthStatusFacade:
         requires_auth = self._ROUTES.get(normalized)
         if requires_auth is None:
             return None
+        logger.debug(f"HealthStatusFacade.route: matched path={normalized!r}, requires_auth={requires_auth}")
         media_type = (
             "text/plain; version=0.0.4; charset=utf-8"
             if normalized == "/metrics"

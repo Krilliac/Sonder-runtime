@@ -12,8 +12,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import importlib
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ..adapters.persistence.autopilot_repository import AutopilotRepository
 from ..adapters.persistence.fleet_registry import FleetStoreRegistryAdapter
@@ -214,6 +217,8 @@ class Application:
             except Exception as exc:
                 # A health probe must never make the control-plane status
                 # endpoint disappear or imply readiness from an exception.
+                logger.error(f"provider health probe failed for provider_id={item.provider_id!r}, reporting as unhealthy", exc_info=True)
+                logger.warning(f"provider health probe failed for provider_id={item.provider_id!r}, reporting as unhealthy: {type(exc).__name__}")
                 rows.append({
                     "provider_id": item.provider_id,
                     "status": "unhealthy",
@@ -298,10 +303,14 @@ def build_application(
     bounded contexts, their services join this graph; until then the
     legacy adapters wrap the root modules.
     """
+    logger.info(f"build_application starting, profile={profile!r}")
+    logger.debug(f"build_application starting, profile={profile!r}, config_provided={config is not None}")
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
         profile = config.profile
+        logger.info(f"config applied, effective profile={profile!r}")
+        logger.debug(f"config supplied, effective profile={profile!r}, home={config.state.home!r}")
         if config.state.home:
             # Keep typed startup state process-local.  This must happen before
             # any lazy persistence factory can resolve a database path, and
@@ -309,6 +318,8 @@ def build_application(
             runtime_paths.configure_home(config.state.home)
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
         from ..adapters.inference import ollama_pool
+        logger.info(f"ollama pool configured, workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
+        logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
             allow_remote=config.ollama.allow_remote,
@@ -316,10 +327,12 @@ def build_application(
         )
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; expected {PROFILES}")
+    logger.debug("configuring runtime lifecycle")
     from ..adapters.web import lifecycle as runtime_lifecycle
     runtime_lifecycle.configure(config)
     # Keep the transitional provider behind lazy closures: composing the
     # application must not import the historical root module.
+    logger.debug("resolving legacy model provider factories")
     from .legacy_model import lazy_legacy_model_provider_factories
     target_resolver, generate_factory = lazy_legacy_model_provider_factories()
     # SPEC-3 Phase 3: the real transport adapter behind the port — consent
@@ -331,6 +344,7 @@ def build_application(
     # wrapped by the typed lifecycle shell so cancellation/deadline and
     # publication health are visible before it reaches the model gateway.
     if embedding_provider is None:
+        logger.warning("no embedding provider supplied, falling back to local legacy adapter")
         import sonder_runtime.adapters.embeddings as legacy_embeddings
 
         def embedding_provider(request, context):
@@ -346,6 +360,7 @@ def build_application(
                 vectors.append(vector)
             return vectors
 
+    logger.debug(f"wiring provider adapters: embedding=custom({embedding_provider is not None}), training={training_backend is not None}, update={update_activator is not None}")
     embedding_adapter = EmbeddingLifecycleAdapter(embedding_provider)
     training_adapter = TrainingLifecycleAdapter(training_backend) if training_backend is not None else None
     update_adapter = UpdateLifecycleAdapter(update_activator) if update_activator is not None else None
@@ -355,7 +370,9 @@ def build_application(
     # backends remain absent and therefore fail closed.  If one is supplied,
     # require the other so the production path cannot be half-composed.
     if (training_adapter is None) != (update_adapter is None):
+        logger.critical(f"provider composition is internally contradictory: training_adapter={training_adapter is not None}, update_adapter={update_adapter is not None} -- they must be supplied together")
         raise ValueError("training_backend and update_activator must be supplied together")
+    logger.debug("wiring specialized providers into registry")
     specialized_bundle = wire_specialized_providers(
         provider_registry,
         embedding=embedding_adapter,
@@ -363,18 +380,23 @@ def build_application(
         update=update_adapter,
     )
 
+    logger.debug("resolving provider bindings from environment")
     try:
         provider_bindings = provider_bindings_from_env()
     except ValueError as exc:
         from ..domain.common.errors import InvalidInput
 
         raise InvalidInput(str(exc)) from exc
+    logger.info(f"provider bindings resolved, provider={provider_bindings.default_provider!r}")
+    logger.debug("building model gateway")
     gateway = build_model_gateway(
         provider_bindings,
         target_resolver=target_resolver,
         generate_factory=generate_factory,
         embedding_provider=embedding_adapter,
     )
+    logger.info("model gateway built")
+    logger.debug("composing vision service and context planning facade")
     vision = VisionService(
         FileVisionInputProvider(),
         OllamaVisionGateway(target_resolver=target_resolver),
@@ -418,6 +440,8 @@ def build_application(
             database = os.environ.get("SONDER_SESSIONS_DB", "").strip()
             if not database:
                 database = state_path("sessions.db", "SONDER_SESSIONS_DB")
+            logger.debug(f"lazy-init session repository at {database!r}")
+            logger.info("session repository initialized")
             session_repository = SQLiteSessionRepository(
                 database
             )
@@ -427,15 +451,16 @@ def build_application(
         nonlocal job_registry
         if job_registry is None:
             from ..platform.paths import state_path
-
-            job_registry = SQLiteDurableJobRegistry(
-                state_path("jobs.db", "SONDER_JOBS_DB")
-            )
+            db_path = state_path("jobs.db", "SONDER_JOBS_DB")
+            logger.debug(f"lazy-init job registry at {db_path!r}")
+            logger.info("job registry initialized")
+            job_registry = SQLiteDurableJobRegistry(db_path)
         return job_registry
 
     def get_session_capture_service() -> SessionCaptureService:
         nonlocal canonical_session_capture
         if canonical_session_capture is None:
+            logger.debug("lazy-init session capture service")
             canonical_session_capture = SessionCaptureService(get_session_repository())
         return canonical_session_capture
 
@@ -477,6 +502,8 @@ def build_application(
     def get_job_service() -> JobRegistryService:
         nonlocal job_service, process_cleanup
         if job_service is None:
+            logger.debug("lazy-init job registry service")
+            logger.info("job registry service initialized")
             if process_cleanup is None:
                 process_cleanup = ProcessTreeSupervisor()
             lifecycle = JobRegistryLifecycleAdapter(
@@ -492,6 +519,8 @@ def build_application(
     def get_process_job_provider() -> ProcessJobProvider:
         nonlocal process_job_provider, process_cleanup, spill_output
         if process_job_provider is None:
+            logger.debug("lazy-init subprocess job provider")
+            logger.info("subprocess job provider initialized")
             from ..platform.paths import state_path
             if process_cleanup is None:
                 process_cleanup = ProcessTreeSupervisor()
@@ -509,6 +538,8 @@ def build_application(
     def get_compute_registry() -> ComputeNodeRegistry:
         nonlocal compute_registry
         if compute_registry is None:
+            logger.debug(f"lazy-init compute registry, node_id={effective_config.compute.node_id!r}, remote_nodes={len(effective_config.compute.nodes)}")
+            logger.info(f"compute registry initialized, node_id={effective_config.compute.node_id!r}, remote_nodes={len(effective_config.compute.nodes)}")
             local_workloads = frozenset(
                 item for item in WorkloadKind if item is not WorkloadKind.INFERENCE
             )
@@ -649,6 +680,8 @@ def build_application(
     def get_compute_service() -> ComputeFabricService:
         nonlocal compute_service, compute_remote_transport
         if compute_service is None:
+            logger.debug(f"lazy-init compute fabric service, remote_nodes={len(effective_config.compute.nodes)}")
+            logger.info(f"compute fabric service initialized, remote_nodes={len(effective_config.compute.nodes)}")
             if effective_config.compute.nodes and not effective_config.secrets.api_key:
                 raise ValueError("remote compute requires SONDER_API_KEY")
             if compute_remote_transport is None:
@@ -656,6 +689,8 @@ def build_application(
                     HttpsComputeJobTransport,
                 )
 
+                if not effective_config.secrets.api_key:
+                    logger.warning("compute transport initialized without API key, remote dispatch will fail")
                 compute_remote_transport = HttpsComputeJobTransport(
                     api_key=(
                         effective_config.secrets.api_key
@@ -684,6 +719,8 @@ def build_application(
     def get_workflow_engine() -> ResumableWorkflowEngine:
         nonlocal workflow_engine
         if workflow_engine is None:
+            logger.debug("lazy-init resumable workflow engine")
+            logger.info("resumable workflow engine initialized")
             from ..platform.paths import state_path
 
             workflow_engine = ResumableWorkflowEngine(
@@ -697,6 +734,8 @@ def build_application(
     def get_agent_registry() -> UnifiedAgentRegistryService:
         nonlocal agent_registry
         if agent_registry is None:
+            logger.debug("lazy-init agent registry and registering workbench modes")
+            logger.info("agent registry initialized")
             agent_registry = UnifiedAgentRegistryService(FleetStoreRegistryAdapter())
             agent_registry.register_workbench_modes()
         return agent_registry
@@ -704,6 +743,7 @@ def build_application(
     def get_extension_registry() -> ExtensionRegistry:
         nonlocal extension_registry
         if extension_registry is None:
+            logger.debug("lazy-init extension registry")
             from ..platform.paths import state_path
             extension_registry = ExtensionRegistry(
                 provenance=extension_provenance or ProvenanceInventory.build([]),
@@ -714,6 +754,7 @@ def build_application(
     def get_experiment_manager() -> EphemeralExperimentManager:
         nonlocal experiment_manager
         if experiment_manager is None:
+            logger.debug(f"lazy-init experiment manager, startup_authority_provided={extension_startup_authority is not None}")
             # The application service owns lifecycle state and receives only
             # the typed child-host boundary from this composition root.  No
             # experiment may start unless an entrypoint explicitly supplies
@@ -723,6 +764,8 @@ def build_application(
                 if extension_startup_authority is not None
                 else (lambda _definition: False)
             )
+            if extension_startup_authority is None:
+                logger.warning("no extension startup authority supplied, all experiment starts will be denied (fail-closed)")
 
             def host_factory(definition, directory):
                 host_limits = definition.limits
@@ -762,6 +805,8 @@ def build_application(
                 def __getattr__(self, name: str):
                     return getattr(importlib.import_module("selfmod"), name)
 
+            if unrestricted_selfmod:
+                logger.warning("self-modification service running in UNRESTRICTED mode, safety guards bypassed")
             selfmod_service = GuardedLegacySelfmodService(
                 _LegacySelfmodModulePort(), unrestricted=unrestricted_selfmod,
             )
@@ -887,6 +932,8 @@ def build_application(
             ).read_update_status
             status = read_update_status()
         except Exception:
+            logger.error("update status check failed, control plane module failed to load or execute", exc_info=True)
+            logger.warning("update status unavailable, control plane module failed to load or execute")
             return unavailable_section("updates")()
         return ({
             "available": True,
@@ -973,6 +1020,8 @@ def build_application(
         try:
             get_compute_snapshot()
         except Exception as exc:
+            logger.error(f"local compute snapshot probe failed, node health will report unknown", exc_info=True)
+            logger.warning(f"local compute snapshot probe failed: {type(exc).__name__}, node health will report unknown")
             local_error = type(exc).__name__
         else:
             local_error = ""
@@ -1042,6 +1091,7 @@ def build_application(
     # permission-modes evaluator makes the operator's standing policy the
     # second gate on every typed call that was not already decided by the
     # surface forwarding it; every receipt is durable before it is visible.
+    logger.debug("composing typed tool application facade")
     from ..platform.logging import Redactor as _Redactor
 
     tools = ToolApplicationFacade.compose(
@@ -1059,6 +1109,8 @@ def build_application(
         permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
     )
 
+    logger.info(f"application graph assembled, profile={profile!r}")
+    logger.debug(f"assembling Application graph for profile={profile!r}")
     return Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
@@ -1143,6 +1195,7 @@ _application_lifecycle = ApplicationLifecycle(_build_default_application)
 
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
+    logger.debug(f"default_app called, config_provided={config is not None}")
     global _default_config
     if config is not None:
         if not isinstance(config, SonderConfig):
@@ -1155,6 +1208,7 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
             _application_lifecycle.reset()
     application = _application_lifecycle.get()
     if config is not None and application.config is not config:
+        logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
         raise RuntimeError("default application was already built without this config")
     return application
 
