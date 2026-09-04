@@ -4049,6 +4049,13 @@ class Handler(BaseHTTPRequestHandler):
             roots = tuple(Path(root).resolve() for root in getattr(state, "workspace_roots", ())) \
                 if _admin_authorized(auth) else ()
             context = replace(context, principal_id=principal, workspace_roots=roots)
+            from sonder_runtime.interfaces.agent_lane_entrypoint import http_parent_scope
+            if payload is not None and not isinstance(payload, dict):
+                raise InvalidInput("request must be an object")
+            payload = dict(payload or {})
+            for fields in (payload, query):
+                if "parent_session_id" in fields:
+                    fields["parent_session_id"] = http_parent_scope(fields["parent_session_id"], principal)
             if method != "GET":
                 # The approval ledger is process-wide. Bind HTTP approvals to
                 # authenticated identity and effective roots as well as the

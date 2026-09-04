@@ -22,7 +22,7 @@ def ledger(tmp_path, monkeypatch):
     pm.reset_unattended_for_tests()
 
 
-@pytest.mark.parametrize('surface', ['native', 'legacy'])
+@pytest.mark.parametrize('surface', ['native', 'legacy', 'registered'])
 def test_exact_mcp_arguments_spend_one_approval_only(surface, ledger, tmp_path, monkeypatch):
     import server
     calls = []
@@ -30,19 +30,29 @@ def test_exact_mcp_arguments_spend_one_approval_only(surface, ledger, tmp_path, 
         dispatch_agent_lane_tool=lambda *a, **k: calls.append(k) or {'ok': True}))
     application = app(tmp_path)
     monkeypatch.setattr(server, '_application', lambda: application)
-    args = {'action':'spawn', 'payload':{'task':'bounded work'}, 'parent_session_id':'parent'}
+    args = {'action':'spawn', 'payload':{'task':'bounded work'}, 'parent_session_id':'minted-root',
+            'parent_token': application.agent_lanes().token}
     def run(arguments):
         if surface == 'native':
             return not invoke(application, arguments)['result']['isError']
         try:
-            server.agent_lane(**arguments)
+            if surface == 'registered':
+                import asyncio
+                result = asyncio.run(server.mcp.call_tool('agent_lane', arguments))
+                assert not result.is_error
+            else:
+                server.agent_lane(**arguments)
             return True
         except Exception as error:
             from sonder_runtime.domain.common.errors import Forbidden
-            assert isinstance(error, Forbidden)
+            from mcp.server.mcpserver.exceptions import ToolError
+            assert isinstance(error, (Forbidden, ToolError))
             return False
     assert not run(args)
-    grant = ledger.issue('agent_lane', pm.call_digest('agent_lane', args), approver='test')
+    from sonder_runtime.interfaces.agent_lane_entrypoint import lane_approval_arguments
+    context = local_owner_context(correlation_id='test', source='mcp', workspace_roots=(tmp_path,))
+    safe = lane_approval_arguments(application, context, args)
+    grant = ledger.issue('agent_lane', pm.call_digest('agent_lane', safe), approver='test')
     assert not run({**args, 'payload': {'task':'different work'}})
     # Legacy's omitted optional argument defaults to empty; it must hash the
     # same invocation as native MCP's omitted optional argument.

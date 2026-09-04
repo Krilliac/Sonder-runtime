@@ -5128,42 +5128,52 @@ def _offload_impl(
     return with_footer(response, iid)
 
 
-@mcp.tool()
-def agent_lane(action: str, payload: dict, parent_session_id: str,
-               parent_lane_id: str = "") -> str:
-    """Spawn, inspect, message or control a durable independent agent conversation.
-
-    Actions: spawn, list, inspect, send_message, wait, interrupt, resume,
-    cancel, reports, ack. Parent identity is checked against the caller's
-    owned sessions; payload cannot supply a different principal or author.
-    """
+def _agent_lane_context():
     from sonder_runtime.application.context import local_owner_context
-    from sonder_runtime.interfaces.agent_lanes import dispatch_agent_lane_tool
-    from sonder_runtime.domain.common.errors import Forbidden, DependencyUnavailable
-    from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
-    arguments = dict(action=action, payload=payload, parent_session_id=parent_session_id)
-    if parent_lane_id:
-        arguments['parent_lane_id'] = parent_lane_id
-    decision = lane_policy.decide_for_caller(
-        "agent_lane", interactive=False, gate_control_exempt=False, surface="mcp",
-        arguments=arguments,
-    )
-    if decision is not None and decision.action != lane_policy.allow_action():
-        raise Forbidden(getattr(decision, "reason", "agent control denied by runtime permission policy"))
     application = _application()
-    factory = getattr(application, "agent_lanes", None)
-    if not callable(factory):
-        raise DependencyUnavailable("agent conversations are unavailable")
     context = local_owner_context(
         correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
         workspace_roots=tuple(Path(root) for root in application.config.state.workspace_roots),
         timeout_seconds=60.0,
     )
+    return application, context
+
+
+def _agent_lane_gate_arguments(arguments):
+    """Shared outer/inner MCP gate identity; never persist bearer proof."""
+    from sonder_runtime.interfaces.agent_lane_entrypoint import lane_approval_arguments
+    application, context = _agent_lane_context()
+    return lane_approval_arguments(application, context, arguments)
+
+
+@mcp.tool()
+def agent_lane(action: str, payload: dict, parent_session_id: str = "",
+               parent_token: str = "") -> str:
+    """Control independent agent conversations with scoped parent authority.
+
+    Call open_parent with an empty payload first; retain its parent_session_id
+    and parent_token for subsequent commands. Never place the token in tasks,
+    messages or files. Actions also include rotate_parent and revoke_parent.
+    Other actions: spawn, list, inspect, send_message, wait, interrupt, resume,
+    cancel, reports and ack. Existing sessions cannot be claimed by name.
+    """
+    from sonder_runtime.interfaces.agent_lane_entrypoint import (
+        lane_approval_arguments, execute_lane_command,
+    )
+    from sonder_runtime.domain.common.errors import Forbidden
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
+    application, context = _agent_lane_context()
+    arguments = {"action": action, "payload": payload,
+                 "parent_session_id": parent_session_id, "parent_token": parent_token}
+    safe = lane_approval_arguments(application, context, arguments)
+    decision = None if lane_policy.approval_spent_for("agent_lane", safe) else lane_policy.decide_for_caller(
+        "agent_lane", interactive=False, gate_control_exempt=False, surface="mcp",
+        arguments=safe,
+    )
+    if decision is not None and decision.action != lane_policy.allow_action():
+        raise Forbidden(decision.reason)
     try:
-        return json.dumps(dispatch_agent_lane_tool(
-            factory(), action, payload, context, parent_session_id=parent_session_id,
-            parent_lane_id=parent_lane_id or None,
-        ), ensure_ascii=False)
+        return json.dumps(execute_lane_command(application, context, arguments), ensure_ascii=False)
     finally:
         lane_policy.forget_spent_approval()
 

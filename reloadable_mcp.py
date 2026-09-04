@@ -563,8 +563,10 @@ class ReloadableMCPServer(MCPServer):
         # this call, and vanish when the call is over.
         import server
 
-        with server.approved_call_reach(name, arguments):
-            _refuse_if_gated(name, arguments)
+        gate_arguments = (server._agent_lane_gate_arguments(arguments)
+                          if name == "agent_lane" else arguments)
+        with server.approved_call_reach(name, gate_arguments):
+            _refuse_if_gated(name, gate_arguments)
             return await super().call_tool(name, arguments, context)
 
     async def list_resources(self):

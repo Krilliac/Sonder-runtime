@@ -440,16 +440,16 @@ _INSPECTION_TOOLS = (
     ),
 )
 _AGENT_LANE_TOOL = ToolDescriptor(
-    "agent_lane", "Create, inspect and control durable independent agent conversations",
+    "agent_lane", "Open a fresh parent with open_parent; retain its scoped capability to control independent agent conversations. Never place the capability in task text or files.",
     {"type": "object", "properties": {
         "action": {"type": "string", "enum": [
-            "spawn", "list", "inspect", "send_message", "wait", "interrupt",
-            "resume", "cancel", "reports", "ack",
+            "open_parent", "rotate_parent", "revoke_parent", "spawn", "list", "inspect",
+            "send_message", "wait", "interrupt", "resume", "cancel", "reports", "ack",
         ]},
         "payload": {"type": "object", "maxProperties": 32},
-        "parent_session_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "parent_lane_id": {"type": "string", "minLength": 1, "maxLength": 128},
-    }, "required": ["action", "payload", "parent_session_id"], "additionalProperties": False},
+        "parent_session_id": {"type": "string", "maxLength": 128},
+        "parent_token": {"type": "string", "maxLength": 256},
+    }, "required": ["action", "payload"], "additionalProperties": False},
 )
 _NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,)
 # Only the inspections the inspection service can run go to it. The catalog
@@ -743,31 +743,17 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         if canonical_name == "agent_lane":
             from ..adapters.security.permission_policy import permission_policy
             from ..domain.common.errors import SonderError
-
-            # Optional parent identity is absent on both native and legacy
-            # surfaces when unset, so an exact approval hashes consistently.
-            if not canonical_arguments.get("parent_lane_id"):
-                canonical_arguments.pop("parent_lane_id", None)
-            decision = permission_policy.decide_for_caller(
-                canonical_name, interactive=False, gate_control_exempt=False,
-                surface="native-mcp",
-                arguments=canonical_arguments,
-            )
-            if decision is not None and decision.action != permission_policy.allow_action():
-                return {"output": getattr(decision, "reason", "agent control denied by runtime permission policy"),
-                        "isError": True, "error": "permission_denied",
-                        "evidence": {"call_id": getattr(decision, "call_id", "")}}
-            factory = getattr(application, "agent_lanes", None)
-            if not callable(factory):
-                return {"output": "agent conversations are unavailable", "isError": True,
-                        "error": "DEPENDENCY_UNAVAILABLE", "evidence": {}}
+            from ..interfaces.agent_lane_entrypoint import lane_approval_arguments, execute_lane_command
             try:
-                from ..interfaces.agent_lanes import dispatch_agent_lane_tool
-                result = dispatch_agent_lane_tool(
-                    factory(), canonical_arguments["action"], canonical_arguments["payload"],
-                    context, parent_session_id=canonical_arguments["parent_session_id"],
-                    parent_lane_id=canonical_arguments.get("parent_lane_id"),
+                safe = lane_approval_arguments(application, context, canonical_arguments)
+                decision = permission_policy.decide_for_caller(
+                    canonical_name, interactive=False, gate_control_exempt=False,
+                    surface="native-mcp", arguments=safe,
                 )
+                if decision is not None and decision.action != permission_policy.allow_action():
+                    return {"output": decision.reason, "isError": True, "error": "permission_denied",
+                            "evidence": {"call_id": getattr(decision, "call_id", "")}}
+                result = execute_lane_command(application, context, canonical_arguments)
                 return {"output": json.dumps(result, ensure_ascii=False), "isError": False,
                         "error": None, "evidence": {"tool": canonical_name}}
             except (SonderError, ValueError, TypeError, PermissionError) as error:
