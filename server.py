@@ -17070,7 +17070,8 @@ def _agent_dispatch(
             lane_refusal = "ERROR: HOST POLICY: agent_lane requires " + refusal
             return lane_refusal
         try:
-            gate_arguments = _standalone_lanes.current().prepare(args)
+            prepared_lane_command = _standalone_lanes.current().prepare_command(args)
+            gate_arguments = prepared_lane_command.approval_arguments()
         except (ValueError, TypeError, PermissionError) as exc:
             lane_refusal = "ERROR: HOST POLICY: " + str(exc)
             return lane_refusal
@@ -17134,7 +17135,10 @@ def _agent_dispatch(
         )
     if tool_name == "agent_lane":
         try:
-            return json.dumps(_standalone_lanes.current().execute(args), ensure_ascii=False)
+            return json.dumps(
+                _standalone_lanes.current().execute_prepared(prepared_lane_command),
+                ensure_ascii=False,
+            )
         except Exception as exc:
             lane_failure = "ERROR: agent_lane " + type(exc).__name__ + ": " + str(exc)
             return lane_failure
@@ -18990,7 +18994,20 @@ def _agent_impl(*args, **kwargs) -> str:
     pinned turn reuses the outer reading.
     """
     with _stable_system_context(), _standalone_lanes.model_loop_scope():
-        return _agent_turn(*args, **kwargs)
+        result = _agent_turn(*args, **kwargs)
+        controller = _standalone_lanes.current()
+        if controller is None or not controller.delegated_work:
+            return result
+        summary = "delegated work requires independent verification"
+        activity_tracker.set_response_status("unverified", summary)
+        activity_tracker.set_result_summary(summary)
+        if isinstance(result, autopilot_controller.HostTaskResult):
+            from dataclasses import replace
+            return replace(
+                result, output=controller.report_outcome(result.output),
+                validation_passed=False,
+            )
+        return controller.report_outcome(result)
 
 
 def _agent_turn(
@@ -19394,19 +19411,6 @@ def _agent_turn(
                     detail="claimed completion without a change or a validation",
                     vacuous=True,
                 )
-        controller = _standalone_lanes.current()
-        if controller is not None and controller.delegated_work:
-            metadata = controller.report_metadata()
-            final = (
-                "UNVERIFIED: delegated work requires verification after child activity is quiescent. "
-                "This run does not certify the child's workspace changes.\n\n"
-                "Unverified model summary:\n" + final +
-                "\n\n=== DELEGATED WORK METADATA ===\n" + json.dumps(metadata, sort_keys=True)
-            )
-            if validation_failed:
-                final = _AGENT_VALIDATION_FAILED_LINE + "\n" + final
-            model_summary = "delegated work requires independent verification"
-            activity_tracker.set_response_status("unverified", model_summary)
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )

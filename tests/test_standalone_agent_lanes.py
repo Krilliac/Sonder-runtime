@@ -295,3 +295,134 @@ def test_lane_effects_invalidate_workspace_verification(action, expected):
         server._agent_tool_mutates("agent_lane", {"action": action, "payload": {}})
         is expected
     )
+
+
+def test_dispatch_consumes_exact_approved_snapshot(env, monkeypatch):
+    from pathlib import Path
+
+    root = env[-1]
+    (root / "other").mkdir()
+    original_resolve = Path.resolve
+    switched = False
+    args = {
+        "action": "spawn",
+        "payload": {
+            "command_id": "approved",
+            "task": "original task",
+            "workspace_root": "child",
+        },
+    }
+
+    def resolve(path, *a, **k):
+        if switched and path == root / "child":
+            return original_resolve(root / "other", *a, **k)
+        return original_resolve(path, *a, **k)
+
+    def gate(name, approved):
+        nonlocal switched
+        assert approved["payload"]["workspace_root"] == str(root / "child")
+        # Both model input and detached gate copy may mutate; neither is executable authority.
+        args["payload"]["workspace_root"] = str(root / "other")
+        args["payload"]["task"] = "unapproved task"
+        approved["payload"]["workspace_root"] = str(root / "other")
+        switched = True
+        return None
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr(server, "_agent_permission_gate_error", gate)
+    with lanes.controller_scope(lambda: app_for(env)) as controller:
+        result = server._agent_dispatch("agent_lane", args)
+        assert "resolution changed" in result
+        assert controller._parent is None
+
+
+def test_prepared_snapshot_ignores_input_mutation_and_rechecks_cancellation(env):
+    from dataclasses import FrozenInstanceError
+
+    with lanes.controller_scope(lambda: app_for(env)) as controller:
+        args = {
+            "action": "spawn",
+            "payload": {
+                "command_id": "frozen",
+                "task": "approved task",
+                "workspace_root": "child",
+            },
+        }
+        prepared = controller.prepare_command(args)
+        args["payload"]["task"] = "different task"
+        with pytest.raises(FrozenInstanceError):
+            prepared.encoded = "{}"
+        result = controller.execute_prepared(prepared)
+        assert result["lane"]["task"] == "approved task"
+        next_command = controller.prepare_command({"action": "list", "payload": {}})
+        controller.request_cancel()
+        with pytest.raises(PermissionError):
+            controller.execute_prepared(next_command)
+
+
+@pytest.mark.parametrize("outcome", ["parse", "model", "maxsteps", "evidence"])
+@pytest.mark.parametrize("receipt", [False, True])
+def test_delegated_early_outcomes_preserve_host_metadata(
+    env, monkeypatch, outcome, receipt
+):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+
+    count = 0
+
+    def decide(*args, **kwargs):
+        nonlocal count
+        count += 1
+        if count == 1:
+            return (
+                {
+                    "tool": "agent_lane",
+                    "args": {
+                        "action": "spawn",
+                        "payload": {
+                            "command_id": "early",
+                            "task": "implement parser",
+                            "workspace_root": str(env[-1] / "child"),
+                        },
+                    },
+                },
+                "",
+                None,
+            )
+        if outcome == "parse":
+            return None, "invalid", ValueError("bad decision")
+        if outcome == "model":
+            return None, "", ModelCallError("http", "model unavailable", status=500)
+        if outcome == "maxsteps":
+            return (
+                {"tool": "agent_lane", "args": {"action": "list", "payload": {}}},
+                "",
+                None,
+            )
+        return {"final": "Everything is verified"}, "", None
+
+    monkeypatch.setattr(server, "_agent_generate_decision", decide)
+    monkeypatch.setattr(server, "_agent_permission_gate_error", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda *a, **k: "")
+    with lanes.controller_scope(lambda: app_for(env)) as controller:
+        result = server._agent_impl(
+            "Delegate implementation",
+            max_steps=2,
+            auto_checklist=False,
+            require_file_evidence=outcome == "evidence",
+            return_host_receipt=receipt,
+        )
+        text = result.output if receipt else result
+        assert "UNVERIFIED: delegated work" in text
+        assert text.count("=== DELEGATED WORK METADATA ===") == 1
+        metadata = json.loads(text.split("=== DELEGATED WORK METADATA ===\n")[1])
+        child = call(controller, "list")["lanes"][0]
+        assert metadata["children"] == [
+            {
+                "id": child["id"],
+                "revision": child["revision"],
+                "status": child["status"],
+            }
+        ]
+        assert controller._parent["parent_token"] not in text
+        if receipt:
+            assert not result.validation_passed
