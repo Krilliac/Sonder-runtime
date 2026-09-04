@@ -1,12 +1,15 @@
 """Fail-closed Ollama endpoint parsing and transport policy."""
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import urllib.parse
 import urllib.request
 
 from sonder_runtime.domain import ollama_policy
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_HOST = ollama_policy.DEFAULT_HOST
@@ -22,6 +25,8 @@ def configure_typed_endpoint(value: str | None) -> None:
     setter is deliberately tiny: validation remains at the configuration
     boundary and this adapter only stores the already-typed startup choice.
     """
+    logger.debug(f"configure_typed_endpoint: value={value!r}")
+    logger.info(f"Ollama endpoint configured: {safe_display(value) if value is not None else 'reset to default'}")
     global _configured_endpoint
     with _configuration_lock:
         _configured_endpoint = None if value is None else str(value)
@@ -66,7 +71,9 @@ def configured_origin(value=None, *, allow_remote=None) -> str:
     origin = normalize(value)
     error = policy_error(origin, allow_remote=allow_remote)
     if error:
+        logger.debug(f"configured_origin: policy error for {origin!r}: {error}")
         raise ValueError(error)
+    logger.debug(f"configured_origin: resolved to {origin!r}")
     return origin
 
 
@@ -108,6 +115,10 @@ def locality(value=None) -> str:
     if is_loopback(origin):
         return "loopback"
     if parsed.scheme.lower() != "https":
+        logger.warning(
+            f"remote Ollama endpoint using insecure HTTP: "
+            f"{safe_display(origin)}"
+        )
         return "remote-insecure"
     return "remote-opt-in" if remote_allowed() else "remote-blocked"
 
@@ -151,6 +162,7 @@ _OPENER = urllib.request.build_opener(_PROXY_HANDLER, _NoRedirect())
 def open_url(request, timeout=30, *, allow_remote=None):
     """Open one Ollama request without environment proxies or redirects."""
     url = request.full_url if hasattr(request, "full_url") else str(request)
+    logger.debug(f"open_url: url={url!r}, timeout={timeout}")
     parsed = urllib.parse.urlsplit(url)
     origin = configured_origin(
         _origin_from_url(url), allow_remote=allow_remote,

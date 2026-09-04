@@ -7,6 +7,7 @@ transport executors; no provider vocabulary crosses this boundary.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
@@ -14,6 +15,8 @@ from threading import RLock
 from typing import Any, Protocol
 
 from ...domain.common.errors import InvalidInput
+
+logger = logging.getLogger(__name__)
 from ...domain.common.ids import SessionId
 from ...domain.loop_retry_policy import RetryDecision
 from ..loop_contract import (
@@ -121,6 +124,7 @@ class LoopSessionLifecycleFacade:
         self._lock = RLock()
 
     def admit_turn(self, turn_id: str, *, session_id: str | SessionId | None = None) -> TurnContract:
+        logger.debug(f"LoopSessionLifecycleFacade.admit_turn: turn_id={turn_id!r}, session_id={session_id!r}")
         if not isinstance(turn_id, str) or not turn_id.strip():
             raise InvalidInput("turn_id must be non-empty")
         normalized_session = None if session_id is None else (
@@ -132,20 +136,26 @@ class LoopSessionLifecycleFacade:
             if turn_id in self._turns:
                 raise InvalidInput("turn_id is already admitted")
             if len(self._turns) >= self._max_turns:
+                logger.warning(f"active turn bound exceeded: current={len(self._turns)}, max={self._max_turns}")
                 raise InvalidInput("active turn bound exceeded")
+            if len(self._turns) >= self._max_turns * 0.9:
+                logger.warning(f"active turn count approaching limit: current={len(self._turns)}, max={self._max_turns}")
             node_id = f"turn:{turn_id}"
             self._control.cancellation.create_child(node_id=node_id)
             turn = TurnContract(turn_id)
             self._turns[turn_id] = _TurnState(normalized_session, turn, {}, {}, node_id)
+            logger.info(f"turn admitted: turn_id={turn_id!r}, session_id={normalized_session!r}")
             return turn
 
     def start_turn(self, turn_id: str) -> TurnContract:
+        logger.debug(f"LoopSessionLifecycleFacade.start_turn: turn_id={turn_id!r}")
         state = self._state(turn_id)
         with self._lock:
             state.turn = state.turn.transition(TurnState.RUNNING)
             return state.turn
 
     def open_step(self, turn_id: str, step_id: str) -> StepContract:
+        logger.debug(f"LoopSessionLifecycleFacade.open_step: turn_id={turn_id!r}, step_id={step_id!r}")
         state = self._state(turn_id)
         if not isinstance(step_id, str) or not step_id.strip():
             raise InvalidInput("step_id must be non-empty")
@@ -162,6 +172,7 @@ class LoopSessionLifecycleFacade:
             return step
 
     def transition_step(self, turn_id: str, step_id: str, next_state: StepState) -> StepContract:
+        logger.debug(f"LoopSessionLifecycleFacade.transition_step: turn_id={turn_id!r}, step_id={step_id!r}, next_state={next_state.value!r}")
         state = self._state(turn_id)
         with self._lock:
             step = self._step(state, step_id)
@@ -177,6 +188,7 @@ class LoopSessionLifecycleFacade:
             return step
 
     def complete_step(self, turn_id: str, step_id: str) -> StepContract:
+        logger.debug(f"LoopSessionLifecycleFacade.complete_step: turn_id={turn_id!r}, step_id={step_id!r}")
         state = self._state(turn_id)
         with self._lock:
             step = self._step(state, step_id)
@@ -187,6 +199,7 @@ class LoopSessionLifecycleFacade:
             return step
 
     def stop_turn(self, turn_id: str) -> TurnContract:
+        logger.debug(f"LoopSessionLifecycleFacade.stop_turn: turn_id={turn_id!r}")
         state = self._state(turn_id)
         with self._lock:
             if state.turn.state is TurnState.STOPPING:
@@ -197,27 +210,35 @@ class LoopSessionLifecycleFacade:
             return state.turn
 
     def complete_turn(self, turn_id: str) -> TurnContract:
+        logger.debug(f"LoopSessionLifecycleFacade.complete_turn: turn_id={turn_id!r}")
         state = self._state(turn_id)
         with self._lock:
             if state.turn.state is not TurnState.STOPPING:
                 state.turn = state.turn.transition(TurnState.STOPPING)
             state.turn = state.turn.complete()
+            logger.info(f"turn completed: turn_id={turn_id!r}")
             return state.turn
 
     def fail_turn(self, turn_id: str) -> TurnContract:
+        logger.debug(f"LoopSessionLifecycleFacade.fail_turn: turn_id={turn_id!r}")
         state = self._state(turn_id)
         with self._lock:
             if state.turn.state in {TurnState.COMPLETED, TurnState.FAILED, TurnState.CANCELLED}:
                 return state.turn
             state.turn = state.turn.transition(TurnState.FAILED)
+            logger.error(f"turn failed: turn_id={turn_id!r}")
+            logger.warning(f"turn failed: turn_id={turn_id!r}")
+            logger.info(f"turn failed: turn_id={turn_id!r}")
             return state.turn
 
     def cancel_turn(self, turn_id: str, *, reason: str = "cancellation requested", timeout: float | None = None) -> tuple[CleanupConformance, ...]:
+        logger.debug(f"LoopSessionLifecycleFacade.cancel_turn: turn_id={turn_id!r}, reason={reason!r}")
         state = self._state(turn_id)
         reports = self._control.cancel_and_cleanup(state.cancellation_node, reason=reason, timeout=timeout)
         with self._lock:
             if state.turn.state not in {TurnState.COMPLETED, TurnState.FAILED, TurnState.CANCELLED}:
                 state.turn = state.turn.transition(TurnState.CANCELLED)
+            logger.info(f"turn cancelled: turn_id={turn_id!r}, reason={reason!r}, cleanup_reports={len(reports)}")
             return reports
 
     def bind_cancellable(self, turn_id: str, target_id: str, *, cancel, cleanup) -> None:
@@ -242,6 +263,7 @@ class LoopSessionLifecycleFacade:
         return self._repository.append(fact.session_id, fact.event_type, _json_payload(fact.payload))
 
     def steer(self, command: SteeringCommand, *, turn_id: str) -> SteeringCommand:
+        logger.debug(f"LoopSessionLifecycleFacade.steer: turn_id={turn_id!r}, command_id={command.command_id!r}, kind={command.kind.value!r}")
         state = self._state(turn_id)
         if not isinstance(command, SteeringCommand):
             raise TypeError("command must be a SteeringCommand")
@@ -253,10 +275,13 @@ class LoopSessionLifecycleFacade:
             return command
 
     def drain_steering(self, turn_id: str) -> tuple[SteeringCommand, ...]:
+        logger.debug(f"LoopSessionLifecycleFacade.drain_steering: turn_id={turn_id!r}")
         state = self._state(turn_id)
         with self._lock:
             commands = order_commands(state.steering.values())
             state.steering.clear()
+        if commands:
+            logger.warning(f"draining {len(commands)} steering command(s) for turn_id={turn_id!r}")
         for command in commands:
             if command.kind is SteeringKind.CANCELLATION:
                 self.cancel_turn(turn_id, reason=command.reason)

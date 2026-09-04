@@ -6,6 +6,7 @@ SQLite transaction.
 """
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from ...domain.memory.rules import (
@@ -14,6 +15,8 @@ from ...domain.memory.rules import (
 )
 from ...domain.common.events import DomainEvent
 from ...domain.common.errors import InvalidInput
+
+logger = logging.getLogger(__name__)
 
 
 class OutcomeStore(Protocol):
@@ -44,6 +47,7 @@ class OutcomeService:
         self, interaction_id: str, signal: str,
         source: str = OUTCOME_SOURCE_CALLER,
     ) -> float:
+        logger.debug(f"OutcomeService.record: interaction_id={interaction_id!r}, signal={signal!r}, source={source!r}")
         if signal not in VALID_SIGNALS:
             raise InvalidInput(
                 f"unknown signal {signal!r}; valid: {sorted(VALID_SIGNALS)}"
@@ -60,6 +64,9 @@ class OutcomeService:
 
         reward = reward_score(signal)
 
+        if reward < 0:
+            logger.warning(f"negative outcome recorded: interaction_id={interaction_id!r}, signal={signal!r}, reward={reward}, source={source!r}")
+
         self._store.record_outcome(interaction_id, signal, reward, source=source)
 
         event = DomainEvent(
@@ -75,5 +82,7 @@ class OutcomeService:
             },
         )
         self._store.append_outbox_event(event)
+        logger.info(f"outcome recorded: interaction_id={interaction_id!r}, signal={signal!r}, reward={reward}, source={source!r}")
+        logger.debug(f"OutcomeService.record: recorded reward={reward}, is_good={reward_is_good(signal)}")
 
         return reward

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import urllib.request
 
 from ...application.context import OperationContext
@@ -10,6 +11,16 @@ from ...application.ports.model_target import ModelTargetResolver
 from ...application.ports.vision_gateway import VisionRequest, VisionResponse, require_vision_text
 from ...domain.common.errors import Cancelled, DeadlineExceeded, DependencyUnavailable, Forbidden
 from . import ollama_endpoint
+
+logger = logging.getLogger(__name__)
+
+_configured_request_timeout: float = 300.0
+
+
+def configure_typed_request_timeout(seconds: int | None) -> None:
+    global _configured_request_timeout
+    if seconds is not None:
+        _configured_request_timeout = max(1.0, float(seconds))
 
 
 class OllamaVisionGateway:
@@ -20,6 +31,7 @@ class OllamaVisionGateway:
             raise ValueError("vision target resolver must be callable")
         self._target_resolver = target_resolver
         self._transport = transport
+        logger.info("OllamaVisionGateway initialized")
 
     @staticmethod
     def _check_context(context: OperationContext) -> float | None:
@@ -34,11 +46,17 @@ class OllamaVisionGateway:
     def analyze(self, request: VisionRequest, context: OperationContext) -> VisionResponse:
         timeout = self._check_context(context)
         endpoint = ollama_endpoint.normalize()
+        logger.debug(f"OllamaVisionGateway.analyze: endpoint={endpoint!r}, tier={request.tier!r}")
         if not ollama_endpoint.is_loopback(endpoint):
             raise Forbidden("vision analysis requires a loopback Ollama endpoint")
         target = self._target_resolver(request.tier, True)
         if not getattr(target, "model", None):
+            logger.warning(
+                f"vision model unavailable for tier={request.tier!r}, "
+                f"target returned no model identity"
+            )
             raise DependencyUnavailable("configured vision model is unavailable")
+        logger.debug(f"OllamaVisionGateway.analyze: resolved model={getattr(target, 'model', None)!r}, cloud={getattr(target, 'cloud', False)}")
         if bool(getattr(target, "cloud", False)):
             raise Forbidden("vision analysis requires an installed local vision model")
         if getattr(target, "tier_label", None) == "cloud-disabled":
@@ -56,10 +74,12 @@ class OllamaVisionGateway:
             "stream": False,
             "options": dict(request.options),
         }
+        url = endpoint + "/api/chat"
+        logger.debug(f"OllamaVisionGateway.analyze: posting to {url!r}, model={target.model!r}, timeout={timeout}")
         data = (
-            self._transport(endpoint + "/api/chat", payload, timeout)
+            self._transport(url, payload, timeout)
             if self._transport is not None
-            else self._post(endpoint + "/api/chat", payload, timeout)
+            else self._post(url, payload, timeout)
         )
         if not isinstance(data, dict):
             raise DependencyUnavailable("Ollama returned an invalid vision response")
@@ -76,9 +96,19 @@ class OllamaVisionGateway:
             headers={"Content-Type": "application/json"}, method="POST",
         )
         try:
-            with ollama_endpoint.open_url(request, timeout=timeout or 300.0) as response:
+            with ollama_endpoint.open_url(request, timeout=timeout or _configured_request_timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except Exception as exc:
+            logger.warning(
+                f"Ollama vision request failed: url={url!r}, "
+                f"timeout={timeout}",
+                exc_info=True,
+            )
+            logger.error(
+                f"Ollama vision inference request failed, url={url!r}, "
+                f"timeout={timeout}",
+                exc_info=True,
+            )
             raise DependencyUnavailable("local Ollama vision request failed") from exc
 
 

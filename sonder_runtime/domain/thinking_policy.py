@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 _INLINE_THINKING_OPEN_RE = re.compile(
@@ -21,7 +24,13 @@ def thinking_exhausted_budget(out, message, *, inline_thinking=False) -> bool:
     if not inline_thinking and (not isinstance(thinking, str) or not thinking.strip()):
         return False
     done_reason = out.get("done_reason") if isinstance(out, dict) else None
-    return str(done_reason or "").strip().casefold() == "length"
+    exhausted = str(done_reason or "").strip().casefold() == "length"
+    if exhausted:
+        logger.error(f"thinking budget exhausted: model reasoning consumed full output budget before producing an answer (inline_thinking={inline_thinking}), response quality is degraded")
+        logger.warning(f"thinking budget exhausted: model reasoning consumed full output budget before producing an answer (inline_thinking={inline_thinking}) -- response quality is degraded, consider increasing max_tokens or using a model with dedicated thinking budget")
+        logger.info(f"thinking budget exhausted: model reasoning consumed full output budget before producing an answer (inline_thinking={inline_thinking})")
+        logger.debug(f"thinking_exhausted_budget: reasoning consumed full output budget (done_reason='length', inline_thinking={inline_thinking})")
+    return exhausted
 
 
 def strip_inline_thinking(content):
@@ -35,6 +44,9 @@ def strip_inline_thinking(content):
     if not isinstance(content, str):
         return content
     value = content
+    if _INLINE_THINKING_OPEN_RE.match(value):
+        logger.info(f"stripping inline thinking block from assistant output, content_len={len(content)}")
+        logger.debug(f"strip_inline_thinking: detected leading thinking block, content_len={len(content)}")
     while True:
         opening = _INLINE_THINKING_OPEN_RE.match(value)
         if not opening:
@@ -52,5 +64,8 @@ def strip_inline_thinking(content):
         # A leading unterminated reasoning block is private by default; never
         # trade an incomplete delimiter for a reasoning exposure.
         if end is None:
+            logger.critical(f"unterminated thinking block detected (content_len={len(content)}), stripping entire assistant output to prevent private reasoning exposure -- security boundary enforced")
+            logger.error(f"unterminated thinking block detected (content_len={len(content)}), stripping entire output to prevent reasoning exposure")
+            logger.warning(f"unterminated thinking block detected (content_len={len(content)}), stripping entire output to prevent reasoning exposure -- model may have been interrupted")
             return ""
         value = value[end:].lstrip()

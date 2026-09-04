@@ -1,9 +1,12 @@
 """Structured delegation integration over the existing child-agent port."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+logger = logging.getLogger(__name__)
 
 from sonder_runtime.application.agents.lineage_delegation import (
     DelegationRequest, DelegationStatus, IntegrationError, ResultEvidence,
@@ -34,6 +37,7 @@ class DelegationService:
 
     def dispatch(self, request: DelegationRequest, context: OperationContext) -> SubagentHandle:
         """Spawn one child only when its assignment fits the parent context."""
+        logger.debug(f"DelegationService.dispatch: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}")
         assignment = request.workspace.guard()
         if context.workspace_roots:
             parent_roots = tuple(root.resolve(strict=False) for root in context.workspace_roots)
@@ -59,7 +63,10 @@ class DelegationService:
                 ("workspace_write_roots", "|".join(request.workspace.write_roots)),
             ),
         )
+        logger.debug(f"DelegationService.dispatch: spawning child_id={request.lineage.child_id!r}, parent_id={request.lineage.parent_id!r}")
         handle = self._provider.spawn(child_request, context)
+        logger.info(f"agent delegated: delegation_id={request.delegation_id!r}, preset={request.preset.name!r}, role={request.preset.role.value!r}, child_id={handle.child_id!r}")
+        logger.debug(f"DelegationService.dispatch: child spawned, handle.child_id={handle.child_id!r}")
         if self._events:
             self._events.emit(
                 "agent.delegation.accepted",
@@ -79,10 +86,16 @@ class DelegationService:
         artifacts: Iterable[str] = (),
     ) -> DelegatedResult:
         """Validate provider identity and publish a bounded structured result."""
+        logger.debug(f"DelegationService.integrate: delegation_id={request.delegation_id!r}, result.status={result.status.value!r}, child_id={result.child_id!r}")
         if result.child_id != request.lineage.child_id or result.parent_id != request.lineage.parent_id:
             raise IntegrationError("provider result does not match delegation lineage")
         succeeded = result.status.value == "succeeded"
+        if not succeeded:
+            logger.error(f"delegation failed: delegation_id={request.delegation_id!r}, child_id={result.child_id!r}, status={result.status.value!r}")
+            logger.warning(f"delegation failed: delegation_id={request.delegation_id!r}, child_id={result.child_id!r}, status={result.status.value!r}")
         output = result.output if succeeded else (result.error.message if result.error else "failed")
+        if result.usage.steps and result.usage.steps > 50:
+            logger.warning(f"delegation used high step count: delegation_id={request.delegation_id!r}, usage_steps={result.usage.steps}")
         evidence = ResultEvidence(
             request.delegation_id,
             DelegationStatus.SUCCEEDED if succeeded else DelegationStatus.FAILED,
@@ -92,6 +105,8 @@ class DelegationService:
             None if succeeded else output,
             usage_steps=result.usage.steps,
         )
+        logger.info(f"delegation integrated: delegation_id={request.delegation_id!r}, status={evidence.status.value!r}, child_id={result.child_id!r}, usage_steps={evidence.usage_steps}")
+        logger.debug(f"DelegationService.integrate: evidence_status={evidence.status.value!r}, usage_steps={evidence.usage_steps}")
         return DelegatedResult(delegation_digest(request), result, evidence)
 
 

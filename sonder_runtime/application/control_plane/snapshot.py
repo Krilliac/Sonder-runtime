@@ -74,7 +74,7 @@ class SnapshotSection:
 CONTROL_PLANE_SECTIONS = (
     "sessions", "plans", "approvals", "jobs", "agents", "model_hardware",
     "context", "memory_explanations", "extensions", "training", "selfmod",
-    "updates", "health", "startup_authorities", "compute_fabric",
+    "updates", "health", "startup_authorities", "compute_fabric", "lineage",
 )
 _SECTION_NAMES = CONTROL_PLANE_SECTIONS
 
@@ -100,6 +100,7 @@ class ControlPlaneSnapshot:
     health: SnapshotSection
     startup_authorities: SnapshotSection
     compute_fabric: SnapshotSection
+    lineage: SnapshotSection
 
     def __post_init__(self) -> None:
         if not isinstance(self.captured_at, str) or not self.captured_at.strip():

@@ -6,10 +6,13 @@ machine cannot silently become a routing fact for another.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+
+logger = logging.getLogger(__name__)
 
 
 def _utc(value: datetime) -> datetime:
@@ -39,7 +42,17 @@ class CalibrationProfile:
             raise ValueError("residency, throughput, and latency must be positive")
         if self.sample_count < 1:
             raise ValueError("sample_count must be positive")
+        if self.sample_count < 3:
+            logger.warning(
+                f"calibration profile for model={self.model!r} has low sample_count={self.sample_count}, "
+                f"performance estimates may be unreliable"
+            )
         object.__setattr__(self, "measured_at", _utc(self.measured_at))
+        logger.info(
+            f"calibration profile recorded: model={self.model!r}, hardware={self.hardware!r}, "
+            f"quant={self.quantization!r}, resident_gb={self.resident_gb:.1f}, "
+            f"throughput={self.throughput_tokens_per_second:.1f} tok/s"
+        )
 
     @property
     def key(self) -> tuple[str, str, str, str]:
@@ -49,7 +62,18 @@ class CalibrationProfile:
         return max(0.0, (_utc(now) - self.measured_at).total_seconds())
 
     def is_fresh(self, now: datetime, max_age_seconds: float) -> bool:
-        return max_age_seconds >= 0 and self.age_seconds(now) <= max_age_seconds
+        age = self.age_seconds(now)
+        fresh = max_age_seconds >= 0 and age <= max_age_seconds
+        if not fresh:
+            logger.warning(
+                f"calibration profile stale: model={self.model!r}, hardware={self.hardware!r}, "
+                f"age={age:.0f}s exceeds max_age={max_age_seconds:.0f}s -- routing decisions may use outdated performance data"
+            )
+            logger.debug(
+                f"CalibrationProfile({self.model!r}/{self.hardware!r}): stale, "
+                f"age={age:.0f}s > max_age={max_age_seconds:.0f}s"
+            )
+        return fresh
 
     def digest(self) -> str:
         payload = {

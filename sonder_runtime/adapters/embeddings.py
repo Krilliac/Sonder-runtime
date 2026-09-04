@@ -15,6 +15,16 @@ from sonder_runtime.adapters.inference import ollama_endpoint
 
 BASE = ollama_endpoint.normalize()
 OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
+
+
+def configure_typed_endpoint(url: str | None) -> None:
+    """Update the frozen BASE to match the typed Ollama endpoint."""
+    global BASE, OLLAMA_HOST
+    if url is not None:
+        BASE = ollama_endpoint.normalize(url)
+    else:
+        BASE = ollama_endpoint.normalize()
+    OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # 0.0.0.0 is a bind-all address (used so `ollama serve` is reachable from a phone
 # on the LAN), not connectable on Windows — dial loopback instead.
 EMBED_MODEL = os.environ.get("SONDER_EMBED_MODEL", "nomic-embed-text")

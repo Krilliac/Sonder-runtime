@@ -12,12 +12,15 @@ receipts and UI.
 """
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Iterable, Protocol
 
 from ..ports.jobs import JobIdentity, JobStatus, TERMINAL_JOB_STATUSES
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionWorldKind(str, Enum):
@@ -195,6 +198,8 @@ class BoundedOutputBuffer:
         ):
             removed = self._events.popleft()
             self._bytes -= len(removed.data.encode("utf-8"))
+            if self._dropped_before == 0:
+                logger.warning(f"output buffer overflow, dropping oldest events: max_events={self._max_events}, max_bytes={self._max_bytes}")
             self._dropped_before = removed.watermark.sequence
         return event
 
@@ -287,6 +292,7 @@ class InMemoryExecutionWorldController:
         return self.world.bind(surface)
 
     def start(self, identity: JobIdentity, *, surface: ExecutionSurface = ExecutionSurface.CODE) -> ExecutionJob:
+        logger.debug(f"InMemoryExecutionWorldController.start: job_id={identity.job_id!r}, surface={surface.value!r}")
         if identity.job_id in self._jobs:
             raise ValueError("job already exists")
         job = ExecutionJob(identity, self._world_binding(surface), JobStatus.RUNNING, 1)
@@ -312,6 +318,7 @@ class InMemoryExecutionWorldController:
         return self._output.read(after, max_events=max_events, max_bytes=max_bytes)
 
     def cancel(self, job_id: str, *, reason: str = "cancelled") -> ExecutionJob:
+        logger.debug(f"InMemoryExecutionWorldController.cancel: job_id={job_id!r}, reason={reason!r}")
         job = self.poll(job_id)
         if job.is_terminal:
             return job
@@ -326,6 +333,7 @@ class InMemoryExecutionWorldController:
         return job
 
     def open_terminal(self, terminal_id: str, *, columns: int = 80, rows: int = 24) -> TerminalSession:
+        logger.debug(f"InMemoryExecutionWorldController.open_terminal: terminal_id={terminal_id!r}, columns={columns}, rows={rows}")
         if terminal_id in self._terminals and not self._terminals[terminal_id].stopped:
             raise ValueError("terminal already exists")
         session = TerminalSession(terminal_id, self._world_binding(ExecutionSurface.TERMINAL), columns, rows)
@@ -352,6 +360,7 @@ class InMemoryExecutionWorldController:
         return updated
 
     def stop_terminal(self, terminal_id: str) -> TerminalSession:
+        logger.debug(f"InMemoryExecutionWorldController.stop_terminal: terminal_id={terminal_id!r}")
         session = self.reconnect_terminal(terminal_id)
         updated = replace(session, stopped=True)
         self._terminals[terminal_id] = updated

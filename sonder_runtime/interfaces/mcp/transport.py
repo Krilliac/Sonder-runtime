@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, TextIO
+
+logger = logging.getLogger(__name__)
 
 from ...application.protocol.mcp_compatibility import (
     LegacyMcpContract, McpCompatibility, McpNegotiation, McpNegotiationError,
@@ -64,13 +67,29 @@ class BoundedMcpProviderExchange:
     def exchange(self, request: str) -> tuple[str, str]:
         if not isinstance(request, str):
             raise TypeError("MCP provider request must be text")
-        if len(request.encode("utf-8")) > self._limits.max_exchange_bytes:
+        request_bytes = len(request.encode("utf-8"))
+        logger.debug(f"provider exchange request_bytes={request_bytes}")
+        exchange_ratio = request_bytes / self._limits.max_exchange_bytes if self._limits.max_exchange_bytes else 1.0
+        if exchange_ratio >= 0.8 and request_bytes <= self._limits.max_exchange_bytes:
+            logger.warning(
+                f"MCP provider request approaching size limit: "
+                f"{request_bytes}/{self._limits.max_exchange_bytes} bytes ({exchange_ratio:.0%})"
+            )
+        if request_bytes > self._limits.max_exchange_bytes:
             raise McpTransportError("MCP request exceeds max_exchange_bytes")
         stdout, stderr = self._provider.run(request)
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise McpTransportError("MCP provider must return text stdout and stderr")
-        if len(stdout.encode("utf-8")) > self._limits.max_exchange_bytes:
+        response_bytes = len(stdout.encode("utf-8"))
+        resp_ratio = response_bytes / self._limits.max_exchange_bytes if self._limits.max_exchange_bytes else 1.0
+        if resp_ratio >= 0.8 and response_bytes <= self._limits.max_exchange_bytes:
+            logger.warning(
+                f"MCP provider response approaching size limit: "
+                f"{response_bytes}/{self._limits.max_exchange_bytes} bytes ({resp_ratio:.0%})"
+            )
+        if response_bytes > self._limits.max_exchange_bytes:
             raise McpTransportError("MCP response exceeds max_exchange_bytes")
+        logger.debug(f"provider exchange completed response_bytes={response_bytes}")
         return stdout, stderr
 
 
@@ -104,6 +123,17 @@ class StdioMcpTransport:
         self._catalog = self._build_catalog(tool_catalog)
         if len(self._catalog) > self._limits.max_tools:
             raise McpTransportError("tool catalog exceeds max_tools")
+        catalog_ratio = len(self._catalog) / self._limits.max_tools if self._limits.max_tools else 1.0
+        if catalog_ratio >= 0.8:
+            logger.warning(
+                f"tool catalog approaching limit: {len(self._catalog)}/{self._limits.max_tools} "
+                f"tools ({catalog_ratio:.0%}), connection_id={self._connection_id!r}"
+            )
+        logger.debug(
+            f"StdioMcpTransport initialized connection_id={self._connection_id!r} "
+            f"tools={len(self._catalog)}"
+        )
+        logger.info(f"MCP transport ready connection_id={self._connection_id!r}, tools={len(self._catalog)}")
 
     def _build_catalog(self, source: Any) -> tuple[dict[str, Any], ...]:
         if hasattr(source, "mcp"):
@@ -141,6 +171,8 @@ class StdioMcpTransport:
         return self._negotiation
 
     def serve(self) -> int:
+        logger.info(f"MCP serve loop started connection_id={self._connection_id!r}")
+        logger.debug(f"serve loop starting connection_id={self._connection_id!r}")
         count = 0
         while True:
             raw = self._input.readline(self._limits.max_frame_bytes + 1)
@@ -152,11 +184,17 @@ class StdioMcpTransport:
             try:
                 response = self._dispatch(self._decode_frame(raw))
             except McpTransportError as exc:
+                logger.error(
+                    f"MCP transport protocol error connection_id={self._connection_id!r}: {exc}",
+                    exc_info=True,
+                )
                 response = self._error(None, -32700, str(exc))
             if response is not None:
                 self._write(response)
         if self._router is not None:
             self._router.unsubscribe(self._connection_id)
+        logger.debug(f"serve loop ended connection_id={self._connection_id!r} frames_processed={count}")
+        logger.info(f"MCP serve loop ended connection_id={self._connection_id!r}, frames_processed={count}")
         return count
 
     def _decode_frame(self, raw: str | bytes) -> dict[str, Any]:
@@ -180,6 +218,7 @@ class StdioMcpTransport:
     def _dispatch(self, request: dict[str, Any]) -> dict[str, Any] | None:
         request_id = request.get("id")
         notification = "id" not in request
+        logger.debug(f"dispatch method={request.get('method')!r} notification={notification}")
         if request.get("jsonrpc") != "2.0" or (not notification and not self._valid_id(request_id)):
             return self._error(request_id, -32600, "invalid request")
         method = request.get("method")
@@ -201,12 +240,23 @@ class StdioMcpTransport:
         except KeyError as exc:
             return self._error(request_id, -32601, str(exc))
         except Exception:
+            logger.error(
+                f"unhandled exception in MCP handler method={method!r}, "
+                f"connection_id={self._connection_id!r}",
+                exc_info=True,
+            )
+            logger.warning(
+                f"internal MCP handler error on method={method!r}, "
+                f"connection_id={self._connection_id!r}",
+                exc_info=True,
+            )
             return self._error(request_id, -32603, "internal MCP handler error")
         if notification:
             return None
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        logger.debug(f"_call method={method!r}")
         if method == "initialize":
             versions = params.get("protocolVersions", params.get("protocolVersion"))
             if isinstance(versions, str):
@@ -220,6 +270,14 @@ class StdioMcpTransport:
                 tuple(versions),
                 client_capabilities=tuple(str(k) for k in capabilities),
                 legacy_contract=self._legacy_contract,
+            )
+            logger.debug(
+                f"MCP negotiation agreed version={self._negotiation.agreed_version!r} "
+                f"capabilities={sorted(self._negotiation.capabilities)}"
+            )
+            logger.info(
+                f"MCP session negotiated version={self._negotiation.agreed_version!r}, "
+                f"capabilities={sorted(self._negotiation.capabilities)}"
             )
             return {"protocolVersion": self._negotiation.agreed_version,
                     "capabilities": {name: {} for name in self._negotiation.capabilities},
@@ -241,6 +299,7 @@ class StdioMcpTransport:
             return {"tools": list(self._catalog)}
         if method == "tools/call":
             name, arguments = params.get("name"), params.get("arguments", {})
+            logger.debug(f"tools/call name={name!r}")
             if not isinstance(name, str) or not name:
                 raise McpTransportError("tools/call requires name")
             if not isinstance(arguments, dict):
@@ -253,12 +312,14 @@ class StdioMcpTransport:
             return dict(value) if isinstance(value, Mapping) else {"output": value}
         if method == "sonder/subscribe":
             event = params.get("event")
+            logger.debug(f"sonder/subscribe event={event!r} connection_id={self._connection_id!r}")
             if self._router is None or not isinstance(event, str) or not event:
                 raise McpTransportError("subscription router and event are required")
             self._router.subscribe(self._connection_id, event, self._on_notification)
             return {"subscribed": event}
         if method == "sonder/unsubscribe":
             event = params.get("event")
+            logger.debug(f"sonder/unsubscribe event={event!r} connection_id={self._connection_id!r}")
             if self._router is not None:
                 self._router.unsubscribe(self._connection_id, event if isinstance(event, str) else None)
             return {"unsubscribed": event}
@@ -297,6 +358,7 @@ class StdioMcpTransport:
                 flush()
 
     def _on_notification(self, event: str, payload: Mapping[str, Any]) -> None:
+        logger.debug(f"sending notification event={event!r} connection_id={self._connection_id!r}")
         self._write({"jsonrpc": "2.0", "method": "notifications/event",
                      "params": {"event": event, "payload": dict(payload)}})
 

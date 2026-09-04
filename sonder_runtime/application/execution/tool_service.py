@@ -8,10 +8,13 @@ No model-facing subsystem may invoke subprocess directly.
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Protocol
 
 from ..context import OperationContext
+
+logger = logging.getLogger(__name__)
 from ..ports.tool_executor import ToolResult as ExecutorResult
 from ...domain.tools.descriptors import (
     ExecutionClass,
@@ -60,6 +63,7 @@ class ToolService:
         call: ToolCall,
         context: OperationContext,
     ) -> ToolResult:
+        logger.debug(f"ToolService.execute: tool_name={call.tool_name!r}")
         if context.expired:
             raise DeadlineExceeded("operation deadline exceeded before tool call")
         if context.cancellation is not None and context.cancellation.cancelled:
@@ -72,11 +76,18 @@ class ToolService:
         self._policy.authorize(descriptor, call)
 
         execution_class = self._policy.select_execution_class(descriptor)
+        logger.debug(f"ToolService.execute: tool={call.tool_name!r}, execution_class={execution_class!r}")
 
         started = time.monotonic()
         result = self._executor.execute(descriptor, call, context, execution_class)
         elapsed = int((time.monotonic() - started) * 1000)
 
+        if not result.success:
+            logger.error(f"tool execution failed: tool={call.tool_name!r}, elapsed_ms={elapsed}")
+            logger.warning(f"tool execution failed: tool={call.tool_name!r}, elapsed_ms={elapsed}, error={result.error!r}")
+        elif elapsed > 10_000:
+            logger.warning(f"slow tool execution: tool={call.tool_name!r}, elapsed_ms={elapsed}")
+        logger.debug(f"ToolService.execute: tool={call.tool_name!r}, success={result.success}, elapsed_ms={elapsed}")
         return ToolResult(
             tool_name=call.tool_name,
             output=result.output,

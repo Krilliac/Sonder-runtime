@@ -1,7 +1,10 @@
 """Typed HTTP presentation for the extension application facade."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from ....application.extensions.experiments import (
     ExperimentLimits,
@@ -132,16 +135,19 @@ def _experiment_id(path: str, suffix: str) -> str | None:
 
 
 def _error(error: Exception) -> ExtensionHttpResult:
+    logger.debug(f"dispatch_extension_route: error type={type(error).__name__}, message={error}")
     if isinstance(error, ExtensionAuthorityDenied):
         return ExtensionHttpResult({"error": {"message": str(error), "type": "forbidden"}}, 403)
     if isinstance(error, ExperimentNotFound):
         return ExtensionHttpResult({"error": {"message": str(error), "type": "not_found"}}, 404)
     if isinstance(error, ExperimentStartupDenied):
+        logger.error(f"experiment startup denied: {error}")
         return ExtensionHttpResult({"error": {"message": str(error), "type": "startup_denied"}}, 403)
     if isinstance(error, ExperimentInvalidTransition):
         return ExtensionHttpResult({"error": {"message": str(error), "type": "conflict"}}, 409)
     if isinstance(error, (ExperimentInvalidDefinition, ExperimentError, ExtensionRegistryError, ValueError, TypeError)):
         return ExtensionHttpResult({"error": {"message": str(error), "type": "invalid_request"}}, 400)
+    logger.error(f"extension operation failed with unexpected error: {type(error).__name__}", exc_info=True)
     return ExtensionHttpResult({"error": {"message": "extension operation failed", "type": "internal_error"}}, 500)
 
 
@@ -153,10 +159,13 @@ def dispatch_extension_route(
     authority: ExtensionAuthority,
 ) -> ExtensionHttpResult | None:
     """Dispatch only the explicit extension routes; return ``None`` otherwise."""
+    logger.debug(f"dispatch_extension_route: method={method!r}, path={path!r}, actor={authority.actor!r}")
     payload = {} if payload is None else payload
     if path == "/v1/extensions" and method == "GET":
         try:
-            return ExtensionHttpResult(_health(facade.registry_health(authority)))
+            result = ExtensionHttpResult(_health(facade.registry_health(authority)))
+            logger.info(f"Extension registry health queried by actor={authority.actor!r}")
+            return result
         except Exception as error:
             return _error(error)
 
@@ -174,6 +183,7 @@ def dispatch_extension_route(
                 if not isinstance(scope, str) or (project_id is not None and not isinstance(project_id, str)):
                     raise TypeError("scope must be text and project_id must be text or null")
                 record = getattr(facade, operation)(extension_id, scope=scope, project_id=project_id, authority=authority)
+                logger.info(f"Extension registry {action}, extension_id={extension_id!r}, scope={scope!r}")
                 return ExtensionHttpResult({"object": f"extension_{action}", "extension": _record(record)})
             except Exception as error:
                 return _error(error)
@@ -186,6 +196,7 @@ def dispatch_extension_route(
                 raise TypeError("scope must be text and project_id must be text or null")
             record = facade.update(_manifest_payload(payload.get("manifest")), scope=scope,
                                    project_id=project_id, authority=authority)
+            logger.info(f"Extension registry update, extension_id={record.extension_id!r}, scope={scope!r}")
             return ExtensionHttpResult({"object": "extension_update", "extension": _record(record)})
         except Exception as error:
             return _error(error)
@@ -202,6 +213,7 @@ def dispatch_extension_route(
             continue
         try:
             snapshot = getattr(facade, operation)(experiment_id, authority)
+            logger.info(f"Experiment {operation}, experiment_id={experiment_id!r}, state={snapshot.state!r}")
             return ExtensionHttpResult({"object": f"experiment_{operation}", "experiment": _snapshot(snapshot)})
         except Exception as error:
             return _error(error)
@@ -232,6 +244,7 @@ def dispatch_extension_route(
                 project_id=project_id, description=description,
                 environment=environment, authority=authority,
             )
+            logger.info(f"Experiment defined (installed), experiment_id={experiment_id!r}, extension_id={extension_id!r}, scope={scope!r}")
             return ExtensionHttpResult({"object": "experiment_define_installed", "experiment": _snapshot(snapshot)}, 201)
         except Exception as error:
             return _error(error)
@@ -260,6 +273,7 @@ def dispatch_extension_route(
                 description=description, environment=environment,
                 limits=ExperimentLimits(memory_limit) if memory_limit is not None else None,
             )
+            logger.info(f"Experiment defined, experiment_id={experiment_id!r}")
             return ExtensionHttpResult({"object": "experiment_define", "experiment": _snapshot(snapshot)}, 201)
         except Exception as error:
             return _error(error)

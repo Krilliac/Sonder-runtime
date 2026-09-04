@@ -22,6 +22,7 @@ Configuration (resolved lazily at call time, never at import/construction):
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import time
 import urllib.error
@@ -29,6 +30,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Sequence
 from urllib.parse import urlsplit
+
+logger = logging.getLogger(__name__)
 
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
@@ -103,6 +106,15 @@ class OpenAICompatibleGateway:
     def __init__(self, config: OpenAICompatibleConfig | None = None, *, transport=None):
         self._config = config
         self._transport = transport
+        if config is not None:
+            loopback = self._is_loopback(config.base_url)
+            logger.info(
+                f"OpenAI-compatible gateway created, "
+                f"base_url={'loopback' if loopback else 'remote'}, "
+                f"model={config.model or 'from-env'}"
+            )
+        else:
+            logger.info("OpenAI-compatible gateway created with deferred env config")
 
     @property
     def capabilities(self) -> frozenset[str]:
@@ -155,6 +167,7 @@ class OpenAICompatibleGateway:
 
         options = dict(request.options or {})
         model = str(options.get("model") or cfg.model or request.tier or "default")
+        logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={cfg.base_url!r}, timeout={timeout}")
         payload = {
             "model": model,
             "messages": self._build_messages(request),
@@ -189,14 +202,24 @@ class OpenAICompatibleGateway:
         output_count = usage.get("completion_tokens")
         if output_count is None:
             output_count = timings.get("predicted_n")
+        duration_ms = int((time.monotonic() - started) * 1000)
         response = ModelResponse(
             text=require_model_text(text),
             model=model,
             tier=request.tier or "openai",
-            duration_ms=int((time.monotonic() - started) * 1000),
+            duration_ms=duration_ms,
             tokens_in=optional_token_count(prompt_count, "prompt token count"),
             tokens_out=optional_token_count(output_count, "completion token count"),
             telemetry=telemetry,
+        )
+        if duration_ms > 60_000:
+            logger.warning(
+                f"slow inference: model={model!r} took {duration_ms}ms "
+                f"(>{60_000}ms threshold), tokens_out={response.tokens_out}"
+            )
+        logger.debug(
+            f"OpenAICompatibleGateway.generate: completed in {duration_ms}ms, "
+            f"tokens_in={response.tokens_in}, tokens_out={response.tokens_out}"
         )
         default_registry().observe_inference("openai_compatible", telemetry)
         return response
@@ -211,6 +234,7 @@ class OpenAICompatibleGateway:
         self._enforce_consent(cfg, context)
         timeout = self._check_liveness(context)
         model = cfg.embed_model or "text-embedding-3-small"
+        logger.debug(f"OpenAICompatibleGateway.embed: text_count={len(items)}, model={model!r}")
         data = self._post(
             "/v1/embeddings", {"model": model, "input": items}, cfg, timeout
         )
@@ -275,28 +299,58 @@ class OpenAICompatibleGateway:
         self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout
     ) -> dict:
         url = cfg.base_url.rstrip("/") + path
+        logger.debug(f"OpenAICompatibleGateway._post: url={url!r}, timeout={timeout}")
         transport = self._transport or self._default_transport
         try:
             data = transport(url, payload, self._headers(cfg), timeout)
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", 0)
             if code in (401, 403):
+                logger.error(
+                    f"authentication failed for OpenAI-compatible endpoint, "
+                    f"http_status={code}, url={url!r}"
+                )
                 raise Forbidden("endpoint rejected credentials (HTTP %d)" % code) from exc
             if code in (400, 404, 422):
                 raise InvalidInput("endpoint rejected request (HTTP %d)" % code) from exc
             if code == 429:
+                logger.warning(
+                    f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
+                    f"url={url!r}"
+                )
                 raise CapacityExceeded(
                     "endpoint is rate limiting requests (HTTP 429)"
                 ) from exc
+            logger.error(
+                f"OpenAI-compatible endpoint returned server error, "
+                f"http_status={code}, url={url!r}",
+                exc_info=True,
+            )
             raise DependencyUnavailable("endpoint returned HTTP %d" % code) from exc
         except (socket.timeout, TimeoutError) as exc:
+            logger.warning(
+                f"OpenAI-compatible endpoint timed out: url={url!r}, "
+                f"timeout={timeout}"
+            )
             raise DeadlineExceeded("endpoint timed out") from exc
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (socket.timeout, TimeoutError)):
+                logger.warning(
+                    f"OpenAI-compatible endpoint timed out (URLError): "
+                    f"url={url!r}, timeout={timeout}"
+                )
                 raise DeadlineExceeded("endpoint timed out") from exc
+            logger.warning(
+                f"OpenAI-compatible endpoint unreachable: url={url!r}, "
+                f"reason={reason}"
+            )
             raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
         except OSError as exc:
+            logger.error(
+                f"OpenAI-compatible endpoint unreachable (OSError), url={url!r}",
+                exc_info=True,
+            )
             raise DependencyUnavailable("cannot reach endpoint: %s" % exc) from exc
         if not isinstance(data, dict):
             raise InternalFailure("endpoint transport returned a non-object response")

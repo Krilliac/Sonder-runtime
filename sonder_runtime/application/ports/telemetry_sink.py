@@ -1,7 +1,7 @@
 """Redaction-first telemetry export port (WP3 SEAM-013)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
 from typing import Mapping, Protocol
@@ -13,7 +13,7 @@ class TelemetryEvent:
 
     event_code: str
     occurred_at: datetime
-    fields: Mapping[str, object] = MappingProxyType({})
+    fields: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
     correlation_id: str | None = None
     operation_id: str | None = None
     redaction_applied: bool = False

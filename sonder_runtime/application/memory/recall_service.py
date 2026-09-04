@@ -7,6 +7,7 @@ directly.
 """
 from __future__ import annotations
 
+import logging
 from typing import Protocol, Sequence
 
 from ...domain.memory.rules import (
@@ -15,6 +16,8 @@ from ...domain.memory.rules import (
     passes_similarity,
 )
 from ..ports.recall import validate_recall_request
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingPort(Protocol):
@@ -65,6 +68,7 @@ class RecallService:
         embedding_model: str | None = None,
         embedding_revision: str | None = None,
     ) -> list[str]:
+        logger.debug(f"RecallService.recall: k={k}, min_sim={min_sim}, project={project!r}, has_embedder={self._embed is not None}")
         validate_recall_request(task, k, min_sim)
         effective_min_sim = min_sim if min_sim is not None else DEFAULT_RECALL_MIN_SIM
 
@@ -73,10 +77,15 @@ class RecallService:
         )
 
         if self._embed is None:
+            logger.warning("no embedding port configured, falling back to lexical-only recall")
+            logger.debug(f"RecallService.recall: no embedder, returning {min(len(lexical), k)} lexical results")
             return [r["text"] for r in lexical[:k]]
 
         query_vec = self._embed.embed(task)
         if query_vec is None:
+            logger.error(f"embedding failed for recall query, falling back to lexical-only: project={project!r}")
+            logger.warning("embedding returned None (embedder may be overloaded), falling back to lexical-only recall")
+            logger.debug(f"RecallService.recall: embedding returned None, falling back to {min(len(lexical), k)} lexical results")
             return [r["text"] for r in lexical[:k]]
 
         candidates = self._store.semantic_candidates(
@@ -97,8 +106,11 @@ class RecallService:
                 scored.append((c["id"], vec, sim, c["text"]))
 
         if not scored:
+            logger.warning(f"no semantic candidates passed similarity threshold (min_sim={effective_min_sim}), falling back to lexical results")
+            logger.debug(f"RecallService.recall: no candidates passed similarity threshold, returning lexical results")
             return [r["text"] for r in lexical[:k]]
 
+        logger.debug(f"RecallService.recall: {len(scored)} candidates passed similarity, running MMR selection for k={k}")
         mmr_ids = mmr_select(
             query_vec,
             [(cid, vec) for cid, vec, _, _ in scored],

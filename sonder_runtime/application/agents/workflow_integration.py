@@ -8,9 +8,12 @@ containment, and result evidence cannot be bypassed by the workflow.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable
+
+logger = logging.getLogger(__name__)
 
 from sonder_runtime.application.agents.delegation_service import (
     DelegatedResult,
@@ -140,6 +143,8 @@ class AgentWorkflowService:
         context: OperationContext,
     ) -> WorkflowDispatch:
         """Create and dispatch the explorer (or configured first) role."""
+        logger.debug(f"AgentWorkflowService.start: workflow_id={workflow_id!r}, root_id={root_id!r}, first_role={self._roles[0].value!r}, num_roles={len(self._roles)}")
+        logger.info(f"agent workflow starting: workflow_id={workflow_id!r}, roles={[r.value for r in self._roles]}, first_role={self._roles[0].value!r}")
         self._required(workflow_id, "workflow_id")
         self._required(root_id, "root_id")
         self._required(parent_id, "parent_id")
@@ -165,6 +170,7 @@ class AgentWorkflowService:
         A failed, cancelled, or timed-out child terminates the workflow and
         cannot cause a later editor or integrator to run.
         """
+        logger.debug(f"AgentWorkflowService.advance: workflow_id={dispatch.state.workflow_id!r}, active_role={dispatch.state.active_role!r}, result_status={result.status.value!r}")
         state = dispatch.state
         if state.active_delegation_id != dispatch.request.delegation_id:
             raise IntegrationError("dispatch is not the active workflow delegation")
@@ -180,6 +186,10 @@ class AgentWorkflowService:
         success = completed.evidence.status is DelegationStatus.SUCCEEDED
         results = state.results + (step,)
         if not success:
+            logger.error(f"workflow step failed, terminating workflow: workflow_id={state.workflow_id!r}, role={active_role.value!r}, delegation_id={dispatch.request.delegation_id!r}, completed_steps={len(results)}/{len(state.roles)}")
+            logger.warning(f"workflow step failed, terminating workflow: workflow_id={state.workflow_id!r}, role={active_role.value!r}, completed_steps={len(results)}/{len(state.roles)}")
+            logger.info(f"agent workflow step failed: workflow_id={state.workflow_id!r}, role={active_role.value!r}, terminating workflow")
+            logger.debug(f"AgentWorkflowService.advance: workflow {state.workflow_id!r} step failed, terminating")
             terminal = AgentWorkflowState(
                 state.workflow_id, state.root_id, state.operation_id, state.roles,
                 AgentWorkflowStatus.FAILED, None, None, state.revision + 1, results,
@@ -188,6 +198,8 @@ class AgentWorkflowService:
 
         next_role = state.roles[len(results)] if len(results) < len(state.roles) else None
         if next_role is None:
+            logger.info(f"agent workflow succeeded: workflow_id={state.workflow_id!r}, completed_steps={len(results)}/{len(state.roles)}")
+            logger.debug(f"AgentWorkflowService.advance: workflow {state.workflow_id!r} all roles complete, succeeding")
             terminal = AgentWorkflowState(
                 state.workflow_id, state.root_id, state.operation_id, state.roles,
                 AgentWorkflowStatus.SUCCEEDED, None, None, state.revision + 1, results,
@@ -201,6 +213,10 @@ class AgentWorkflowService:
             state.revision + 1, results,
         )
         next_prompt = self._next_prompt(next_role, completed.result.output)
+        if len(next_prompt) > MAX_WORKFLOW_PROMPT_CHARS * 0.9:
+            logger.warning(f"workflow prompt approaching size limit: workflow_id={state.workflow_id!r}, prompt_len={len(next_prompt)}/{MAX_WORKFLOW_PROMPT_CHARS}")
+        logger.info(f"agent workflow advancing: workflow_id={state.workflow_id!r}, next_role={next_role.value!r}, step={len(results)+1}/{len(state.roles)}")
+        logger.debug(f"AgentWorkflowService.advance: workflow {state.workflow_id!r} advancing to next_role={next_role.value!r}, step={len(results)+1}/{len(state.roles)}")
         next_dispatch = self._dispatch(
             next_state, parent_id=result.child_id, prompt=next_prompt,
             workspace=dispatch.request.workspace, context=context,
@@ -216,6 +232,7 @@ class AgentWorkflowService:
         workspace: WorkspaceAssignment,
         context: OperationContext,
     ) -> WorkflowDispatch:
+        logger.debug(f"AgentWorkflowService._dispatch: workflow_id={state.workflow_id!r}, active_role={state.active_role!r}")
         role = state.active_role
         if role is None:
             raise IntegrationError("cannot dispatch a terminal workflow")

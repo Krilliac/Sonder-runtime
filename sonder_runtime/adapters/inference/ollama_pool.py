@@ -27,11 +27,15 @@ from urllib.parse import urlsplit
 import urllib.error
 import urllib.request
 
+import logging
+
 import sonder_runtime.adapters.model_inventory as model_inventory
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor
 from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
+
+logger = logging.getLogger(__name__)
 
 
 _FAILOVER_HTTP_CODES = frozenset({502, 503, 504})
@@ -55,6 +59,12 @@ _MAX_METRIC_WORKERS = 16
 _METRIC_OVERFLOW_LABEL = "overflow"
 _configured_workers: tuple[str, ...] | None = None
 _configured_allow_remote: bool | None = None
+_configured_trusted_origins: tuple[str, ...] | None = None
+_configured_failure_threshold: int | None = None
+_configured_cooldown_seconds: float | None = None
+_configured_admission_timeout_ms: int | None = None
+_configured_capability_ttl_seconds: int | None = None
+_configured_probe_timeout_ms: int | None = None
 _configuration_lock = threading.RLock()
 
 
@@ -177,6 +187,7 @@ def validate_worker_origin(
     trusted_origins: tuple[str, ...] = (),
 ) -> str:
     """Normalize one worker origin under the Ollama trust policy."""
+    logger.debug(f"validating worker origin={origin!r}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
     normalized = ollama_policy.normalize(origin)
     parsed = urlsplit(normalized)
     try:
@@ -194,6 +205,7 @@ def validate_worker_origin(
             "worker endpoint must be an origin without a path, query, or fragment"
         )
     if not _is_loopback(normalized):
+        logger.debug(f"origin {normalized!r} is remote, checking policy")
         if not allow_remote:
             raise ValueError(
                 "remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1"
@@ -203,7 +215,9 @@ def validate_worker_origin(
             and not _host_in_trusted_origins(parsed.hostname or "", trusted_origins)
         ):
             raise ValueError("remote worker endpoints must use https")
-    return normalized.rstrip("/")
+    result = normalized.rstrip("/")
+    logger.debug(f"validated worker origin -> {result!r}")
+    return result
 
 
 def configure_typed_workers(
@@ -211,7 +225,14 @@ def configure_typed_workers(
     *,
     allow_remote: bool,
     trusted_origins: tuple[str, ...] = (),
+    failure_threshold: int | None = None,
+    cooldown_seconds: int | None = None,
+    admission_timeout_ms: int | None = None,
+    capability_ttl_seconds: int | None = None,
+    probe_timeout_ms: int | None = None,
 ) -> None:
+    logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
+    logger.info(f"configuring {len(worker_origins)} typed Ollama worker(s), allow_remote={allow_remote}")
     normalized = tuple(
         validate_worker_origin(
             origin,
@@ -220,17 +241,36 @@ def configure_typed_workers(
         )
         for origin in tuple(worker_origins)
     )
-    global _configured_workers, _configured_allow_remote
+    global _configured_workers, _configured_allow_remote, _configured_trusted_origins
+    global _configured_failure_threshold, _configured_cooldown_seconds
+    global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
+    global _configured_probe_timeout_ms
     with _configuration_lock:
         _configured_workers = normalized
         _configured_allow_remote = allow_remote
+        _configured_trusted_origins = trusted_origins
+        _configured_failure_threshold = failure_threshold
+        _configured_cooldown_seconds = cooldown_seconds
+        _configured_admission_timeout_ms = admission_timeout_ms
+        _configured_capability_ttl_seconds = capability_ttl_seconds
+        _configured_probe_timeout_ms = probe_timeout_ms
 
 
 def reset_typed_workers() -> None:
-    global _configured_workers, _configured_allow_remote
+    logger.info("typed Ollama worker configuration reset")
+    global _configured_workers, _configured_allow_remote, _configured_trusted_origins
+    global _configured_failure_threshold, _configured_cooldown_seconds
+    global _configured_admission_timeout_ms, _configured_capability_ttl_seconds
+    global _configured_probe_timeout_ms
     with _configuration_lock:
         _configured_workers = None
         _configured_allow_remote = None
+        _configured_trusted_origins = None
+        _configured_failure_threshold = None
+        _configured_cooldown_seconds = None
+        _configured_admission_timeout_ms = None
+        _configured_capability_ttl_seconds = None
+        _configured_probe_timeout_ms = None
 
 
 def has_configured_remote_workers(environment=None) -> bool:
@@ -392,6 +432,7 @@ class OllamaWorkerPool:
         worker_origins: tuple[str, ...] = (),
         *,
         allow_remote: bool = False,
+        trusted_origins: tuple[str, ...] = (),
         failure_threshold: int = _DEFAULT_FAILURE_THRESHOLD,
         cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS,
         max_inflight_per_worker: int = _DEFAULT_MAX_INFLIGHT,
@@ -422,7 +463,7 @@ class OllamaWorkerPool:
         states = []
         seen = set()
         for raw in all_origins:
-            origin = validate_worker_origin(raw, allow_remote=allow_remote)
+            origin = validate_worker_origin(raw, allow_remote=allow_remote, trusted_origins=trusted_origins)
             if origin in seen:
                 continue
             seen.add(origin)
@@ -431,6 +472,17 @@ class OllamaWorkerPool:
             ))
         if not states:
             raise ValueError("at least one Ollama worker is required")
+        logger.debug(
+            f"OllamaWorkerPool.__init__: workers={len(states)}, "
+            f"origins={[s.endpoint.origin for s in states]}, "
+            f"failure_threshold={failure_threshold}, cooldown={cooldown_seconds}s, "
+            f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}, "
+            f"admission_timeout={admission_timeout_seconds}s, capability_ttl={capability_ttl_seconds}s"
+        )
+        logger.info(
+            f"Ollama worker pool initialized with {len(states)} worker(s), "
+            f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}"
+        )
         self._states = states
         self._failure_threshold = int(failure_threshold)
         self._cooldown_seconds = float(cooldown_seconds)
@@ -553,10 +605,49 @@ class OllamaWorkerPool:
         state.consecutive_failures += 1
         state.last_error = self._redactor.redact(_safe_error(error))[:200]
         self._metrics["transport_failures"] += 1
+        if (
+            state.consecutive_failures > 0
+            and state.consecutive_failures < self._failure_threshold
+        ):
+            logger.warning(
+                f"worker {state.endpoint.worker_id} at "
+                f"{state.consecutive_failures}/{self._failure_threshold} "
+                f"consecutive failures, next failure opens circuit"
+            )
         if state.consecutive_failures >= self._failure_threshold:
             exponent = min(3, state.consecutive_failures - self._failure_threshold)
             state.trips += 1
-            state.cooldown_until = now + self._cooldown_seconds * (2 ** exponent)
+            cooldown_duration = self._cooldown_seconds * (2 ** exponent)
+            state.cooldown_until = now + cooldown_duration
+            logger.debug(
+                f"circuit opened for {state.endpoint.worker_id}: "
+                f"failures={state.consecutive_failures}, trips={state.trips}, "
+                f"cooldown={cooldown_duration:.1f}s"
+            )
+            logger.error(
+                f"worker {state.endpoint.worker_id} circuit opened after "
+                f"{state.consecutive_failures} consecutive transport failures, "
+                f"cooldown={cooldown_duration:.1f}s, trips={state.trips}, "
+                f"last_error={state.last_error!r}"
+            )
+            if not was_open:
+                logger.warning(
+                    f"circuit opened: worker {state.endpoint.worker_id} marked "
+                    f"unhealthy after {state.consecutive_failures} consecutive "
+                    f"failures, cooldown={cooldown_duration:.1f}s, trips={state.trips}"
+                )
+            all_unhealthy = all(
+                s.cooldown_until > now
+                or s.compatibility_error
+                or (s.capabilities is None and s.capability_probe_failed)
+                for s in self._states
+            )
+            if all_unhealthy:
+                logger.critical(
+                    f"all {len(self._states)} worker(s) are unhealthy — "
+                    f"no inference capacity remains, "
+                    f"worker_ids={[s.endpoint.worker_id for s in self._states]}"
+                )
             if not was_open and self._metrics_observer is not None:
                 self._metrics_observer.observe_ollama_worker_circuit(
                     worker=state.endpoint.metric_label, state="open"
@@ -564,6 +655,13 @@ class OllamaWorkerPool:
 
     def _record_success(self, state: _WorkerState, latency_ms: float) -> None:
         reconnect = state.consecutive_failures >= self._failure_threshold
+        if reconnect:
+            logger.debug(f"worker {state.endpoint.worker_id} reconnected after {state.consecutive_failures} failures")
+            logger.warning(
+                f"worker {state.endpoint.worker_id} recovered after "
+                f"{state.consecutive_failures} consecutive failures "
+                f"(was circuit-open for {state.trips} trip(s))"
+            )
         state.consecutive_failures = 0
         state.last_error = ""
         state.cooldown_until = 0.0
@@ -588,9 +686,12 @@ class OllamaWorkerPool:
         Circuit-open workers are not probed before their retry deadline unless
         ``force`` is explicitly requested by an operator-facing caller.
         """
+        logger.debug(f"refresh_capabilities called, force={force}")
         if self._capability_prober is None:
+            logger.debug("no capability prober configured, skipping refresh")
             return self.snapshots()
         if not self._probe_lock.acquire(blocking=False):
+            logger.debug("probe lock contended, skipping refresh")
             return self.snapshots()
         try:
             now = self._clock()
@@ -602,6 +703,7 @@ class OllamaWorkerPool:
                     and not state.half_open_inflight
                 ]
             if not candidates:
+                logger.debug("no stale/eligible workers to probe")
                 return self.snapshots()
 
             def run(state: _WorkerState):
@@ -613,6 +715,8 @@ class OllamaWorkerPool:
                 except Exception as error:
                     return None, 0.0, error
 
+            logger.debug(f"probing {len(candidates)} candidate workers: {[s.endpoint.worker_id for s in candidates]}")
+            logger.info(f"probing capabilities on {len(candidates)} worker(s)")
             workers = min(4, len(candidates))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = [executor.submit(run, state) for state in candidates]
@@ -622,6 +726,17 @@ class OllamaWorkerPool:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
                     self._metrics["capability_probes"] += 1
                     if error is not None:
+                        logger.debug(f"capability probe failed for {state.endpoint.worker_id}: {_safe_error(error)}")
+                        logger.warning(
+                            f"capability probe failed for worker "
+                            f"{state.endpoint.worker_id}: {_safe_error(error)} "
+                            f"(worker may be overloaded or unreachable)"
+                        )
+                        logger.error(
+                            f"capability probe failed for worker "
+                            f"{state.endpoint.worker_id}, probe_error={_safe_error(error)!r}",
+                            exc_info=error,
+                        )
                         self._metrics["capability_probe_failures"] += 1
                         state.capability_probe_failed = True
                         if self._retryable(error):
@@ -639,7 +754,18 @@ class OllamaWorkerPool:
                         state.capability_probe_failed = True
                         state.compatibility_error = self._redactor.redact(_safe_error(capability_error))
                         state.last_error = state.compatibility_error
+                        logger.error(
+                            f"capability probe returned unexpected data for worker "
+                            f"{state.endpoint.worker_id}, "
+                            f"compatibility_error={state.compatibility_error!r}",
+                            exc_info=True,
+                        )
                         continue
+                    logger.debug(
+                        f"capability probe succeeded for {state.endpoint.worker_id}: "
+                        f"models={len(capabilities.models)}, version={capabilities.version!r}, "
+                        f"effective_max_inflight={capabilities.effective_max_inflight}, latency={latency_ms:.1f}ms"
+                    )
                     state.capabilities = capabilities
                     state.compatibility_error = ""
                     state.capability_probe_failed = False
@@ -660,11 +786,14 @@ class OllamaWorkerPool:
     def note_models(self, origin_or_id: str, model_names) -> bool:
         target = str(origin_or_id or "").strip().rstrip("/")
         names = frozenset(_model_key(name) for name in (model_names or ()) if _model_key(name))
+        logger.debug(f"note_models: target={target!r}, model_count={len(names)}")
         with self._condition:
             for state in self._states:
                 if target in (state.endpoint.origin, state.endpoint.worker_id):
                     state.known_models = names
+                    logger.debug(f"note_models: updated {state.endpoint.worker_id} with {len(names)} models")
                     return True
+        logger.debug(f"note_models: no matching worker for target={target!r}")
         return False
 
     def refresh_inventory(self, fetch_tags: Callable[[str], object]) -> dict:
@@ -680,6 +809,11 @@ class OllamaWorkerPool:
                 self.note_models(endpoint.origin, names)
                 results[endpoint.worker_id] = len([name for name in names if name])
             except Exception as error:
+                logger.error(
+                    f"inventory refresh failed for worker {endpoint.worker_id}, "
+                    f"error={_safe_error(error)!r}",
+                    exc_info=True,
+                )
                 results[endpoint.worker_id] = "error: %s" % _safe_error(error)
         return results
 
@@ -701,6 +835,7 @@ class OllamaWorkerPool:
             and state.inflight < self._capacity(state)
         ]
         if not candidates:
+            logger.debug(f"_choose: no eligible workers for model={model!r}, excluded={excluded}")
             return None
         half_open = [
             state for state in candidates
@@ -722,7 +857,13 @@ class OllamaWorkerPool:
             )
             return (lacks_model, (state.inflight + 1) * latency, state.inflight)
 
-        return min(rotated, key=score)
+        chosen = min(rotated, key=score)
+        logger.debug(
+            f"_choose: selected {chosen.endpoint.worker_id} for model={model!r}, "
+            f"inflight={chosen.inflight}/{self._capacity(chosen)}, "
+            f"latency_ewma={chosen.latency_ewma_ms}, candidates={len(candidates)}"
+        )
+        return chosen
 
     def _acquire(
         self,
@@ -731,6 +872,7 @@ class OllamaWorkerPool:
         excluded: set[str],
         admission_timeout: float,
     ) -> _WorkerState:
+        logger.debug(f"_acquire: model={model!r}, excluded={excluded}, timeout={admission_timeout:.3f}s")
         deadline = time.monotonic() + admission_timeout
         queued = False
         with self._condition:
@@ -784,14 +926,30 @@ class OllamaWorkerPool:
                     )
                 if not queued:
                     if self._waiters >= self._queue_depth:
+                        logger.debug(f"_acquire: queue full ({self._waiters}/{self._queue_depth}), rejecting")
+                        logger.warning(
+                            f"worker pool queue full, rejecting request: "
+                            f"waiters={self._waiters}/{self._queue_depth}"
+                        )
                         self._metrics["backpressure_rejections"] += 1
                         raise WorkerPoolBackpressure("Ollama worker queue is full")
                     self._waiters += 1
                     queued = True
+                    if self._queue_depth > 0 and self._waiters >= self._queue_depth * 0.8:
+                        logger.warning(
+                            f"worker pool queue depth approaching limit: "
+                            f"waiters={self._waiters}/{self._queue_depth}"
+                        )
+                    logger.debug(f"_acquire: queued for capacity, waiters={self._waiters}/{self._queue_depth}")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._waiters -= 1
                     self._metrics["backpressure_rejections"] += 1
+                    logger.warning(
+                        f"admission timeout after {admission_timeout:.3f}s "
+                        f"waiting for worker capacity, model={model!r}, "
+                        f"waiters={self._waiters}/{self._queue_depth}"
+                    )
                     raise WorkerPoolBackpressure(
                         "timed out waiting for Ollama worker capacity"
                     )
@@ -838,6 +996,7 @@ class OllamaWorkerPool:
     ):
         """Admit and send one logical request with pre-response failover only."""
         model = str(model or "").strip() or None
+        logger.debug(f"pool.request: model={model!r}, idempotent={idempotent}")
         with self._condition:
             self._metrics["logical_requests"] += 1
         if model:
@@ -861,33 +1020,56 @@ class OllamaWorkerPool:
                 )
             except WorkerPoolUnavailable:
                 if last_error is not None:
+                    logger.error(
+                        f"all attempted workers failed for model={model!r}, "
+                        f"attempted={attempted}, last_error={_safe_error(last_error)!r}"
+                    )
                     raise last_error
                 raise
             with self._condition:
                 if attempted:
                     self._metrics["failovers"] += 1
+                    logger.warning(
+                        f"failing over to worker {state.endpoint.worker_id} "
+                        f"(attempt #{len(attempted) + 1}, model={model!r}), "
+                        f"previous worker(s) failed: {attempted}"
+                    )
                 self._metrics["dispatches"] += 1
             attempted.add(state.endpoint.worker_id)
+            logger.debug(f"pool.request: dispatching to {state.endpoint.worker_id}, model={model!r}")
             started = self._clock()
             try:
                 result = sender(state.endpoint.origin)
             except Exception as error:
                 latency_ms = max(0.0, (self._clock() - started) * 1000.0)
                 retryable = self._retryable(error)
+                logger.debug(
+                    f"pool.request: error from {state.endpoint.worker_id} after {latency_ms:.1f}ms, "
+                    f"retryable={retryable}: {_safe_error(error)}"
+                )
                 self._finish(
                     state, error=error, latency_ms=latency_ms,
                     count_failure=retryable,
                 )
                 if not idempotent or not retryable:
                     raise
+                logger.error(
+                    f"worker {state.endpoint.worker_id} inference request failed, "
+                    f"failing over to next worker, model={model!r}, "
+                    f"elapsed_ms={latency_ms:.1f}, error={_safe_error(error)!r}",
+                    exc_info=True,
+                )
                 last_error = error
                 continue
             latency_ms = max(0.0, (self._clock() - started) * 1000.0)
+            logger.debug(f"pool.request: success from {state.endpoint.worker_id} in {latency_ms:.1f}ms")
             self._finish(state, error=None, latency_ms=latency_ms)
             return result
 
     def drain(self, *, timeout_seconds: float = 5.0) -> bool:
         """Stop admission and wait a bounded interval for in-flight calls."""
+        logger.debug(f"pool.drain: starting with timeout={timeout_seconds}s")
+        logger.info(f"worker pool drain started, timeout={timeout_seconds}s")
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
         with self._condition:
             self._draining = True
@@ -895,8 +1077,14 @@ class OllamaWorkerPool:
             while any(state.inflight for state in self._states):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    inflight_count = sum(s.inflight for s in self._states)
+                    logger.warning(
+                        f"worker pool drain timed out after {timeout_seconds}s "
+                        f"with {inflight_count} in-flight request(s) remaining"
+                    )
                     return False
                 self._condition.wait(timeout=remaining)
+            logger.info("worker pool drained successfully")
             return True
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
@@ -965,6 +1153,13 @@ class OllamaWorkerPool:
             metrics = dict(self._metrics)
             waiters = self._waiters
             draining = self._draining
+        healthy_count = sum(1 for w in workers if w.healthy)
+        total_count = len(workers)
+        if healthy_count < total_count and not draining:
+            logger.warning(
+                f"pool running with {healthy_count}/{total_count} healthy "
+                f"workers; unhealthy: {[w.worker_id for w in workers if not w.healthy]}"
+            )
         return {
             "enabled": self.enabled,
             "admission": "draining" if draining else "accepting",
@@ -1034,44 +1229,69 @@ class OllamaWorkerPool:
 
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     """Build the pool from consented, bounded environment configuration."""
+    logger.debug(f"from_environment: primary_origin={primary_origin!r}")
+    logger.info(f"building Ollama worker pool from environment, primary_origin={primary_origin!r}")
     env = os.environ if environment is None else environment
     with _configuration_lock:
         typed_workers = _configured_workers
         typed_allow_remote = _configured_allow_remote
-    if environment is None and typed_workers is not None and typed_allow_remote is not None:
+        typed_trusted_origins = _configured_trusted_origins
+        typed_failure = _configured_failure_threshold
+        typed_cooldown = _configured_cooldown_seconds
+        typed_admission = _configured_admission_timeout_ms
+        typed_ttl = _configured_capability_ttl_seconds
+        typed_probe = _configured_probe_timeout_ms
+    use_typed = environment is None and typed_workers is not None and typed_allow_remote is not None
+    if use_typed:
         worker_origins = typed_workers
         allow_remote = typed_allow_remote
+        trusted_origins = typed_trusted_origins or ()
+        logger.debug(f"from_environment: using typed config, workers={len(worker_origins)}, allow_remote={allow_remote}")
     else:
         worker_origins = parse_worker_origins(env.get("SONDER_OLLAMA_WORKERS"))
         allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
             "1", "true", "yes", "on",
         }
-    cooldown = _positive_int(
-        env,
-        "SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS",
-        int(_DEFAULT_COOLDOWN_SECONDS),
-        maximum=int(_MAX_COOLDOWN_SECONDS),
+        raw_trusted = env.get("SONDER_TRUSTED_ORIGINS", "")
+        trusted_origins = tuple(
+            v.strip() for v in raw_trusted.replace(";", ",").split(",") if v.strip()
+        )
+        logger.debug(f"from_environment: using env config, workers={len(worker_origins)}, allow_remote={allow_remote}")
+    cooldown = (
+        typed_cooldown if use_typed and typed_cooldown is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS",
+            int(_DEFAULT_COOLDOWN_SECONDS), maximum=int(_MAX_COOLDOWN_SECONDS),
+        )
     )
-    admission_ms = _positive_int(
-        env,
-        "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS",
-        int(_DEFAULT_ADMISSION_TIMEOUT_SECONDS * 1000),
-        maximum=int(_MAX_ADMISSION_TIMEOUT_SECONDS * 1000),
+    admission_ms = (
+        typed_admission if use_typed and typed_admission is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS",
+            int(_DEFAULT_ADMISSION_TIMEOUT_SECONDS * 1000),
+            maximum=int(_MAX_ADMISSION_TIMEOUT_SECONDS * 1000),
+        )
     )
-    probe_timeout_ms = _positive_int(
-        env, "SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS", 2000,
-        maximum=30_000,
+    probe_timeout_ms = (
+        typed_probe if use_typed and typed_probe is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS", 2000,
+            maximum=30_000,
+        )
+    )
+    failure_threshold = (
+        typed_failure if use_typed and typed_failure is not None
+        else _positive_int(
+            env, "SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD",
+            _DEFAULT_FAILURE_THRESHOLD, maximum=_MAX_FAILURE_THRESHOLD,
+        )
     )
     return OllamaWorkerPool(
         primary_origin,
         worker_origins,
         allow_remote=allow_remote,
-        failure_threshold=_positive_int(
-            env,
-            "SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD",
-            _DEFAULT_FAILURE_THRESHOLD,
-            maximum=_MAX_FAILURE_THRESHOLD,
-        ),
+        trusted_origins=trusted_origins,
+        failure_threshold=failure_threshold,
         cooldown_seconds=cooldown,
         max_inflight_per_worker=_positive_int(
             env, "SONDER_OLLAMA_WORKER_MAX_INFLIGHT", _DEFAULT_MAX_INFLIGHT,
@@ -1082,11 +1302,13 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
             maximum=_MAX_QUEUE_DEPTH,
         ),
         admission_timeout_seconds=admission_ms / 1000.0,
-        capability_ttl_seconds=_positive_int(
-            env,
-            "SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS",
-            int(_DEFAULT_CAPABILITY_TTL_SECONDS),
-            maximum=int(_MAX_CAPABILITY_TTL_SECONDS),
+        capability_ttl_seconds=(
+            typed_ttl if use_typed and typed_ttl is not None
+            else _positive_int(
+                env, "SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS",
+                int(_DEFAULT_CAPABILITY_TTL_SECONDS),
+                maximum=int(_MAX_CAPABILITY_TTL_SECONDS),
+            )
         ),
         capability_prober=_default_capability_prober(
             allow_remote=allow_remote, timeout=probe_timeout_ms / 1000.0,

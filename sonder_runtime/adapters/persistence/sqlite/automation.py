@@ -7,10 +7,13 @@ discriminator.  Includes outbox_events for transactional event dispatch.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
 from .outbox import OUTBOX_DDL
+
+logger = logging.getLogger(__name__)
 
 
 AUTOMATION_DDL = """\
@@ -75,10 +78,13 @@ CREATE TABLE IF NOT EXISTS schema_epoch (
 
 def init_automation_db(db_path: Path) -> sqlite3.Connection:
     """Open or create automation.db with the SPEC-5 schema."""
+    logger.debug(f"initializing automation.db at {db_path!r}")
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(AUTOMATION_DDL)
     conn.executescript(OUTBOX_DDL)
+    logger.debug("automation.db schema applied successfully")
+    logger.info(f"automation.db initialized at {db_path}")
     return conn
