@@ -5098,11 +5098,15 @@ def agent_lane(action: str, payload: dict, parent_session_id: str,
     from sonder_runtime.interfaces.agent_lanes import dispatch_agent_lane_tool
     from sonder_runtime.domain.common.errors import Forbidden, DependencyUnavailable
     from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
+    arguments = dict(action=action, payload=payload, parent_session_id=parent_session_id)
+    if parent_lane_id:
+        arguments['parent_lane_id'] = parent_lane_id
     decision = lane_policy.decide_for_caller(
         "agent_lane", interactive=False, gate_control_exempt=False, surface="mcp",
+        arguments=arguments,
     )
     if decision is not None and decision.action != lane_policy.allow_action():
-        raise Forbidden("agent control denied by runtime permission policy")
+        raise Forbidden(getattr(decision, "reason", "agent control denied by runtime permission policy"))
     application = _application()
     factory = getattr(application, "agent_lanes", None)
     if not callable(factory):

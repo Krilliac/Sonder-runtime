@@ -744,13 +744,19 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             from ..adapters.security.permission_policy import permission_policy
             from ..domain.common.errors import SonderError
 
+            # Optional parent identity is absent on both native and legacy
+            # surfaces when unset, so an exact approval hashes consistently.
+            if not canonical_arguments.get("parent_lane_id"):
+                canonical_arguments.pop("parent_lane_id", None)
             decision = permission_policy.decide_for_caller(
                 canonical_name, interactive=False, gate_control_exempt=False,
                 surface="native-mcp",
+                arguments=canonical_arguments,
             )
             if decision is not None and decision.action != permission_policy.allow_action():
-                return {"output": "agent control denied by runtime permission policy",
-                        "isError": True, "error": "permission_denied", "evidence": {}}
+                return {"output": getattr(decision, "reason", "agent control denied by runtime permission policy"),
+                        "isError": True, "error": "permission_denied",
+                        "evidence": {"call_id": getattr(decision, "call_id", "")}}
             factory = getattr(application, "agent_lanes", None)
             if not callable(factory):
                 return {"output": "agent conversations are unavailable", "isError": True,

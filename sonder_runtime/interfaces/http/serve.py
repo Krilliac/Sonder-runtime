@@ -3966,6 +3966,7 @@ class Handler(BaseHTTPRequestHandler):
         from dataclasses import replace
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.domain.common.errors import SonderError
+        from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
 
         try:
             application = default_app()
@@ -3994,6 +3995,21 @@ class Handler(BaseHTTPRequestHandler):
             roots = tuple(Path(root).resolve() for root in getattr(state, "workspace_roots", ())) \
                 if _admin_authorized(auth) else ()
             context = replace(context, principal_id=principal, workspace_roots=roots)
+            if method != "GET":
+                # The approval ledger is process-wide. Bind HTTP approvals to
+                # authenticated identity and effective roots as well as the
+                # exact request; another account cannot spend this approval.
+                arguments = {
+                    "method": method, "path": path, "payload": payload or {},
+                    "query": query, "principal_id": principal,
+                    "workspace_roots": [str(root) for root in roots],
+                }
+                decision = lane_policy.decide_for_caller(
+                    "agent_lane", interactive=False, gate_control_exempt=False,
+                    surface="http", arguments=arguments,
+                )
+                if decision is not None and decision.action != lane_policy.allow_action():
+                    raise PermissionError(decision.reason)
             from sonder_runtime.interfaces.http.facades.agent_lanes import dispatch_agent_lane_route
             result = dispatch_agent_lane_route(
                 factory(), method, path, payload or {}, query, context,
@@ -4024,6 +4040,8 @@ class Handler(BaseHTTPRequestHandler):
                            "message": "agent conversations are unavailable", "type": "server_error"}},
                 status=503,
             )
+        finally:
+            lane_policy.forget_spent_approval()
         return True
 
     def do_GET(self):
