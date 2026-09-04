@@ -185,12 +185,16 @@ class SubprocessJobProvider:
             self._limits[request.identity.job_id] = request.max_descendants
             self._memory_tokens[request.identity.job_id] = memory_token
         launch_lock.acquire()
+        capacity_dispatched = False
         try:
             if deadline_at is not None:
                 self._schedule_deadline_at(request.identity.job_id, deadline_at)
             current = self._registry.poll(request.identity.job_id)
             if current.is_terminal or current.status is JobStatus.CANCELLATION_REQUESTED:
                 raise RuntimeError("process deadline expired before launch")
+            if request.capacity_token is not None:
+                self._registry.dispatch_capacity(request.identity.job_id, request.capacity_token)
+                capacity_dispatched = True
             process = self._launcher(list(launch_argv), **launch_options)
             process_id = getattr(process, "pid", None)
             if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
@@ -277,6 +281,8 @@ class SubprocessJobProvider:
                 else:
                     self._memory_tokens.pop(request.identity.job_id, None)
             current = self._registry.poll(request.identity.job_id)
+            if capacity_dispatched and containment is not None and containment.complete:
+                self._release_capacity(request.identity.job_id)
             if cleanup_complete:
                 self._limits.pop(request.identity.job_id, None)
                 self._discard_deadline(request.identity.job_id)
@@ -370,6 +376,7 @@ class SubprocessJobProvider:
             self._forget_local_job(job_id)
             return ProcessJobWait(records[-1], exit_code)
         if containment is not None:
+            self._release_capacity(job_id)
             self._release_memory_limit(job_id)
         output_failure = self._take_output_failure(job_id)
         status = (
@@ -734,7 +741,13 @@ class SubprocessJobProvider:
         self._unresolved_scopes.pop(job_id, None)
         return True
 
+    def _release_capacity(self, job_id: str) -> None:
+        release = getattr(self._registry, "release_capacity", None)
+        if callable(release):
+            release(job_id)
+
     def _forget_local_job(self, job_id: str) -> None:
+        self._release_capacity(job_id)
         had_process = self._processes.pop(job_id, None) is not None
         self._limits.pop(job_id, None)
         if had_process and self._process_slots is not None:

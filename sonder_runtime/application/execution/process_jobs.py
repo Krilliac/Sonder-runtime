@@ -22,8 +22,14 @@ class ProcessJobRequest:
     memory_limit_bytes: int | None = None
     metadata: tuple[tuple[str, str], ...] = ()
     require_job_scope: bool = False
+    capacity_token: str | None = None
 
     def __post_init__(self) -> None:
+        if self.capacity_token is not None and (
+            not isinstance(self.capacity_token, str) or len(self.capacity_token) != 64
+            or any(c not in "0123456789abcdef" for c in self.capacity_token)
+        ):
+            raise ValueError("capacity_token must be a 256-bit hex token")
         if not isinstance(self.identity, JobIdentity):
             raise TypeError("identity must be a JobIdentity")
         if not self.argv or any(not isinstance(item, str) or not item for item in self.argv):

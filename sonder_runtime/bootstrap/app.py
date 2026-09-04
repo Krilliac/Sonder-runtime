@@ -655,6 +655,7 @@ def build_application(
                         job.allowed_relative_path_options
                     ),
                     memory_limit_bytes=job.memory_limit_bytes,
+                    memory_reservation_bytes=job.memory_reservation_bytes,
                     artifact_paths=job.artifact_paths,
                 )
                 for job in effective_config.compute.jobs
@@ -672,11 +673,27 @@ def build_application(
                 if effective_config.state.workspace_roots
                 else Path.cwd().resolve()
             )
+            from ..application.compute_fabric.capacity import WorkerBudget, measured_worker_budget
+
+            def worker_budget() -> WorkerBudget:
+                configured = effective_config.compute.worker_memory_budget_bytes
+                if configured is None:
+                    return measured_worker_budget(
+                        get_compute_snapshot(), effective_config.compute.worker_host_id,
+                    )
+                return WorkerBudget(
+                    effective_config.compute.worker_host_id, configured,
+                    effective_config.compute.worker_max_jobs,
+                )
+
             compute_job_worker = ComputeJobWorker(
                 worker_id=effective_config.compute.node_id,
                 catalog=catalog,
                 workspace_mappings=roots,
                 provider=get_process_job_provider(),
+                capacity=get_job_registry(),
+                budget=worker_budget,
+                reservation_seconds=effective_config.compute.worker_reservation_seconds,
             )
         return compute_job_worker
 
