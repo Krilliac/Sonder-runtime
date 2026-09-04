@@ -18,6 +18,7 @@ from ..context import OperationContext
 logger = logging.getLogger(__name__)
 from ..ports.model_gateway import InferenceTelemetry, ModelGateway, ModelRequest
 from ..session.capture import CapturedTurn, SessionCaptureService
+from ..session.provider_attempts import ProviderCaptureFailure, provider_attempt_scope
 from ...domain.common.errors import IntegrityFailure, InternalFailure, SonderError
 from ...domain.common.ids import SessionId, TurnId, new_id
 
@@ -95,8 +96,11 @@ class ChatService:
             )
         logger.debug(f"ChatService.complete: sending request to gateway, tier={command.tier!r}")
         try:
-            response = self._gateway.generate(request, context)
+            with provider_attempt_scope(capture_service, pending):
+                response = self._gateway.generate(request, context)
         except Exception as model_error:
+            if isinstance(model_error, ProviderCaptureFailure):
+                raise
             if pending is not None:
                 code = (
                     model_error.code

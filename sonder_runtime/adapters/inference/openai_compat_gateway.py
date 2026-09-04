@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 from ...application.context import OperationContext
+from ...application.session.provider_attempts import dispatch_provider
 from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
@@ -302,7 +303,10 @@ class OpenAICompatibleGateway:
         logger.debug(f"OpenAICompatibleGateway._post: url={url!r}, timeout={timeout}")
         transport = self._transport or self._default_transport
         try:
-            data = transport(url, payload, self._headers(cfg), timeout)
+            data = dispatch_provider(
+                "openai-compatible", path, payload,
+                lambda: transport(url, payload, self._headers(cfg), timeout),
+            )
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", 0)
             if code in (401, 403):
