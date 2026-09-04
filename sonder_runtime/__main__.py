@@ -778,6 +778,8 @@ def cmd_mcp(args) -> int:
             print(f"migration failed: {exc}", file=sys.stderr)
             return 1
         return run_native_mcp(build_application(config=config))
+    from sonder_runtime.adapters.security import unsafe_lab as _unsafe_lab
+    _unsafe_lab.require_startup()
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
