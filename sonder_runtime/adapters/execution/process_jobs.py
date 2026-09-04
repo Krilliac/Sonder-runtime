@@ -262,15 +262,18 @@ class SubprocessJobProvider:
         except Exception as exc:
             if process is not None:
                 self._abort_unregistered(process)
-            containment = self._quiesce_containment(
-                request.identity.job_id, force=True,
-            )
+                containment = self._quiesce_containment(
+                    request.identity.job_id, force=True,
+                )
+            else:
+                containment = None
             cleanup_complete = containment is None or containment.complete
-            if cleanup_complete and memory_token is not None:
+            if memory_token is not None:
                 try:
                     memory_token.close()
                 except Exception:
-                    cleanup_complete = False
+                    if process is not None:
+                        cleanup_complete = False
                 else:
                     self._memory_tokens.pop(request.identity.job_id, None)
             current = self._registry.poll(request.identity.job_id)
