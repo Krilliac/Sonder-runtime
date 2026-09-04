@@ -26,6 +26,30 @@ def test_clean_tail_resumes_after_last_durable_event():
     assert plan.discarded_tail == ()
 
 
+@pytest.mark.parametrize("terminal", ["provider.responded", "provider.failed"])
+def test_provider_attempts_use_child_identity_even_after_logical_completion(terminal):
+    events = [
+        event(1, "model.requested", {"request_id": "parent", "turn_id": "turn"}),
+        event(2, "provider.requested", {"request_id": "parent", "attempt_id": "a1", "turn_id": "turn"}),
+        event(3, "provider.requested", {"request_id": "parent", "attempt_id": "a2", "turn_id": "turn"}),
+        event(4, terminal, {"request_id": "parent", "attempt_id": "a2", "turn_id": "turn"}),
+        event(5, "model.response", {"request_id": "parent", "turn_id": "turn"}),
+    ]
+    diagnosis = diagnose_session_tail(events)
+    assert diagnosis.disposition == "truncated"
+    assert diagnosis.valid_boundary == 1
+    assert diagnosis.issues[0].sequence == 2
+    assert diagnose_session_tail(events + [event(6, "provider.failed", {"attempt_id": "a1", "request_id": "parent"})]).disposition == "clean"
+
+
+def test_provider_terminal_requires_exact_attempt_identity():
+    diagnosis = diagnose_session_tail([
+        event(1, "provider.requested", {"request_id": "parent", "attempt_id": "a1"}),
+        event(2, "provider.responded", {"request_id": "parent"}),
+    ])
+    assert diagnosis.disposition == "inconsistent"
+
+
 def test_inflight_tail_stops_before_effect_and_does_not_replay_it():
     events = [event(1, "session.started"), event(2, "model.requested", {"request_id": "r", "model": "local"}), event(3, "model.started", {"request_id": "r", "model": "local"})]
     plan = plan_session_resume(events)
