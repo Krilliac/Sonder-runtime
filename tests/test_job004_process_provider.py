@@ -35,6 +35,56 @@ def _request(job_id: str = "job-process") -> ProcessJobRequest:
     )
 
 
+@pytest.mark.parametrize("failure", ["prepare", "registry", "launch", "identity", "attach", "limits", "readers", "cleanup", "already_released"])
+def test_failed_start_returns_single_capacity_slot(failure, monkeypatch):
+    from dataclasses import replace
+    registry = DurableJobRegistry()
+    process = _Process()
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: process, memory_limiter=_MemoryLimiter(),
+        max_concurrent_processes=1, process_identity_resolver=lambda pid: "stable",
+        platform_name="posix",
+    )
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected failed start")
+    bad = _request("failed-start")
+    with monkeypatch.context() as patch:
+        if failure == "prepare":
+            bad = replace(bad, require_job_scope=True)
+        elif failure == "registry":
+            patch.setattr(registry, "start", fail)
+        elif failure == "launch":
+            patch.setattr(provider, "_launcher", fail)
+        elif failure == "identity":
+            patch.setattr(provider, "_process_identity_resolver", fail)
+        elif failure == "attach":
+            patch.setattr(registry, "attach_process", fail)
+        elif failure == "limits":
+            bad = replace(bad, memory_limit_bytes=1024)
+            patch.setattr(provider._memory_limiter, "apply", fail)
+        elif failure == "readers":
+            patch.setattr(provider, "_start_output_readers", fail)
+        elif failure == "cleanup":
+            patch.setattr(provider, "_process_identity_resolver", fail)
+            patch.setattr(provider, "_abort_unregistered", fail)
+        elif failure == "already_released":
+            def release_then_fail(job_id, process):
+                provider._forget_local_job(job_id)
+                fail()
+            patch.setattr(provider, "_start_output_readers", release_then_fail)
+        with pytest.raises(RuntimeError):
+            provider.start(bad)
+    provider.start(_request("valid-after-failure"))
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("cannot-overbook"))
+    provider.wait("valid-after-failure")
+    provider.start(_request("valid-after-completion"))
+    provider.cancel("valid-after-completion")
+    provider.start(_request("valid-after-cancellation"))
+    provider.wait("valid-after-cancellation")
+
+
 class _Process:
     pid = 77
 
