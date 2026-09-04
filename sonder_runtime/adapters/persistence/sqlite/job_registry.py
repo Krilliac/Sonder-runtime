@@ -35,6 +35,9 @@ from sonder_runtime.domain.common.errors import (
 )
 
 
+from .worker_capacity import CAPACITY_DDL, SQLiteWorkerCapacity
+
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS durable_job (
     job_id TEXT PRIMARY KEY, kind TEXT NOT NULL, operation_id TEXT NOT NULL,
@@ -112,7 +115,7 @@ def _storage_failure(exc: BaseException) -> SonderError:
     return DependencyUnavailable("durable job storage is unavailable")
 
 
-class SQLiteDurableJobRegistry:
+class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
     """Durable implementation of the parent-linked job lifecycle.
 
     Each mutating operation is transaction-scoped.  Process termination is
@@ -138,6 +141,7 @@ class SQLiteDurableJobRegistry:
         self._lock = Lock()
         with self._connect() as connection:
             initialize_schema(connection)
+            connection.executescript(CAPACITY_DDL)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

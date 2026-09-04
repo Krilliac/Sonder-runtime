@@ -183,6 +183,10 @@ def test_compute_catalog_rejects_unsafe_worker_owned_fields(
 def test_redacted_dump_serializes_nested_compute_configuration() -> None:
     dumped = load_config(env={}).as_redacted_dict()
     assert dumped["compute"] == {
+        "worker_host_id": "local",
+        "worker_memory_budget_bytes": None,
+        "worker_max_jobs": 1,
+        "worker_reservation_seconds": 30,
         "allow_remote": False,
         "node_id": "local",
         "snapshot_ttl_seconds": 30,

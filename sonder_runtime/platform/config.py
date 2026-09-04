@@ -147,10 +147,15 @@ class ComputeJobConfig:
     allowed_relative_path_options: tuple[str, ...] = ()
     memory_limit_bytes: int | None = None
     artifact_paths: tuple[str, ...] = ()
+    memory_reservation_bytes: int | None = None
 
 
 @dataclass(frozen=True)
 class ComputeConfig:
+    worker_host_id: str = "local"
+    worker_memory_budget_bytes: int | None = None
+    worker_max_jobs: int = 1
+    worker_reservation_seconds: int = 30
     allow_remote: bool = False
     node_id: str = "local"
     snapshot_ttl_seconds: int = 30
@@ -257,6 +262,10 @@ class SonderConfig:
                 for f in fields(value)
             }
         out["compute"] = {
+            "worker_host_id": self.compute.worker_host_id,
+            "worker_memory_budget_bytes": self.compute.worker_memory_budget_bytes,
+            "worker_max_jobs": self.compute.worker_max_jobs,
+            "worker_reservation_seconds": self.compute.worker_reservation_seconds,
             "allow_remote": self.compute.allow_remote,
             "node_id": self.compute.node_id,
             "snapshot_ttl_seconds": self.compute.snapshot_ttl_seconds,
@@ -287,6 +296,7 @@ class SonderConfig:
                         job.allowed_relative_path_options
                     ),
                     "memory_limit_bytes": job.memory_limit_bytes,
+                    "memory_reservation_bytes": job.memory_reservation_bytes,
                     "artifact_paths": list(job.artifact_paths),
                 }
                 for job in self.compute.jobs
@@ -421,12 +431,24 @@ def _apply_compute_section(
 ) -> ComputeConfig:
     known = {
         "allow_remote", "node_id", "snapshot_ttl_seconds", "probe_timeout_ms",
-        "nodes", "jobs",
+        "nodes", "jobs", "worker_host_id", "worker_memory_budget_bytes",
+        "worker_max_jobs", "worker_reservation_seconds",
     }
     for key in raw:
         if key not in known:
             errors.append(f"unknown key [compute].{key}")
 
+    capacity_values = {}
+    for key in ("worker_host_id", "worker_memory_budget_bytes", "worker_max_jobs", "worker_reservation_seconds"):
+        value = raw.get(key, getattr(current, key))
+        expected = str if key == "worker_host_id" else int
+        if key == "worker_memory_budget_bytes" and value is None and key not in raw:
+            capacity_values[key] = None
+            continue
+        if not isinstance(value, expected) or isinstance(value, bool):
+            errors.append(f"[compute].{key} has an invalid type")
+            value = getattr(current, key)
+        capacity_values[key] = value
     allow_remote = raw.get("allow_remote", current.allow_remote)
     if not isinstance(allow_remote, bool):
         errors.append("[compute].allow_remote must be a boolean")
@@ -489,7 +511,7 @@ def _apply_compute_section(
             "environment_allowlist", "workspace_mappings",
             "allowed_flags", "allowed_bounded_options",
             "allowed_relative_path_options",
-            "memory_limit_bytes",
+            "memory_limit_bytes", "memory_reservation_bytes",
             "artifact_paths",
         }
         for index, item in enumerate(jobs_raw):
@@ -534,6 +556,7 @@ def _apply_compute_section(
                     and not isinstance(item.get("memory_limit_bytes"), bool)
                     else None
                 ),
+                memory_reservation_bytes=item.get("memory_reservation_bytes"),
                 artifact_paths=_string_list(item, "artifact_paths", where, errors),
             ))
             if (
@@ -545,6 +568,7 @@ def _apply_compute_section(
             ):
                 errors.append(f"{where}.memory_limit_bytes must be an integer")
     return ComputeConfig(
+        **capacity_values,
         allow_remote=allow_remote,
         node_id=local_node_id,
         snapshot_ttl_seconds=snapshot_ttl,
@@ -1011,11 +1035,31 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             for item in node.workspace_mappings
         ):
             errors.append(f"{where}.workspace_mappings contains an invalid identity")
+    if not isinstance(compute.worker_host_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", compute.worker_host_id
+    ):
+        errors.append("[compute].worker_host_id must be a bounded stable identity")
+    for key, minimum, maximum in (
+        ("worker_memory_budget_bytes", 0, 1 << 50),
+        ("worker_max_jobs", 1, 1024),
+        ("worker_reservation_seconds", 1, 300),
+    ):
+        value = getattr(compute, key)
+        if key == "worker_memory_budget_bytes" and value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            errors.append(f"[compute].{key} must be within {minimum}..{maximum}")
     job_ids = [job.job_id for job in compute.jobs]
     if len(job_ids) != len(set(job_ids)):
         errors.append("[compute].jobs contains duplicate job identities")
     for index, job in enumerate(compute.jobs):
         where = f"[compute].jobs[{index}]"
+        if job.memory_reservation_bytes is not None and (
+            isinstance(job.memory_reservation_bytes, bool)
+            or not isinstance(job.memory_reservation_bytes, int)
+            or not 1 <= job.memory_reservation_bytes <= 1 << 50
+        ):
+            errors.append(f"{where}.memory_reservation_bytes must be within 1..2^50")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", job.job_id):
             errors.append(f"{where}.id must be a bounded stable identity")
         try:
