@@ -713,3 +713,51 @@ def test_legacy_runner_binding_receives_the_durable_child_identity(tmp_path):
     )
     handle.result(5)
     assert seen == [handle.child_id]
+
+
+def test_spawn_retry_alone_projects_and_schedules_after_committed_outbox_failure(env):
+    service, store, sessions, _, _, _ = env
+    original = store.flush
+    failed = False
+    scheduled = []
+    service._schedule = lambda lane, ctx: scheduled.append(lane)
+
+    def fail_once():
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("projection unavailable")
+        original()
+
+    store.flush = fail_once
+    with pytest.raises(OSError):
+        spawn(env)
+    receipt = spawn(env)
+    assert scheduled == [receipt["lane"]["id"]]
+    assert [
+        e.event_type for e in sessions.read_range(receipt["lane"]["session_id"])
+    ] == ["lane.created", "lane.message"]
+
+
+def test_resume_consumes_known_response_without_another_provider_call(env):
+    service, store, _, model, context, _ = env
+    lane = spawn(env)["lane"]["id"]
+    original = store.flush
+    failed = False
+
+    def fail_after_response():
+        nonlocal failed
+        events, _ = store.events(lane, 0, 100)
+        if not failed and any(e["event_type"] == "model.response" for e in events):
+            failed = True
+            raise OSError("projection failed after response commit")
+        original()
+
+    store.flush = fail_after_response
+    service.run_pending(lane, context)
+    assert service.inspect(lane, context)["lane"]["status"] == "failed"
+    service.control(lane, "resume", command_id="resume-known", context=context)
+    service.run_pending(lane, context)
+    assert len(model.requests) == 1
+    assert len(service.reports("parent", context)["reports"]) == 1
+    assert service.inspect(lane, context)["lane"]["status"] == "completed"

@@ -9,6 +9,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
+from functools import wraps
 import hashlib
 import json
 import threading
@@ -61,6 +62,7 @@ _HIDDEN = frozenset(
         "pending_effect",
         "depth",
         "artifacts",
+        "pending_response",
     }
 )
 
@@ -105,6 +107,29 @@ class _LaneCancellation:
         while not self.cancelled and time.monotonic() < end:
             time.sleep(min(0.05, max(0, end - time.monotonic())))
         return self.cancelled
+
+
+class _ReplayReceipt(Exception):
+    def __init__(self, receipt):
+        self.receipt = receipt
+
+
+def _recover_committed_command(method):
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except _ReplayReceipt as replay:
+            # Leave the transaction before projection or asynchronous dispatch.
+            self._done()
+            lane = self.store.read_lane(replay.receipt["lane"]["id"])
+            context = kwargs["context"]
+            if lane["status"] == "queued" and not lane["owner"]:
+                self._authorize(lane, context, execute=True)
+                self._schedule(lane["id"], context)
+            return replay.receipt
+
+    return invoke
 
 
 class AgentLaneService:
@@ -222,6 +247,7 @@ class AgentLaneService:
                 self.run_pending, lane_id, replace(context, deadline_monotonic=None)
             )
 
+    @_recover_committed_command
     def spawn(
         self,
         *,
@@ -285,7 +311,7 @@ class AgentLaneService:
         with self.store.transaction() as tx:
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
-                return prior
+                raise _ReplayReceipt(prior)
             root_id = tx.root(parent_session_id, context.principal_id)
             depth = 1
             expiry = time.time() + max_wall_seconds
@@ -349,6 +375,7 @@ class AgentLaneService:
                 used_tokens=0,
                 used_wall=0.0,
                 pending_effect=False,
+                pending_response=None,
                 depth=depth,
                 error="",
                 artifacts=[],
@@ -401,6 +428,7 @@ class AgentLaneService:
             has_more=more,
         )
 
+    @_recover_committed_command
     def send_message(self, lane_id, *, command_id, content, author, context):
         command_id = _text(command_id, "command_id", 160)
         content = _text(content, "content")
@@ -415,7 +443,7 @@ class AgentLaneService:
             self._authorize(lane, context)
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
-                return prior
+                raise _ReplayReceipt(prior)
             if lane["status"] in {"cancelled", "cancel_requested"}:
                 raise ValueError("cancelled lane cannot accept instructions")
             if lane["status"] == "completed":
@@ -438,6 +466,8 @@ class AgentLaneService:
         return receipt
 
     def _remaining(self, lane):
+        if lane.get("pending_response"):
+            return  # A known result must be consumed without a new model charge.
         if (
             lane["used_steps"] >= lane["max_steps"]
             or lane["used_tokens"] >= lane["max_output_tokens"]
@@ -445,6 +475,7 @@ class AgentLaneService:
         ):
             raise ValueError("lane lifetime budget exhausted")
 
+    @_recover_committed_command
     def control(
         self,
         lane_id,
@@ -480,7 +511,7 @@ class AgentLaneService:
             self._authorize(lane, context)
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
-                return prior
+                raise _ReplayReceipt(prior)
             if action == "resume":
                 self._authorize(lane, context, execute=True)
                 self._remaining(lane)
@@ -502,7 +533,7 @@ class AgentLaneService:
                 )
                 if content:
                     tx.message(lane, content, author)
-                elif not any(
+                elif not lane.get("pending_response") and not any(
                     m["delivery_state"] == "queued" for m in tx.messages(lane_id)
                 ):
                     tx.message(
@@ -567,6 +598,7 @@ class AgentLaneService:
             has_more=len(reports) > limit,
         )
 
+    @_recover_committed_command
     def ack_report(self, report_id, *, command_id, context, parent_session_id=None):
         command_id = _text(command_id, "command_id", 160)
         digest = _digest(
@@ -575,7 +607,7 @@ class AgentLaneService:
         with self.store.transaction() as tx:
             prior = tx.receipt(context.principal_id, command_id, digest)
             if prior:
-                return prior
+                raise _ReplayReceipt(prior)
             lane = tx.acknowledge(report_id, context.principal_id, parent_session_id)
             receipt = self._receipt(tx, lane, command_id)
             tx.record_receipt(context.principal_id, command_id, digest, receipt)
@@ -795,6 +827,10 @@ class AgentLaneService:
                         for m in tx.messages(lane_id)
                         if m["delivery_state"] == "queued"
                     ]
+                if lane.get("pending_response"):
+                    if self._consume_response(lane_id, run_context, started):
+                        break
+                    continue
                 request = self._request(lane, messages)
                 request_id = "request-" + uuid.uuid4().hex
                 turn_id = lane["attempt_id"] + "-" + str(lane["used_steps"] + 1)
@@ -853,36 +889,14 @@ class AgentLaneService:
                         "model.response",
                         {"content": text, "turn_id": turn_id, "request_id": request_id},
                     )
+                    lane["pending_response"] = dict(
+                        text=text,
+                        source_sequence=sequence,
+                        attempt_id=lane["attempt_id"],
+                    )
                     tx.handled(lane, [m["id"] for m in messages])
                     tx.save(lane)
                 self._done()
-                tool = self._tool_call(text, lane)
-                if tool is not None:
-                    self._execute_tool(lane, tool, run_context)
-                    continue
-                with self.store.transaction() as tx:
-                    lane = tx.lane(lane_id)
-                    if lane["status"] in {"interrupt_requested", "cancel_requested"}:
-                        continue
-                    if any(
-                        m["delivery_state"] == "queued" for m in tx.messages(lane_id)
-                    ):
-                        continue
-                    tx.message(
-                        lane,
-                        text[:8000],
-                        "child",
-                        report=True,
-                        source_sequence=sequence,
-                    )
-                    lane.update(
-                        status="completed",
-                        owner="",
-                        used_wall=lane["used_wall"] + time.monotonic() - started,
-                    )
-                    tx.emit(lane, "lane.completed", {"attempt_id": lane["attempt_id"]})
-                    tx.save(lane)
-                    break
         except Exception as exc:
             with self.store.transaction() as tx:
                 lane = tx.lane(lane_id)
@@ -915,6 +929,41 @@ class AgentLaneService:
         finally:
             self._done()
 
+    def _consume_response(self, lane_id, context, started):
+        lane = self.store.read_lane(lane_id)
+        known = lane.get("pending_response")
+        if not known:
+            return False
+        tool = self._tool_call(known["text"], lane)
+        if tool is not None:
+            self._execute_tool(lane, tool, context)
+            return False
+        with self.store.transaction() as tx:
+            lane = tx.lane(lane_id)
+            if lane["owner"] != self.owner or lane["status"] != "running":
+                return False
+            lane["pending_response"] = None
+            if any(m["delivery_state"] == "queued" for m in tx.messages(lane_id)):
+                tx.save(lane)
+                return False
+            report_lane = dict(lane, attempt_id=known["attempt_id"])
+            tx.message(
+                report_lane,
+                known["text"][:8000],
+                "child",
+                report=True,
+                source_sequence=known["source_sequence"],
+            )
+            lane.update(
+                status="completed",
+                owner="",
+                used_wall=lane["used_wall"] + time.monotonic() - started,
+            )
+            tx.emit(lane, "lane.completed", {"attempt_id": lane["attempt_id"]})
+            tx.save(lane)
+        self._done()
+        return True
+
     def _execute_tool(self, lane, tool, context):
         name, args, effects = tool
         call_id = "call-" + uuid.uuid4().hex
@@ -924,6 +973,7 @@ class AgentLaneService:
                 return
             self._authorize(fresh, context, execute=True)
             fresh["pending_effect"] = True
+            fresh["pending_response"] = None
             tx.emit(
                 fresh,
                 "tool.requested",
