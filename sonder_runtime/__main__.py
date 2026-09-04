@@ -778,35 +778,35 @@ def cmd_mcp(args) -> int:
             print(f"migration failed: {exc}", file=sys.stderr)
             return 1
         return run_native_mcp(build_application(config=config))
-    from sonder_runtime.adapters.security import unsafe_lab as _unsafe_lab
-    _unsafe_lab.require_startup()
-    try:
+    def _configure_mcp_legacy() -> None:
         config = _load_config(args)
+        _configure_typed_home(config)
+        from sonder_runtime.platform.logging import configure_logging, Redactor
+        configure_logging(
+            level=config.observability.log_level,
+            log_format=config.observability.log_format,
+            redactor=Redactor(env=os.environ),
+        )
+        _export_runtime_environment(config)
+        from sonder_runtime.adapters.inference import ollama_endpoint
+        ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+        from sonder_runtime.adapters.inference import ollama_pool
+        ollama_pool.configure_typed_workers(
+            config.ollama.workers,
+            allow_remote=config.ollama.allow_remote,
+            trusted_origins=config.ollama.trusted_origins,
+            failure_threshold=config.ollama.worker_failure_threshold,
+            cooldown_seconds=config.ollama.worker_cooldown_seconds,
+            admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
+            capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
+            probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
+        )
+
+    try:
+        McpCommand(build_legacy_server_mcp_runtime()).execute(_configure_mcp_legacy)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    _configure_typed_home(config)
-    from sonder_runtime.platform.logging import configure_logging, Redactor
-    configure_logging(
-        level=config.observability.log_level,
-        log_format=config.observability.log_format,
-        redactor=Redactor(env=os.environ),
-    )
-    _export_runtime_environment(config)
-    from sonder_runtime.adapters.inference import ollama_endpoint
-    ollama_endpoint.configure_typed_endpoint(config.ollama.url)
-    from sonder_runtime.adapters.inference import ollama_pool
-    ollama_pool.configure_typed_workers(
-        config.ollama.workers,
-        allow_remote=config.ollama.allow_remote,
-        trusted_origins=config.ollama.trusted_origins,
-        failure_threshold=config.ollama.worker_failure_threshold,
-        cooldown_seconds=config.ollama.worker_cooldown_seconds,
-        admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
-        capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
-        probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
-    )
-    McpCommand(build_legacy_server_mcp_runtime()).execute(lambda: None)
     return 0
 
 
