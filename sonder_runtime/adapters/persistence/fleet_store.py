@@ -769,6 +769,24 @@ def update_agent(agent_id: str, owner_id: str, **changes) -> dict | None:
     return _row_dict(row)
 
 
+def transition_provenance(
+    current_status: str, target_status: str, *, source: str = "process",
+) -> dict:
+    """Build a provenance record for a state transition.
+
+    The record carries enough context to audit who caused a transition and
+    whether it was authoritative (process lifecycle, cancellation protocol)
+    or inferred (stale-owner reconciliation, retry dispatch).
+    """
+    return {
+        "from": current_status,
+        "to": target_status,
+        "source": source,
+        "ts": time.time(),
+        "valid": _sm.fleet_can_transition(current_status, target_status),
+    }
+
+
 def finish_agent(
     agent_id: str, owner_id: str, *, output: str = "", error: str = "",
     task_drift: bool = False, drift_metrics: dict | None = None,
@@ -1464,7 +1482,9 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
                 SUM(CASE WHEN status='interrupted' THEN 1 ELSE 0 END) AS interrupted_agents,
                 SUM(CASE WHEN status='task_drift' THEN 1 ELSE 0 END) AS task_drift_agents,
                 COALESCE(SUM(tokens_in), 0) AS tokens_in,
-                COALESCE(SUM(tokens_out), 0) AS tokens_out
+                COALESCE(SUM(tokens_out), 0) AS tokens_out,
+                COALESCE(SUM(CASE WHEN status IN ('queued','running')
+                    THEN worker_slots ELSE 0 END), 0) AS worker_slots_total
             FROM fleet_agents
             """
         ).fetchone()
@@ -1496,6 +1516,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             "events": [_event_dict(row) for row in reversed(events)],
             "tokens_in": int(totals["tokens_in"] or 0),
             "tokens_out": int(totals["tokens_out"] or 0),
+            "worker_slots_total": int(totals["worker_slots_total"] or 0),
             # Keep the scalar for API compatibility, but also return identity
             # and task context. A status view can otherwise place an older,
             # unrelated repository result directly beneath a live fleet and
