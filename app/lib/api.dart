@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'agent_lanes.dart';
 
 /// Return the catalog spelling of a saved model selector when it still exists.
 ///
@@ -758,6 +759,101 @@ class PermissionMode {
 /// with an optional `Authorization: Bearer <key>` header when the host
 /// enabled auth. This mirrors sonder_client.py, but for a GUI.
 class SonderApi {
+  Future<Map<String, dynamic>> _agentRequest(
+    String path, {
+    Map<String, String>? query,
+    Map<String, dynamic>? body,
+  }) async {
+    final uri = _uri('/v1/agent-lanes$path').replace(queryParameters: query);
+    final response =
+        await (body == null
+                ? http.get(uri, headers: _headers())
+                : http.post(uri, headers: _headers(), body: jsonEncode(body)))
+            .timeout(const Duration(seconds: 35));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _responseException(
+        response,
+        'Could not load agent conversations (HTTP ${response.statusCode}).',
+      );
+    }
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw SonderException('Invalid agent conversation response.');
+    }
+    return decoded;
+  }
+
+  Future<AgentLanePage> agentLanes({
+    int cursor = 0,
+    String? parentSessionId,
+  }) async => AgentLanePage.fromJson(
+    await _agentRequest(
+      '',
+      query: {
+        'cursor': '$cursor',
+        'limit': '50',
+        if (parentSessionId != null) 'parent_session_id': parentSessionId,
+      },
+    ),
+  );
+  Future<AgentSnapshot> agentInspect(
+    String id, {
+    int cursor = 0,
+    bool wait = false,
+  }) async => AgentSnapshot.fromJson(
+    await _agentRequest(
+      '/${Uri.encodeComponent(id)}${wait ? '/wait' : ''}',
+      query: {
+        'cursor': '$cursor',
+        'limit': '100',
+        if (wait) 'timeout_seconds': '25',
+      },
+    ),
+  );
+  Future<AgentReceipt> agentCommand(
+    String id,
+    String action, {
+    required String commandId,
+    String? content,
+  }) async {
+    if (!const {'messages', 'interrupt', 'resume', 'cancel'}.contains(action)) {
+      throw ArgumentError.value(action);
+    }
+    return AgentReceipt.fromJson(
+      await _agentRequest(
+        '/${Uri.encodeComponent(id)}/$action',
+        body: {
+          'command_id': commandId,
+          if (content != null) 'content': content,
+        },
+      ),
+    );
+  }
+
+  Future<AgentReportPage> agentReports(
+    String parentSessionId, {
+    int cursor = 0,
+  }) async => AgentReportPage.fromJson(
+    await _agentRequest(
+      '/reports',
+      query: {
+        'parent_session_id': parentSessionId,
+        'cursor': '$cursor',
+        'limit': '50',
+      },
+    ),
+  );
+  Future<AgentReceipt> agentAcknowledge(
+    String id, {
+    required String commandId,
+  }) async => AgentReceipt.fromJson(
+    await _agentRequest(
+      '/reports/${Uri.encodeComponent(id)}/ack',
+      body: {'command_id': commandId},
+    ),
+  );
+
+
   final String baseUrl; // e.g. https://sonder.example.com
   final String apiKey; // empty when the server has auth disabled
   final String localFallbackUrl;
