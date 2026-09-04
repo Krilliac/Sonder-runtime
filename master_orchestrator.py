@@ -554,10 +554,6 @@ def capacity(
         limits["gpu_vram"] = int(gpu_slots)
     if _FLEET_WORKER_CAP is not None:
         limits["fleet_workers"] = int(_FLEET_WORKER_CAP)
-    # Optimistic reservation: subtract in-flight reservations that the durable
-    # ledger has not yet recorded, so back-to-back _new_agent() calls within a
-    # single scheduling pass cannot all read the same stale snapshot and
-    # over-dispatch (thundering-herd prevention).
     with _LOCK:
         reserved = _RESERVED_SLOTS
     if reserved > 0:
