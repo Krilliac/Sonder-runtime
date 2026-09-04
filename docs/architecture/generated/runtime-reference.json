@@ -4309,6 +4309,16 @@
     },
     {
       "aliases": [],
+      "category": "system",
+      "name": "/lanes",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "inspect and control durable agent conversations",
+      "tool": ""
+    },
+    {
+      "aliases": [],
       "category": "memory",
       "name": "/learn_from_example",
       "native": false,
@@ -9414,12 +9424,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 315,
+    "commands": 316,
     "configuration": 81,
     "events": 43,
     "tools": 212
   },
-  "digest": "31665e180dbf93c549533ba9aa1a89d7b13eac58bf9441d740cedb20d1551ea1",
+  "digest": "b4a52f2b16e5fd95ed65b485b05d6623f08525b0939d9b5ec4d511be15a78467",
   "events": [
     {
       "name": "session.started",
@@ -9890,7 +9900,7 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "a3087913d4cda487808a666458a71f3d9d1cfbede2efb69d5ff9fb815166cb84",
+    "server.py": "5f5aac0be3bf1fa2cac8289328ba75c37ef74121715c4cac745ce11fa269bc5b",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/platform/config.py": "8545fe1afd0ca40edb4f763c9bbb097a57c7de6395276c4e912473e9ff296abb"

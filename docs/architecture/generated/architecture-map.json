@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 247,
+      "file_count": 248,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -146,6 +146,7 @@
         "sonder_runtime/adapters/inspection/project_detect.py",
         "sonder_runtime/adapters/inspection/workspace_compare.py",
         "sonder_runtime/adapters/inspection_executor.py",
+        "sonder_runtime/adapters/lane_tests.py",
         "sonder_runtime/adapters/launcher_idempotency.py",
         "sonder_runtime/adapters/launcher_output.py",
         "sonder_runtime/adapters/learning_health.py",
@@ -575,7 +576,7 @@
       ]
     },
     {
-      "file_count": 17,
+      "file_count": 18,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -585,6 +586,7 @@
         "sonder_runtime/bootstrap/container.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
+        "sonder_runtime/bootstrap/lane_tests.py",
         "sonder_runtime/bootstrap/legacy_interfaces.py",
         "sonder_runtime/bootstrap/legacy_mcp.py",
         "sonder_runtime/bootstrap/legacy_model.py",
@@ -772,7 +774,7 @@
       ]
     },
     {
-      "file_count": 41,
+      "file_count": 43,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -808,6 +810,7 @@
         "sonder_runtime/interfaces/repl/__init__.py",
         "sonder_runtime/interfaces/repl/command_router.py",
         "sonder_runtime/interfaces/repl/facades/__init__.py",
+        "sonder_runtime/interfaces/repl/facades/agent_lanes.py",
         "sonder_runtime/interfaces/repl/facades/status_model.py",
         "sonder_runtime/interfaces/repl/handler.py",
         "sonder_runtime/interfaces/repl/repl.py",
@@ -815,7 +818,8 @@
         "sonder_runtime/interfaces/sdk/client.py",
         "sonder_runtime/interfaces/sdk/contracts.py",
         "sonder_runtime/interfaces/sdk/discovery.py",
-        "sonder_runtime/interfaces/sdk/plugins.py"
+        "sonder_runtime/interfaces/sdk/plugins.py",
+        "sonder_runtime/interfaces/standalone_agent_lanes.py"
       ]
     },
     {
