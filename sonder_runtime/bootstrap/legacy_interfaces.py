@@ -36,12 +36,11 @@ def configure_legacy_capacity(
 ) -> None:
     """Push typed capacity limits into legacy modules.
 
-    All three limits route through server.py (the only allowed root legacy
-    module) which delegates to master_orchestrator and adaptive_training
-    internally, keeping the architecture ratchet at 1 root module.
+    Routes through legacy_root (the only allowed server importer) to keep
+    the architecture ratchet at 1 root module.
     """
-    import server as legacy_server
-    legacy_server.configure_capacity(
+    from .legacy_root import configure_capacity
+    configure_capacity(
         autopilot_runs=autopilot_runs,
         fleet_workers=fleet_workers,
         training_jobs=training_jobs,

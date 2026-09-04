@@ -43,4 +43,19 @@ def runtime_proxy() -> LazyRuntimeProxy:
     return LazyRuntimeProxy()
 
 
-__all__ = ["LazyRuntimeProxy", "runtime", "runtime_proxy"]
+def configure_capacity(
+    *,
+    autopilot_runs: int,
+    fleet_workers: int,
+    training_jobs: int,
+) -> None:
+    """Push capacity limits through the single allowed server import."""
+    import server as legacy_server
+    legacy_server.configure_capacity(
+        autopilot_runs=autopilot_runs,
+        fleet_workers=fleet_workers,
+        training_jobs=training_jobs,
+    )
+
+
+__all__ = ["LazyRuntimeProxy", "configure_capacity", "runtime", "runtime_proxy"]
