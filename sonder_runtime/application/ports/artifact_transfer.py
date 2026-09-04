@@ -1,0 +1,49 @@
+"""Provider-neutral authenticated chunk transport; handles do not grant access."""
+
+from typing import Callable, Protocol
+from ..artifacts.transfer import ArtifactRange, TransferGrant, TransferLimits
+
+
+class ArtifactTransferStore(Protocol):
+    def begin(
+        self, spec: dict, command_id: str, grant: TransferGrant, limits: TransferLimits
+    ) -> dict: ...
+    def inspect(self, transfer_id: str, grant: TransferGrant) -> dict: ...
+    def append(
+        self,
+        transfer_id: str,
+        offset: int,
+        digest: str,
+        body: bytes,
+        grant: TransferGrant,
+    ) -> dict: ...
+    def artifact(self, artifact_id: str, grant: TransferGrant) -> dict: ...
+    def admit_seal(
+        self, transfer_id: str, command_id: str, grant: TransferGrant
+    ) -> dict: ...
+    def seal(
+        self,
+        transfer_id: str,
+        grant: TransferGrant,
+        revalidate: Callable[[], TransferGrant],
+    ) -> None: ...
+    def abort(
+        self, transfer_id: str, command_id: str, grant: TransferGrant
+    ) -> dict: ...
+    def reap_expired(self, *, limit: int = 8) -> int: ...
+    def read_range(
+        self, artifact_id: str, offset: int, length: int, grant: TransferGrant
+    ) -> ArtifactRange: ...
+
+
+class ArtifactTransferPeer(Protocol):
+    def begin(self, spec: dict, command_id: str) -> dict: ...
+    def inspect(self, transfer_id: str) -> dict: ...
+    def append(
+        self, transfer_id: str, offset: int, digest: str, body: bytes
+    ) -> dict: ...
+    def seal(self, transfer_id: str, command_id: str) -> dict: ...
+    def artifact(self, artifact_id: str) -> dict: ...
+    def read_range(
+        self, artifact_id: str, offset: int, length: int
+    ) -> ArtifactRange: ...
