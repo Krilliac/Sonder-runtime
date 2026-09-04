@@ -48,6 +48,7 @@ class SessionRepairPlan:
 
 
 _IN_FLIGHT = {
+    "provider.requested": "provider response or failure",
     "model.requested": "model completion or failure",
     "model.started": "model completion or failure",
     "tool.requested": "tool completion or failure",
@@ -60,6 +61,7 @@ _IN_FLIGHT = {
     "subagent.started": "subagent completion or failure",
 }
 _TERMINALS = {
+    "provider.responded", "provider.failed",
     "model.completed", "model.failed", "tool.completed", "tool.failed",
     "approval.granted", "approval.denied", "compaction.completed",
     "retrieval.completed", "subagent.completed", "subagent.failed",
@@ -78,7 +80,7 @@ def _operation_key(event: DomainEvent) -> tuple[str, str | None, str | None]:
     """Keep explicit operation identities separate from legacy event identities."""
     family = event.event_type.split(".", 1)[0]
     field = {
-        "model": "request_id", "tool": "call_id", "approval": "approval_id",
+        "provider": "attempt_id", "model": "request_id", "tool": "call_id", "approval": "approval_id",
         "compaction": "compaction_id", "retrieval": "retrieval_id",
         "subagent": "subagent_id",
     }.get(family, "")
@@ -119,6 +121,9 @@ def diagnose_session_tail(events: Iterable[DomainEvent]) -> SessionTailDiagnosis
     boundary = len(accepted)
     pending: dict[tuple[str, str | None, str | None], int] = {}
     for index, event in enumerate(accepted):
+        if event.event_type in {"provider.requested", "provider.responded", "provider.failed"} and not _payload_text(event, "attempt_id"):
+            issues.append(RepairIssue(event.sequence, "invalid_attempt_identity", "provider evidence requires an attempt identity"))
+            continue
         if event.event_type in _IN_FLIGHT:
             pending.setdefault(_operation_key(event), index)
         elif event.event_type in _TERMINALS:
