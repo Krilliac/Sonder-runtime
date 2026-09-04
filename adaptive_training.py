@@ -35,6 +35,16 @@ import sonder_paths
 import training_data
 
 
+_MAX_TRAINING_JOBS: int | None = None
+
+
+def configure_training_capacity(max_jobs: int) -> None:
+    global _MAX_TRAINING_JOBS
+    if max_jobs < 0:
+        raise ValueError("training_jobs must be >= 0")
+    _MAX_TRAINING_JOBS = int(max_jobs)
+
+
 ROOT = Path(__file__).resolve().parent
 PERSONAL_MODEL = "sonder-personal:latest"
 ROLLBACK_MODEL = "sonder:latest"
@@ -547,6 +557,8 @@ def _disk_ok(path, required_gb):
 
 
 def start_training(plan, *, confirmed=False, dry_run=False, resume=False, runner=subprocess.run):
+    if _MAX_TRAINING_JOBS is not None and _MAX_TRAINING_JOBS < 1 and not dry_run:
+        return False, "Training blocked: training_jobs capacity set to 0."
     if dry_run or not plan.training.enabled or not confirmed:
         return _start_training_locked(
             plan, confirmed=confirmed, dry_run=dry_run, resume=resume, runner=runner
