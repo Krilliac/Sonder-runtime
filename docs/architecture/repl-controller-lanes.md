@@ -56,3 +56,15 @@ Terminal output escapes ANSI/OSC, C0/C1, surrogate and Unicode format controls,
 including bidirectional overrides; literal line breaks and indentation survive.
 The existing JSONL writer remains the sole output stream adapter, so every line
 continues to use sonder.repl-output.v1. No terminal chrome is added in JSONL mode.
+
+
+Report history is paged in SQL across all retained reports, with no latest-100
+per-lane ceiling. The persisted global event sequence remains the cursor: a page
+returns ascending sequences greater than the supplied cursor. Existing cursors
+continue from the same position; cursor zero now reaches the oldest retained
+report. New reports appended during traversal appear on subsequent pages.
+Metadata selection applies principal/parent filters and limit+1 before joining
+message bodies, so a page never loads the full history to determine has_more.
+An idempotent report/sequence index supports seeking existing databases. Ack and
+report response fields are unchanged; the console still filters each parent page
+to the selected lane and prints its exact continuation and ack commands.

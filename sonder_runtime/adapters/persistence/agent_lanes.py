@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS agent_lane_messages (
  attempt_id TEXT NOT NULL DEFAULT '', report INTEGER NOT NULL DEFAULT 0,
  acknowledged INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS agent_lane_messages_lane ON agent_lane_messages(lane_id,sequence);
+CREATE INDEX IF NOT EXISTS agent_lane_reports_sequence ON agent_lane_messages(report,sequence);
 """
 
 
@@ -280,6 +281,37 @@ class LaneTransaction:
             )
             for r in reversed(rows)
         ]
+
+    def report_page(self, principal, parent_session, cursor, limit):
+        """Seek metadata first, then load bodies only for the bounded selected page."""
+        page_sql = (
+            "SELECT m.message_id,m.lane_id,m.attempt_id,m.sequence,m.acknowledged "
+            "FROM agent_lane_messages m JOIN agent_lanes l ON l.id=m.lane_id "
+            "WHERE l.principal=? AND m.report=1 AND m.sequence>?"
+        )
+        parameters = [principal, cursor]
+        if parent_session:
+            page_sql += " AND l.parent_session=?"
+            parameters.append(parent_session)
+        page_sql += " ORDER BY m.sequence LIMIT ?"
+        parameters.append(limit)
+        rows = self.conn.execute(
+            "SELECT page.*,f.body,e.payload AS event_payload FROM (" + page_sql + ") page "
+            "JOIN fleet_messages f ON f.message_id=page.message_id "
+            "JOIN agent_lane_events e ON e.sequence=page.sequence ORDER BY page.sequence",
+            parameters,
+        ).fetchall()
+        result = []
+        for row in rows:
+            event = json.loads(row["event_payload"])
+            result.append(dict(
+                id=row["message_id"], lane_id=row["lane_id"],
+                attempt_id=row["attempt_id"], source_sequence=event.get("source_sequence", 0),
+                sequence=row["sequence"], summary=row["body"],
+                artifacts=list(event.get("artifacts", [])),
+                acknowledged=bool(row["acknowledged"]),
+            ))
+        return result
 
     def accepted(self, lane, ids):
         for message_id in ids:
