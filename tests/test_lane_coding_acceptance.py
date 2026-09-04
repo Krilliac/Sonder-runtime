@@ -407,6 +407,103 @@ def test_catalog_is_immutable_and_outside_model_workspace(coding):
         catalog.require_current()
 
 
+def test_catalog_cannot_live_in_another_model_writable_root(coding, monkeypatch):
+    repo, path, _, _, _, _, _, _ = coding
+    other = repo.parent / "other-root"
+    other.mkdir()
+    catalog = other / "catalog.json"
+    catalog.write_bytes(path.read_bytes())
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(repo) + ";" + str(other))
+    with pytest.raises(ValueError, match="writable"):
+        LaneTestCatalog.load(catalog)
+
+
+def test_missing_native_containment_refuses_before_process_launch(coding, monkeypatch):
+    from types import SimpleNamespace
+
+    repo, _, _, _, _, provider, _, context = coding
+    launched = []
+    monkeypatch.setattr(
+        provider, "_memory_limiter", SimpleNamespace(apply=lambda *args: None)
+    )
+    monkeypatch.setattr(
+        provider, "_launcher", lambda *args, **kwargs: launched.append(True)
+    )
+    service, _ = make_service(coding, [tool("run_tests", target="unit")])
+    lane = service.spawn(
+        command_id="no-containment",
+        parent_session_id="parent",
+        task="run",
+        workspace_root=str(repo),
+        context=context,
+    )["lane"]["id"]
+    service.run_pending(lane, context)
+    assert service.inspect(lane, context)["lane"]["status"] == "awaiting_input"
+    assert not launched
+
+
+def test_real_test_process_receives_no_ambient_credentials_or_controls(
+    coding, monkeypatch
+):
+    repo, path, store, sessions, jobs, provider, _, context = coding
+    names = [
+        "GH_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "custom_PASSWORD",
+        "SSH_AUTH_SOCK",
+        "HTTPS_PROXY",
+        "SONDER_PERMISSION_MODE",
+        "SONDER_FILE_BYPASS",
+        "PYTHONPATH",
+    ]
+    for name in names:
+        monkeypatch.setenv(name, "ambient-value-must-not-inherit")
+    probe = repo / "env_probe.py"
+    probe.write_text(
+        "import os, json\nprint(json.dumps(sorted(os.environ)), flush=True)\n",
+        encoding="utf-8",
+    )
+    body = json.loads(path.read_text())
+    body["targets"] = [
+        dict(
+            name="env", workspace_root=str(repo), argv=[sys.executable, "env_probe.py"]
+        )
+    ]
+    path.write_text(json.dumps(body), encoding="utf-8")
+    catalog = LaneTestCatalog.load(path)
+    facade = ToolApplicationFacade.compose(
+        InMemoryToolRegistry([lane_test_descriptor(catalog)]),
+        LaneTestExecutor(catalog, provider),
+        policy=ResourcePolicy(
+            [PolicyRule("fixture", Decision.ALLOW, tool="run_tests")]
+        ),
+    )
+    service = AgentLaneService(
+        store,
+        sessions,
+        ScriptedModel([tool("run_tests", target="env"), "done"]),
+        facade,
+        auto_start=False,
+        allowed_tools=("run_tests",),
+    )
+    lane = service.spawn(
+        command_id="env",
+        parent_session_id="parent",
+        task="probe",
+        workspace_root=str(repo),
+        context=context,
+    )["lane"]["id"]
+    service.run_pending(lane, context)
+    result = json.loads(
+        next(r.output for r in facade.receipts if r.tool_name == "run_tests")
+    )
+    assert result["exit_code"] == 0
+    inherited = {name.upper() for name in json.loads(result["output"])}
+    assert not inherited.intersection(name.upper() for name in names)
+    if sys.platform == "win32":
+        assert "SYSTEMROOT" in inherited
+
+
 @pytest.mark.parametrize("admitted", [False, True])
 def test_supported_composition_preserves_operator_execution_gate(
     coding, monkeypatch, admitted
@@ -433,6 +530,9 @@ def test_supported_composition_preserves_operator_execution_gate(
 
     def refuse(self, name, scope, **kwargs):
         assert self._policy_names[name] == "workspace_run"
+        assert kwargs["arguments"]["configured_target"]["argv"] == list(
+            LaneTestCatalog.load(path).targets["unit"].argv
+        )
         if admitted:
             return "permission:explicit-test-fixture"
         raise Forbidden("execution denied by operator")

@@ -103,7 +103,7 @@ class SubprocessJobProvider:
             raise RuntimeError(
                 f"tool process capacity exhausted ({self._max_concurrent_processes} concurrent)"
             )
-        environment = runtime_logging.child_environment()
+        environment = runtime_logging.child_environment() if request.inherit_environment else {}
         environment.update(request.environment)
         launch_options: dict[str, Any] = {
             "cwd": None if request.cwd is None else str(Path(request.cwd)),
