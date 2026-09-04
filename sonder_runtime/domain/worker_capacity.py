@@ -28,5 +28,3 @@ class CapacityReservation:
     token: str
     memory_bytes: int
     expires_at: str
-
-
