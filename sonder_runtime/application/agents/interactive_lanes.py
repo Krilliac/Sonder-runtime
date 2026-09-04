@@ -934,7 +934,23 @@ class AgentLaneService:
         known = lane.get("pending_response")
         if not known:
             return False
-        tool = self._tool_call(known["text"], lane)
+        try:
+            tool = self._tool_call(known["text"], lane)
+        except (PermissionError, ValueError, TypeError):
+            with self.store.transaction() as tx:
+                fresh = tx.lane(lane_id)
+                if fresh["owner"] == self.owner:
+                    fresh["pending_response"] = None
+                    tx.emit(
+                        fresh,
+                        "tool.rejected",
+                        {
+                            "error_code": "TOOL_REQUEST_REJECTED",
+                            "source_sequence": known["source_sequence"],
+                        },
+                    )
+                    tx.save(fresh)
+            raise
         if tool is not None:
             self._execute_tool(lane, tool, context)
             return False
