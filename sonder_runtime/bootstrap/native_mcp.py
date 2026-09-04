@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import sys
 import uuid
 from pathlib import Path
 from typing import TextIO
+
+logger = logging.getLogger(__name__)
 
 from ..application.context import local_owner_context
 from ..application.ports.tool_executor import ToolCall
@@ -483,6 +486,7 @@ _GRADED_NAMES = {
 
 def native_tool_registry() -> InMemoryToolRegistry:
     """Return the immutable-at-composition catalog for native MCP tools."""
+    logger.debug(f"building native tool registry, tool_count={len(_NATIVE_TOOLS)}")
     return InMemoryToolRegistry(sorted(_NATIVE_TOOLS, key=lambda item: item.name))
 
 
@@ -490,19 +494,26 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                    output_stream: TextIO | None = None,
                    task_handler=None) -> int:
     """Serve native MCP over stdio using the application tool port."""
+    logger.info("native MCP server starting")
+    logger.debug("run_native_mcp starting")
     config = application.config
     roots = tuple(
         Path(root)
         for root in (config.state.workspace_roots if config is not None else ())
     )
+    logger.debug(f"workspace roots={len(roots)}")
     registry = native_tool_registry()
     if task_handler is None:
         job_service_factory = getattr(application, "job_service", None)
         if callable(job_service_factory):
+            logger.debug("wiring MCP task handler from job service")
             task_handler = McpTaskHandler(job_service_factory())
+        else:
+            logger.warning("MCP task handler unavailable, job_service not callable on application graph")
     capabilities = ("tools", "notifications")
     if callable(task_handler):
         capabilities += ("tasks",)
+    logger.debug(f"MCP capabilities={capabilities!r}")
 
     def compute_result(name: str, arguments: dict) -> dict:
         from ..application.compute_fabric.jobs import DigestBoundInput, RemoteJobEnvelope
@@ -510,6 +521,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
 
         service_factory = getattr(application, "compute_service", None)
         if not callable(service_factory):
+            logger.warning(f"compute tool {name!r} called but compute fabric is not configured")
             return {
                 "output": "compute fabric is not configured", "isError": True,
                 "error": "DependencyUnavailable", "evidence": {},
@@ -579,6 +591,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     arguments["controller_job_id"], reason=arguments["reason"],
                 )
         except Exception as exc:
+            logger.error(f"compute operation failed, tool={name!r}, error={type(exc).__name__}", exc_info=True)
+            logger.warning(f"compute operation {name!r} failed: {type(exc).__name__}", exc_info=True)
             return {
                 "output": str(exc), "isError": True,
                 "error": type(exc).__name__, "evidence": {},
@@ -688,6 +702,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         }
 
     def execute(name: str, arguments: dict) -> dict:
+        logger.debug(f"MCP execute tool={name!r}")
         descriptor = registry.get(name)
         if descriptor is None:
             return {
@@ -711,6 +726,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             timeout_seconds=60.0,
         )
         if canonical_name in _COMPUTE_NAMES:
+            logger.debug(f"routing to compute handler: {canonical_name!r}")
             if canonical_name in {"compute_submit", "compute_cancel"}:
                 from ..adapters.security.permission_policy import permission_policy
 
@@ -724,6 +740,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     decision is not None
                     and decision.action != permission_policy.allow_action()
                 ):
+                    logger.error(f"compute tool permission denied, tool={canonical_name!r}, surface='native-mcp'")
+                    logger.warning(f"compute tool {canonical_name!r} denied by runtime permission policy")
                     return {
                         "output": "compute host control denied by runtime permission policy",
                         "isError": True,
@@ -741,8 +759,10 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 timeout_seconds=60.0,
             )
         if canonical_name in _VISION_NAMES:
+            logger.debug(f"routing to vision service: {canonical_name!r}")
             service = getattr(application, "vision", None)
             if service is None:
+                logger.warning(f"vision tool {canonical_name!r} called but vision service is not configured")
                 return {
                     "output": "vision service is not configured",
                     "isError": True,
@@ -754,6 +774,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     canonical_arguments["path"], canonical_arguments["prompt"], context,
                 )
             except Exception as exc:
+                logger.error(f"vision analysis failed for tool={canonical_name!r}", exc_info=True)
                 return {
                     "output": str(exc), "isError": True,
                     "error": type(exc).__name__, "evidence": {},
@@ -766,12 +787,15 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             }
         typed_tools = getattr(application, "tools", None)
         if canonical_name in _TYPED_TOOL_NAMES and typed_tools is not None:
+            logger.debug(f"routing to typed tool gateway: {canonical_name!r}")
             return typed_result(typed_tools, canonical_name, canonical_arguments, context)
         if canonical_name in _INSPECTION_NAMES:
+            logger.debug(f"routing to inspection service: {canonical_name!r}")
             result = application.inspections.inspect(
                 canonical_name, canonical_arguments, context
             )
         else:
+            logger.debug(f"routing to packaged tool executor: {canonical_name!r}")
             result = application.tool_executor.execute(
                 ToolCall(tool=canonical_name, arguments=canonical_arguments), context
             )
@@ -782,6 +806,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             "evidence": dict(result.evidence or {}),
         }
 
+    logger.info(f"native MCP server serving, tool_count={len(registry.list_all())}, capabilities={capabilities!r}")
+    logger.debug("starting stdio MCP transport")
     transport = StdioMcpTransport(
         input_stream or sys.stdin,
         output_stream or sys.stdout,

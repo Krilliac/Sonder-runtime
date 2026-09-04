@@ -7,8 +7,11 @@ without importing an adapter or the root launcher.
 """
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, InvalidOperation
 import re
+
+logger = logging.getLogger(__name__)
 
 
 MAX_CONTEXT_TOKENS = 1_000_000
@@ -22,6 +25,15 @@ def process_state_number(tracker) -> int:
     tracker protocol by shape so it does not depend on platform state types.
     """
     process = tracker.snapshot().process
+    logger.debug(f"process_state_number: process={process.value!r}")
+    if process.value == "degraded":
+        logger.warning(f"process in degraded state")
+    elif process.value == "recovery_required":
+        logger.error(f"process requires recovery: state={process.value!r}")
+        logger.warning(f"process requires recovery")
+    elif process.value == "failed":
+        logger.error(f"process in failed state: state={process.value!r}")
+        logger.critical(f"runtime process has entered failed state, manual recovery required")
     return {
         "starting": 0,
         "migrating": 1,
@@ -36,6 +48,9 @@ def process_state_number(tracker) -> int:
 
 def normalize_context_size(value):
     """Validate the bounded context syntax accepted by lifecycle requests."""
+    logger.debug(f"normalize_context_size: value={value!r}")
+    if value is None or str(value).strip() == "":
+        logger.warning("no context_size specified, falling back to default 8192")
     text = str(value or "8192").strip().lower()
     match = _CONTEXT_SIZE.fullmatch(text)
     if not match:

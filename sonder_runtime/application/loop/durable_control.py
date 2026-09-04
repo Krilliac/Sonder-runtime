@@ -7,10 +7,13 @@ those effects through small callbacks and receive immutable evidence back.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+
+logger = logging.getLogger(__name__)
 import json
 from threading import RLock
 from typing import Any, Protocol
@@ -78,6 +81,7 @@ class RetryEvidenceLedger:
         self._records: list[RetryEvidence] = []
 
     def record(self, operation_id: str, decision: RetryDecision, *, attempt: int = 1, failure_code: str = "") -> RetryEvidence:
+        logger.debug(f"RetryEvidenceLedger.record: operation_id={operation_id!r}, attempt={attempt}, action={decision.action.value!r}, failure_code={failure_code!r}")
         if isinstance(attempt, bool) or attempt < 1:
             raise ValueError("attempt must be positive")
         evidence = RetryEvidence(
@@ -177,6 +181,7 @@ class OutboxIdempotencyStore:
             if written is None:
                 latest = self._read(key, fingerprint)
                 if latest is None:
+                    logger.critical(f"idempotency CAS lost without a readable record: key={key!r}, aggregate={aggregate!r} — persistence layer state corruption")
                     raise RuntimeError("idempotency CAS lost without a readable record")
                 return self._receipt(latest)
             return self._receipt(written)
@@ -184,6 +189,7 @@ class OutboxIdempotencyStore:
     @staticmethod
     def _receipt(record: TransactionNeutralRecord | None) -> IdempotencyReceipt:
         if record is None:
+            logger.critical("idempotency record is missing when one was expected — persistence layer may be corrupted")
             raise RuntimeError("idempotency record is missing")
         payload = record.payload
         evidence = payload.get("evidence", {})
@@ -193,12 +199,14 @@ class OutboxIdempotencyStore:
         )
 
     def begin(self, key: str, fingerprint: str) -> IdempotencyReceipt:
+        logger.debug(f"OutboxIdempotencyStore.begin: key={key!r}")
         self._validate(key, fingerprint)
         with self._lock:
             current = self._read(key, fingerprint)
             return self._receipt(current) if current else self._write(key, fingerprint, "started")
 
     def complete(self, key: str, fingerprint: str, result: Any) -> IdempotencyReceipt:
+        logger.debug(f"OutboxIdempotencyStore.complete: key={key!r}")
         self._validate(key, fingerprint)
         with self._lock:
             current = self._read(key, fingerprint)
@@ -207,6 +215,9 @@ class OutboxIdempotencyStore:
             return self._write(key, fingerprint, "completed", result=result)
 
     def mark_unknown(self, key: str, fingerprint: str, *, evidence: Mapping[str, Any]) -> IdempotencyReceipt:
+        logger.error(f"idempotency outcome uncertain, marking unknown: key={key!r}")
+        logger.warning(f"marking idempotency key as unknown (outcome uncertain): key={key!r}")
+        logger.debug(f"OutboxIdempotencyStore.mark_unknown: key={key!r}")
         self._validate(key, fingerprint)
         with self._lock:
             current = self._read(key, fingerprint)
@@ -215,6 +226,7 @@ class OutboxIdempotencyStore:
             return self._write(key, fingerprint, "unknown", evidence=evidence)
 
     def reconcile(self, key: str, fingerprint: str, result: Any, *, evidence: Mapping[str, Any]) -> IdempotencyReceipt:
+        logger.debug(f"OutboxIdempotencyStore.reconcile: key={key!r}")
         self._validate(key, fingerprint)
         with self._lock:
             current = self._read(key, fingerprint)
@@ -254,6 +266,8 @@ class DurableLoopControl:
             self._bindings.append(_Binding(self.cancellation.node(node_id), target_id, cancel, cleanup))
 
     def cancel_and_cleanup(self, node_id: str = "root", *, reason: str = "cancellation requested", timeout: float | None = None) -> tuple[CleanupConformance, ...]:
+        logger.debug(f"DurableLoopControl.cancel_and_cleanup: node_id={node_id!r}, reason={reason!r}, timeout={timeout}")
+        logger.info(f"cancellation and cleanup initiated: node_id={node_id!r}, reason={reason!r}")
         node = self.cancellation.node(node_id)
         changed = node.cancel(reason=reason)
         with self._lock:
@@ -281,11 +295,20 @@ class DurableLoopControl:
                     result.resources_released,
                     result.detail,
                 )
+                if not binding.cleanup_result.conforms:
+                    logger.error(f"cleanup did not conform: target_id={binding.target_id!r}, quiescent={result.quiescent}, resources_released={result.resources_released}")
+                    logger.warning(f"cleanup did not conform: target_id={binding.target_id!r}, quiescent={result.quiescent}, resources_released={result.resources_released}")
             reports.append(binding.cleanup_result)
         return tuple(reports)
 
     def retry(self, operation_id: str, *, failure_code: str = "", status: int | None = None, attempt: int = 1, max_attempts: int = 3, outcome_known: bool = True, effect: SideEffectClass = SideEffectClass.NONE, idempotency_key: str | None = None, retry_after_seconds: float | None = None, deadline_seconds: float | None = None) -> RetryDecision:
+        logger.debug(f"DurableLoopControl.retry: operation_id={operation_id!r}, failure_code={failure_code!r}, attempt={attempt}/{max_attempts}, effect={effect.value!r}")
         decision = retry_decision(failure_code, status=status, attempt=attempt, max_attempts=max_attempts, outcome_known=outcome_known, effect=effect, idempotency_key=idempotency_key, retry_after_seconds=retry_after_seconds, deadline_seconds=deadline_seconds)
+        if decision.action is ReplayAction.RETRY:
+            logger.warning(f"retry scheduled: operation_id={operation_id!r}, attempt={attempt}/{max_attempts}, failure_code={failure_code!r}, delay_cap={decision.backoff.cap_for_attempt(1):.1f}s")
+        elif decision.action is ReplayAction.DO_NOT_RETRY and attempt > 1:
+            logger.error(f"retry exhausted, failing: operation_id={operation_id!r}, attempt={attempt}/{max_attempts}, failure_code={failure_code!r}")
+            logger.warning(f"retry exhausted, failing: operation_id={operation_id!r}, attempt={attempt}/{max_attempts}, failure_code={failure_code!r}")
         self.ledger.record(operation_id, decision, attempt=attempt, failure_code=failure_code)
         return decision
 

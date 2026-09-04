@@ -1,8 +1,11 @@
 """Authenticated HTTP discovery facade for the local A2A Agent Card."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable
+
+logger = logging.getLogger(__name__)
 
 from sonder_runtime.application.protocol.a2a import A2AAgentCard, card_from_registrations
 
@@ -24,7 +27,10 @@ class A2AAgentCardFacade:
 
     def route(self, path: str) -> A2AAgentCardRoute | None:
         normalized = str(path or "").split("?", 1)[0].rstrip("/") or "/"
-        return A2AAgentCardRoute(self.PATH) if normalized == self.PATH else None
+        matched = normalized == self.PATH
+        if matched:
+            logger.debug("A2AAgentCardFacade.route: matched agent-card discovery path")
+        return A2AAgentCardRoute(self.PATH) if matched else None
 
     def card(
         self,
@@ -33,6 +39,8 @@ class A2AAgentCardFacade:
         base_url: str,
         version: str = "1",
     ) -> A2AAgentCard:
+        logger.info(f"Building A2A agent card, base_url={base_url!r}, version={version!r}")
+        logger.debug(f"A2AAgentCardFacade.card: base_url={base_url!r}, version={version!r}")
         return card_from_registrations(
             "sonder-runtime",
             "Sonder Runtime agent host",

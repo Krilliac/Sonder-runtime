@@ -1,9 +1,12 @@
 """Catalog-bound remote compute job contracts and worker orchestration."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
+
+logger = logging.getLogger(__name__)
 import json
 import mimetypes
 import os
@@ -533,6 +536,7 @@ class ComputeJobWorker:
         except (ArtifactSpoolError, OSError) as exc:
             raise InvalidInput("private compute artifact spool is unsafe") from exc
         self._rehydrate()
+        logger.info(f"compute job worker initialized: worker_id={worker_id!r}, catalog_entries={sorted(catalog.keys())}, workspace_mappings={sorted(roots.keys())}")
 
     def _rehydrate(self) -> None:
         recover = getattr(self._provider, "recover", None)
@@ -561,6 +565,7 @@ class ComputeJobWorker:
                 continue
             prior = self._by_idempotency.get(receipt.idempotency_key)
             if prior is not None and prior.request_sha256 != receipt.request_sha256:
+                logger.critical(f"durable compute idempotency metadata is inconsistent: idempotency_key={receipt.idempotency_key!r}, worker_id={self.worker_id!r} — state corruption detected during rehydration")
                 raise Conflict("durable compute idempotency metadata is inconsistent")
             self._by_idempotency[receipt.idempotency_key] = receipt
             self._by_job[receipt.remote_job_id] = receipt
@@ -587,6 +592,7 @@ class ComputeJobWorker:
                     self._input_stages[receipt.remote_job_id] = stage
 
     def submit(self, envelope: RemoteJobEnvelope) -> RemoteJobReceipt:
+        logger.debug(f"ComputeJobWorker.submit: worker_id={self.worker_id!r}, catalog_entry={envelope.catalog_entry_id!r}, idempotency_key={envelope.idempotency_key!r}, workload={envelope.workload.value!r}")
         try:
             envelope.verify()
         except (TypeError, ValueError) as exc:
@@ -596,6 +602,7 @@ class ComputeJobWorker:
             if prior is not None:
                 if prior.request_sha256 != envelope.request_sha256:
                     raise Conflict("idempotency key is already bound to another request")
+                logger.warning(f"returning prior compute job for duplicate idempotency key: idempotency_key={envelope.idempotency_key!r}, state={prior.state!r}")
                 return prior
         entry = self._catalog.get(envelope.catalog_entry_id)
         if entry is None:
@@ -670,6 +677,8 @@ class ComputeJobWorker:
             try:
                 started = self._provider.start(request)
             except Exception:
+                logger.error(f"compute job start failed: remote_job_id={remote_job_id!r}, catalog_entry={envelope.catalog_entry_id!r}, workload={envelope.workload.value!r}", exc_info=True)
+                logger.warning(f"compute job start failed: remote_job_id={remote_job_id!r}, catalog_entry={envelope.catalog_entry_id!r}", exc_info=True)
                 if input_stage is not None:
                     self._remove_input_stage(input_stage)
                 poll = getattr(self._provider, "poll", None)
@@ -704,6 +713,8 @@ class ComputeJobWorker:
                 state=started.record.status.value,
                 process_id=started.process_id,
             )
+            logger.info(f"compute job submitted: remote_job_id={remote_job_id!r}, catalog_entry={envelope.catalog_entry_id!r}, workload={envelope.workload.value!r}, state={receipt.state!r}")
+            logger.debug(f"ComputeJobWorker.submit: job started, remote_job_id={remote_job_id!r}, state={receipt.state!r}, process_id={receipt.process_id}")
             self._by_idempotency[envelope.idempotency_key] = receipt
             self._by_job[remote_job_id] = receipt
             self._artifact_context[remote_job_id] = (
@@ -837,6 +848,7 @@ class ComputeJobWorker:
             raise InvalidInput("compute artifact spool binding is invalid") from exc
         if observed != binding:
             stage.close()
+            logger.critical(f"compute artifact spool binding mismatch: remote_job_id={receipt.remote_job_id!r}, worker_id={receipt.worker_id!r} — private spool integrity violated")
             raise Conflict("compute artifact spool belongs to a different request")
         return stage
 
@@ -1176,6 +1188,7 @@ class ComputeJobWorker:
             self._remove_input_stage(stage)
 
     def status(self, remote_job_id: str) -> RemoteJobReceipt:
+        logger.debug(f"ComputeJobWorker.status: remote_job_id={remote_job_id!r}")
         _identity(remote_job_id, "remote_job_id")
         with self._lock:
             receipt = self._by_job.get(remote_job_id)
@@ -1216,6 +1229,12 @@ class ComputeJobWorker:
         receipt = self._project_output(receipt)
         receipt = self._collect_artifacts(receipt)
         if receipt.state in {"succeeded", "failed", "cancelled", "interrupted"}:
+            if receipt.state in {"failed", "interrupted"}:
+                logger.error(f"compute job reached terminal failure state: remote_job_id={remote_job_id!r}, state={receipt.state!r}")
+                logger.warning(f"compute job reached terminal failure state: remote_job_id={remote_job_id!r}, state={receipt.state!r}")
+            if receipt.output_truncated:
+                logger.warning(f"compute job output was truncated: remote_job_id={remote_job_id!r}")
+            logger.info(f"compute job terminal: remote_job_id={remote_job_id!r}, state={receipt.state!r}, artifacts={len(receipt.artifacts)}")
             self._cleanup_input_stage(remote_job_id)
         with self._lock:
             self._by_job[remote_job_id] = receipt
@@ -1234,6 +1253,7 @@ class ComputeJobWorker:
         *,
         max_bytes: int = MAX_COMPUTE_ARTIFACT_BYTES,
     ) -> RemoteArtifactPayload:
+        logger.debug(f"ComputeJobWorker.read_artifact: remote_job_id={remote_job_id!r}, name={name!r}, max_bytes={max_bytes}")
         if (
             isinstance(max_bytes, bool)
             or not 1 <= max_bytes <= MAX_COMPUTE_ARTIFACT_BYTES
@@ -1283,6 +1303,7 @@ class ComputeJobWorker:
             raise InvalidInput("compute artifact snapshot changed after publication") from exc
 
     def cancel(self, remote_job_id: str, reason: str = "cancelled") -> RemoteJobReceipt:
+        logger.debug(f"ComputeJobWorker.cancel: remote_job_id={remote_job_id!r}, reason={reason!r}")
         receipt = self.status(remote_job_id)
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
             raise InvalidInput("cancellation reason must be non-empty and bounded")
@@ -1292,6 +1313,8 @@ class ComputeJobWorker:
             cleanup_completed = bool(
                 result.get("cleanup_completed", result.get("quiescent", False))
             )
+        if not cleanup_completed:
+            logger.warning(f"compute job cancellation pending cleanup: remote_job_id={remote_job_id!r}, reason={reason!r}")
         cancelled = RemoteJobReceipt(
             worker_id=receipt.worker_id,
             remote_job_id=receipt.remote_job_id,
@@ -1312,6 +1335,7 @@ class ComputeJobWorker:
         cancelled = self._collect_artifacts(cancelled)
         if cancelled.state in {"cancelled", "interrupted"}:
             self._cleanup_input_stage(remote_job_id)
+        logger.info(f"compute job cancelled: remote_job_id={remote_job_id!r}, state={cancelled.state!r}")
         with self._lock:
             self._by_job[remote_job_id] = cancelled
             self._by_idempotency[receipt.idempotency_key] = cancelled

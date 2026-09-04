@@ -56,11 +56,11 @@ def workspace(tmp_path, monkeypatch):
 def application(tmp_path, monkeypatch, workspace):
     previous = runtime_paths._configured_home()
     runtime_paths.configure_home(tmp_path / "home")
-    app = bootstrap_app.build_application()
-    monkeypatch.setattr(server, "_APP_GRAPH", app)
-    monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
-    monkeypatch.setattr(pm, "_approval_ledger", lambda: None)
     try:
+        app = bootstrap_app.build_application()
+        monkeypatch.setattr(server, "_APP_GRAPH", app)
+        monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
+        monkeypatch.setattr(pm, "_approval_ledger", lambda: None)
         yield app
     finally:
         if previous is None:

@@ -13,8 +13,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
+import logging
 import time
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from sonder_runtime.application.context import OperationContext
 from sonder_runtime.application.ports.model_gateway import (
@@ -87,6 +90,7 @@ def _bounded_request(payload: Mapping[str, Any]) -> None:
     if messages is None:
         messages = payload.get("input")
     if isinstance(messages, list) and len(messages) > MAX_MESSAGES:
+        logger.warning(f"request rejected: message count {len(messages)} exceeds HTTP bound {MAX_MESSAGES}")
         raise ModelFacadeError("message count exceeds the HTTP bound")
     encoded_size = sum(
         len(str(item.get("content", "")))
@@ -96,6 +100,7 @@ def _bounded_request(payload: Mapping[str, Any]) -> None:
         len(messages) if isinstance(messages, str) else 0
     )
     if encoded_size > MAX_MESSAGE_CHARS:
+        logger.warning(f"request rejected: message content size {encoded_size} exceeds HTTP bound {MAX_MESSAGE_CHARS}")
         raise ModelFacadeError("message content exceeds the HTTP bound")
     if len(payload) > MAX_OPTIONS + 8:
         raise ModelFacadeError("request contains too many fields")
@@ -114,6 +119,7 @@ class ModelRequestFacade:
     def route(self, path: object) -> ModelRoute | None:
         normalized = _path(path)
         operation = MODEL_ROUTES.get(normalized)
+        logger.debug(f"ModelRequestFacade.route: path={normalized!r} -> operation={operation!r}")
         return ModelRoute(normalized, operation) if operation else None
 
     def normalize(self, path: object, payload: Mapping[str, Any]) -> CanonicalRequest:
@@ -135,6 +141,7 @@ class ModelRequestFacade:
             raise ModelFacadeError(
                 "streaming is not enabled for the bounded Responses route"
             )
+        logger.debug(f"ModelRequestFacade.normalize: model={request.model!r}, operation={request.operation!r}, stream={request.stream}, messages={len(request.messages)}")
         return request
 
     @staticmethod
@@ -169,6 +176,7 @@ class ModelRequestFacade:
         context: OperationContext,
     ) -> ModelInvocation:
         started = time.monotonic()
+        logger.debug(f"ModelRequestFacade.invoke: path={path!r}")
         route = self.route(path)
         if route is None:
             raise ModelFacadeError("unsupported model route")
@@ -181,9 +189,11 @@ class ModelRequestFacade:
         def complete(request: CanonicalRequest) -> CanonicalResponse:
             response = gateway.generate(self.to_model_request(request), context)
             if not isinstance(response, ModelResponse):
+                logger.error(f"model gateway returned non-ModelResponse type: {type(response).__name__}")
                 raise ModelFacadeError("model gateway returned an invalid response")
             text = response.text
             if not isinstance(text, str) or not text.strip():
+                logger.error(f"model gateway returned empty text for model={request.model!r}")
                 raise ModelFacadeError("model gateway returned empty text")
             usage = {}
             if response.tokens_in is not None:
@@ -222,6 +232,8 @@ class ModelRequestFacade:
                 "model": canonical.model,
                 "response_id": canonical.response_id,
             })
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.debug(f"ModelRequestFacade.invoke: completed model={canonical.model!r}, response_id={canonical.response_id!r}, elapsed_ms={elapsed_ms}")
         return ModelInvocation(request, canonical)
 
     @staticmethod

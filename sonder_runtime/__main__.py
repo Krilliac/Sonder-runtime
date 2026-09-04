@@ -342,6 +342,10 @@ def cmd_backup(args) -> int:
     config = None
     if args.backup_command != "verify":
         config = _load_config(args)
+        if not config.backup.enabled:
+            print("backups are disabled in configuration "
+                  "([backup].enabled = false)", file=sys.stderr)
+            return 1
         # Backup source discovery reads SONDER_HOME; exporting only the validated
         # target backed up unrelated state while reporting success.
         _export_runtime_environment(config)
@@ -565,8 +569,17 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
         "1" if config.ollama.allow_remote else "0"
     )
     os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
+    os.environ["SONDER_ALLOW_CLOUD"] = "1" if config.features.cloud else "0"
     os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
     os.environ["SONDER_LIVE_RELOAD"] = "1" if config.features.live_reload else "0"
+    os.environ["SONDER_SOURCE_MODIFICATION"] = (
+        "1" if config.features.source_modification else "0"
+    )
+    os.environ["SONDER_HOST_CONTROL"] = (
+        "1" if config.features.host_control else "0"
+    )
+    os.environ["SONDER_TRAINING"] = "1" if config.features.training else "0"
+    os.environ["SONDER_NPU"] = "1" if config.features.npu else "0"
     os.environ["SONDER_EXPOSE_REASONING"] = (
         "1" if config.features.expose_reasoning else "0"
     )
@@ -578,6 +591,9 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     )
     if include_typed_runtime:
         os.environ["SONDER_QUEUE_DEPTH"] = str(config.capacity.queue_depth)
+        os.environ["SONDER_SPECULATION_SLOTS"] = str(
+            config.capacity.model_generations
+        )
         os.environ["SONDER_METRICS"] = "1" if config.observability.metrics_enabled else "0"
     if config.secrets.api_key:
         os.environ["SONDER_API_KEY"] = config.secrets.api_key
@@ -597,6 +613,19 @@ def cmd_serve(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    # Export worker config to env early so the pool sees it even if
+    # server.py is imported before configure_typed_workers runs.
+    os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
+    os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
+        "1" if config.ollama.allow_remote else "0"
+    )
+    os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
+    from sonder_runtime.platform.logging import configure_logging, Redactor
+    configure_logging(
+        level=config.observability.log_level,
+        log_format=config.observability.log_format,
+        redactor=Redactor(env=os.environ),
+    )
     if not args.skip_preflight:
         report = _run_preflight(
             config, check_ollama=not args.skip_ollama
@@ -617,11 +646,22 @@ def cmd_serve(args) -> int:
     _configure_typed_home(config)
     from sonder_runtime.adapters.inference import ollama_endpoint
     ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+    from sonder_runtime.adapters import embeddings as sonder_embeddings
+    sonder_embeddings.configure_typed_endpoint(config.ollama.url)
     from sonder_runtime.adapters.inference import ollama_pool
     ollama_pool.configure_typed_workers(
         config.ollama.workers,
         allow_remote=config.ollama.allow_remote,
         trusted_origins=config.ollama.trusted_origins,
+        failure_threshold=config.ollama.worker_failure_threshold,
+        cooldown_seconds=config.ollama.worker_cooldown_seconds,
+        admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
+        capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
+        probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
+    )
+    from sonder_runtime.adapters.inference import ollama_vision
+    ollama_vision.configure_typed_request_timeout(
+        config.ollama.request_timeout_seconds,
     )
     from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
         require_epoch_2,
@@ -652,6 +692,17 @@ def cmd_serve(args) -> int:
         print(f"migration failed, refusing to bind: {exc}", file=sys.stderr)
         return 1
 
+    try:
+        from sonder_runtime.adapters.persistence.operations_store import OperationsStore
+        pruned = OperationsStore().prune_events(
+            config.observability.audit_retention_days
+        )
+        if pruned:
+            print(f"pruned {pruned} audit events older than "
+                  f"{config.observability.audit_retention_days} days")
+    except Exception:
+        pass
+
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
@@ -662,10 +713,26 @@ def cmd_serve(args) -> int:
 
 def cmd_repl(args) -> int:
     try:
-        _export_runtime_environment(_load_config(args))
+        config = _load_config(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    _configure_typed_home(config)
+    from sonder_runtime.platform.logging import configure_logging, Redactor
+    configure_logging(
+        level=config.observability.log_level,
+        log_format=config.observability.log_format,
+        redactor=Redactor(env=os.environ),
+    )
+    _export_runtime_environment(config)
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+    try:
+        sonder_migrations.migrate_all(
+            busy_timeout_ms=config.state.sqlite_busy_timeout_ms
+        )
+    except sonder_migrations.MigrationError as exc:
+        print(f"migration failed: {exc}", file=sys.stderr)
+        return 1
     import sonder_runtime.interfaces.repl.repl as sonder_repl
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
@@ -695,12 +762,48 @@ def cmd_mcp(args) -> int:
         from sonder_runtime.bootstrap.native_mcp import run_native_mcp
 
         _configure_typed_home(config)
-        _export_runtime_environment(config, include_typed_runtime=False)
-        return run_native_mcp(build_application(config=config))
-    try:
-        McpCommand(build_legacy_server_mcp_runtime()).execute(
-            lambda: _export_runtime_environment(_load_config(args))
+        from sonder_runtime.platform.logging import configure_logging, Redactor
+        configure_logging(
+            level=config.observability.log_level,
+            log_format=config.observability.log_format,
+            redactor=Redactor(env=os.environ),
         )
+        _export_runtime_environment(config, include_typed_runtime=False)
+        import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+        try:
+            sonder_migrations.migrate_all(
+                busy_timeout_ms=config.state.sqlite_busy_timeout_ms
+            )
+        except sonder_migrations.MigrationError as exc:
+            print(f"migration failed: {exc}", file=sys.stderr)
+            return 1
+        return run_native_mcp(build_application(config=config))
+    def _configure_mcp_legacy() -> None:
+        config = _load_config(args)
+        _configure_typed_home(config)
+        from sonder_runtime.platform.logging import configure_logging, Redactor
+        configure_logging(
+            level=config.observability.log_level,
+            log_format=config.observability.log_format,
+            redactor=Redactor(env=os.environ),
+        )
+        _export_runtime_environment(config)
+        from sonder_runtime.adapters.inference import ollama_endpoint
+        ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+        from sonder_runtime.adapters.inference import ollama_pool
+        ollama_pool.configure_typed_workers(
+            config.ollama.workers,
+            allow_remote=config.ollama.allow_remote,
+            trusted_origins=config.ollama.trusted_origins,
+            failure_threshold=config.ollama.worker_failure_threshold,
+            cooldown_seconds=config.ollama.worker_cooldown_seconds,
+            admission_timeout_ms=config.ollama.worker_admission_timeout_ms,
+            capability_ttl_seconds=config.ollama.worker_capability_ttl_seconds,
+            probe_timeout_ms=config.ollama.worker_probe_timeout_ms,
+        )
+
+    try:
+        McpCommand(build_legacy_server_mcp_runtime()).execute(_configure_mcp_legacy)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -820,7 +923,8 @@ def cmd_rotate_key(args) -> int:
             },
         )
     except Exception:
-        pass
+        print("WARNING: key rotation succeeded but audit record "
+              "could not be written", file=sys.stderr)
     _emit(report, as_json=args.json)
     return 0
 

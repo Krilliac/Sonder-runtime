@@ -44,6 +44,26 @@ def test_remote_worker_requires_https_and_explicit_consent():
     ) == "https://192.168.1.20:11434"
 
 
+def test_trusted_origins_allows_http_remote_workers_through_pool_constructor():
+    pool = OllamaWorkerPool(
+        "http://127.0.0.1:11434",
+        ("http://192.168.1.20:11434",),
+        allow_remote=True,
+        trusted_origins=("192.168.1.0/24",),
+    )
+    assert len(pool.origins) == 2
+    assert pool.origins[1] == "http://192.168.1.20:11434"
+
+
+def test_pool_constructor_rejects_http_remote_without_trusted_origins():
+    with pytest.raises(ValueError, match="must use https"):
+        OllamaWorkerPool(
+            "http://127.0.0.1:11434",
+            ("http://192.168.1.20:11434",),
+            allow_remote=True,
+        )
+
+
 @pytest.mark.parametrize("origin, message", [
     ("ftp://127.0.0.1:11434", "http or https"),
     ("http://127.0.0.1:11434/api", "without a path"),

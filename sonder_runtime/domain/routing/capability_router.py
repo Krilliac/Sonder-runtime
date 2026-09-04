@@ -20,7 +20,10 @@ Design notes:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 TASK_CLASSES = ("simple", "search", "code", "reasoning", "vision", "long_context")
 
@@ -116,23 +119,31 @@ def classify_task(
     forces long-context. Otherwise the highest keyword score wins, defaulting to
     ``simple`` for short, unmarked requests.
     """
+    logger.debug(f"classify_task: has_image={has_image}, approx_tokens={approx_tokens}, explicit={explicit!r}")
     if explicit in TASK_CLASSES:
+        logger.info(f"task classification override applied: class={explicit!r}")
+        logger.debug(f"classify_task: explicit override to {explicit!r}")
         return explicit, 1.0
     if has_image:
+        logger.debug("classify_task: image present, classifying as vision")
         return "vision", 1.0
     scores = _score(prompt)
     # Size dominates: a genuinely large payload is a long-context job regardless
     # of surface keywords.
     if approx_tokens >= _LONG_CONTEXT_TOKENS:
+        logger.debug(f"classify_task: token count {approx_tokens} >= {_LONG_CONTEXT_TOKENS}, classifying as long_context")
         return "long_context", 0.9
     best = max(scores, key=lambda c: scores[c])
     top = scores[best]
     if top == 0:
+        logger.warning(f"task classification has no keyword signal, defaulting to simple with low confidence (0.4), prompt_len={len(prompt or '')}")
+        logger.debug("classify_task: no keyword hits, defaulting to simple (confidence=0.4)")
         return "simple", 0.4
     total = sum(scores.values()) or 1
     # Confidence: share of hits going to the winner, floored so a lone strong
     # cue still reads as reasonably confident.
     confidence = max(0.5, min(0.95, top / total))
+    logger.debug(f"classify_task: scores={scores}, best={best!r}, confidence={confidence}")
     return best, round(confidence, 2)
 
 
@@ -141,16 +152,25 @@ def _resolve(tier: str, available) -> str:
         return tier
     for fb in _FALLBACK:
         if fb in available:
+            logger.warning(f"preferred tier {tier!r} unavailable, falling back to {fb!r} (available={available})")
+            logger.debug(f"_resolve: tier {tier!r} unavailable, falling back to {fb!r}")
             return fb
     # Nothing matched (misconfigured policy) — return the requested tier as-is
     # so the caller surfaces a clear "unknown tier" error rather than silence.
+    logger.critical(f"routing policy has no usable tier: requested={tier!r}, none of {_FALLBACK} available in {available} -- all inference routing will fail")
+    logger.error(f"no fallback tier found for {tier!r}, routing policy is misconfigured (available={available})")
+    logger.warning(f"no fallback tier found for {tier!r}, policy may be misconfigured (available={available})")
+    logger.debug(f"_resolve: no fallback found for tier {tier!r}, returning as-is (available={available})")
     return tier
 
 
 def recommend_tier(task: str, available) -> str:
     """Best available tier for a task class, degrading to a base tier."""
     available = set(available or ())
-    return _resolve(_PREFERRED.get(task, "general"), available)
+    preferred = _PREFERRED.get(task, "general")
+    resolved = _resolve(preferred, available)
+    logger.debug(f"recommend_tier: task={task!r}, preferred={preferred!r}, resolved={resolved!r}")
+    return resolved
 
 
 def escalation_ladder(task: str, available, *, allow_oracle: bool = False) -> tuple[str, ...]:
@@ -170,7 +190,9 @@ def escalation_ladder(task: str, available, *, allow_oracle: bool = False) -> tu
         if resolved and resolved not in out:
             out.append(resolved)
     if not out:  # ensure a non-empty ladder even on a sparse policy
+        logger.warning(f"escalation ladder empty for task={task!r}, falling back to single recommended tier (available={available})")
         out.append(recommend_tier(task, available))
+    logger.debug(f"escalation_ladder: task={task!r}, allow_oracle={allow_oracle}, ladder={tuple(out)}")
     return tuple(out)
 
 
@@ -181,12 +203,24 @@ def next_tier(ladder, current: str, reason: str) -> str | None:
     (returns ``None``) so a satisfied result never wastes a stronger model.
     """
     if reason not in ESCALATION_REASONS:
+        logger.debug(f"next_tier: reason {reason!r} not recognized, staying on {current!r}")
         return None
     ladder = tuple(ladder or ())
     if current not in ladder:
-        return ladder[0] if ladder else None
+        result = ladder[0] if ladder else None
+        logger.debug(f"next_tier: current {current!r} not in ladder, jumping to {result!r}")
+        if result is not None:
+            logger.info(f"tier escalation: {current!r} -> {result!r}, reason={reason!r}")
+        return result
     idx = ladder.index(current)
-    return ladder[idx + 1] if idx + 1 < len(ladder) else None
+    result = ladder[idx + 1] if idx + 1 < len(ladder) else None
+    logger.debug(f"next_tier: escalating from {current!r} (reason={reason!r}) to {result!r}")
+    if result is not None:
+        logger.info(f"tier escalation: {current!r} -> {result!r}, reason={reason!r}")
+    else:
+        logger.error(f"escalation ladder exhausted: no tier above {current!r} for reason={reason!r}, request cannot be retried at a stronger tier")
+        logger.warning(f"escalation ladder exhausted: no tier above {current!r} for reason={reason!r}, request cannot be retried at a stronger tier")
+    return result
 
 
 def route(
@@ -199,6 +233,7 @@ def route(
     allow_oracle: bool = False,
 ) -> Route:
     """One-call capability route: classify, pick a tier, build the ladder."""
+    logger.debug(f"route: available_tiers={set(available or ())}, allow_oracle={allow_oracle}")
     task, confidence = classify_task(
         prompt, has_image=has_image, approx_tokens=approx_tokens, explicit=explicit
     )
@@ -208,6 +243,7 @@ def route(
     # end is not automatic; we keep the recommended tier but flag it so the live
     # router can choose to pre-escalate.
     want_web = task == "search"
+    logger.debug(f"route: task={task!r}, tier={tier!r}, confidence={confidence}, want_web={want_web}")
     return Route(
         task=task,
         tier=tier,

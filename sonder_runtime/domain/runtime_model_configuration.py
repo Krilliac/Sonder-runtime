@@ -8,8 +8,11 @@ of process and filesystem I/O.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Mapping
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,8 @@ class RuntimeModelConfiguration:
         def live_cloud_model(configured: object, default: str) -> str:
             lowered = str(configured or "").strip().lower()
             if not lowered or lowered in retired_cloud_models:
+                if lowered and lowered in retired_cloud_models:
+                    logger.warning(f"configured cloud model {configured!r} is retired, falling back to default={default!r}")
                 return default
             return str(configured)
 
@@ -46,6 +51,22 @@ class RuntimeModelConfiguration:
         cloud_general = live_cloud_model(
             env.get("SONDER_CLOUD_GENERAL"), default_cloud_general_model
         )
+        logger.info(
+            f"model configuration loaded: stable_alias={stable_alias!r}, "
+            f"cloud_code={cloud_code!r}, cloud_general={cloud_general!r}"
+        )
+        logger.debug(
+            f"RuntimeModelConfiguration.from_environment: "
+            f"cloud_code={cloud_code!r}, cloud_general={cloud_general!r}, "
+            f"stable_alias={stable_alias!r}"
+        )
+        empty_local_tiers = []
+        if not str(env.get("SONDER_REASONING", "")).strip():
+            empty_local_tiers.append("reasoning")
+        if not str(env.get("SONDER_VISION", "")).strip():
+            empty_local_tiers.append("vision")
+        if empty_local_tiers:
+            logger.warning(f"local tiers with no model configured: {empty_local_tiers} -- requests needing these capabilities will fall back to general-purpose models")
         return cls(
             stable_alias=stable_alias,
             local_code_model=str(env.get("SONDER_CODE_LOCAL", stable_alias)),

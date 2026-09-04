@@ -1,8 +1,11 @@
 """Read-only HTTP presentation for sanitized local observability."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 from ....application.observability.trace_projection import MAX_TRACE_SPANS
 
@@ -48,6 +51,7 @@ def dispatch_trace_route(
     """Project only the already-redacted event sink through one GET route."""
     if path != "/v1/observability/trace":
         return None
+    logger.debug(f"dispatch_trace_route: method={method!r}")
     if method != "GET":
         return TraceHttpResult(
             {"error": {"message": "method not allowed", "type": "invalid_request"}},
@@ -77,19 +81,24 @@ def dispatch_trace_route(
         filters[name] = value
     projector = getattr(events, "trace_projection", None)
     if not callable(projector):
+        logger.error("trace projection requested but events object does not expose a callable trace_projection")
         return TraceHttpResult(
             {"error": {"message": "observability projection is unavailable", "type": "server_error"}},
             503,
         )
+    logger.debug(f"dispatch_trace_route: limit={limit}, filters={filters}")
     try:
         projection = projector(limit=limit, **filters)
         body = projection.to_dict()
     except Exception:
+        logger.error("trace projection execution failed", exc_info=True)
+        logger.debug("dispatch_trace_route: projection failed")
         return TraceHttpResult(
             {"error": {"message": "observability projection failed", "type": "server_error"}},
             500,
         )
     body["object"] = "trace_projection"
+    logger.debug(f"dispatch_trace_route: returning projection with {len(body.get('spans', []))} spans")
     return TraceHttpResult(body)
 
 
