@@ -22,14 +22,16 @@ AUTOPILOT_ALL = AUTOPILOT_ACTIVE + AUTOPILOT_RESUMABLE + AUTOPILOT_TERMINAL
 # Allowed autopilot transitions (SPEC-3 section 7). Resume/retry out of a
 # resumable or failed state is explicit; terminal states never leave.
 _AUTOPILOT_TRANSITIONS: dict[str, frozenset[str]] = {
-    "ready": frozenset({"planning", "running", "cancelled"}),
-    "planning": frozenset({"running", "paused", "blocked", "failed",
-                           "interrupted", "cancelled"}),
+    "ready": frozenset({"planning", "running", "cancelled", "paused"}),
+    "planning": frozenset({"running", "paused", "blocked", "completed",
+                           "failed", "interrupted", "cancelled"}),
     "running": frozenset({"paused", "blocked", "completed", "failed",
-                          "interrupted", "cancelled"}),
-    "paused": frozenset({"running", "cancelled"}),
-    "blocked": frozenset({"running", "failed", "cancelled"}),
-    "interrupted": frozenset({"running", "cancelled"}),  # explicit resume
+                          "interrupted", "cancelled", "planning"}),
+    "paused": frozenset({"running", "cancelled", "planning"}),
+    "blocked": frozenset({"running", "failed", "cancelled", "planning",
+                          "paused"}),
+    "interrupted": frozenset({"running", "cancelled", "planning",
+                              "paused"}),
     "failed": frozenset({"running"}),                    # explicit retry
     "completed": frozenset(),
     "cancelled": frozenset(),
@@ -71,7 +73,8 @@ FLEET_ALL = FLEET_ACTIVE + FLEET_TERMINAL
 # (mirrors fleet_store's WHERE status IN ('interrupted','failed','cancelled')
 # retry path).
 _FLEET_TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"running", "cancelled", "interrupted"}),
+    "queued": frozenset({"running", "cancelled", "interrupted",
+                         "done", "failed", "task_drift"}),
     "running": frozenset({
         "done", "failed", "task_drift", "cancelled", "interrupted",
     }),

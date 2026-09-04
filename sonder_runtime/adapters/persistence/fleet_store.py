@@ -509,6 +509,12 @@ def heartbeat_owner(owner_id: str) -> bool:
 
 
 def close_owner(owner_id: str, reason: str = "process exited before completion") -> int:
+    # State machine is the single source of truth for valid transitions.
+    for src in ("queued", "running"):
+        if not _sm.fleet_can_transition(src, "interrupted"):
+            raise ValueError(
+                "fleet state machine does not allow %s -> interrupted" % src
+            )
     now = time.time()
     with _write_transaction() as conn:
         cursor = conn.execute(
@@ -531,6 +537,12 @@ def reconcile_stale_owners(
     *, now: float | None = None, stale_seconds: int = DEFAULT_STALE_SECONDS,
     grace_seconds: int = DEFAULT_STALE_GRACE_SECONDS,
 ) -> dict:
+    # State machine is the single source of truth for valid transitions.
+    for src in ("queued", "running"):
+        if not _sm.fleet_can_transition(src, "interrupted"):
+            raise ValueError(
+                "fleet state machine does not allow %s -> interrupted" % src
+            )
     current = float(now or time.time())
     stale_seconds = max(15, min(int(stale_seconds), 3600))
     grace_seconds = max(1, min(int(grace_seconds), 300))
@@ -679,6 +691,11 @@ def start_agent(
     tool_calls: int = 0, requested_agents: int = 0, worker_slots: int = 0,
     mode: str = "", tier: str = "",
 ) -> dict | None:
+    # State machine is the single source of truth: queued -> running.
+    if not _sm.fleet_can_transition("queued", "running"):
+        raise ValueError(
+            "fleet state machine does not allow queued -> running"
+        )
     now = time.time()
     with _write_transaction() as conn:
         cursor = conn.execute(
@@ -831,6 +848,14 @@ def finish_agent(
             final_error = _clamp_text(error, MAX_ERROR_CHARS)
             marker = output
             tokens_out = max(0, (len(output or "") + 3) // 4)
+        # State machine is the single source of truth for valid transitions.
+        if current["status"] != status and not _sm.fleet_can_transition(
+            current["status"], status
+        ):
+            raise ValueError(
+                "fleet state machine does not allow %s -> %s"
+                % (current["status"], status)
+            )
         conn.execute(
             """
             UPDATE fleet_agents
@@ -882,6 +907,14 @@ def finish_agent(
             and stored_dict.get("status") == "done"
             and stored_dict.get("retry_of")
         ):
+            # State machine is the single source of truth for retry-source
+            # transitions.
+            for src in ("interrupted", "failed", "cancelled", "task_drift"):
+                if not _sm.fleet_can_transition(src, "retried"):
+                    raise ValueError(
+                        "fleet state machine does not allow %s -> retried"
+                        % src
+                    )
             conn.execute(
                 """
                 UPDATE fleet_agents
@@ -898,6 +931,11 @@ def finish_agent(
 
 
 def cancel_agents(selector: str) -> dict:
+    # State machine is the single source of truth for valid transitions.
+    if not _sm.fleet_can_transition("queued", "cancelled"):
+        raise ValueError(
+            "fleet state machine does not allow queued -> cancelled"
+        )
     value = str(selector or "").strip()
     now = time.time()
     with _write_transaction() as conn:

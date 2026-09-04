@@ -264,9 +264,9 @@ _RULES = [
     _rule(r"^cancel\s+(?:all\s+)?agents\b", _fixed("/agentcancel")),
     _rule(r"^retry\s+(?:the\s+)?agent\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/agentretry %s" % (m.group("arg") or "")).strip()),
-    _rule(r"^(?:show|list|what(?:'s| is)|my)\s+active\s+fanouts?\b",
+    _rule(r"^(?:show|list|what(?:'s| is)|my)\s+(?:me\s+)?(?:my\s+)?active\s+fanouts?\b",
           _fixed("/fanouts active")),
-    _rule(r"^(?:show|list|what(?:'s| is)|my)\s+(?:recent\s+)?fanouts?\b",
+    _rule(r"^(?:show|list|what(?:'s| is)|my)\s+(?:me\s+)?(?:my\s+)?(?:recent\s+)?fanouts?\b",
           _fixed("/fanouts")),
     _rule(r"^(?:tool\s+)?activity\b|^recent\s+tools?\b|^what\s+tools\s+ran\b",
           _fixed("/activity")),
@@ -307,8 +307,11 @@ _RULES = [
     # --- weather ---
     _rule(r"^(?:check|show|get)\s+(?:the\s+)?weather\s+(?:for|in)\s+"
           r"(?P<arg>.+?)\s*[?!.]*$", _weather_action),
-    _rule(r"^(?:weather|forecast)\b(?:\s+(?:for|in)\s+(?P<arg>.+))?",
+    _rule(r"^(?:weather|forecast)\s+(?:for|in)\s+(?P<arg>.+?)\s*[?!.]*$",
           _weather_action),
+    _rule(r"^(?:weather|forecast)\s+(?P<arg>[A-Z][\w\s,.-]+?)\s*[?!.]*$",
+          _weather_action),
+    _rule(r"^(?:weather|forecast)\s*[?!.]*$", _weather_action),
 
     # --- environment ---
     _rule(r"^(?:show\s+(?:the\s+)?|what\s+)?(?:host\s+)?environment\b(?:\s+are\s+you\s+(?:on|in))?\s*\??$",
@@ -357,8 +360,11 @@ _RULES = [
     _rule(r"^delete\s+(?:the\s+)?file\s+(?P<arg>\S+)", _with_arg("/delete")),
 
     # --- todos ---
-    _rule(r"^(?:show|list)\s+(?:my\s+)?(?:todos?|tasks)\b(?:\s+(?P<arg>.+))?",
+    _rule(r"^(?:show|list)\s+(?:me\s+)?(?:my\s+)?(?:todos?|tasks|task\s+list)\b"
+          r"(?:\s+(?P<arg>.+))?",
           lambda m: ("/todo %s" % (m.group("arg") or "")).strip()),
+    _rule(r"^(?:what(?:'s| is)\s+(?:on\s+)?(?:my\s+)?(?:todo|task)\s+list)\s*[?!.]*$",
+          _fixed("/todo")),
 
     # --- repository inspection (read-only) ---
     # These map git-familiar phrasing onto the read-only repo_* tools. The

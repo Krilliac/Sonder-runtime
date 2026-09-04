@@ -84,23 +84,34 @@ _WORK_POLITE_RE = re.compile(
     r"^(please\s+|can you\s+|could you\s+|would you\s+|will you\s+)+"
 )
 _WORK_ACTION_RE = re.compile(
-    r"\b(add|audit|benchmark|build|compile|continue|create|delete|deploy|diagnose|"
-    r"document|edit|execute|find|fix|"
-    r"generate|implement|inspect|install|list|make|modify|move|open|read|refactor|"
-    r"remove|rename|repair|review|run|scan|scaffold|search|ship|test|update|validate|"
+    r"\b(add|analyze|analyse|audit|benchmark|build|clean|compile|configure|continue|"
+    r"create|debug|delete|deploy|design|develop|diagnose|"
+    r"document|edit|execute|find|fix|format|"
+    r"generate|implement|inspect|install|integrate|lint|list|make|merge|migrate|"
+    r"modify|move|open|optimize|patch|profile|publish|read|refactor|"
+    r"remove|rename|repair|restructure|review|rewrite|run|scan|scaffold|search|"
+    r"setup|ship|start|stop|sync|test|troubleshoot|update|upgrade|validate|"
     r"verify|view|write)\b"
 )
 _WORK_TARGET_RE = re.compile(
-    r"\b(animation|api|app|application|asset|audio|background|brand|build|chart|"
-    r"cli|code|config|dashboard|data|diagram|directory|doc|docs|document|file|"
-    r"files|folder|folders|function|game|graphic|icon|image|library|logo|model|"
-    r"music|package|path|presentation|program|project|readme|report|repo|repository|"
-    r"scene|script|scripts|sound|spreadsheet|sprite|system|test|tests|texture|"
-    r"tool|tools|sonder|ui|vector|web|webpage|website|workspace)\b"
+    r"\b(animation|api|app|application|asset|audio|backend|binary|build|chart|"
+    r"class|cli|code|component|config|controller|database|dashboard|data|"
+    r"dependency|dependencies|diagram|directory|doc|docs|dockerfile|document|"
+    r"endpoint|enum|extension|feature|file|files|fixture|folder|folders|form|"
+    r"frontend|function|game|graphic|handler|hook|icon|image|interface|"
+    r"library|logger|logo|makefile|manifest|method|middleware|migration|model|"
+    r"module|music|package|parser|path|pipeline|plugin|presentation|program|"
+    r"project|query|readme|renderer|report|repo|repository|route|scene|schema|"
+    r"script|scripts|serializer|server|service|shader|sound|spec|spreadsheet|"
+    r"sprite|struct|style|styles|system|table|task|template|test|tests|texture|"
+    r"tool|tools|type|types|sonder|ui|validator|variable|vector|view|web|"
+    r"webpage|website|workflow|workspace)\b"
 )
 _WORK_DIRECT_RE = re.compile(
-    r"\b(use (the )?tools|work on|continue working|take care of|make the change|implement it|fix it|"
-    r"edit it|run it|test it|build it|create it)\b"
+    r"\b(use (the )?tools|work on|continue working|take care of|make the change|"
+    r"implement it|fix it|edit it|run it|test it|build it|create it|debug it|"
+    r"deploy it|refactor it|update it|ship it|clean it up|set it up|start it|"
+    r"finish it|get it working|get it done|make it work)\b"
 )
 _PATH_LIKE_RE = re.compile(
     r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
@@ -129,7 +140,7 @@ _CONTAINMENT_EVASION_RE = re.compile(
 )
 _EXTERNAL_CONTACT_RE = re.compile(
     r"\b(?:email|sms|webhook)\b|\b(?:send|message|notify|contact|post|deliver)\b.*\b"
-    r"(?:outside|external|off[-\s]?host|another\s+(?:app|process)|"
+    r"(?:outside|external(?:ly)?|off[-\s]?host|another\s+(?:app|process)|"
     r"windows\s+notifications?|email|sms|webhook|slack|discord)\b",
     re.I | re.S,
 )
