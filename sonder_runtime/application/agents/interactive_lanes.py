@@ -223,9 +223,7 @@ class AgentLaneService:
 
     def _public(self, lane, tx):
         result = {k: v for k, v in lane.items() if k not in _HIDDEN}
-        result["unread_reports"] = sum(
-            not m["acknowledged"] for m in tx.messages(lane["id"], report=True)
-        )
+        result["unread_reports"] = tx.unread_report_count(lane["id"])
         return result
 
     def _receipt(self, tx, lane, command_id, **extra):
@@ -409,6 +407,48 @@ class AgentLaneService:
             next_cursor=rows[min(limit, len(rows)) - 1][0] if rows else cursor,
             has_more=len(rows) > limit,
         )
+
+    def read_view(self, context, *, lane_id=None, cursor=0, limit=20, transcript=False):
+        """Authorized metadata, optionally with one bounded event page; no mailbox bodies.
+
+        Existing inspect remains the full compatibility contract for other surfaces.
+        List cursors refer to durable source rows even if inconsistent ownership
+        metadata causes a row to be withheld.
+        """
+        _bounds(cursor, limit)
+        if transcript and lane_id is None:
+            raise ValueError("transcript requires a lane id")
+        self.store.flush()
+        if lane_id is None:
+            with self.store.transaction() as tx:
+                rows = tx.lanes(context.principal_id, None, cursor, limit + 1)
+                lanes = []
+                for _, lane in rows[:limit]:
+                    try:
+                        self._authorize(lane, context)
+                    except PermissionError:
+                        continue
+                    lanes.append(self._public(lane, tx))
+            return dict(
+                lanes=lanes,
+                source_count=min(limit, len(rows)),
+                next_cursor=rows[min(limit, len(rows)) - 1][0] if rows else cursor,
+                has_more=len(rows) > limit,
+            )
+        self.store.reconcile(lane_id, context.principal_id)
+        with self.store.transaction() as tx:
+            lane = tx.lane(lane_id)
+            self._authorize(lane, context)
+            result = dict(lane=self._public(lane, tx))
+        self.store.flush()
+        if transcript:
+            events, more = self.store.events(lane_id, cursor, limit)
+            result.update(
+                events=events,
+                next_cursor=events[-1]["sequence"] if events else cursor,
+                has_more=more,
+            )
+        return result
 
     def inspect(self, lane_id, context, *, cursor=0, limit=100):
         _bounds(cursor, limit)

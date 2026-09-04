@@ -348,3 +348,101 @@ def test_lane_target_retargeting_after_approval_is_refused(env, monkeypatch):
     result = facade(env, approve).run("cancel " + lane)
     assert "outside the current configured" in result
     assert env[0].inspect(lane, env[-2])["lane"]["status"] == "queued"
+
+
+from tests.test_permission_approvals import ledger
+
+
+def test_real_ledger_approves_identical_console_retry_once(env, ledger, monkeypatch):
+    lane = child(env)
+    monkeypatch.setattr(
+        repl, "_legacy_runtime", SimpleNamespace(_application=lambda: app_for(env))
+    )
+    monkeypatch.setattr(repl, "_console_has_operator", lambda: False)
+    command = "message " + lane + " exact retry content"
+    first = repl._lanes_command(command)
+    assert "refused" in first
+    pending = ledger.pending()
+    assert len(pending) == 1
+    call_id = pending[0].call_id
+    assert call_id in first.replace("\n", "")
+    approved = server.control_command(
+        "/approve " + call_id + " 120", operator_approved=True
+    )
+    assert "approved agent_lane" in approved
+    assert "Recorded message" in repl._lanes_command(command)
+    assert "refused" in repl._lanes_command(command)
+    messages = env[0].inspect(lane, env[-2])["messages"]
+    assert sum(message["content"] == "exact retry content" for message in messages) == 1
+
+
+def test_console_reads_and_control_prechecks_do_not_fetch_message_bodies(
+    env, monkeypatch
+):
+    from sonder_runtime.adapters.persistence.agent_lanes import LaneTransaction
+
+    lane = child(env)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("console metadata/transcript path loaded mailbox bodies")
+
+    monkeypatch.setattr(LaneTransaction, "messages", forbidden)
+    ui = facade(env)
+    assert lane in ui.run("list")
+    assert lane in ui.run("show " + lane)
+    assert "Recorded message" in ui.run("message " + lane + " hello")
+    assert "Recorded interrupt" in ui.run("interrupt " + lane)
+
+
+def test_unread_report_count_includes_more_than_one_hundred_reports(env):
+    lane = child(env)
+    with env[1].transaction() as tx:
+        row = tx.lane(lane)
+        for index in range(105):
+            tx.message(row, "report " + str(index), "parent", report=True)
+    assert env[0].inspect(lane, env[-2])["lane"]["unread_reports"] == 105
+
+
+def test_lightweight_metadata_does_not_read_event_pages(env, monkeypatch):
+    lane = child(env)
+    calls = []
+    original = env[1].events
+
+    def events(lane_id, cursor, limit):
+        calls.append((lane_id, cursor, limit))
+        return original(lane_id, cursor, limit)
+
+    monkeypatch.setattr(env[1], "events", events)
+    ui = facade(env)
+    assert lane in ui.run("list")
+    assert "Recorded message" in ui.run("message " + lane + " hi")
+    assert calls == []
+    assert lane in ui.run("show " + lane)
+    assert calls == [(lane, 0, 20)]
+
+
+def test_unread_aggregate_decrements_after_ack(env):
+    lane = child(env)
+    with env[1].transaction() as tx:
+        row = tx.lane(lane)
+        ids = [tx.message(row, "report", "parent", report=True) for _ in range(105)]
+    env[0].ack_report(ids[0], command_id="ack-first", context=env[-2])
+    assert env[0].read_view(env[-2], lane_id=lane)["lane"]["unread_reports"] == 104
+
+
+def test_remote_model_permission_is_bound_and_rechecked(env):
+    lane = child(env)
+    app = app_for(env)
+    app.config.ollama.allow_remote = True
+    seen = []
+
+    def revoke(arguments):
+        seen.append(arguments)
+        app.config.ollama.allow_remote = False
+        return True, ""
+
+    result = facade(env, revoke, app).run("cancel " + lane)
+    assert seen[0]["remote_ollama_allowed"] is True
+    assert "command_id" not in seen[0]
+    assert "permission changed" in result
+    assert env[0].inspect(lane, env[-2])["lane"]["status"] == "queued"

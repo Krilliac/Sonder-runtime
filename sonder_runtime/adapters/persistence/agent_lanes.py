@@ -249,6 +249,14 @@ class LaneTransaction:
         )
         return message_id
 
+    def unread_report_count(self, lane_id):
+        """Count all unacknowledged reports without retrieving mailbox bodies."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM agent_lane_messages "
+            "WHERE lane_id=? AND report=1 AND acknowledged=0",
+            (lane_id,),
+        ).fetchone()[0]
+
     def messages(self, lane_id, *, report=False, limit=100):
         rows = self.conn.execute(
             """SELECT m.*,f.body,e.payload AS event_payload FROM agent_lane_messages m
