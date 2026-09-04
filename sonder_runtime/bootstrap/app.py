@@ -778,9 +778,21 @@ def build_application(
             from ..adapters.persistence.fleet_store import database_path
             from ..application.agents.interactive_lanes import AgentLaneService
             sessions = get_session_repository()
+            lane_tools = tools
+            lane_test_catalog = None
+            catalog_path = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()
+            if catalog_path:
+                from ..adapters.lane_tests import LaneTestCatalog
+                from .lane_tests import compose_lane_test_tools
+                lane_test_catalog = LaneTestCatalog.load(catalog_path)
+                lane_tools = compose_lane_test_tools(
+                    tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
+                )
             def authorize_lane_grant(lane, context):
                 from ..application.context import LOCAL_OWNER
                 from ..adapters.filesystem.file_ops import allowed_roots
+                if lane_test_catalog is not None:
+                    lane_test_catalog.require_current()
                 if context.principal_id != LOCAL_OWNER:
                     raise PermissionError("account lanes require a configured live account authorizer")
                 root = Path(lane['workspace_root']).resolve()
@@ -788,8 +800,9 @@ def build_application(
                            for current in allowed_roots()):
                     raise PermissionError("configured workspace grant was removed")
             interactive_lanes = AgentLaneService(
-                SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, tools,
+                SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, lane_tools,
                 authorize_grant=authorize_lane_grant,
+                allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
             )
         return interactive_lanes
 
@@ -1198,18 +1211,20 @@ def build_application(
     logger.debug("composing typed tool application facade")
     from ..platform.logging import Redactor as _Redactor
 
+    tool_audit = DurableToolAuditRepository(
+        runtime_paths.state_path(
+            os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT",
+        ),
+        limits=ToolAuditLimits(),
+    )
+
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
         PackagedToolExecutor(),
         policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(_Redactor().redact),
         receipts=ReceiptStore(),
-        audit=DurableToolAuditRepository(
-            runtime_paths.state_path(
-                os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT",
-            ),
-            limits=ToolAuditLimits(),
-        ),
+        audit=tool_audit,
         permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
     )
 
