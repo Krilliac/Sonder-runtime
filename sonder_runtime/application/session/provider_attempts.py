@@ -23,6 +23,12 @@ class _Owner:
     capture: object
     pending: object
     failure: ProviderCaptureFailure | None = None
+    admit: object = None
+    completed: object = None
+
+    @property
+    def admission(self):
+        return (self.capture, self.pending) if self.pending is not None else None
 
     def fail(self, message, cause):
         self.failure = ProviderCaptureFailure(message)
@@ -35,13 +41,49 @@ def provider_attempt_scope(capture, pending):
     owner = _Owner(capture, pending) if capture is not None and pending is not None else None
     token = _owner.set(owner)
     try:
-        yield
+        yield owner
         # Legacy repair/fallback callbacks may swallow Exception. A damaged
         # evidence scope must neither run another attempt nor publish success.
         if owner is not None and owner.failure is not None:
             raise owner.failure
     finally:
         _owner.reset(token)
+
+
+@contextmanager
+def deferred_provider_request_scope(admit):
+    """Bind an explicit owner's admission callback; cache hits do not invoke it.
+
+    Yield a scope whose ``admission`` is None before dispatch, or the capture
+    service and committed request afterwards for surface-owned completion.
+    None preserves an existing enclosing owner (including explicit opt-outs).
+    """
+    if admit is None or _owner.get() is not None:
+        yield _owner.get()
+        return
+    owner = _Owner(None, None, admit=admit)
+    token = _owner.set(owner)
+    try:
+        yield owner
+        if owner.failure is not None:
+            raise owner.failure
+    finally:
+        _owner.reset(token)
+
+
+def complete_scoped_provider_request(session_id, response):
+    """Complete an admitted legacy turn once; None retains retrospective capture."""
+    owner = _owner.get()
+    if owner is None or owner.pending is None or owner.pending.session_id != str(session_id):
+        return None
+    if owner.failure is not None:
+        raise owner.failure
+    if owner.completed is None:
+        try:
+            owner.completed = owner.capture.complete_request(owner.pending, model_response=response)
+        except Exception as error:
+            owner.fail("could not persist logical response", error)
+    return owner.completed
 
 
 def dispatch_provider(provider, operation, payload, send):
@@ -57,6 +99,11 @@ def dispatch_provider(provider, operation, payload, send):
         return send()
     if owner.failure is not None:
         raise owner.failure
+    if owner.pending is None:
+        try:
+            owner.capture, owner.pending = owner.admit()
+        except Exception as error:
+            owner.fail("could not persist logical admission", error)
     capture, pending = owner.capture, owner.pending
     try:
         attempt = capture.begin_provider_attempt(pending, provider=provider, operation=operation, payload=payload)

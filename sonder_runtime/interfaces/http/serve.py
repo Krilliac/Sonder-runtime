@@ -12,6 +12,8 @@ Run:
 Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key).
 """
 import json
+import functools
+import inspect
 import contextlib
 import hmac
 import hashlib
@@ -26,7 +28,7 @@ import time
 import urllib.parse
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -193,7 +195,7 @@ class _LiveSessionCaptureFailure(RuntimeError):
 
 
 def _capture_live_session_turn(*, session_id, prompt, history, model, content,
-                               request_id, turn_id, stream):
+                               request_id, turn_id, stream, provider_capture=None):
     """Capture only a named, model-backed HTTP turn through the app graph.
 
     Legacy control/web/execution routes intentionally do not enter this seam.
@@ -204,6 +206,12 @@ def _capture_live_session_turn(*, session_id, prompt, history, model, content,
         return None
     try:
         from sonder_runtime.bootstrap.app import default_app
+
+        if provider_capture is not None:
+            capture, pending = provider_capture
+            if pending.session_id != session_id or pending.request_id != request_id:
+                raise ValueError("provider admission owner mismatch")
+            return capture.complete_request(pending, model_response=content)
 
         request = ModelRequest(
             prompt=prompt,
@@ -669,6 +677,8 @@ class TurnResult:
     # when the turn never consulted the cache.  A closed set by construction,
     # so it is safe to surface in the bounded HTTP receipt.
     cache: str = ""
+    # Internal-only admission carrier; never part of the HTTP response body.
+    provider_capture: tuple | None = None
 
 
 class _LegacyConversationState:
@@ -2993,9 +3003,51 @@ def _turn_reasoning():
     return record.get("text") or ""
 
 
+def _capture_http_provider_request(function):
+    """Bind HTTP-owned identities only on the ordinary/structured model route."""
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        from sonder_runtime.application.session.provider_attempts import (
+            ProviderCaptureFailure, deferred_provider_request_scope,
+        )
+
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        enabled = bool(values.get("session") and values.get("capture_request_id"))
+
+        def admit():
+            from sonder_runtime.bootstrap.app import default_app
+
+            capture = default_app().session_capture_service()
+            pending = capture.begin_request(
+                values["session"], values["capture_turn_id"],
+                ModelRequest(prompt=values["prompt"], tier=values.get("tier") or "code",
+                             history=tuple(values.get("history") or ()),
+                             options={"stream": bool(values.get("capture_stream"))}),
+                request_id=values["capture_request_id"], user_message=values["prompt"],
+            )
+            return capture, pending
+
+        try:
+            with deferred_provider_request_scope(admit if enabled else None) as scope:
+                result = function(*args, **kwargs)
+                if enabled and isinstance(result, TurnResult):
+                    result = replace(result, provider_capture=scope.admission)
+                return result
+        except ProviderCaptureFailure as error:
+            raise _LiveSessionCaptureFailure from error
+
+    return wrapped
+
+
+@_capture_http_provider_request
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
     state=None, return_result=False, metrics=None, augment=True, cache_scope="",
+    capture_request_id="", capture_turn_id="", capture_stream=False,
 ):
     """Call Sonder Runtime's learning loop with the UI's prior turns; returns UI text."""
     _serve_logger.debug(f"_run_prompt: tier={tier!r}, session={session!r}, project={project!r}, augment={augment}")
@@ -3063,8 +3115,10 @@ def _run_prompt(
     return result if return_result else result.content
 
 
+@_capture_http_provider_request
 def _run_structured_prompt(
     prompt, history, tier, schema, context_size="", metrics=None,
+    session="", capture_request_id="", capture_turn_id="", capture_stream=False,
 ):
     """Run the isolated structured path; never add a footer or activity text."""
     resolved_target = {}
@@ -5599,6 +5653,8 @@ class Handler(BaseHTTPRequestHandler):
                         turn = _run_structured_prompt(
                             prompt, history, model_selector, structured_schema,
                             context_size=context_size, metrics=_lifecycle.metrics,
+                            session=storage_session, capture_request_id=self._correlation(),
+                            capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
                         )
                         content = turn.content
                         response_model = turn.resolved_model
@@ -5672,6 +5728,8 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project,
                             state=state,
                             return_result=True,
+                            capture_request_id=self._correlation(),
+                            capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
                             # The deterministic request cache is offered only
                             # to this plain, non-streaming generation
                             # fall-through: every control/tool/web/work/agent
@@ -5722,6 +5780,7 @@ class Handler(BaseHTTPRequestHandler):
                         request_id=self._correlation(),
                         turn_id=response_iid or uuid.uuid4().hex,
                         stream=stream,
+                        provider_capture=turn.provider_capture,
                     )
         except sonder_lifecycle.AdmissionRejected as rejection:
             _serve_logger.error(f"request admission rejected: code={rejection.code!r}, retryable={rejection.retryable}, correlation={self._correlation()!r}")
