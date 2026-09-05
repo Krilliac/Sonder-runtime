@@ -4,6 +4,13 @@ import 'package:http/testing.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/account_session.dart';
 void main() {
+ test('account token rejects oversized whitespace and controls without truncation', () {
+  for(final token in ['', 'x' * 513, 'a b', 'a\t', 'a\u0000', 'é']) {
+   expect(()=>AccountSession(token:token,origin:'https://host.test'),throwsArgumentError);
+  }
+  expect(AccountSession(token:'x' * 512,origin:'https://host.test').token.length,512);
+ });
+
  test('remote HTTP account calls fail before any request', () async {
   var requests=0;
   await http.runWithClient(() async {
