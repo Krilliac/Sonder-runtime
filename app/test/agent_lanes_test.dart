@@ -37,6 +37,22 @@ void main() {
     );
   });
 
+  test('execution summary uses only server-owned public lane fields', () {
+    final lane = AgentLane.fromJson({
+      'id': 'a',
+      'status': 'running',
+      'tier': 'code',
+      'revision': 7,
+      'max_steps': 8,
+      'used_steps': 2,
+    });
+    expect(lane.executionSummary, 'Running · tier code · revision 7');
+    expect(
+      AgentLane.fromJson({'id': 'a', 'status': 'queued'}).executionSummary,
+      'Queued · tier unavailable · revision 0',
+    );
+  });
+
   test(
     'lane client uses configured bearer and bounded cursor request',
     () async {
