@@ -680,7 +680,7 @@
       ]
     },
     {
-      "file_count": 169,
+      "file_count": 170,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -823,6 +823,7 @@
         "sonder_runtime/domain/runtime_policy/__init__.py",
         "sonder_runtime/domain/runtime_policy/rules.py",
         "sonder_runtime/domain/runtime_update_parsing.py",
+        "sonder_runtime/domain/scheduler_partition.py",
         "sonder_runtime/domain/schema_policy.py",
         "sonder_runtime/domain/security/__init__.py",
         "sonder_runtime/domain/security/credential_egress.py",
