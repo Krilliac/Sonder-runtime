@@ -327,6 +327,11 @@ class ManagedStandaloneSession:
             original.blockers,
         )
 
+    def final_evidence(self, expected_turn):
+        from ..application.agents.host_turns import read_current_host_final_evidence
+        self.require_current()
+        return read_current_host_final_evidence(self._bound, expected_turn)
+
     def recovery_verification(self, *, verifier_factory):
         self._compose_verifier(verifier_factory)
         identity = self._bound.pending_verification()

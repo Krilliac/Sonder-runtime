@@ -6,7 +6,7 @@ import json
 
 from ..ports.delegated_verification import digest
 from ..ports.host_final import HostFinalFacts
-from ..ports.host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink, FinalizedHostResult
+from ..ports.host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink, FinalizedHostResult, ManagedHostFinalEvidence
 from ..ports.lane_continuation import (
     ProjectionBinding,
     open_projection,
@@ -387,3 +387,23 @@ def close_host_turn(bound, admission):
         turn["state"] = "closed"
         bound._service._save(tx, record)
         return link
+
+
+def read_current_host_final_evidence(bound, expected_turn):
+    """Observe only the exact current closed turn under live attachment authority."""
+    if type(expected_turn) is not ManagedHostTurnLink:
+        raise PermissionError("typed expected host turn required")
+    expected_turn.__post_init__()
+    with bound._scope() as context, bound._service._transaction(context) as tx:
+        record = bound._service._row(tx, bound.continuation_id)
+        bound._require_current_tx(tx, record, context=context)
+        turn = record.get("host_turn")
+        if not turn or turn["state"] != "closed" or _turn_link(record, turn) != expected_turn:
+            raise PermissionError("exact current closed host turn required")
+        final = _stored_final(bound, tx, record, turn)
+        facts = dict(turn["final_receipt"]["facts"])
+        facts["tools"], facts["blockers"] = tuple(facts["tools"]), tuple(facts["blockers"])
+        return ManagedHostFinalEvidence(
+            FinalizedHostResult(final.output, _terminal_link(bound, tx, record, turn)),
+            HostFinalFacts(**facts),
+        )
