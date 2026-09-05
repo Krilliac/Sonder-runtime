@@ -203,10 +203,22 @@ class AppWorkRecoveryRegistry:
                 entry.phase, entry.code = "unknown", "ACTION_OUTCOME_UNKNOWN"
         finally:
             with self._lock:
+                if entry.uncertain and action != "close" and entry.phase != "unknown":
+                    # A returned callback does not authorize replay after a lost
+                    # submit acknowledgement. Keep the public phase aligned
+                    # with the retained no-replay guard until durable inspection.
+                    entry.phase, entry.code = "unknown", "ACTION_OUTCOME_UNKNOWN"
+                    entry.approval = None
                 self._active = entry.busy = False
 
     def inspect(self, selection, attempt_id):
         entry = self._entry(selection, attempt_id)
+        with self._lock:
+            if entry.busy:
+                # _entry already performed fresh current-account admission.
+                # An in-flight callback owns its transition. Report that fact;
+                # competing history reads cannot prove its completion or death.
+                return self._snapshot(entry)
         # Reading durable scoped completion never enters attachment, approval,
         # verifier, publisher, or an uncertain callback again.
         current = AppWorkRecoveryHistory(self._authority).inspect(

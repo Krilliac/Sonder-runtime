@@ -1,17 +1,22 @@
-# Recovery HTTP draft — not release ready
+# Bounded recovery HTTP integration
 
-This isolated slice adds runtime-owned, bounded recovery handles and explicit HTTP preparation, attachment, verification resume, status and close. It preserves separate attachment and verifier approval calls and the original output receipt. It does not grant approval through HTTP.
+This slice adds runtime-owned recovery handles and explicit HTTP preparation, attachment, verification resume, status and close. Attachment and verifier approval remain separate host-controlled calls. HTTP does not grant approval, and original prepared work and terminal receipts remain immutable.
 
-**Do not merge or deploy this slice as verified recovery support.** The current real loopback HTTP acceptance test fails its bounded wait while the callback performs fresh authorization/private-path checks and terminal publication. Its test fixture uses a scripted model and verifier gateway. The recorded run took447.54s;28 architecture checks passed and the one HTTP acceptance test failed. No timeout is evidence that the callback stopped.
+The initial d336a139 draft failed the bounded HTTP acceptance wait because live private-path checks were repeated and status polling competed with the recovery callback. The correction removes duplicate inventory work within one current guard invocation and avoids a second durable-history admission while a callback is still busy. Each status response still requires fresh current account/control/selection admission. No mutable authorization or path snapshot is cached across callbacks. Closed or ambiguous callbacks are never assumed terminated from timeout alone.
 
-Other recorded checks:7 registry/route checks passed; the later combined run had41passes including the actual isolated owned recovery slot and existing ownership checks. Its architecture cycle was corrected and architecture was subsequently verified. The full registry capacity, foreign selection, ambiguous submission, callback reconciliation, failed cleanup and restart matrix is not complete. Daybreak review is pending. Generated catalogs are not refreshed for this draft.
+Validation recorded for the correction:
 
-The registry retains at most32 records and allows one active callback. Closed records remain retained; there is no eviction or restart adoption claim. No public original-output retrieval or recovery UI is included.
+- Fourteen registry, real loopback HTTP and actual isolated owned-slot checks passed. The HTTP path covers original verifier-pending work, fresh login/control, separate attachment and verifier approvals, deliberately lost durable-completion response, observational terminal reconciliation, old-control refusal and revoked-login refusal. One original model and one verifier gateway execution were observed; terminal retries did not replay either.
+- Forty-seven final focused, ownership and architecture checks passed, including submit ambiguity before/after enqueue, truthful unknown phase after a late callback, cleanup retention/retry, logout during busy status and changed live workspace roots.
 
-Reproduce remaining acceptance failure from this worktree:
+Models and the verifier job gateway in acceptance are scripted. These checks do not prove external model providers, native verifier subprocesses, real multi-node execution or an unrestricted latency guarantee. Daybreak exact-revision review and root integration checks remain required before promotion.
+
+The registry retains at most32 entries, including closed entries, and permits one active callback. There is no eviction or process-restart adoption claim. Public original-output retrieval and recovery UI remain separate incomplete roadmap work.
+
+Reproduce bounded acceptance:
 
 ```
-python -m pytest tests/test_app_recovery_http.py -q --tb=short
+python -m pytest tests/test_app_recovery_registry.py tests/test_app_recovery_http.py tests/test_owned_app_recovery_slot.py -q --tb=short
 ```
 
-The installed runtime was not modified by this development lane. This draft requires further implementation, verification and security review before promotion.
+This development lane did not modify an installed runtime.

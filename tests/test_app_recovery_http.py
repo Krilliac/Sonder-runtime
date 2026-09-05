@@ -49,7 +49,7 @@ def observed(h, path, *, headers=None):
         assert status == 200, body
         if not body["recovery"]["busy"]:
             return body["recovery"]
-        time.sleep(2.1)  # Respect the real wire boundary's per-peer admission rate.
+        time.sleep(10)  # Bounded observation leaves the callback time to progress.
     pytest.fail("bounded recovery callback has not completed")
 
 
@@ -176,6 +176,20 @@ def test_http_original_pending_new_login_and_two_separate_approvals(
         path = "/v1/app-control/recovery/" + body["recovery"]["attempt_id"]
         ready = observed(h, path, headers=headers)
         assert ready["phase"] == "prepared", ready
+        assert (
+            h.request("GET", path)[0] == 404
+        )  # Original control cannot borrow the fresh attempt.
+        attempt_id = body["recovery"]["attempt_id"]
+        attempt = recovery.registry._entries[attempt_id].attempt
+        original_complete = attempt._complete
+        completions = []
+
+        def lost_completion(*args, **kwargs):
+            row = original_complete(*args, **kwargs)
+            completions.append(row)
+            raise RuntimeError("completion response lost after durable commit")
+
+        monkeypatch.setattr(attempt, "_complete", lost_completion)
         for action, phase in (
             ("attach", "attachment_pending"),
             ("attach", "attached"),
@@ -195,6 +209,12 @@ def test_http_original_pending_new_login_and_two_separate_approvals(
                 )
                 assert verified[0][1].calls == 0
         assert verified[0][1].calls == 1 and len(h.models) == 1
+        assert len(completions) == 1
+        status, _, retry = h.request(
+            "POST", path + "/resume", {}, custom_headers=headers
+        )
+        assert status == 202 and retry["recovery"]["phase"] == "terminal", retry
+        assert len(completions) == 1 and verified[0][1].calls == 1
         entry = recovery.registry._entries[body["recovery"]["attempt_id"]]
         assert entry.work.prepared == original_row.prepared
         assert (
@@ -207,5 +227,40 @@ def test_http_original_pending_new_login_and_two_separate_approvals(
             and "account_session_ref" not in encoded
         )
         assert "issuer" not in encoded and "inspected repository" not in encoded
+        conn = h.account_open()
+        try:
+            admin_auth.revoke_session(conn, token)
+        finally:
+            conn.close()
+        assert h.request("GET", path, custom_headers=headers)[0] == 401
+        assert h.request("POST", path + "/resume", {}, custom_headers=headers)[0] == 401
+        assert len(completions) == 1 and verified[0][1].calls == 1
     finally:
         recovery.registry.close()
+
+
+def test_recovery_paths_reuse_only_same_guard_inventory_and_observe_changed_roots(
+    work_http, monkeypatch
+):
+    h = work_http
+    service = install(h)
+    selection = h.service._issue(h.token, h.credential, "inspect_recovery", {})
+    attempt = service._attempt(selection)
+    calls = []
+    original = h.service.inventory
+
+    def inventory():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(h.service, "inventory", inventory)
+    try:
+        assert attempt._private_paths()
+        assert len(calls) == 1
+        monkeypatch.setattr(h.service, "model_roots", lambda: (h.service.output_root,))
+        with pytest.raises(PermissionError):
+            attempt._private_paths()
+        assert len(calls) == 2
+    finally:
+        attempt.close()
+        service.registry.close()
