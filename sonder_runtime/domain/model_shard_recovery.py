@@ -111,6 +111,15 @@ class ShardRecoveryDecision:
             raise ShardRecoveryError("lost_ranks must not contain duplicates")
         if type(self.replacement_ranks) is not tuple:
             raise ShardRecoveryError("replacement_ranks must be an immutable tuple")
+        if any(not isinstance(rank, ModelRank) for rank in self.replacement_ranks):
+            raise ShardRecoveryError("replacement_ranks must contain ModelRank values")
+        replacement_ids = tuple(rank.rank for rank in self.replacement_ranks)
+        if len(set(replacement_ids)) != len(replacement_ids):
+            raise ShardRecoveryError("replacement_ranks must not contain duplicates")
+        if self.state is RecoveryState.READY and replacement_ids != self.lost_ranks:
+            raise ShardRecoveryError("ready recovery must replace exactly the lost ranks")
+        if self.state is RecoveryState.PAUSED and self.replacement_ranks:
+            raise ShardRecoveryError("paused recovery cannot publish replacement ranks")
         if type(self.kv_cache_recovery_verified) is not bool or type(self.application_replay_required) is not bool:
             raise ShardRecoveryError("recovery flags must be boolean")
         if self.kv_cache_recovery_verified:
