@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 272,
+      "file_count": 273,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -240,6 +240,7 @@
         "sonder_runtime/adapters/persistence/sqlite/job_registry.py",
         "sonder_runtime/adapters/persistence/sqlite/loop_state.py",
         "sonder_runtime/adapters/persistence/sqlite/memory.py",
+        "sonder_runtime/adapters/persistence/sqlite/memory_replication.py",
         "sonder_runtime/adapters/persistence/sqlite/operations.py",
         "sonder_runtime/adapters/persistence/sqlite/outbox.py",
         "sonder_runtime/adapters/persistence/sqlite/selfmod.py",
@@ -680,7 +681,7 @@
       ]
     },
     {
-      "file_count": 169,
+      "file_count": 170,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -780,6 +781,7 @@
         "sonder_runtime/domain/mcp_runtime_formatting.py",
         "sonder_runtime/domain/memory/__init__.py",
         "sonder_runtime/domain/memory/governance.py",
+        "sonder_runtime/domain/memory/replication.py",
         "sonder_runtime/domain/memory/rules.py",
         "sonder_runtime/domain/memory/wp6_typed.py",
         "sonder_runtime/domain/mode_tool_policy.py",
