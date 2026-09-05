@@ -332,6 +332,10 @@ class ManagedStandaloneSession:
         self.require_current()
         return read_current_host_final_evidence(self._bound, expected_turn)
 
+    def terminal_eligibility(self, expected_turn, *, verifier_factory):
+        from .managed_terminal_eligibility import terminal_eligibility
+        return terminal_eligibility(self, expected_turn, verifier_factory=verifier_factory)
+
     def recovery_verification(self, *, verifier_factory):
         self._compose_verifier(verifier_factory)
         identity = self._bound.pending_verification()

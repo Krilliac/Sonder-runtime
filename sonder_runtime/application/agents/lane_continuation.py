@@ -382,9 +382,11 @@ class BoundContinuation:
             return verifier.execute_prepared(prepared, context=context, approve=approve)
 
     def commit_terminal_projection(self, identity, original_revision, host_result):
-        from ..ports.delegated_verification import digest
+        return self._commit_terminal_projection_with_codec(identity, original_revision,
+            host_result, self._service.terminal_result_codec)
 
-        codec = self._service.terminal_result_codec
+    def _commit_terminal_projection_with_codec(self, identity, original_revision, host_result, codec):
+        from ..ports.delegated_verification import digest
         if codec is None:
             raise PermissionError("trusted terminal result codec unavailable")
         original = self.terminal_projection(identity)

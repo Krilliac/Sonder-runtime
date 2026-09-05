@@ -65,10 +65,31 @@ def test_failed_terminal_commit_does_not_return_publishable_output(lanes, monkey
     bound.execute_verification(verifier, prepared, approve=granted)
     def fail(*args):
         raise OSError('commit response unavailable')
-    monkeypatch.setattr(bound, 'commit_terminal_projection', fail)
+    monkeypatch.setattr(bound, '_commit_terminal_projection_with_codec', fail)
     with pytest.raises(OSError, match='commit response'):
         publisher.publish()
     bound.close()
+
+
+def test_each_publisher_uses_its_own_codec_after_another_is_installed(lanes):
+    from sonder_runtime.bootstrap.standalone_continuation import HostTerminalPublisher
+    publisher, host, bound, verifier, prepared, identity, gateway = setup(lanes)
+    try:
+        bound.execute_verification(verifier, prepared, approve=granted)
+        original = bound.terminal_projection(identity)
+        retained = publisher.codec.capture(original)
+        later = HostTerminalPublisher(bound=bound, verifier=verifier,
+            original_codec=host.projection_codec, require_current=bound.require_current)
+        host.terminal_result_codec = later.codec
+        with pytest.raises(PermissionError):
+            bound._commit_terminal_projection_with_codec(identity,
+                identity.projection_revision, retained, later.codec)
+        first = publisher.publish()
+        assert publisher.publish().receipt == first.receipt
+        assert later.publish().receipt == first.receipt
+        assert gateway.calls == 1
+    finally:
+        bound.close()
 
 
 def test_fenced_attachment_cannot_publish(lanes):
@@ -107,13 +128,13 @@ def test_reattached_pending_verification_publishes_original_with_fresh_codec(lan
 def test_lost_result_commit_response_replays_same_receipt_without_execution(lanes, monkeypatch):
     publisher, host, bound, verifier, prepared, identity, gateway = setup(lanes)
     bound.execute_verification(verifier, prepared, approve=granted)
-    commit = bound.commit_terminal_projection
+    commit = bound._commit_terminal_projection_with_codec
     receipts = []
     def lost(*args):
         receipts.append(commit(*args))
         raise OSError('lost response after commit')
     with monkeypatch.context() as patch:
-        patch.setattr(bound, 'commit_terminal_projection', lost)
+        patch.setattr(bound, '_commit_terminal_projection_with_codec', lost)
         with pytest.raises(OSError):
             publisher.publish()
     result = publisher.publish()
