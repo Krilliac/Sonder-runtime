@@ -36,6 +36,7 @@ from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_tra
 
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
+_ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
 
 import logging as _logging_module
 _serve_logger = _logging_module.getLogger(__name__)
@@ -3904,6 +3905,9 @@ class Handler(BaseHTTPRequestHandler):
         return must_close
 
     def _send_json_payload(self, payload, status=200, headers=None, elapsed_ms=None):
+        if _request_route(getattr(self, 'path', '')) == '/v1/sonder/logout':
+            headers = {**(headers or {}), 'Cache-Control': 'no-store',
+                       'Referrer-Policy': 'no-referrer'}
         _serve_logger.debug(f"_send_json_payload: status={status}")
         body = json.dumps(payload).encode("utf-8")
         # Keep this low-level delivery helper usable by the focused socket
@@ -5076,6 +5080,54 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
         return True
 
+    def _handle_account_logout(self):
+        """Revoke an explicitly supplied login; never infer a target account.
+
+        Retrying a revoked/unknown token is deliberately indistinguishable.
+        API-key deployment requirements still apply, but an API key cannot
+        name a session through Authorization or request-body account fields.
+        """
+        response_headers = {'Cache-Control': 'no-store',
+                            'Referrer-Policy': 'no-referrer'}
+        def reply(payload, status=200):
+            self._send_json_payload(payload, status=status, headers=response_headers)
+
+        values = self.headers.get_all('X-Sonder-Account-Token') or ()
+        token = _bearer_token(values[0]) if len(values) == 1 else ''
+        if not isinstance(token, str) or not 1 <= len(token) <= 512:
+            reply({'ok': False, 'message': 'account session required'}, 401)
+            return
+        mode = _effective_auth_mode()
+        authorization = self.headers.get('Authorization', '')
+        api_key_ok = bool(API_KEY) and (
+            check_auth(authorization, API_KEY)
+            or sonder_secrets.previous_key_valid(_bearer_token(authorization))
+        )
+        if mode in ('api-key', 'both') and not api_key_ok:
+            reply({'ok': False, 'message': 'authentication required'}, 401)
+            return
+        try:
+            request = self._read_json(max_bytes=1024)
+        except HTTPRequestError as error:
+            reply({'ok': False, 'message': error.message}, error.status)
+            return
+        if request != {}:
+            reply({'ok': False, 'message': 'logout requires an empty object'}, 400)
+            return
+        conn = None
+        try:
+            conn = server._open_db()
+            admin_auth.revoke_session(conn, token)
+        except Exception:
+            # No exception text or credentials in logs or response. A lost
+            # commit response is safe to retry with the exact same token.
+            reply({'ok': False, 'message': 'session revocation unavailable'}, 503)
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+        reply({'ok': True})
+
     def do_POST(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
@@ -5116,6 +5168,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/v1/admin/drain":
             self._handle_admin_drain()
+            return
+        if path == '/v1/sonder/logout':
+            if not _ACCOUNT_LOGOUT_ADMISSION.acquire(blocking=False):
+                self._send_json_payload(
+                    {'ok': False, 'message': 'session revocation busy'},
+                    status=429, headers={'Retry-After': '1'},
+                )
+                return
+            try:
+                self._handle_account_logout()
+            finally:
+                _ACCOUNT_LOGOUT_ADMISSION.release()
             return
         if self._auth_rate_limited():
             return

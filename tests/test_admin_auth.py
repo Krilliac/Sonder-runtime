@@ -6,6 +6,45 @@ import admin_auth
 import memory_store
 
 
+def test_revoke_session_only_revokes_exact_login_and_survives_reopen(tmp_path):
+    path = str(tmp_path / 'accounts.sqlite')
+    conn = memory_store.connect(path)
+    try:
+        admin_auth.register(conn, 'owner', 'password123')
+        first, _ = admin_auth.login(conn, 'owner', 'password123')
+        second, _ = admin_auth.login(conn, 'owner', 'password123')
+        assert admin_auth.revoke_session(conn, first) is None
+        assert admin_auth.revoke_session(conn, first) is None
+        assert admin_auth.revoke_session(conn, 'unknown-session') is None
+    finally:
+        conn.close()
+    conn = memory_store.connect(path)
+    try:
+        assert admin_auth.authenticate(conn, first) is None
+        assert admin_auth.authenticate(conn, second)['username'] == 'owner'
+        with pytest.raises(PermissionError):
+            admin_auth.reauthenticate(conn, first, 'password123')
+        assert conn.execute('SELECT COUNT(*) FROM account_sessions').fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_revoke_session_preserves_caller_transaction():
+    conn = memory_store.connect(':memory:')
+    try:
+        admin_auth.register(conn, 'owner', 'password123')
+        token, _ = admin_auth.login(conn, 'owner', 'password123')
+        conn.execute("UPDATE accounts SET tier='pro' WHERE username='owner'")
+        with pytest.raises(PermissionError, match='idle owned connection'):
+            admin_auth.revoke_session(conn, token)
+        assert conn.in_transaction
+        conn.rollback()
+        assert admin_auth.authenticate(conn, token) is not None
+        assert admin_auth.public_account(conn, 'owner')['tier'] == 'free'
+    finally:
+        conn.close()
+
+
 def test_first_registered_account_becomes_admin():
     conn = memory_store.connect(":memory:")
     account = admin_auth.register(conn, "Owner", "password123")

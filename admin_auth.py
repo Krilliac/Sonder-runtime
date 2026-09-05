@@ -317,6 +317,30 @@ def reauthenticate(conn: sqlite3.Connection, token: str, password: str) -> dict:
         conn.rollback()
 
 
+def revoke_session(conn: sqlite3.Connection, token: str) -> None:
+    """Durably revoke only this bearer; retries disclose no session existence.
+
+    Callers own an idle connection. A committed revocation remains effective
+    after response loss; dependent control admissions must check this session
+    live instead of treating a cached account row as authority.
+    """
+    if not isinstance(token, str) or not 1 <= len(token) <= 512:
+        raise ValueError('account session required')
+    if conn.in_transaction:
+        raise PermissionError('session revocation requires an idle owned connection')
+    init(conn)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            'UPDATE account_sessions SET revoked=1 WHERE token_hash=? AND revoked=0',
+            (_hash_token(token),),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def authenticate(conn: sqlite3.Connection, token: str) -> dict | None:
     init(conn)
     if not token:
