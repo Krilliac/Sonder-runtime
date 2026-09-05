@@ -193,8 +193,8 @@ class HostTerminalPublisher:
         original = self._bound.terminal_projection(identity)
         result = self.codec.capture(original)
         self._admit()
-        receipt = self._bound.commit_terminal_projection(
-            identity, identity.projection_revision, result)
+        receipt = self._bound._commit_terminal_projection_with_codec(
+            identity, identity.projection_revision, result, self.codec)
         # A storage error or lost response propagates. No success-shaped object
         # escapes before the authoritative immutable result receipt is returned.
         return PublishedHostTerminal(result.output, result.valid, result.verdict, receipt)
