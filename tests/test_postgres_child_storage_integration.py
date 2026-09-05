@@ -531,3 +531,70 @@ def test_owner_loss_during_commit_never_publishes_success(repository, monkeypatc
         ).fetchone()[0]
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("surface", ["repl", "legacy-mcp"])
+def test_toml_cli_uses_actual_postgres_graph(
+    storage_config, tmp_path, monkeypatch, surface
+):
+    import json
+    from types import SimpleNamespace
+    import server
+    from sonder_runtime import __main__ as cli
+    from sonder_runtime.bootstrap import app as composition, legacy_root
+    from sonder_runtime.platform import logging as runtime_logging
+    from sonder_runtime.interfaces.repl import repl
+    from sonder_runtime.adapters.persistence.postgres_continuation import (
+        PostgreSQLDurableContinuationRepository,
+    )
+
+    composition.reset_for_tests()
+    monkeypatch.setattr(runtime_logging, "configure_logging", lambda **kwargs: None)
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setattr(legacy_root, "_owned_application", None)
+    path = tmp_path / "explicit-postgres.toml"
+    path.write_text(
+        "[state]\nhome = "
+        + json.dumps(str(tmp_path))
+        + "\nworkspace_roots = ["
+        + json.dumps(str(tmp_path))
+        + "]\n[child_storage]\nbackend = 'postgresql'\nowner_id = 'lab-owner'\ndurability = 'sync-pair'\nrequired_standby = 'lab_standby'\nbinding_file = "
+        + json.dumps(storage_config.binding_file)
+        + "\n",
+        encoding="utf-8",
+    )
+    seen = []
+
+    def run(*args, **kwargs):
+        application = server._application()
+        assert application.config.child_storage.backend == "postgresql"
+        assert isinstance(
+            application.lineage_query()._children,
+            PostgreSQLDurableContinuationRepository,
+        )
+        assert str(path.resolve()) in application.private_source_paths
+        assert (
+            str(Path(storage_config.binding_file).resolve())
+            in application.private_source_paths
+        )
+        root = "cli-root-" + uuid.uuid4().hex
+        application.delegation_service()._provider.register_root(
+            root, SubagentBudget(max_steps=3)
+        )
+        assert application.lineage_query()._children.get(root).request.child_id == root
+        assert "SONDER_CHILD_STORAGE_BINDING_FILE" not in os.environ
+        seen.append(application)
+
+    arguments = SimpleNamespace(
+        config=str(path), secrets=None, set=None, json=True, native=False
+    )
+    if surface == "repl":
+        monkeypatch.setattr(repl, "run_jsonl", run)
+        assert cli.cmd_repl(arguments) == 0
+    else:
+        monkeypatch.setattr(server, "require_mcp_startup_safety", lambda: None)
+        monkeypatch.setattr(server, "run_mcp", run)
+        assert cli.cmd_mcp(arguments) == 0
+    assert len(seen) == 1
+    assert seen[0].lineage_query()._children._closed

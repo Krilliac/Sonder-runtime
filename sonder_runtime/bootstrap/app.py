@@ -222,6 +222,11 @@ class Application:
     close_compute: Callable[..., None] | None = None
     close_delegation: Callable[..., None] | None = None
 
+    @property
+    def private_source_paths(self) -> tuple[str, ...]:
+        """Exact host-loaded provenance, never inferred from diagnostic labels."""
+        return self.config.private_source_paths if self.config is not None else ()
+
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
         return tuple(
