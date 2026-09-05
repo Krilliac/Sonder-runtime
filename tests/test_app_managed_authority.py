@@ -528,3 +528,53 @@ def test_expired_admission_cannot_be_reactivated_by_mutating_token(managed):
                 selection.host_conversation_id,
                 connection=tx.conn,
             )
+
+
+def test_key_rotation_after_reference_read_refuses_before_fleet_mutation(
+    managed, monkeypatch
+):
+    from sonder_runtime.adapters.security.account_auth import account_auth
+
+    authority, selection, lanes, *_ = managed
+    host = authority.continuation_service(selection)
+    from contextlib import contextmanager
+
+    original_transaction = lanes.store.transaction
+    transactions = []
+
+    @contextmanager
+    def observed_transaction():
+        transactions.append("opened")
+        with original_transaction() as tx:
+            yield tx
+
+    monkeypatch.setattr(lanes.store, "transaction", observed_transaction)
+    original_read = account_auth.read_session_reference
+    reads = []
+
+    def read_then_rotate(conn, reference):
+        identity = original_read(conn, reference)
+        assert identity == selection.account
+        reads.append(identity)
+        monkeypatch.setenv(
+            "SONDER_AUTH_SECRET",
+            "rotated-after-real-read-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        )
+        return identity
+
+    monkeypatch.setattr(account_auth, "read_session_reference", read_then_rotate)
+    with lanes.store.connect() as conn:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM agent_lane_parent_grants"
+        ).fetchone()[0]
+    with pytest.raises(PermissionError):
+        host.open_parent(selection.context)
+    assert len(reads) == 1
+    assert transactions == []
+    assert not authority._admissions
+    with lanes.store.connect() as conn:
+        after = conn.execute(
+            "SELECT COUNT(*) FROM agent_lane_parent_grants"
+        ).fetchone()[0]
+    assert after == before
+    assert not host._minted_parents
