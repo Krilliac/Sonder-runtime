@@ -150,9 +150,7 @@ class Settings {
         final data = jsonDecode(raw) as Map<String, dynamic>;
         account = AccountSession(
             token: data['token'] as String, origin: data['origin'] as String);
-        if (!account.matches(p.getString(_kServer) ?? 'http://127.0.0.1:11435')) {
-          account = null;
-        }
+
       }
     } catch (_) {
       account = null;
@@ -183,6 +181,9 @@ class Settings {
 
   /// Writes bearer credentials only to the platform credential store.
   Future<void> save({CredentialStore? credentialStore}) async {
+    if (accountSession != null && !accountSession!.matches(serverUrl)) {
+      throw StateError('Handle the existing account session before switching servers');
+    }
     final p = await SharedPreferences.getInstance();
     final credentials =
         credentialStore ?? testingCredentialStore ?? _credentials;
@@ -215,8 +216,6 @@ class Settings {
     if (account != null && account.matches(serverUrl)) {
       await credentials.write(_kAccount,
           jsonEncode({'token': account.token, 'origin': account.origin}));
-    } else {
-      await credentials.delete(_kAccount);
     }
     await p.remove(_kAccount);
     await p.setString(_kServer, serverUrl.trim());

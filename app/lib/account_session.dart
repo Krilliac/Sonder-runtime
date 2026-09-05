@@ -26,5 +26,15 @@ String serverOrigin(String value) {
       uri.hasFragment) {
     throw ArgumentError('Invalid server origin');
   }
+  final host = uri.host;
+  final octets = host.split('.');
+  final ipv4Loopback = octets.length == 4 && octets.first == '127' &&
+      octets.every((part) {
+        final n = int.tryParse(part);
+        return n != null && n >= 0 && n <= 255 && n.toString() == part;
+      });
+  if (uri.scheme == 'http' && host != '::1' && !ipv4Loopback) {
+    throw ArgumentError('Account traffic requires HTTPS or numeric loopback');
+  }
   return uri.origin;
 }

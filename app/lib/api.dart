@@ -1485,6 +1485,7 @@ class SonderApi {
   }
 
   Future<String> login(String username, String password) async {
+    serverOrigin(baseUrl);
     late http.Response resp;
     try {
       resp = await _requestPost(
@@ -1508,6 +1509,7 @@ class SonderApi {
     String username,
     String password,
   ) async {
+    serverOrigin(baseUrl);
     late http.Response resp;
     try {
       resp = await _requestPost(
