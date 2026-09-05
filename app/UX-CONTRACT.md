@@ -33,7 +33,7 @@ AppControlClient owns its dedicated transport and memory-only bearer, bound to e
 
 Mutations are pessimistic, serialized and never automatically replayed. An uncertain mutation retains exact immutable command bytes for explicit reconciliation. Enrollment retains no password: the user re-enters it to check the same command. A committed enrollment without recoverable credential offers fresh explicit step-up, subject to server quota. Disconnecting explicitly forgets local authority and makes no server-revocation or outcome-resolution claim.
 
-Only one bounded bindings page is held at a time (50 requested, server may cap lower), with Next page and First page. Failed reads preserve the previous page with a warning; not-yet-loaded and empty are distinct. GET selection owns visible epoch/binding state; clearing retains its server epoch. Conflict requires refresh/review. Revoking names the exact conversation and confirms the consequence. Clear/revoke do not promise cancellation of independently granted children. This slice explicitly does not enable managed execution.
+Only one bounded bindings page is held at a time (50 requested, server may cap lower), with Next page and First page. Failed reads preserve the previous page with a warning; not-yet-loaded and empty are distinct. GET selection owns visible epoch/binding state; clearing retains its server epoch. Conflict requires refresh/review. Revoking names the exact conversation and confirms the consequence. Clear/revoke do not promise cancellation of independently granted children. Conversation selection alone does not enable managed execution.
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 |---|---|---|---|---|
@@ -43,3 +43,13 @@ Only one bounded bindings page is held at a time (50 requested, server may cap l
 | CRUD | AppControlClient and Material AlertDialog | backend app-control HTTP contract | bounded list / create / select / clear / revoke | app_control_test.dart and app_control_screen_test.dart |
 
 App-control previews are actual Flutter test renders with bundled Sans, Mono and Material icon fonts and disposable fixture data. They are not browser screenshots or evidence of live server enrollment.
+
+## Managed app work
+
+The selected server conversation opens a subordinate Managed work screen. It reuses AppControlClient's dedicated memory-only transport, Material form/buttons, WorkspaceNotice, reading width and theme. A task is prepared before a separate Run action. This first view fixes automatic route, eight steps, web/location off; it never adds caller roots, authority or tool grants. Server support is required and unavailable is an honest failure state.
+
+One task and original prompt are retained in memory per control connection. The prepare command is immutable; uncertain preparation only retries identical bytes. The exact selection ID, epoch and binding revision guard every later operation. Account/origin/control reset clears work data; reselecting cannot control the old task. No work or credential is persisted to chat, preferences, secure storage or URLs. A new control connection is required for another task in this bounded UI slice; disconnect does not cancel server work.
+
+Actual dispatch approval-pending shows the safe host approval call reference and an explicit Retry after host approval action. This app does not issue approvals. Unknown execution permits status only, even if a later response says prepared. No automatic mutation, dispatch, polling or recovery occurs. Durable verification-pending evidence is immutable status data, never authority to resume. Refresh preserves prior content on failure. Terminal means recorded host turn, not successful completion. The endpoint supplies no output; the UI never manufactures transcript content.
+
+Unprepared drafts prompt before leaving the screen. Prepared prompts remain read-only and retained when returning to server conversations. Material controls retain keyboard focus, and narrow layouts use natural scrolling. Verification: app_work_test.dart, app_work_screen_test.dart and app_control_http_test.dart cover exact retries, credentials/redirects, scope changes, unknown outcomes and actual wide/narrow test renders.
