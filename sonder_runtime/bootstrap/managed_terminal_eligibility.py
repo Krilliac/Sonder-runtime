@@ -50,7 +50,8 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
             )
             and not facts.certificate_id
             and facts.certificate_generation == 0
-            and bool(facts.certificate_code)
+            and facts.certificate_code
+            in {"ORIGINAL_PARENT_EVIDENCE_FAILED", "VERIFICATION_UNAVAILABLE"}
         )
         return ManagedTerminalEligibility(
             evidence,
@@ -94,12 +95,19 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
         return ManagedTerminalEligibility(
             evidence, False, "unknown", "CERTIFICATE_NOT_CURRENT", identity
         )
-    if (
+    original_certified = not (
         facts.certificate_id != verdict.certificate_id
         or facts.certificate_generation != verdict.generation
         or facts.certificate_code != verdict.code
         or facts.validation_passed is not True
-    ):
+    )
+    certified_after_return = (
+        facts.validation_passed is False
+        and facts.terminal_class == "UNVERIFIED"
+        and not facts.certificate_id
+        and facts.certificate_generation == 0
+    )
+    if not original_certified and not certified_after_return:
         return ManagedTerminalEligibility(
             evidence, False, "unknown", "FINAL_CERTIFICATE_MISMATCH", identity
         )
@@ -117,5 +125,11 @@ def terminal_eligibility(session, expected_turn, *, verifier_factory):
     if session.final_evidence(expected_turn) != evidence:
         raise PermissionError("current outward final evidence changed")
     return ManagedTerminalEligibility(
-        evidence, True, "certified", "CERTIFIED", identity, None, published
+        evidence,
+        True,
+        "certified" if original_certified else "certified_after_return",
+        "CERTIFIED" if original_certified else "RECOVERED_CERTIFIED",
+        identity,
+        None,
+        published,
     )
