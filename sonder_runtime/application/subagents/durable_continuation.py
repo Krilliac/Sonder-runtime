@@ -9,10 +9,13 @@ without trusting the old process' memory.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from threading import Event, Lock, Thread
 from typing import Protocol
 from uuid import uuid4
+from ..ports.continuation_mutations import (
+    ContinuationStorageFailure, ContinuationCommitAmbiguous,
+    PreparedContinuationMutation, ContinuationMutationOutcome,
+)
 
 from ..context import OperationContext
 from ..ports.subagents import (
@@ -24,40 +27,18 @@ from .continuable import ContinuableCheckpoint
 from sonder_runtime.domain.agents.roles import AgentRole, role_budget
 
 
-@dataclass(frozen=True, slots=True)
-class ChildSessionLineage:
-    """Immutable parent chain captured when the child is created."""
-
-    parent_id: str
-    ancestors: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not self.parent_id.strip() or any(not item.strip() for item in self.ancestors):
-            raise InvalidSubagentRequest("child lineage ids must be non-empty")
-        if self.parent_id in self.ancestors:
-            raise InvalidSubagentRequest("child lineage contains a cycle")
-
-    @property
-    def chain(self) -> tuple[str, ...]:
-        return self.ancestors + (self.parent_id,)
-
-
-@dataclass(frozen=True, slots=True)
-class DurableChildSession:
-    request: SubagentRequest
-    lineage: ChildSessionLineage
-    status: SubagentStatus = SubagentStatus.CREATED
-    checkpoint: ContinuableCheckpoint | None = None
-    revision: int = 0
-    usage: SubagentUsage = SubagentUsage()
-    result: SubagentResult | None = None
-    recovery_required: bool = False
-    cancellation_requested: bool = False
-    cancellation_reason: str | None = None
+from ..ports.continuation_records import ChildSessionLineage, DurableChildSession
 
 
 class DurableContinuationRepository(Protocol):
     """Transactional persistence port for child sessions."""
+
+    def mutate(self, prepared: PreparedContinuationMutation) -> ContinuationMutationOutcome: ...
+    def reconcile(self, prepared: PreparedContinuationMutation) -> ContinuationMutationOutcome | None: ...
+    def read_mutation(self, operation_id: str) -> PreparedContinuationMutation | None: ...
+    def latest_mutation(self, child_id: str) -> PreparedContinuationMutation | None: ...
+    def unresolved_mutation(self, child_id: str) -> PreparedContinuationMutation | None: ...
+    def mutation_ids(self, child_id: str, *, after: int = 0, limit: int = 100) -> tuple[tuple[tuple[int, str], ...], bool]: ...
 
     def create(self, session: DurableChildSession) -> DurableChildSession: ...
     def get(self, child_id: str) -> DurableChildSession | None: ...
@@ -78,8 +59,10 @@ Runner = Callable[[Mapping[str, object], Callable[[Mapping[str, object], str | N
 
 
 class DurableCancellation:
-    def __init__(self, repository: DurableContinuationRepository, child_id: str) -> None:
+    def __init__(self, repository: DurableContinuationRepository, child_id: str,
+                 cancel_request: Callable[[str], bool] | None = None) -> None:
         self._repository, self._child_id = repository, child_id
+        self._cancel_request = cancel_request
         self._event = Event()
 
     @property
@@ -95,9 +78,10 @@ class DurableCancellation:
         return (record.cancellation_reason if record else None) or "cancellation requested"
 
     def cancel(self, reason: str) -> bool:
-        changed = self._repository.request_cancel(self._child_id, reason=reason)
         self._event.set()
-        return changed
+        if self._cancel_request is not None:
+            return self._cancel_request(reason)
+        return self._repository.request_cancel(self._child_id, reason=reason)
 
     def wait(self, timeout: float | None = None) -> bool:
         return self._event.wait(timeout) or self.cancelled
@@ -112,6 +96,28 @@ class DurableContinuationService:
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
         self._admitted_roots: dict[str, int] = {}
+        self._storage_failures: dict[str, ContinuationStorageFailure] = {}
+
+    def _write(self, method, *args, **kwargs):
+        value = args[0]
+        child_id = (value.request.child_id if isinstance(value, DurableChildSession)
+                    else value.child_id if isinstance(value, ContinuableCheckpoint) else value)
+        try:
+            self._require_storage_settled(child_id)
+            return getattr(self._repository, method)(*args, **kwargs)
+        except ContinuationStorageFailure as error:
+            self._storage_failures[child_id] = error
+            control = self._controls.get(child_id)
+            if control is not None:
+                control._event.set()
+            raise
+
+    def _require_storage_settled(self, child_id):
+        if child_id in self._storage_failures:
+            raise self._storage_failures[child_id]
+        pending = self._repository.unresolved_mutation(child_id)
+        if pending is not None:
+            raise ContinuationCommitAmbiguous(pending)
 
     def spawn(self, request: SubagentRequest, context: OperationContext, runner: Runner) -> SubagentHandle:
         child_id = request.child_id or f"child-{uuid4().hex}"
@@ -127,7 +133,7 @@ class DurableContinuationService:
         )
         self._admit(request, lineage, parent)
         try:
-            self._repository.create(DurableChildSession(request, lineage))
+            self._write("create", DurableChildSession(request, lineage))
         except Exception:
             self._release(lineage.chain[0])
             raise
@@ -153,7 +159,7 @@ class DurableContinuationService:
             child_id=root_id,
             metadata=(("provider_root", "true"),),
         )
-        return self._repository.create(
+        return self._write("create",
             DurableChildSession(request, ChildSessionLineage(root_id))
         )
 
@@ -218,6 +224,7 @@ class DurableContinuationService:
 
     def _start(self, child_id: str, context: OperationContext, runner: Runner, *,
                resuming: bool = False) -> SubagentHandle:
+        self._require_storage_settled(child_id)
         record = self._require(child_id)
         if resuming and (
             not record.recovery_required
@@ -227,9 +234,13 @@ class DurableContinuationService:
         if record.cancellation_requested:
             raise InvalidSubagentRequest("cancelled child session cannot be started")
         if resuming:
-            updated = self._repository.claim_resume(child_id, expected_revision=record.revision)
+            try:
+                updated = self._write("claim_resume", child_id, expected_revision=record.revision)
+            except ContinuationStorageFailure as error:
+                self._storage_failures[child_id] = error
+                raise
         else:
-            updated = self._repository.update(
+            updated = self._write("update",
                 child_id, status=SubagentStatus.RUNNING,
                 expected_revision=record.revision, recovery_required=False,
             )
@@ -240,15 +251,27 @@ class DurableContinuationService:
             or updated.result is not None
         ):
             raise RuntimeError("child session state changed before launch")
-        control = DurableCancellation(self._repository, child_id)
+        control = DurableCancellation(
+            self._repository, child_id,
+            lambda reason: self._write("request_cancel", child_id, reason=reason),
+        )
         with self._lock:
             self._controls[child_id] = control
-            thread = Thread(target=self._run, args=(child_id, context, runner, control), daemon=True)
+            thread = Thread(target=self._run, args=(child_id, context, runner, control, record.lineage.chain[0]), daemon=True)
             self._threads[child_id] = thread
         thread.start()
         return _Handle(self, child_id, record.request.parent_id)
 
-    def _run(self, child_id: str, context: OperationContext, runner: Runner, control: DurableCancellation) -> None:
+    def _run(self, child_id, context, runner, control, root_id):
+        try:
+            self._run_body(child_id, context, runner, control)
+        except ContinuationStorageFailure as error:
+            self._storage_failures[child_id] = error
+            control._event.set()
+        finally:
+            self._release(root_id)
+
+    def _run_body(self, child_id: str, context: OperationContext, runner: Runner, control: DurableCancellation) -> None:
         record = self._require(child_id)
         checkpoint = record.checkpoint
         expected = checkpoint.sequence if checkpoint else -1
@@ -256,8 +279,15 @@ class DurableContinuationService:
 
         def save(next_state: Mapping[str, object], cursor: str | None = None) -> ContinuableCheckpoint:
             nonlocal expected, state
+            if child_id in self._storage_failures:
+                raise self._storage_failures[child_id]
             candidate = ContinuableCheckpoint(child_id, expected + 1, next_state, cursor)
-            saved = self._repository.save_checkpoint(candidate, expected_sequence=expected)
+            try:
+                saved = self._write("save_checkpoint", candidate, expected_sequence=expected)
+            except ContinuationStorageFailure as error:
+                self._storage_failures[child_id] = error
+                control._event.set()
+                raise
             if saved is None:
                 raise RuntimeError("checkpoint compare-and-set conflict")
             fresh = self._require(child_id)
@@ -270,53 +300,53 @@ class DurableContinuationService:
             if control.cancelled or context.cancellation.cancelled:
                 raise _Cancelled(control.reason)
             output = runner(state, save, control)
+            if child_id in self._storage_failures:
+                raise self._storage_failures[child_id]
             if control.cancelled or context.cancellation.cancelled:
                 raise _Cancelled(control.reason)
             usage = SubagentUsage(steps=max(expected + 1, 0))
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.SUCCEEDED, output=output, usage=usage)
-            self._repository.update(child_id, status=result.status, usage=usage, result=result, recovery_required=False)
-            self._release(record.lineage.chain[0])
+            self._write("update", child_id, status=result.status, usage=usage, result=result, recovery_required=False)
+        except ContinuationStorageFailure as error:
+            self._storage_failures[child_id] = error
+            control._event.set()
         except _Cancelled as exc:
             usage = SubagentUsage(steps=max(expected + 1, 0))
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.CANCELLED,
                                     error=SubagentError("cancelled", str(exc)), usage=usage)
-            self._repository.update(child_id, status=result.status, usage=usage, result=result)
-            self._release(record.lineage.chain[0])
+            self._write("update", child_id, status=result.status, usage=usage, result=result)
         except TimeoutError as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.TIMED_OUT,
                                     error=SubagentError("deadline_exceeded", str(exc), True),
                                     usage=SubagentUsage(steps=max(expected + 1, 0)))
-            self._repository.update(child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
-            self._release(record.lineage.chain[0])
+            self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
         except Exception as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.FAILED,
                                     error=SubagentError("runner_failed", str(exc), True),
                                     usage=SubagentUsage(steps=max(expected + 1, 0)))
-            self._repository.update(child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
-            self._release(record.lineage.chain[0])
+            self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
 
     def resume(self, child_id: str, context: OperationContext, runner: Runner) -> SubagentHandle:
         return self._start(child_id, context, runner, resuming=True)
 
     def recover_after_restart(self) -> tuple[str, ...]:
+        if self._storage_failures:
+            raise next(iter(self._storage_failures.values()))
         recovered: list[str] = []
         for record in self._repository.list_active():
             with self._lock:
                 if record.request.child_id in self._threads and self._threads[record.request.child_id].is_alive():
                     continue
             if record.status is SubagentStatus.RUNNING:
-                result = SubagentResult(record.request.child_id, record.request.parent_id, SubagentStatus.FAILED,
-                                        error=SubagentError("interrupted", "worker restart", True),
-                                        usage=record.usage)
-                if self._repository.update(record.request.child_id, status=SubagentStatus.FAILED,
-                                           expected_revision=record.revision, result=result,
-                                           recovery_required=True):
-                    recovered.append(record.request.child_id)
+                latest = getattr(self._repository, 'latest_mutation', lambda _: None)(record.request.child_id)
+                if latest is not None:
+                    raise ContinuationCommitAmbiguous(latest)
+                raise ContinuationStorageFailure('running child requires proved owner cleanup and receipt reconciliation')
         return tuple(recovered)
 
     def cancel(self, child_id: str, *, reason: str = "cancellation requested") -> bool:
         self._require(child_id)
-        return self._repository.request_cancel(child_id, reason=reason)
+        return self._write("request_cancel", child_id, reason=reason)
 
     def snapshot(self, child_id: str) -> SubagentSnapshot:
         record = self._require(child_id)
@@ -328,6 +358,7 @@ class DurableContinuationService:
             thread = self._threads.get(child_id)
         if thread is not None:
             thread.join(timeout)
+        self._require_storage_settled(child_id)
         result = self._require(child_id).result
         if result is None:
             raise TimeoutError("child session has not reached a terminal state")
@@ -335,7 +366,11 @@ class DurableContinuationService:
 
     def close(self, timeout: float | None = None) -> bool:
         for child_id in tuple(self._controls):
-            self.cancel(child_id, reason="service closing")
+            self._controls[child_id]._event.set()
+            try:
+                self.cancel(child_id, reason="service closing")
+            except ContinuationStorageFailure:
+                pass  # Join owned workers, retaining the unresolved durable state.
         with self._lock:
             threads = tuple(self._threads.values())
         for thread in threads:
