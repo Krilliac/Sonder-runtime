@@ -122,6 +122,12 @@ class SQLiteRuntimeOwnerJournal:
     def prepare(self, command):
         if type(command) is not PreparedOwnerOperation:
             raise OwnerRefused("immutable prepared owner command required")
+        command = PreparedOwnerOperation(
+            command.operation_id,
+            command.action,
+            command.expected_revision,
+            command.payload,
+        )
         with self._transaction(command) as connection:
             owner = self._owner(connection)
             prior = self._existing(connection, command)
@@ -162,6 +168,14 @@ class SQLiteRuntimeOwnerJournal:
             return None
 
     def complete(self, command, result, state):
+        if type(command) is not PreparedOwnerOperation:
+            raise OwnerRefused("immutable prepared owner command required")
+        command = PreparedOwnerOperation(
+            command.operation_id,
+            command.action,
+            command.expected_revision,
+            command.payload,
+        )
         encoded = canonical(result)
         if type(result) is not dict or len(encoded) > 32768:
             raise OwnerRefused("owner result exceeds bounds")
@@ -195,15 +209,19 @@ class SQLiteRuntimeOwnerJournal:
                     "operation_id": command.operation_id,
                     "revision": owner[1] + 1,
                     "state": state,
-                    "result": result,
+                    "result": json.loads(encoded),
                 }
             )
-            connection.execute(
-                "UPDATE operation SET result=? WHERE id=?",
-                (receipt, command.operation_id),
-            )
-            connection.execute(
-                "UPDATE owner SET revision=revision+1,state=?,pending=NULL,selection=? WHERE id=1",
-                (state, selection),
-            )
+            changed = connection.execute(
+                "UPDATE operation SET result=? WHERE id=? AND digest=? AND result IS NULL",
+                (receipt, command.operation_id, command.digest),
+            ).rowcount
+            if changed != 1:
+                raise OwnerRefused("exact owner receipt was not retained")
+            changed = connection.execute(
+                "UPDATE owner SET revision=revision+1,state=?,pending=NULL,selection=? WHERE id=1 AND revision=? AND pending=?",
+                (state, selection, owner[1], command.operation_id),
+            ).rowcount
+            if changed != 1:
+                raise OwnerRefused("owner state advancement conflicted")
             return json.loads(receipt)
