@@ -16,6 +16,7 @@ from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedge
         (None, "NORMAL", "", False),
         (True, "NORMAL", "", False),
         (True, "UNVERIFIED", "ORIGINAL_PARENT_EVIDENCE_FAILED", True),
+        (True, "UNVERIFIED", "UNKNOWN_FUTURE_CODE", False),
     ],
 )
 def test_no_pending_requires_explicit_sealed_delegation_fact(
