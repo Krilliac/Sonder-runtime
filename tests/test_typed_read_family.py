@@ -16,7 +16,9 @@ a legacy forward, which the gateway records as ``permission:surface``.
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
+import itertools
 import json
 import pathlib
 import time
@@ -164,6 +166,62 @@ def test_both_surfaces_run_one_pipeline_and_leave_one_receipt_each(
         assert record["policy_match"].startswith("resource:read-only:")
         assert "permission:" in record["policy_match"]
         assert record["model"] == ""
+    _audit(tmp_path).verify()
+
+
+def test_text_search_receipts_hash_the_exact_adapter_timing(
+    application, tmp_path, monkeypatch,
+):
+    """Timing is evidence in the exact result, rather than parity noise."""
+    adapter_clock = Mock(wraps=time)
+    monkeypatch.setattr(workbench, "time", adapter_clock)
+
+    adapter_clock.monotonic.side_effect = itertools.chain(
+        (1000.0,), itertools.repeat(1000.125),
+    )
+    legacy = server.text_search(query="needle", root=".")
+    adapter_clock.monotonic.side_effect = itertools.chain(
+        (2000.0,), itertools.repeat(2000.875),
+    )
+    native = _native(application, "text_search", {
+        "query": "needle", "root": ".", "glob": "*", "regex": False,
+        "case_sensitive": False, "max_results": 100, "max_entries": 20000,
+        "timeout_seconds": 10.0, "include_hidden": False,
+        "include_ignored": False,
+    })
+
+    assert not legacy.startswith("ERROR"), legacy
+    assert native["isError"] is False, native
+    records = _audit(tmp_path).read()
+    assert len(records) == 2
+    legacy_receipt, native_receipt = records
+    assert (legacy_receipt["source"], native_receipt["source"]) == ("repl", "mcp")
+    legacy_payload = json.loads(legacy_receipt["output"])
+    native_payload = json.loads(native_receipt["output"])
+    assert legacy_payload["elapsed_ms"] == 125
+    assert native_payload["elapsed_ms"] == 875
+
+    legacy_without_timing = dict(legacy_payload)
+    native_without_timing = dict(native_payload)
+    legacy_without_timing.pop("elapsed_ms")
+    native_without_timing.pop("elapsed_ms")
+    assert legacy_without_timing == native_without_timing
+
+    def exact_result_digest(value):
+        encoded = json.dumps(
+            value, sort_keys=True, default=str, separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    assert legacy_receipt["result_digest"] == exact_result_digest(
+        legacy_receipt["output"],
+    )
+    assert native_receipt["result_digest"] == exact_result_digest(
+        native_receipt["output"],
+    )
+    assert legacy_receipt["result_digest"] != native_receipt["result_digest"]
+    assert native["evidence"]["result_digest"] == native_receipt["result_digest"]
+    assert native_receipt["previous_audit_digest"] == legacy_receipt["audit_digest"]
     _audit(tmp_path).verify()
 
 
