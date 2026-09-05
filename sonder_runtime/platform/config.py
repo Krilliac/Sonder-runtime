@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform.artifact_transfer_config import ArtifactTransferConfig, artifact_transfer_errors
+from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
 from sonder_runtime.platform.child_storage_config import (
     ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
 )
@@ -257,6 +258,7 @@ class SonderConfig:
     private_source_paths: tuple[str, ...] = field(default=(), repr=False)
     artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
+    app_control: AppControlConfig = field(default_factory=AppControlConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -322,6 +324,11 @@ class SonderConfig:
                 }
                 for job in self.compute.jobs
             ],
+        }
+        out['app_control'] = {
+            item.name: ('<configured>' if self.app_control.catalog_file else '<unset>')
+            if item.name == 'catalog_file' else getattr(self.app_control, item.name)
+            for item in fields(self.app_control)
         }
         out["secrets"] = self.secrets.as_redacted_dict()
         out['child_storage'] = {
@@ -395,6 +402,7 @@ _SECTION_TYPES = {
     "deployment": DeploymentConfig,
     "artifact_transfer": ArtifactTransferConfig,
     "child_storage": ChildStorageConfig,
+    "app_control": AppControlConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -852,6 +860,7 @@ def validate_deployment(config: SonderConfig) -> None:
 
 def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(child_storage_errors(config))
+    errors.extend(app_control_errors(config))
     errors.extend(artifact_transfer_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
@@ -1341,6 +1350,8 @@ def load_config(
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
+    if config.app_control.catalog_file:
+        private_source_paths.append(str(Path(config.app_control.catalog_file).resolve()))
     if config.child_storage.binding_file:
         private_source_paths.append(str(Path(config.child_storage.binding_file).resolve()))
     return replace(config, sources=tuple(sources), private_source_paths=tuple(dict.fromkeys(private_source_paths)))
