@@ -21,3 +21,18 @@ does not revoke arbitrary subprocess access by the same operating-system user.
 
 REPL persisted session selection can provide the host binding. App chat labels,
 MCP connection identifiers, model arguments, and old parent tokens cannot.
+
+`HostTerminalPublisher` composes the original projection codec, exact persisted
+prepared verification, current verifier validation, and the bound continuation's
+terminal-result CAS. It checks the complete production certificate shape and
+never generates replacement answer text. Its published value is constructed
+only after the immutable result receipt returns; a failed or lost commit response
+propagates without a success-shaped value. Retrying the same current certificate
+returns the original receipt without running another check. A fresh attachment
+uses a new publisher and reloads the original evidence through the scoped store.
+
+The publisher's live admission callback must be the host composition guard.
+Install its result codec only on the corresponding host-owned continuation
+service. A stored historical receipt is not fresh authority: publication still
+requires a current attachment and valid current workspace certificate. Original
+parent failures remain failures even when all delegated checks passed.

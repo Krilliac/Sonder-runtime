@@ -5,8 +5,13 @@ first obtain a BoundContinuation through the authenticated host selection flow.
 Inventory callbacks belong to application composition, never model arguments.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
+import math
 from pathlib import Path
+
+from sonder_runtime.adapters.host_terminal_result import TerminalResultCodec
+from sonder_runtime.application.ports.lane_continuation import TerminalProjectionReceipt
+from sonder_runtime.application.ports.delegated_verification import VerificationVerdict
 
 
 class HostContinuationAdmission:
@@ -85,3 +90,90 @@ transactional effect admission and anchored persistence adapters.
         """Run one host-selected operation with the checked immutable context."""
         self.require_current()
         return operation(self._context, *args, **kwargs)
+
+
+@dataclass(frozen=True)
+class PublishedHostTerminal:
+    output: str
+    valid: bool
+    verdict: VerificationVerdict
+    receipt: TerminalProjectionReceipt
+
+
+class HostTerminalPublisher:
+    """Reload original evidence and publish only after the backend result CAS.
+
+    One instance belongs to one current private attachment. Reattachment creates
+    a new publisher; it never reconstructs authority from a persisted principal.
+    Composition installs ``codec`` as that continuation service's result codec.
+    This component does not approve work, run checks, or generate replacement text.
+    """
+
+    def __init__(self, *, bound, verifier, original_codec, require_current):
+        if not callable(require_current):
+            raise ValueError('live host admission required')
+        self._bound = bound
+        self._verifier = verifier
+        self._original = original_codec
+        self._admit = require_current
+        self.codec = TerminalResultCodec(original_codec=original_codec,
+            load_original=self._load, prepared_verification=self._prepared,
+            current_verdict=self._verdict, certificate=self._certificate)
+
+    def _identity(self, binding=None):
+        self._admit()
+        self._bound.require_current()
+        identity = self._bound.pending_verification()
+        if identity is None:
+            raise PermissionError('original terminal verification unavailable')
+        if binding is not None:
+            original = self._bound.terminal_projection(identity)
+            if self._original.binding(original) != binding:
+                raise PermissionError('terminal publication binding mismatch')
+        return identity
+
+    def _load(self, binding):
+        return self._bound.terminal_projection(self._identity(binding))
+
+    def _prepared(self, binding):
+        return self._bound.prepared_verification(self._identity(binding))
+
+    def _verdict(self, binding):
+        identity = self._identity(binding)
+        return self._bound.verification_view(self._verifier,
+            identity.verification_id, action='validate')
+
+    def _certificate(self, binding):
+        identity = self._identity(binding)
+        view = self._bound.verification_view(self._verifier,
+            identity.verification_id, action='inspect')
+        certificate = view.get('certificate')
+        expected_keys = {'id', 'bundle', 'approval_id', 'before_manifest_digest',
+            'after_manifest_digest', 'manifest_policy', 'cleanup_proofs', 'created_at'}
+        if not isinstance(certificate, dict) or set(certificate) != expected_keys:
+            raise PermissionError('complete verifier certificate required')
+        manifests = (certificate['before_manifest_digest'], certificate['after_manifest_digest'])
+        if (any(not isinstance(d, str) or len(d) != 64
+                or any(c not in '0123456789abcdef' for c in d) for d in manifests)
+                or manifests[0] != manifests[1]
+                or not isinstance(certificate['approval_id'], str)
+                or not 1 <= len(certificate['approval_id']) <= 256
+                or not isinstance(certificate['manifest_policy'], dict)
+                or not isinstance(certificate['cleanup_proofs'], list)
+                or len(certificate['cleanup_proofs']) != len(self._prepared(binding).checks)
+                or type(certificate['created_at']) not in (int, float)
+                or not math.isfinite(certificate['created_at'])
+                or certificate['created_at'] <= 0):
+            raise PermissionError('invalid verifier certificate structure')
+        return certificate
+
+    def publish(self):
+        identity = self._identity()
+        original = self._bound.terminal_projection(identity)
+        result = self.codec.capture(original)
+        self._admit()
+        receipt = self._bound.commit_terminal_projection(
+            identity, identity.projection_revision, result)
+        # A storage error or lost response propagates. No success-shaped object
+        # escapes before the authoritative immutable result receipt is returned.
+        return PublishedHostTerminal(result.output, result.valid, result.verdict, receipt)

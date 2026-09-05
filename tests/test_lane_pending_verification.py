@@ -8,7 +8,7 @@ from tests.test_lane_continuation import make_host, granted
 from tests.test_lane_continuation_projection import Codec, HostProjection
 
 
-def setup_pending(lanes):
+def setup_pending(lanes, *, original_factory=None):
     from sonder_runtime.application.agents.delegated_verification import (
         DelegatedVerificationService,
     )
@@ -65,7 +65,7 @@ def setup_pending(lanes):
         lanes[0], gateway, lambda job: proofs.get(job), WorkspaceSnapshotter()
     )
     prepared = bound.prepare_verification(verifier, command_id="verify")
-    codec = Codec()
+    codec = Codec() if original_factory is None else original_factory[0]
     host.projection_codec = codec
     binding = ProjectionBinding(
         bound.continuation_id,
@@ -79,7 +79,8 @@ def setup_pending(lanes):
         prepared.roots,
         1,
     )
-    projection = HostProjection(binding, True, "VALIDATION_FAILED", codec.issuer)
+    projection = (HostProjection(binding, True, "VALIDATION_FAILED", codec.issuer)
+                  if original_factory is None else original_factory[1](binding))
     identity = bound.link_pending_verification(verifier, prepared, projection)
     return host, bound, context, verifier, prepared, identity, gateway
 
