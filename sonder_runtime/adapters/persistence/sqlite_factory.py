@@ -107,6 +107,15 @@ def close_cached(cache_key: str) -> None:
         setattr(_thread_local, path_attr, None)
 
 
+def close_current_thread() -> None:
+    """Close actual cached handles without suppressing missing cleanup proof."""
+    for name, connection in tuple(vars(_thread_local).items()):
+        if name.startswith("_sqlite_factory_") and name.endswith("_conn") and connection is not None:
+            connection.close()
+            setattr(_thread_local, name, None)
+            setattr(_thread_local, name[:-5] + "_path", None)
+
+
 __all__ = [
     "cached_connection",
     "close_cached",

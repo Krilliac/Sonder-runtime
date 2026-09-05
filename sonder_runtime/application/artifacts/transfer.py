@@ -1,5 +1,7 @@
 """Scoped immutable byte transfer. No network identity is inferred from a body."""
 
+from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
@@ -102,7 +104,7 @@ class ArtifactRange:
 class ArtifactTransferService:
     def __init__(self, store, *, authorizer=None, limits=TransferLimits()):
         self.store, self.authorizer, self.limits = store, authorizer, limits
-        self._workers = ThreadPoolExecutor(
+        self._workers = owned_runtime_pool(
             max_workers=1, thread_name_prefix="artifact-verify"
         )
         self._slots = _VERIFY_SLOTS

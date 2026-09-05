@@ -6,6 +6,8 @@ Distributed takeover is deliberately absent from this local coordinator.
 """
 
 from __future__ import annotations
+
+from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, contextmanager
 from dataclasses import replace
@@ -187,7 +189,7 @@ class AgentLaneService:
         self.owner = "lane-owner-" + uuid.uuid4().hex
         self._lease = self.store.acquire_owner(self.owner)
         self._pool = (
-            ThreadPoolExecutor(max_workers=4, thread_name_prefix="sonder-lane")
+            owned_runtime_pool(max_workers=4, thread_name_prefix="sonder-lane")
             if auto_start
             else None
         )

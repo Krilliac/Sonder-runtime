@@ -20,6 +20,8 @@ adopts the production behavior on first use.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import os
 import socket
 import threading
@@ -613,7 +615,7 @@ class RuntimeLifecycle:
                 self.probe_ollama_once()
 
         self.probe_ollama_once()
-        self._probe_thread = threading.Thread(
+        self._probe_thread = owned_runtime_thread(
             target=probe_loop, daemon=True, name="sonder-ollama-probe"
         )
         self._probe_thread.start()

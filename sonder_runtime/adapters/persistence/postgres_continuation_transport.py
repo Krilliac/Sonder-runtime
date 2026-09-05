@@ -1,5 +1,7 @@
 """Optional PostgreSQL driver ownership and externally bounded transactions."""
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 from threading import BoundedSemaphore, Event, Lock, Thread, local
 import time
 
@@ -214,7 +216,7 @@ class PostgresContinuationTransport:
             if prepared is not None:
                 self._inflight[prepared.operation_id] = done
         try:
-            Thread(target=work, name="child-postgres-operation", daemon=True).start()
+            owned_runtime_thread(target=work, name="child-postgres-operation", daemon=True).start()
         except Exception:
             with self._lock:
                 self._active.discard(done)

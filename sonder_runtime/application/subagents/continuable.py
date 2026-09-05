@@ -7,6 +7,8 @@ same repository protocol with SQLite or another transactional store.
 """
 from __future__ import annotations
 
+from sonder_runtime.application.ports.runtime_threads import Thread as owned_runtime_thread
+
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -172,7 +174,7 @@ class ContinuableSubagentService:
 
     def _launch(self, record: ContinuableRecord, context: OperationContext, runner: Runner, control: _Cancellation) -> None:
         self._repository.update(record.request.child_id, status=SubagentStatus.RUNNING, recovery_required=False)
-        thread = Thread(target=self._run, args=(record.request.child_id, context, runner, control), daemon=True)
+        thread = owned_runtime_thread(target=self._run, args=(record.request.child_id, context, runner, control), daemon=True)
         with self._lock:
             self._threads[record.request.child_id] = thread
         thread.start()

@@ -101,6 +101,15 @@ def _row_dict(row) -> dict:
     return d
 
 
+def close_current_thread():
+    """Host cleanup on the cache's actual owning thread only."""
+    conn = getattr(_LOCAL, "comp_conn", None)
+    if conn is not None:
+        conn.close()
+    _LOCAL.comp_conn = None
+    _LOCAL.comp_path = None
+
+
 def bind(
     source_type: str,
     source_id: str,

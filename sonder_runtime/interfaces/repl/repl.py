@@ -6,6 +6,8 @@ trace/strict mode, teach outcomes back, and surface stats/lessons. The legacy
 runtime is an explicit composition dependency; this interface never discovers
 it at import time.
 """
+
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 import json
 import getpass
 import inspect
@@ -1483,7 +1485,7 @@ class _WorkingIndicator:
         self.label = str(label or "Sonder")
         self.stream = stream or sys.stdout
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = owned_runtime_thread(target=self._run, daemon=True)
 
     def start(self):
         self._thread.start()
