@@ -190,3 +190,36 @@ def test_managed_factory_and_controller_scope_restore_after_close_failure(setup)
     assert module.current() is None
     assert module._DEPTH.get() == 0
     assert module.StandaloneLaneController(lambda: app)._managed_factory is None
+
+
+@pytest.mark.parametrize("kind", ["controller", "loop"])
+def test_nested_managed_controller_refuses_before_any_application_or_legacy_authority(
+    setup, kind
+):
+    session, app = setup
+    calls = []
+
+    def application():
+        calls.append("application")
+        return app
+
+    with module.managed_controller_factory_scope(
+        lambda controller, application: session
+    ):
+        scope = (
+            module.controller_scope(application)
+            if kind == "controller"
+            else module.model_loop_scope()
+        )
+        with scope:
+            nested = module.StandaloneLaneController(application)
+            for invoke in (
+                lambda: nested.prepare_command({"action": "list", "payload": {}}),
+                lambda: nested.execute({"action": "list", "payload": {}}),
+            ):
+                with pytest.raises(PermissionError, match="nested"):
+                    invoke()
+            with module.controller_scope(application) as absent:
+                assert absent is None
+    assert calls == []
+    assert session.calls == []

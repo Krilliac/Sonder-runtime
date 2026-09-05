@@ -118,6 +118,9 @@ class StandaloneLaneController:
         self._verification_verdict = None
         self._host_ledger = self._host_terminal = None
         self._host_evidence_error = False
+        self._managed_nested_forbidden = _MANAGED_FACTORY.get() is not None and bool(
+            _DEPTH.get() or _LOOP_DEPTH.get()
+        )
         self._managed_factory = (
             _MANAGED_FACTORY.get() if not (_DEPTH.get() or _LOOP_DEPTH.get()) else None
         )
@@ -276,6 +279,8 @@ class StandaloneLaneController:
         return not (self._closed or self._cancelled or self._restricted)
 
     def _initialize(self):
+        if self._managed_nested_forbidden:
+            raise PermissionError("nested managed controller authority is forbidden")
         if not self.available:
             raise PermissionError("standalone lane authority is not active")
         if self._managed_initialization_failed:
@@ -529,7 +534,9 @@ class StandaloneLaneController:
 def controller_scope(application_factory, *, project=""):
     # A recursively invoked agent must not inherit or mint another controller.
     controller = (
-        None if _DEPTH.get() else StandaloneLaneController(application_factory, project)
+        None
+        if (_DEPTH.get() or _LOOP_DEPTH.get())
+        else StandaloneLaneController(application_factory, project)
     )
     depth_token = _DEPTH.set(_DEPTH.get() + 1)
     token = _CURRENT.set(controller)
