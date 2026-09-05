@@ -45,3 +45,18 @@ Acceptance covers two actual `/work` commands through the console and a loaded
 Application, plus two independently certified turns over real contained test
 processes in a disposable Git repository. Model responses are deterministic
 scripts; no live-model or remote-execution success is claimed.
+# Exact terminal history
+
+Each repeated managed turn retains two distinct records. The original host
+projection stays immutable and remains the input to delegated verification.
+The final receipt binds that original digest to exact outward output, including
+host validation warnings, escalation text, end reports and activity reports,
+plus typed mutation/validation and certificate observations. `UNVERIFIED` is
+an explicit failure class and cannot become clean through persistence.
+
+Controller close fences the turn before outer report formatting completes.
+The private conversation boundary persists the final receipt and closes the
+durable turn before returning the completed text. Missing, corrupt or failed
+final persistence prevents advancement; it does not discard original evidence
+or rerun a model. Retained history keeps both records. Older turns without a
+final receipt are not silently upgraded or accepted for advancement.

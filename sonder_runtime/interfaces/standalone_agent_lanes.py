@@ -190,6 +190,23 @@ class StandaloneLaneController:
             capture(candidate)
         return True
 
+    def capture_host_final(self, output, facts):
+        """Record the actual outward result after all host finalization."""
+        self._guard_host_evidence()
+        if self._escalation is not None and not self._escalation.finalizing:
+            return
+        capture = getattr(self._managed_session, 'capture_final', None)
+        if capture is not None:
+            capture(output, facts)
+
+    def stage_host_final(self, output, facts):
+        self._guard_host_evidence()
+        if self._escalation is not None and not self._escalation.finalizing:
+            return
+        stage = getattr(self._managed_session, 'stage_final', None)
+        if stage is not None:
+            stage(facts)
+
     def parent_effect_evidence(self):
         self._guard_host_evidence()
         if self._host_evidence_error or self._host_ledger is None:

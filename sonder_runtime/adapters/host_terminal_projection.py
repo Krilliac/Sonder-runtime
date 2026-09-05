@@ -12,12 +12,12 @@ from sonder_runtime.application.ports.lane_continuation import ProjectionBinding
 from sonder_runtime.application.ports.terminal_output import MAX_OUTPUT_BYTES, TerminalOutputReference
 from .agent_terminal_evidence import HostObservationLedger
 
-_FAILURES = ("ERROR", "EVIDENCE_REQUIRED", "VALIDATION_FAILED", "CANCELLED")
+_FAILURES = ("ERROR", "EVIDENCE_REQUIRED", "VALIDATION_FAILED", "CANCELLED", "UNVERIFIED")
 # Match the host's actual markers, including markers without a required colon.
 _FAILURE_MARKERS = (("ERROR:", "ERROR"),
                     ("VALIDATION_FAILED:", "VALIDATION_FAILED"),
                     ("EVIDENCE_REQUIRED", "EVIDENCE_REQUIRED"),
-                    ("CANCELLED", "CANCELLED"))
+                    ("CANCELLED", "CANCELLED"), ("UNVERIFIED:", "UNVERIFIED"))
 
 
 def _canonical(value):

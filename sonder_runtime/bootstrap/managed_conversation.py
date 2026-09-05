@@ -5,11 +5,13 @@ from threading import RLock
 from ..application.agents.host_turns import (
     advance_host_turn,
     capture_host_turn,
+    capture_host_final,
     close_host_turn,
 )
 from ..adapters.agent_terminal_evidence import HostObservationLedger
 from ..interfaces.standalone_agent_lanes import HostTerminalDraft
 from .managed_standalone import ManagedStandaloneSession
+from ..application.ports.host_final import HostFinalFacts
 
 
 class ManagedConversationLifetime:
@@ -68,6 +70,26 @@ class ManagedConversationLifetime:
                 self._active = None
                 # An admitted turn with failed composition remains unknown.
                 raise
+
+    def finalize_result(self, result):
+        """The trusted outer REPL return, after reporting, ends the turn.
+
+        Controller cleanup already fenced the view. Only this private owner
+        can persist its staged facts with the actual outward text and close
+        the durable turn; no model dispatch or new controller is admitted.
+        """
+        with self._lock:
+            self._require_current()
+            view = self._active
+            if view is None:
+                return result
+            if not getattr(view, '_awaiting_final', False) or not isinstance(result, str):
+                raise PermissionError('outer host final boundary unavailable')
+            capture_host_final(view._session._bound, view._admission, result,
+                view._final_facts, HostObservationLedger.restore(view._draft.ledger_bytes))
+            close_host_turn(view._session._bound, view._admission)
+            self._previous, self._active = view, None
+            return result
 
     def close(self):
         with self._lock:
@@ -190,6 +212,26 @@ class _ManagedTurn:
                 raise TypeError("exact host terminal draft required")
             ledger = HostObservationLedger.restore(draft.ledger_bytes)
             capture_host_turn(self._session._bound, self._admission, draft, ledger)
+            self._draft = draft
+
+    def capture_final(self, output, facts):
+        with self._lifetime._lock:
+            self.require_current()
+            draft = getattr(self, '_draft', None)
+            if draft is None:
+                raise PermissionError('original host terminal evidence unavailable')
+            capture_host_final(self._session._bound, self._admission, output, facts,
+                               HostObservationLedger.restore(draft.ledger_bytes))
+
+    def stage_final(self, facts):
+        with self._lifetime._lock:
+            self.require_current()
+            if type(facts) is not HostFinalFacts or getattr(self, '_draft', None) is None:
+                raise PermissionError('typed final facts and original draft required')
+            previous = getattr(self, '_final_facts', None)
+            if previous is not None and previous != facts:
+                raise PermissionError('staged final facts are immutable')
+            self._final_facts = facts
 
     def dispatch(self, prepared):
         with self._lifetime._lock:
@@ -218,6 +260,11 @@ class _ManagedTurn:
     def close(self):
         with self._lifetime._lock:
             if self._closed:
+                return
+            if getattr(self, '_final_facts', None) is not None:
+                self.require_current()
+                self._closed = True
+                self._awaiting_final = True
                 return
             try:
                 self.require_current()

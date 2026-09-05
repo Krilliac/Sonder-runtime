@@ -9,6 +9,12 @@ from tests.test_managed_standalone_session import setup, command
 from tests.test_lane_coding_acceptance import coding, make_service, tool
 from sonder_runtime.interfaces.standalone_agent_lanes import HostTerminalDraft
 from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
+from sonder_runtime.application.ports.host_final import HostFinalFacts
+
+
+def final_receipt(view, output, terminal_class='NORMAL', *, validated=False):
+    view.capture_final(output, HostFinalFacts((), str(view.context.workspace_roots[0]),
+        False, validated, validated, terminal_class))
 
 
 @pytest.mark.parametrize('failure_after_release', [False, True])
@@ -121,6 +127,7 @@ def test_two_certified_turns_keep_parent_and_original_receipts(lanes, damage):
             assert verdict.valid
             identities.append(view._session._bound.pending_verification())
             parents.append(view.report_metadata()["parent_session_id"])
+            final_receipt(view, draft.output, validated=True)
             view.close()
             with pytest.raises(PermissionError):
                 view.require_current()
@@ -242,6 +249,7 @@ def test_real_pending_or_consumed_unknown_cannot_advance(lanes, unknown):
             draft, verifier_factory=lambda *args: verifier
         ).valid
         identity = view._session._bound.pending_verification()
+        final_receipt(view, 'UNVERIFIED: exact pending', 'UNVERIFIED')
         view.close()
         with pytest.raises(PermissionError):
             lifetime.factory(SimpleNamespace(run_id="new-turn"), app)
@@ -282,6 +290,7 @@ def test_dirty_failed_no_child_turn_is_retained_and_stale_view_fenced(lanes):
         first.capture_terminal(
             HostTerminalDraft(ledger.seal(), "ERROR: incomplete", "ERROR", ())
         )
+        final_receipt(first, 'ERROR: incomplete', 'ERROR')
         first.close()
         second = lifetime.factory(SimpleNamespace(run_id="repair-turn"), app)
         inherited = second.inherit_host_ledger(
@@ -430,6 +439,7 @@ def test_two_turns_use_real_catalog_processes_and_released_job_proofs(coding):
                             "resources_released",
                         )
                     )
+            final_receipt(view, draft.output, validated=True)
             view.close()
         assert len(set(certificates)) == 2
         assert "return sum(values)\n" in (repo / "calc.py").read_text()
@@ -459,6 +469,7 @@ def test_turn_history_bound_refuses_without_evicting(lanes):
             view.capture_terminal(
                 HostTerminalDraft(ledger.seal(), f"output {index}", "NORMAL", ())
             )
+            final_receipt(view, f'output {index}')
             view.close()
         with pytest.raises(ValueError, match="limit"):
             lifetime.factory(SimpleNamespace(run_id="over-limit"), app)

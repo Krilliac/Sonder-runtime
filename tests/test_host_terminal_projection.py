@@ -31,7 +31,7 @@ def test_fresh_host_codec_restores_exact_output_and_binding(tmp_path):
     assert second.parent_effects_valid(restored) is True
 
 
-@pytest.mark.parametrize("prefix", ["ERROR", "CANCELLED", "EVIDENCE_REQUIRED", "VALIDATION_FAILED"])
+@pytest.mark.parametrize("prefix", ["ERROR", "CANCELLED", "EVIDENCE_REQUIRED", "VALIDATION_FAILED", "UNVERIFIED"])
 def test_failure_prefix_cannot_be_declared_normal(tmp_path, prefix):
     codec = TerminalProjectionCodec()
     restored = codec.decode(codec.encode(make(codec, tmp_path, "  " + prefix + ": failed")))

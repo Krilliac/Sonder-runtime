@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from ..ports.delegated_verification import digest
+from ..ports.host_final import HostFinalFacts
 from ..ports.lane_continuation import (
     ProjectionBinding,
     open_projection,
@@ -73,6 +74,8 @@ def advance_host_turn(bound, run_id, *, verifier=None):
             raise PermissionError(
                 "previous host turn lacks a durable terminal boundary"
             )
+        if prior:
+            _stored_final(bound, tx, record, prior)
         if any(item["run_id"] == run_id for item in history):
             raise PermissionError("historical host turn cannot be replayed")
         parent = record["parent_session_id"]
@@ -235,6 +238,83 @@ def capture_host_turn(bound, admission, draft, ledger):
             bound._service._save(tx, record)
 
 
+def _final_binding(record, turn, original, facts):
+    stamp = digest(dict(original=turn['projection_digest'], ordinal=turn['ordinal'],
+                        binding=asdict(original.binding_value), facts=facts))
+    return replace(original.binding_value, verification_id='host-final-' + stamp,
+                   bundle_digest=stamp)
+
+
+def _stored_final(bound, tx, record, turn):
+    receipt = turn.get('final_receipt')
+    if not isinstance(receipt, dict):
+        raise PermissionError('exact host final receipt unavailable')
+    original = _stored_projection(bound, tx, record, turn)
+    try:
+        facts = dict(receipt['facts'])
+        facts['tools'], facts['blockers'] = tuple(facts['tools']), tuple(facts['blockers'])
+        typed = HostFinalFacts(**facts)
+        binding = _final_binding(record, turn, original, receipt['facts'])
+        final = tx.terminal_projection(record['id'], record['principal_id'], binding.verification_id)
+        expected = dict(facts=receipt['facts'], original_digest=turn['projection_digest'],
+                        projection_id=binding.verification_id, projection_digest=final.sha256)
+        if receipt != dict(expected, digest=digest(expected)) or final.binding != binding:
+            raise ValueError('final receipt changed')
+        result = open_projection(bound._service.projection_codec, final, binding)
+        if (result.ledger_bytes != original.ledger_bytes
+                or result.terminal_class != typed.terminal_class
+                or result.blockers != typed.blockers
+                or typed.project_scope not in binding.project_roots):
+            raise ValueError('final observation scope changed')
+        return result
+    except (KeyError, TypeError, ValueError):
+        raise PermissionError('host final receipt integrity failure') from None
+
+
+def capture_host_final(bound, admission, output, facts, ledger):
+    if type(admission) is not HostTurnAdmission or admission.owner is not bound:
+        raise PermissionError('private host final admission required')
+    if type(facts) is not HostFinalFacts:
+        raise TypeError('exact host final facts required')
+    facts.__post_init__()
+    encoded_facts = json.loads(json.dumps(asdict(facts)))
+    codec = bound._service.projection_codec
+    with bound._scope() as context:
+        with bound._service.store.transaction() as tx:
+            record = bound._service._row(tx, bound.continuation_id)
+            bound._require_current_tx(tx, record)
+            turn = record.get('host_turn')
+            if (not turn or turn['run_id'] != admission.run_id
+                    or turn['ordinal'] != admission.ordinal or turn['state'] != 'active'):
+                raise PermissionError('exact active host final turn required')
+            original = _stored_projection(bound, tx, record, turn)
+            if ledger.seal() != original.ledger_bytes:
+                raise PermissionError('original host ledger changed')
+            binding = _final_binding(record, turn, original, encoded_facts)
+            original_digest = turn['projection_digest']
+        final = codec.capture(binding=binding, ledger=ledger, output=output,
+            terminal_class=facts.terminal_class, blockers=facts.blockers,
+            terminal_receipt_id=admission.run_id + '-host-final')
+        if final.terminal_class != facts.terminal_class:
+            raise PermissionError('host final class disagrees with failure marker')
+        sealed = seal_projection(codec, final, binding)
+        value = dict(facts=encoded_facts, original_digest=original_digest,
+                     projection_id=binding.verification_id, projection_digest=sealed.sha256)
+        receipt = dict(value, digest=digest(value))
+        with bound._service.store.transaction() as tx:
+            record = bound._service._row(tx, bound.continuation_id)
+            bound._require_current_tx(tx, record)
+            turn = record.get('host_turn')
+            if (not turn or turn['run_id'] != admission.run_id or turn['ordinal'] != admission.ordinal
+                    or turn['state'] != 'active' or turn.get('projection_digest') != original_digest):
+                raise PermissionError('host final turn changed before commit')
+            if turn.get('final_receipt') not in (None, receipt):
+                raise PermissionError('host final receipt is immutable')
+            tx.link_terminal_projection(record['id'], context.principal_id, sealed)
+            turn['final_receipt'] = receipt
+            bound._service._save(tx, record)
+
+
 def close_host_turn(bound, admission):
     if type(admission) is not HostTurnAdmission or admission.owner is not bound:
         raise PermissionError("private host turn admission required")
@@ -252,5 +332,6 @@ def close_host_turn(bound, admission):
         if not turn.get("projection_digest"):
             raise PermissionError("host terminal evidence unavailable")
         _stored_projection(bound, tx, record, turn)
+        _stored_final(bound, tx, record, turn)
         turn["state"] = "closed"
         bound._service._save(tx, record)
