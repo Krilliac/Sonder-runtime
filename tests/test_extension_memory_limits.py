@@ -205,3 +205,24 @@ def test_windows_token_query_failure_does_not_claim_empty_or_drop_handle(monkeyp
     with pytest.raises(Exception, match="quiescent"):
         token.close()
     assert token._handle == 123
+
+
+@pytest.mark.parametrize("user_scope", [True, False])
+def test_isolated_scope_bus_context_is_wrapper_only(user_scope):
+    limiter = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", environ={"DBUS_SESSION_BUS_ADDRESS": "malicious", "SECRET": "private"}, geteuid=lambda: 1000),
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}", systemd_user=user_scope)
+    argv = ("/usr/bin/python3", "-c", "pass")
+    prepared = limiter.prepare_process_job("isolated", argv, 1024 * 1024, 3)
+    environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    result = limiter.isolated_process_environment(prepared, argv, environment)
+    assert result.token is prepared.token
+    assert result.argv[-8:] == ("/usr/bin/env", "-i", "--", "LANG=C.UTF-8", "PATH=/usr/bin:/bin", *argv)
+    wrapper = result.launch_options["env"]
+    assert "SECRET" not in wrapper
+    assert "malicious" not in result.argv
+    assert environment == {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    if user_scope:
+        assert wrapper["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    else:
+        assert wrapper == environment
