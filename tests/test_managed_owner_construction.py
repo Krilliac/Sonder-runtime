@@ -45,6 +45,7 @@ def test_post_base_constructor_failure_releases_exact_owned_resources(
     (tmp_path / "owner-workspace").rename(tmp_path / "closed-workspace")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows Job Objects and directory anchors required")
 @pytest.mark.parametrize("failure", ["false", "raise"])
 def test_pg_cleanup_failure_still_contains_process_and_retains_authority(
     tmp_path, failure
@@ -84,6 +85,7 @@ def test_pg_cleanup_failure_still_contains_process_and_retains_authority(
         owner.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows Job Objects and directory anchors required")
 @pytest.mark.parametrize(
     "failure", ["overlap", "port", "capacity", "write", "readback"]
 )
@@ -138,6 +140,7 @@ def test_failed_pg_registration_keeps_target_caller_owned(
         owner.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows Job Objects and directory anchors required")
 def test_pg_prelaunch_drain_failure_does_not_publish_process_identity(
     tmp_path, monkeypatch
 ):
