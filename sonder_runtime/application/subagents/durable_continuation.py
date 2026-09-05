@@ -105,8 +105,13 @@ class DurableContinuationService:
         child_id = (value.request.child_id if isinstance(value, DurableChildSession)
                     else value.child_id if isinstance(value, ContinuableCheckpoint) else value)
         try:
-            self._require_storage_settled(child_id)
-            return getattr(self._repository, method)(*args, **kwargs)
+            # The repository records intent before its effect receipt. Keep the
+            # settlement check and the following mutation together so a worker
+            # cannot observe another operation in that narrow interval and
+            # misclassify the ordered mutation as its own ambiguity.
+            with self._lock:
+                self._require_storage_settled(child_id)
+                return getattr(self._repository, method)(*args, **kwargs)
         except ContinuationStorageFailure as error:
             self._storage_failures[child_id] = error
             control = self._controls.get(child_id)
