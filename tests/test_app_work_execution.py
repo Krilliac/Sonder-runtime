@@ -62,6 +62,7 @@ def test_link_cannot_admit_prepared_work_or_change_original_encoding(state):
     old.pop("interruption", None)
     old.pop("terminal", None)
     old.pop("completion", None)
+    old.pop("verification_pending", None)
     raw = json.dumps(old, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     assert _encode(record) == raw
     assert _decode(raw, AppWorkRecord) == record
