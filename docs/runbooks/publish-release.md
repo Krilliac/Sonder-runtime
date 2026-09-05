@@ -95,6 +95,8 @@ The checker reads only object identities and NUL-delimited paths, never blob
 contents. Clearing this gate requires
 the separately authorized history-rewrite and remote-ref cleanup procedure;
 deleting a file only at `HEAD` is intentionally insufficient.
+The current audit result and bounded inspection contract are recorded in the
+[history-privacy debt evidence record](../security/history-privacy-debt.md).
 
 The integrity artifact contains:
 
