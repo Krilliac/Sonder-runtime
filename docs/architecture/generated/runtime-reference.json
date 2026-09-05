@@ -9011,6 +9011,12 @@
       "type": "tuple[str, ...]"
     },
     {
+      "default": null,
+      "field": "artifact_transfer",
+      "section": "root",
+      "type": "ArtifactTransferConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -9027,6 +9033,96 @@
       "field": "backup_key_file",
       "section": "secrets",
       "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "store_dir",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "principal_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "project_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "peer_node_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "grant_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 1,
+      "field": "grant_revision",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 0,
+      "field": "expires_at",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "can_read",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": false,
+      "field": "can_write",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 1073741824,
+      "field": "quota_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2147483648,
+      "field": "total_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 3600,
+      "field": "ttl_seconds",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
     },
     {
       "default": true,
@@ -9425,11 +9521,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 316,
-    "configuration": 81,
+    "configuration": 97,
     "events": 43,
     "tools": 212
   },
-  "digest": "89fe5802512108a8af267f6a7d0d64481d5c3c9812b56a6ff936de46c4c1cb21",
+  "digest": "691c2d5702b899ee130c29e80a71738b88f20aae8253805aef0ab08cfa3234ea",
   "events": [
     {
       "name": "session.started",
@@ -9903,7 +9999,7 @@
     "server.py": "5f5aac0be3bf1fa2cac8289328ba75c37ef74121715c4cac745ce11fa269bc5b",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "8545fe1afd0ca40edb4f763c9bbb097a57c7de6395276c4e912473e9ff296abb"
+    "sonder_runtime/platform/config.py": "e3df035b9601e5d83210a1cf1fbb084d1d0f5a4688f75e52680e6166d2fb239b"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [

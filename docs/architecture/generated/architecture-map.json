@@ -580,11 +580,12 @@
       ]
     },
     {
-      "file_count": 18,
+      "file_count": 19,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
         "sonder_runtime/bootstrap/app.py",
+        "sonder_runtime/bootstrap/artifact_transfer.py",
         "sonder_runtime/bootstrap/capabilities.py",
         "sonder_runtime/bootstrap/config_loading.py",
         "sonder_runtime/bootstrap/container.py",
@@ -778,7 +779,7 @@
       ]
     },
     {
-      "file_count": 44,
+      "file_count": 45,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -793,6 +794,7 @@
         "sonder_runtime/interfaces/editor/__init__.py",
         "sonder_runtime/interfaces/editor/transport.py",
         "sonder_runtime/interfaces/http/__init__.py",
+        "sonder_runtime/interfaces/http/artifact_transfer.py",
         "sonder_runtime/interfaces/http/authority_contract.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",
         "sonder_runtime/interfaces/http/facades/a2a.py",
@@ -828,10 +830,11 @@
       ]
     },
     {
-      "file_count": 33,
+      "file_count": 34,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
+        "sonder_runtime/platform/artifact_transfer_config.py",
         "sonder_runtime/platform/child_environment_policy.py",
         "sonder_runtime/platform/client_fallback.py",
         "sonder_runtime/platform/config.py",
