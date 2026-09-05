@@ -5156,21 +5156,33 @@ def _managed_agent_admission_scope():
 
 
 def _require_managed_agent_admission():
+    from sonder_runtime.bootstrap.prepared_workbench import current_permit
+    permit = current_permit()
+    if permit is not None:
+        permit.require_current()
     controller = _managed_agent_controller()
     if controller is not None:
         controller.require_current()
 
 
 def _guard_managed_agent_call(callback, *, inherit_context=False):
+    from sonder_runtime.bootstrap.prepared_workbench import current_permit
+    prepared_permit = current_permit()
     controller = _managed_agent_controller()
-    if controller is None:
+    if controller is None and prepared_permit is None:
         return callback
     captured = contextvars.copy_context() if inherit_context else None
 
     def admitted(*args, **kwargs):
+        if prepared_permit is not None:
+            prepared_permit.require_current()
+            if controller is None:
+                raise PermissionError("prepared work requires its managed controller")
         controller.require_current()
         result = callback(*args, **kwargs)
         controller.require_current()
+        if prepared_permit is not None:
+            prepared_permit.require_current()
         return result
 
     def invoke(*args, **kwargs):
@@ -17184,6 +17196,8 @@ def _agent_dispatch(
         allow_location = True
         repository_extra_roots = ""
     tool_name = _canonical_agent_tool_name((tool_name or "").strip())
+    from sonder_runtime.bootstrap.prepared_workbench import require_prepared_tool
+    require_prepared_tool(tool_name)
     args = args or {}
     if not isinstance(args, dict):
         return "ERROR: tool args must be a JSON object"
@@ -19223,7 +19237,12 @@ def _agent_turn(
         tool_policy = None
         auto_checklist = False
     max_steps = _safe_limit_policy(max_steps, 6, 20)
-    model, cloud, augment, tier_label = _serve_target(tier, None)
+    from sonder_runtime.bootstrap.prepared_workbench import prepared_target
+    pinned_target = prepared_target(prompt, tier, max_steps, allow_web, project, allow_location)
+    if pinned_target is not None:
+        from sonder_runtime.bootstrap.prepared_workbench import prepared_tool_allowlist
+        tool_allowlist = prepared_tool_allowlist(tool_allowlist)
+    model, cloud, augment, tier_label = pinned_target if pinned_target is not None else _serve_target(tier, None)
     if tier_label == "cloud-disabled":
         return _cloud_disabled_message()
     if tier_label is None:
@@ -20603,7 +20622,7 @@ def _work_expects_effects(prompt):
 
 
 def _workbench_agent_escalating(
-    prompt, tier, *, max_steps, allow_web, project, allow_location,
+    prompt, tier, *, max_steps, allow_web, project, allow_location, prepared_plan=None,
 ):
     project_scope, _error = _agent_project_scope(project)
     with _standalone_lanes.managed_escalation_scope(
@@ -20613,6 +20632,7 @@ def _workbench_agent_escalating(
             return _workbench_agent_escalating_owned(
                 prompt, tier, max_steps=max_steps, allow_web=allow_web,
                 project=project, allow_location=allow_location, managed_plan=None,
+                prepared_plan=prepared_plan,
             )
         with activity_tracker.response_span(
             'managed-workbench', prompt, surface='agent', model=tier, project=project,
@@ -20620,6 +20640,7 @@ def _workbench_agent_escalating(
             output, answered = _workbench_agent_escalating_owned(
                 prompt, tier, max_steps=max_steps, allow_web=allow_web,
                 project=project, allow_location=allow_location, managed_plan=managed_plan,
+                prepared_plan=prepared_plan,
             )
         return '%s\n\n%s\n\n%s' % (
             output.rstrip(),
@@ -20630,6 +20651,7 @@ def _workbench_agent_escalating(
 
 def _workbench_agent_escalating_owned(
     prompt, tier, *, max_steps, allow_web, project, allow_location, managed_plan,
+    prepared_plan=None,
 ):
     """Run the workbench agent on ``tier``, stepping up when the model fails.
 
@@ -20644,8 +20666,15 @@ def _workbench_agent_escalating_owned(
     every attempt.  Returns ``(output, tier)`` for the attempt that stood; an
     escalated output carries the escalation line.
     """
-    start = _local_tier_rung(tier)
-    escalation_plan = _default_route_plan(prompt, start) if start is not None else None
+    if prepared_plan is not None:
+        from sonder_runtime.bootstrap.prepared_workbench import current_permit
+        permit = current_permit()
+        if permit is None or permit.require_current()[2] is not prepared_plan:
+            raise PermissionError("private prepared workbench plan required")
+        escalation_plan = prepared_plan
+    else:
+        start = _local_tier_rung(tier)
+        escalation_plan = _default_route_plan(prompt, start) if start is not None else None
     if escalation_plan is None or escalation_plan.escalations == 0:
         with managed_plan.rung() if managed_plan is not None else contextlib.nullcontext():
             output = workbench_agent(
