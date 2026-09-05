@@ -159,6 +159,14 @@ class ContinuationReceiptCapacity(ContinuationStorageFailure):
     pass
 
 
+class ContinuationCleanupRequired(ContinuationStorageFailure):
+    """Storage may be settled; the old execution owner's cleanup is unproven."""
+
+    def __init__(self, child_id: str):
+        self.child_id = child_id
+        super().__init__("running child requires proved owner cleanup: " + child_id)
+
+
 @dataclass(frozen=True)
 class ContinuationMutationOutcome:
     disposition: Literal["applied", "precondition_failed", "no_change", "invalid"]

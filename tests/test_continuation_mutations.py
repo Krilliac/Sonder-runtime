@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -12,6 +13,7 @@ from sonder_runtime.application.ports.continuation_mutations import (
     ContinuationCommitAmbiguous,
     ContinuationReceiptCapacity,
     ContinuationStorageFailure,
+    ContinuationCleanupRequired,
 )
 from sonder_runtime.application.subagents.continuable import ContinuableCheckpoint
 from sonder_runtime.application.subagents.durable_continuation import (
@@ -95,10 +97,25 @@ def test_independent_connections_single_resume_and_same_command_replay(tmp_path)
     commands = [
         prepare_call("claim_resume", "child-1", expected_revision=7) for _ in range(2)
     ]
+
+    def attempt(pair):
+        try:
+            return pair[0].mutate(pair[1])
+        except ContinuationCommitAmbiguous as error:
+            return error
+
     with ThreadPoolExecutor(2) as pool:
-        outcomes = list(
-            pool.map(lambda pair: pair[0].mutate(pair[1]), zip((a, b), commands))
+        outcomes = list(pool.map(attempt, zip((a, b), commands)))
+    # The later admitted operation may reach the state lock first. It must
+    # remain pending until the earlier command settles, then use its same ID.
+    outcomes = [
+        (
+            repo.mutate(command)
+            if isinstance(outcome, ContinuationCommitAmbiguous)
+            else outcome
         )
+        for repo, command, outcome in zip((a, b), commands, outcomes)
+    ]
     assert sum(result.value is not None for result in outcomes) == 1
     for repo, command, result in zip((a, b), commands, outcomes):
         assert repo.mutate(command).result_bytes == result.result_bytes
@@ -186,8 +203,10 @@ os._exit(73)
         "running" if after_commit else "failed"
     )
     if after_commit:
-        with pytest.raises(ContinuationCommitAmbiguous):
+        with pytest.raises(ContinuationCleanupRequired) as cleanup:
             service.recover_after_restart()
+        assert cleanup.value.child_id == "child-1"
+        assert not isinstance(cleanup.value, ContinuationCommitAmbiguous)
 
 
 def test_same_command_concurrent_connections_insert_one_original_receipt(tmp_path):
@@ -260,3 +279,76 @@ def test_lost_terminal_ack_preserves_committed_result_without_new_effects(tmp_pa
     with pytest.raises(ContinuationCommitAmbiguous):
         service.resume("child-1", _context(), lambda *args: pytest.fail("new effect"))
     assert service.close(1)
+
+
+def test_later_cancel_cannot_overtake_retained_checkpoint_even_after_crash(tmp_path):
+    from sonder_runtime.application.ports.subagents import SubagentStatus
+
+    path = tmp_path / "children.db"
+    repository = SQLiteDurableContinuationRepository(path)
+    _seed(repository, status=SubagentStatus.RUNNING, recovery=False)
+    ready, release = tmp_path / "ready", tmp_path / "release"
+    script = """
+import os, sys, time
+from pathlib import Path
+from contextlib import contextmanager
+from sonder_runtime.adapters.persistence.durable_continuation import SQLiteDurableContinuationRepository
+from sonder_runtime.application.ports.continuation_mutations import prepare_call
+from sonder_runtime.application.subagents.continuable import ContinuableCheckpoint
+class Paused(SQLiteDurableContinuationRepository):
+    calls = 0
+    @contextmanager
+    def _connect(self):
+        self.calls += 1
+        call = self.calls
+        with super()._connect() as connection:
+            yield connection
+        if call == 2:
+            Path(sys.argv[2]).write_text('intent committed', encoding='utf-8')
+            deadline = time.monotonic() + 10
+            while not Path(sys.argv[3]).exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            os._exit(73)
+repo = Paused(sys.argv[1])
+repo.mutate(prepare_call('save_checkpoint', ContinuableCheckpoint('child-1', 2, {'step': 3}), expected_sequence=1, operation_id='earlier-checkpoint'))
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(path), str(ready), str(release)]
+    )
+    later = prepare_call(
+        "request_cancel", "child-1", reason="stop", operation_id="later-cancel"
+    )
+    try:
+        deadline = time.monotonic() + 8
+        while (
+            not ready.exists()
+            and process.poll() is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert ready.exists() and process.poll() is None
+        with pytest.raises(ContinuationCommitAmbiguous) as failure:
+            repository.mutate(later)
+        assert failure.value.prepared.operation_id == "earlier-checkpoint"
+        assert not repository.get("child-1").cancellation_requested
+    finally:
+        release.write_text("exit", encoding="utf-8")
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            process.wait(timeout=5)
+    assert process.returncode == 73
+    reopened = SQLiteDurableContinuationRepository(path)
+    earlier = reopened.read_mutation("earlier-checkpoint")
+    assert reopened.reconcile(earlier) is None and reopened.reconcile(later) is None
+    with pytest.raises(ContinuationCommitAmbiguous) as recovery:
+        DurableContinuationService(reopened).recover_after_restart()
+    assert recovery.value.prepared.operation_id == earlier.operation_id
+    with pytest.raises(ContinuationCommitAmbiguous):
+        reopened.mutate(later)
+    assert reopened.mutate(earlier).value.checkpoint.sequence == 2
+    assert reopened.mutate(later).value is True
+    assert reopened.get("child-1").cancellation_requested
+    with pytest.raises(ContinuationCleanupRequired):
+        DurableContinuationService(reopened).recover_after_restart()

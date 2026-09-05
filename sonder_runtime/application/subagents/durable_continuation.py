@@ -13,7 +13,7 @@ from threading import Event, Lock, Thread
 from typing import Protocol
 from uuid import uuid4
 from ..ports.continuation_mutations import (
-    ContinuationStorageFailure, ContinuationCommitAmbiguous,
+    ContinuationStorageFailure, ContinuationCommitAmbiguous, ContinuationCleanupRequired,
     PreparedContinuationMutation, ContinuationMutationOutcome,
 )
 
@@ -338,10 +338,14 @@ class DurableContinuationService:
                 if record.request.child_id in self._threads and self._threads[record.request.child_id].is_alive():
                     continue
             if record.status is SubagentStatus.RUNNING:
-                latest = getattr(self._repository, 'latest_mutation', lambda _: None)(record.request.child_id)
-                if latest is not None:
+                child_id = record.request.child_id
+                pending = self._repository.unresolved_mutation(child_id)
+                if pending is not None:
+                    raise ContinuationCommitAmbiguous(pending)
+                latest = self._repository.latest_mutation(child_id)
+                if latest is not None and self._repository.reconcile(latest) is None:
                     raise ContinuationCommitAmbiguous(latest)
-                raise ContinuationStorageFailure('running child requires proved owner cleanup and receipt reconciliation')
+                raise ContinuationCleanupRequired(child_id)
         return tuple(recovered)
 
     def cancel(self, child_id: str, *, reason: str = "cancellation requested") -> bool:

@@ -100,8 +100,8 @@ def test_restart_recovery_requires_cleanup_and_storage_reconciliation(tmp_path):
     running = repository.update("child-orphan", status=SubagentStatus.RUNNING)
     assert running is not None
     service = DurableContinuationService(SQLiteDurableContinuationRepository(tmp_path / "orphan.sqlite"))
-    from sonder_runtime.application.ports.continuation_mutations import ContinuationCommitAmbiguous
-    with pytest.raises(ContinuationCommitAmbiguous):
+    from sonder_runtime.application.ports.continuation_mutations import ContinuationCleanupRequired
+    with pytest.raises(ContinuationCleanupRequired):
         service.recover_after_restart()
     recovered = repository.get("child-orphan")
     assert recovered and recovered.status is SubagentStatus.RUNNING
