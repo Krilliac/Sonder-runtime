@@ -69,6 +69,15 @@ class PreparedLaneCommand:
         return json.loads(self.encoded)
 
 
+@dataclass(frozen=True)
+class HostTerminalDraft:
+    """Actual turn evidence awaiting scoped durable continuation linkage."""
+    ledger_bytes: bytes
+    output: str
+    terminal_class: str
+    blockers: tuple[str, ...]
+
+
 class StandaloneLaneController:
     def __init__(self, application_factory, project=""):
         self._factory = application_factory
@@ -81,6 +90,42 @@ class StandaloneLaneController:
         self._verification_attempted = False
         self._verifier = self._verification_prepared = None
         self._verification_verdict = None
+        self._host_ledger = self._host_terminal = None
+        self._host_evidence_error = False
+
+    def begin_host_turn(self, ledger):
+        # The composition root owns the adapter; interfaces only consume its
+        # host-only observe/seal seam.
+        self._host_ledger = ledger
+        self._host_terminal = None
+        self._host_evidence_error = False
+
+    def observe_host_tool(self, **facts):
+        if self._host_ledger is None:
+            self._host_evidence_error = True
+            return
+        try:
+            self._host_ledger.observe(**facts)
+        except ValueError:
+            # Retain an unavailable state. No delegated verification may use
+            # an incomplete ledger even if later calls themselves succeed.
+            self._host_evidence_error = True
+
+    def freeze_host_terminal(self, output, *, terminal_class, blockers):
+        if self._host_evidence_error or self._host_ledger is None:
+            return False
+        try:
+            ledger_bytes = self._host_ledger.seal()
+        except ValueError:
+            self._host_evidence_error = True
+            return False
+        self._host_terminal = HostTerminalDraft(ledger_bytes, output, terminal_class, tuple(blockers))
+        return True
+
+    def host_terminal_draft(self):
+        if self._host_evidence_error or self._host_terminal is None:
+            raise PermissionError("complete original host terminal evidence unavailable")
+        return self._host_terminal
 
     def verify_delegated(self, approve, *, verifier_factory):
         """Host-only finalization: one admission, then fresh typed validation.

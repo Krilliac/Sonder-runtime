@@ -81,7 +81,10 @@ def test_real_loop_projects_parent_and_child_validation_separately(consumer, mon
     responses.append({"final": "ERROR: incomplete task" if failed else "Work complete."})
     turns = iter(json.dumps(value) for value in responses)
     monkeypatch.setattr(server, "_make_generate", lambda *args, **kwargs: lambda *a, **k: next(turns, json.dumps(responses[-1])))
-    monkeypatch.setattr(server, "_standalone_verifier_factory", lambda *args: verifier)
+    def factory(*args):
+        assert controller.host_terminal_draft().output.startswith("Work complete.")
+        return verifier
+    monkeypatch.setattr(server, "_standalone_verifier_factory", factory)
     monkeypatch.setattr(server, "_agent_permission_gate_error", lambda *args, **kwargs: None)
     monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
     token = standalone_agent_lanes._CURRENT.set(controller)
@@ -101,6 +104,13 @@ def test_real_loop_projects_parent_and_child_validation_separately(consumer, mon
     if parent_edit:
         assert (root / "parent.txt").read_text() == "parent change"
         assert "UNVERIFIED:" in result.output
+    # Freeze actual host evidence before delegated approval/final decoration.
+    from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
+    draft = controller.host_terminal_draft()
+    assert draft.output.startswith("ERROR:" if failed else "Work complete.")
+    assert "Delegated workspace certificate" not in draft.output
+    assert HostObservationLedger.restore(draft.ledger_bytes).resolve().dirty is parent_edit
+    assert draft.terminal_class == ("ERROR" if failed else "NORMAL")
 
 
 def test_standalone_composed_catalog_certifies_real_repair_and_diff(coding, monkeypatch):

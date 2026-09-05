@@ -19181,6 +19181,11 @@ def _agent_turn(
     inspected = False
     mutated = False
     parent_effect_dirty = False
+    host_controller = _standalone_lanes.current()
+    if host_controller is not None:
+        from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
+
+        host_controller.begin_host_turn(HostObservationLedger(project_scope=project_scope))
     validation_attempted = False
     validation_ok = False
     # A currently-valid citation for the completion claim. Same discipline as
@@ -19374,6 +19379,20 @@ def _agent_turn(
                 prefix, failures,
             )
             failed = True
+        final = _attach_tool_evidence(final)
+        if controller is not None:
+            terminal_class = "ERROR" if failed else "NORMAL"
+            for marker in autopilot_controller.FAILURE_PREFIXES:
+                if final.lstrip().startswith(marker):
+                    terminal_class = marker.rstrip(":")
+                    break
+            captured = controller.freeze_host_terminal(
+                final, terminal_class=terminal_class,
+                blockers=tuple(sorted(completion_blocking_failures)),
+            )
+            if delegated and not captured:
+                final = "EVIDENCE_REQUIRED: original host observations could not be preserved.\n\n" + final
+                failed = True
         validated = False if failed else _work_validated()
         if delegated and delegated_verdict is not None:
             validation_attempted = True
@@ -19395,7 +19414,6 @@ def _agent_turn(
             _agent_checklist_mark(
                 checklist_id, checklist_states, 4, "done", "end report prepared",
             )
-        final = _attach_tool_evidence(final)
         # The model's own first line, captured before anything leads the report,
         # so the activity feed keeps naming the work rather than the standing.
         model_summary = final.splitlines()[0] if final else "agent completed"
@@ -20203,6 +20221,19 @@ def _agent_turn(
                         if validation_covered else "did not validate changed paths",
                     ),
                 )
+        if host_controller is not None:
+            host_controller.observe_host_tool(
+                tool=tool_name, arguments=policy_tool_args,
+                observation=observation_text, dispatched=bool(tool_dispatched),
+                success=bool(tool_ok),
+                dirty=bool(mutation_attempt_may_have_changed or execution_may_have_changed),
+                mutation_records=(
+                    _agent_mutation_records(tool_name, policy_tool_args)
+                    if mutation_attempt_may_have_changed else ()
+                ),
+                verifier=tool_name in _AGENT_VERIFICATION_TOOLS,
+                validator=tool_name in _WORK_VALIDATION_TOOLS,
+            )
         observations.append(
             "step %d tool=%s reason=%s\n%s" % (
                 step,
