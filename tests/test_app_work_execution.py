@@ -61,6 +61,7 @@ def test_link_cannot_admit_prepared_work_or_change_original_encoding(state):
     old.pop("host_turn")
     old.pop("interruption", None)
     old.pop("terminal", None)
+    old.pop("completion", None)
     raw = json.dumps(old, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     assert _encode(record) == raw
     assert _decode(raw, AppWorkRecord) == record
@@ -127,6 +128,11 @@ def test_interruption_retains_links_and_never_allows_redispatch(state, phase):
 
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_terminal_link_reconciliation_is_exact_and_non_dispatchable(state, interrupted):
+    from sonder_runtime.application.ports.app_managed_work import WorkCompletionEvidence
+    from sonder_runtime.application.ports.lane_continuation import (
+        PendingVerificationIdentity,
+        TerminalProjectionReceipt,
+    )
     from sonder_runtime.application.ports.host_turn_links import ManagedHostTerminalLink
     from sonder_runtime.application.ports.app_managed_work import WorkInterruption
 
@@ -162,6 +168,35 @@ def test_terminal_link_reconciliation_is_exact_and_non_dispatchable(state, inter
     terminal = ManagedHostTerminalLink(
         link, "original1", "a" * 64, "final1", "b" * 64, "c" * 64, "d" * 64
     )
+    identity = PendingVerificationIdentity(
+        link.continuation_id,
+        "verify1",
+        link.parent_session_id,
+        1,
+        1,
+        "a" * 64,
+        "verify-command",
+        "9" * 64,
+        1,
+    )
+    receipt = TerminalProjectionReceipt("published1", "f" * 64, "9" * 64, "a" * 64, 2)
+    completion = WorkCompletionEvidence(
+        "certified_after_return" if interrupted else "certified", identity, receipt
+    )
+    with pytest.raises(ValueError):
+        WorkCompletionEvidence("not_required", identity, receipt)
+    with pytest.raises(ValueError):
+        store.atomic(
+            lambda tx: tx.record_work_terminal(
+                **scope,
+                expected_revision=record.revision,
+                terminal=terminal,
+                completion=replace(
+                    completion,
+                    pending_identity=replace(identity, parent_session_id="foreign"),
+                )
+            )
+        )
     with pytest.raises(ValueError):
         store.atomic(
             lambda tx: tx.record_work_terminal(
@@ -174,15 +209,34 @@ def test_terminal_link_reconciliation_is_exact_and_non_dispatchable(state, inter
         )
     completed = store.atomic(
         lambda tx: tx.record_work_terminal(
-            **scope, expected_revision=record.revision, terminal=terminal
+            **scope,
+            expected_revision=record.revision,
+            terminal=terminal,
+            completion=completion
         )
     )
     assert completed.state == "terminal" and completed.terminal == terminal
     assert completed.interruption == record.interruption
+    assert completed.completion == completion
+    with pytest.raises(CommandConflict):
+        store.atomic(
+            lambda tx: tx.record_work_terminal(
+                **scope,
+                expected_revision=record.revision,
+                terminal=terminal,
+                completion=replace(
+                    completion,
+                    phase="certified" if interrupted else "certified_after_return",
+                )
+            )
+        )
     assert (
         store.atomic(
             lambda tx: tx.record_work_terminal(
-                **scope, expected_revision=record.revision, terminal=terminal
+                **scope,
+                expected_revision=record.revision,
+                terminal=terminal,
+                completion=completion
             )
         )
         == completed
