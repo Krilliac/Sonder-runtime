@@ -91,6 +91,11 @@ class ReplHostSelectionAdapter:
 
     @staticmethod
     def _context(context):
+        if context.deadline_monotonic is not None and (
+            type(context.deadline_monotonic) not in (int, float)
+            or not math.isfinite(context.deadline_monotonic)
+        ):
+            raise PermissionError("finite host deadline required")
         if (
             context.source != "repl"
             or context.auth_level != "local"
@@ -197,7 +202,7 @@ class ReplHostSelectionAdapter:
     def scope(self, selection, context):
         with self._lock:
             self._validate(selection, context)
-            token = self._scope.set(selection)
+            token = self._scope.set((selection, context))
         try:
             yield selection
         finally:
@@ -205,7 +210,43 @@ class ReplHostSelectionAdapter:
 
     def authorize(self, context, host_conversation_id):
         with self._lock:
-            selection = self._scope.get()
+            scoped = self._scope.get()
+            if scoped is None:
+                raise PermissionError("private host context scope required")
+            selection, original = scoped
+            self._context(original)
+            self._context(context)
+            if (
+                context.cancellation is not original.cancellation
+                or context.source != original.source
+                or context.principal_id != original.principal_id
+                or context.auth_level != original.auth_level
+                or (context.cloud_allowed and not original.cloud_allowed)
+                or (
+                    context.remote_ollama_allowed and not original.remote_ollama_allowed
+                )
+                or (
+                    original.deadline_monotonic is not None
+                    and (
+                        context.deadline_monotonic is None
+                        or not math.isfinite(context.deadline_monotonic)
+                        or context.deadline_monotonic > original.deadline_monotonic
+                    )
+                )
+            ):
+                raise PermissionError("scoped host authority expanded or replaced")
+            original_roots = tuple(
+                Path(root).resolve() for root in original.workspace_roots
+            )
+            if len(context.workspace_roots) > 256 or any(
+                not any(
+                    Path(root).resolve() == allowed
+                    or allowed in Path(root).resolve().parents
+                    for allowed in original_roots
+                )
+                for root in context.workspace_roots
+            ):
+                raise PermissionError("scoped host workspace authority expanded")
             policy = self._validate(selection, context)
             if host_conversation_id != selection.host_conversation_id:
                 raise PermissionError("selected host conversation mismatch")
