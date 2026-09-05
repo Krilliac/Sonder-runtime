@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 250,
+      "file_count": 252,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -92,6 +92,7 @@
         "sonder_runtime/adapters/context_formatting.py",
         "sonder_runtime/adapters/context_planning.py",
         "sonder_runtime/adapters/conversational_subagents.py",
+        "sonder_runtime/adapters/delegated_verification.py",
         "sonder_runtime/adapters/embedding_cache.py",
         "sonder_runtime/adapters/embeddings.py",
         "sonder_runtime/adapters/eval_history_reader.py",
@@ -123,6 +124,7 @@
         "sonder_runtime/adapters/filesystem/typed.py",
         "sonder_runtime/adapters/filesystem/workbench.py",
         "sonder_runtime/adapters/filesystem/workflow_store.py",
+        "sonder_runtime/adapters/filesystem/workspace_manifest.py",
         "sonder_runtime/adapters/git/__init__.py",
         "sonder_runtime/adapters/git_discovery.py",
         "sonder_runtime/adapters/goal_formatting.py",
@@ -299,7 +301,7 @@
       ]
     },
     {
-      "file_count": 275,
+      "file_count": 277,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -307,6 +309,7 @@
         "sonder_runtime/application/agent_registry/unified.py",
         "sonder_runtime/application/agent_registry/workbench_review.py",
         "sonder_runtime/application/agents/__init__.py",
+        "sonder_runtime/application/agents/delegated_verification.py",
         "sonder_runtime/application/agents/delegation_service.py",
         "sonder_runtime/application/agents/durable_lineage.py",
         "sonder_runtime/application/agents/interactive_lanes.py",
@@ -437,6 +440,7 @@
         "sonder_runtime/application/ports/compaction.py",
         "sonder_runtime/application/ports/compute_fabric.py",
         "sonder_runtime/application/ports/content_services.py",
+        "sonder_runtime/application/ports/delegated_verification.py",
         "sonder_runtime/application/ports/evaluation.py",
         "sonder_runtime/application/ports/evaluation_history.py",
         "sonder_runtime/application/ports/event_sink.py",
@@ -580,7 +584,7 @@
       ]
     },
     {
-      "file_count": 19,
+      "file_count": 20,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -589,6 +593,7 @@
         "sonder_runtime/bootstrap/capabilities.py",
         "sonder_runtime/bootstrap/config_loading.py",
         "sonder_runtime/bootstrap/container.py",
+        "sonder_runtime/bootstrap/delegated_verification.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
         "sonder_runtime/bootstrap/doctor_formatting.py",
         "sonder_runtime/bootstrap/lane_tests.py",

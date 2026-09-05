@@ -5131,6 +5131,22 @@ def _offload_impl(
 from sonder_runtime.interfaces import standalone_agent_lanes as _standalone_lanes
 
 
+def _standalone_verifier_factory(application, service):
+    from sonder_runtime.bootstrap.delegated_verification import compose_delegated_verification
+    catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()
+    if not catalog:
+        raise PermissionError("independent verification catalog is not configured")
+    return compose_delegated_verification(service, application.process_job_provider(), catalog)
+
+
+def _approve_standalone_verification(prepared, context):
+    # Independent host check: never reuse the child lane's approval.
+    refusal = _agent_permission_gate_error("workspace_run", prepared.approval_payload())
+    if refusal:
+        raise PermissionError(refusal)
+    return "standalone-verification-" + uuid.uuid4().hex
+
+
 def _agent_lane_context():
     from sonder_runtime.application.context import local_owner_context
     application = _application()
@@ -18994,9 +19010,12 @@ def _agent_impl(*args, **kwargs) -> str:
     pinned turn reuses the outer reading.
     """
     with _stable_system_context(), _standalone_lanes.model_loop_scope():
+        controller = _standalone_lanes.current()
+        if controller is not None:
+            controller.terminal_projected = False
         result = _agent_turn(*args, **kwargs)
         controller = _standalone_lanes.current()
-        if controller is None or not controller.delegated_work:
+        if controller is None or not controller.delegated_work or controller.terminal_projected:
             return result
         summary = "delegated work requires independent verification"
         activity_tracker.set_response_status("unverified", summary)
@@ -19161,6 +19180,7 @@ def _agent_turn(
     used_tool = False
     inspected = False
     mutated = False
+    parent_effect_dirty = False
     validation_attempted = False
     validation_ok = False
     # A currently-valid citation for the completion claim. Same discipline as
@@ -19302,6 +19322,8 @@ def _agent_turn(
             text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
         return text
 
+    delegated_verdict = None
+
     def _work_validated():
         """Was the change actually checked, by either grounded route?
 
@@ -19318,14 +19340,24 @@ def _agent_turn(
         Not a relaxation: the added satisfying condition is a host-observed
         passing verifier whose root covers every mutated path.
         """
+        nonlocal delegated_verdict
         controller = _standalone_lanes.current()
         if controller is not None and controller.delegated_work:
-            return False
+            delegated_verdict = controller.verify_delegated(
+                _approve_standalone_verification,
+                verifier_factory=_standalone_verifier_factory,
+            )
+            return (delegated_verdict.valid is True
+                    and (not parent_effect_dirty or validation_ok or verification_ok))
         return validation_ok or verification_ok
 
-    def finish_final(final):
+    def finish_final(final, *, failed=False):
+        nonlocal validation_attempted
         _teardown_speculation()
         final = str(final or "")
+        controller = _standalone_lanes.current()
+        delegated = controller is not None and controller.delegated_work
+        failed = failed or final.startswith(autopilot_controller.FAILURE_PREFIXES)
         if completion_blocking_failures:
             failures = "; ".join(
                 "%s: %s" % (name, detail[:240])
@@ -19338,19 +19370,22 @@ def _agent_turn(
                 for name, _detail in completion_blocking_failures.values()
             )
             prefix = "EVIDENCE_REQUIRED" if evidence_failure else "ERROR"
-            return "%s: required host evidence did not recover (%s)." % (
+            final = "%s: required host evidence did not recover (%s)." % (
                 prefix, failures,
             )
-        validated = _work_validated()
+            failed = True
+        validated = False if failed else _work_validated()
+        if delegated and delegated_verdict is not None:
+            validation_attempted = True
         if auto_checklist:
             _agent_checklist_mark(
                 checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
             )
             _agent_checklist_mark(
-                checklist_id, checklist_states, 2, "done",
+                checklist_id, checklist_states, 2, "blocked" if failed else "done",
                 "requested work completed" if mutated else "analysis completed without file mutation",
             )
-            validation_status = "done" if (validated or not mutated) else "blocked"
+            validation_status = "done" if (not failed and (validated or not (mutated or delegated))) else "blocked"
             _agent_checklist_mark(
                 checklist_id, checklist_states, 3, validation_status,
                 "grounded validation passed" if validated else (
@@ -19365,12 +19400,12 @@ def _agent_turn(
         # so the activity feed keeps naming the work rather than the standing.
         model_summary = final.splitlines()[0] if final else "agent completed"
 
-        validation_failed = bool(auto_checklist and mutated and not validated)
+        validation_failed = bool(auto_checklist and (mutated or delegated) and not validated)
         standing = ""
         # Only where a verifier was actually callable. Elsewhere the sentence
         # names tools the lane is forbidden from using and has no OFF state --
         # see _agent_verifier_reachable.
-        if not verification_ok and _agent_verifier_reachable(
+        if not validated and not verification_ok and _agent_verifier_reachable(
             read_only, allowed_tools,
         ):
             demanded, reason = _agent_verification_standing()
@@ -19379,7 +19414,7 @@ def _agent_turn(
                 # should_verify's own projection of the counts. Nothing is
                 # generated by the model or about how it feels.
                 standing = reason
-        if validation_failed:
+        if validation_failed and not failed:
             # Compose, never stack. Prefixing the standing in front of
             # VALIDATION_FAILED would push that marker off position 0, and
             # _task_passed / _agent_observation_ok would stop seeing a failed
@@ -19392,7 +19427,7 @@ def _agent_turn(
                     _AGENT_VERIFIERS_PHRASE, standing,
                 )
             final = block + "\n\n" + final
-        elif standing:
+        elif standing and not failed:
             final = "%s this run claimed completion without %s - %s\n\n%s" % (
                 _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
             )
@@ -19414,6 +19449,22 @@ def _agent_turn(
         activity_tracker.set_result_summary(
             _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
         )
+        certificate_fields = {}
+        if delegated:
+            if delegated_verdict is not None:
+                certificate_fields = {
+                    "verification_certificate_id": delegated_verdict.certificate_id,
+                    "verification_generation": delegated_verdict.generation,
+                    "verification_code": delegated_verdict.code,
+                }
+            if validated:
+                final = ("Delegated workspace certificate valid for generation %s.\n\n"
+                         "Model outcome:\n%s" % (delegated_verdict.generation, final))
+            else:
+                final = controller.report_outcome(final)
+                activity_tracker.set_response_status("unverified", "delegated work or parent effects lack current validation")
+                activity_tracker.set_result_summary("delegated work or parent effects lack current validation")
+            controller.terminal_projected = True
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=final,
@@ -19422,6 +19473,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=validated,
                 project_scope=project_scope,
+                **certificate_fields,
             )
         return final
 
@@ -19433,6 +19485,9 @@ def _agent_turn(
         check, misreporting a normal evidence/parse failure as a scope
         mismatch.
         """
+        controller = _standalone_lanes.current()
+        if controller is not None and controller.delegated_work:
+            return finish_final(text, failed=True)
         _teardown_speculation()
         text = str(text or "")
         # Early exits are still auditable outcomes.  A worker may have already
@@ -20062,10 +20117,11 @@ def _agent_turn(
             )
         mutation_happened = _agent_tool_mutates(
             tool_name, policy_tool_args,
-        ) and tool_ok
+        ) and tool_ok and tool_name != "agent_lane"
         mutation_attempt_may_have_changed = (
             tool_dispatched
             and _agent_tool_mutates(tool_name, policy_tool_args)
+            and tool_name != "agent_lane"
         )
         if mutation_attempt_may_have_changed:
             # A failed mutator can still leave directories or partial output.
@@ -20077,6 +20133,7 @@ def _agent_turn(
             and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
         )
         if mutation_attempt_may_have_changed or execution_may_have_changed:
+            parent_effect_dirty = True
             # A real mutation or an execution-capable tool can make prior
             # inspection results stale even when the command exits nonzero.
             # Dry-run mutation tools do not reach here.

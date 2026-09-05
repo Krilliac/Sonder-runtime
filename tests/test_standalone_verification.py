@@ -1,8 +1,10 @@
 """The standalone consumer binds typed certificates to its private parent."""
 from dataclasses import replace
 from types import SimpleNamespace
+import json
 import pytest
 from tests.test_delegated_verification import lanes as lane_env, _verifier
+from tests.test_lane_coding_acceptance import coding, make_service, tool
 from sonder_runtime.interfaces.standalone_agent_lanes import StandaloneLaneController
 
 
@@ -65,3 +67,81 @@ def test_consumer_never_relaunches_after_ambiguous_execution_response(consumer, 
     assert not controller.verify_delegated(lambda *args: "approval", verifier_factory=factory).valid
     assert controller.verify_delegated(lambda *args: "approval", verifier_factory=factory).valid
     assert gateway.calls == 1
+
+
+@pytest.mark.parametrize("parent_edit,failed", [(False, False), (True, False), (False, True)])
+def test_real_loop_projects_parent_and_child_validation_separately(consumer, monkeypatch, parent_edit, failed):
+    import server
+    from sonder_runtime.interfaces import standalone_agent_lanes
+    from sonder_runtime.adapters.filesystem import file_ops
+    controller, verifier, gateway, root = consumer
+    responses = []
+    if parent_edit:
+        responses.append({"tool": "file_write", "args": {"path": str(root / "parent.txt"), "content": "parent change"}})
+    responses.append({"final": "ERROR: incomplete task" if failed else "Work complete."})
+    turns = iter(json.dumps(value) for value in responses)
+    monkeypatch.setattr(server, "_make_generate", lambda *args, **kwargs: lambda *a, **k: next(turns, json.dumps(responses[-1])))
+    monkeypatch.setattr(server, "_standalone_verifier_factory", lambda *args: verifier)
+    monkeypatch.setattr(server, "_agent_permission_gate_error", lambda *args, **kwargs: None)
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    token = standalone_agent_lanes._CURRENT.set(controller)
+    try:
+        result = server._agent_impl("Complete the bounded work", max_steps=3, return_host_receipt=True)
+    finally:
+        standalone_agent_lanes._CURRENT.reset(token)
+    assert result.validation_passed is (not parent_edit and not failed)
+    assert result.mutation_observed is parent_edit
+    if not failed:
+        assert result.verification_code == "CERTIFIED"
+        assert result.verification_certificate_id
+        assert gateway.calls == 1
+    else:
+        assert result.output.startswith("ERROR:")
+        assert gateway.calls == 0
+    if parent_edit:
+        assert (root / "parent.txt").read_text() == "parent change"
+        assert "UNVERIFIED:" in result.output
+
+
+def test_standalone_composed_catalog_certifies_real_repair_and_diff(coding, monkeypatch):
+    import subprocess
+    import server
+    from sonder_runtime.interfaces import standalone_agent_lanes
+    repo, catalog_path, store, sessions, jobs, provider, facade, context = coding
+    service, model = make_service(coding, [
+        tool("run_tests", target="unit"),
+        tool("edit_file", path="calc.py", old="return sum(values) + 1", new="return sum(values)"),
+        tool("run_tests", target="unit"), "Repaired",
+    ])
+    independent = catalog_path.with_name("independent-tests.json")
+    catalog = json.loads(catalog_path.read_text())
+    catalog["targets"] = [target for target in catalog["targets"] if target["name"] == "unit"]
+    independent.write_text(json.dumps(catalog))
+    monkeypatch.setenv("SONDER_LANE_TEST_TARGETS_FILE", str(independent))
+    app = SimpleNamespace(agent_lanes=lambda: service, process_job_provider=lambda: provider,
+        config=SimpleNamespace(state=SimpleNamespace(workspace_roots=(str(repo),)),
+                               ollama=SimpleNamespace(allow_remote=False)))
+    approvals = []
+    def approve(name, args):
+        approvals.append((name, args))
+        return None
+    monkeypatch.setattr(server, "_agent_permission_gate_error", approve)
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda *a, **k: json.dumps({"final": "Repair ready for review."}))
+    with standalone_agent_lanes.controller_scope(lambda: app) as controller:
+        child = controller.execute({"action": "spawn", "payload": {
+            "command_id": "real-repair", "task": "Repair total and test it",
+            "workspace_root": str(repo), "max_steps": 8,
+        }})["lane"]
+        service.run_pending(child["id"], controller._context)
+        assert service.inspect(child["id"], controller._context)["lane"]["status"] == "completed"
+        result = server._agent_impl("Return the reviewed work", return_host_receipt=True)
+        assert result.validation_passed is True, result.output
+        assert result.verification_code == "CERTIFIED"
+        assert result.receipt()["delegated_verification"]["certificate_id"]
+        assert result.mutation_observed is False  # Parent did not perform the child edit.
+        assert len(approvals) == 1 and approvals[0][0] == "workspace_run"
+        assert approvals[0][1]["checks"][0]["argv"] == catalog["targets"][0]["argv"]
+        assert controller._parent["parent_token"] not in result.output
+    diff = subprocess.run(["git", "diff", "--", "calc.py"], cwd=repo, capture_output=True,
+                          text=True, check=True, timeout=10).stdout
+    assert "+    return sum(values)" in diff
