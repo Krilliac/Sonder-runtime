@@ -4,6 +4,7 @@ Existing callers retain native sqlite3 behavior until private host composition
 installs an owner. This is an explicit factory, never a sqlite3 monkeypatch.
 Thread-affine handles are closed on their constructing thread only.
 """
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -147,3 +148,14 @@ def connect(*args, **kwargs):
     if owner is None:
         return sqlite3.connect(*args, **kwargs)
     return owner.connect(*args, **kwargs)
+
+
+@contextmanager
+def transaction(*args, **kwargs):
+    """Commit/rollback the operation, then close its exact connection."""
+    connection = connect(*args, **kwargs)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()

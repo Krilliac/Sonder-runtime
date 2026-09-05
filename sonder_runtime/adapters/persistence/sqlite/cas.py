@@ -1,7 +1,9 @@
 """Domain-scoped SQLite adapter for the application outbox/CAS port."""
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from contextlib import contextmanager
+
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 
 from collections.abc import Mapping
 import json
@@ -57,10 +59,11 @@ class SQLiteOutboxCASRepository(OutboxCASRepository):
                 );
             """)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = owned_sqlite_connect(str(self._path), timeout=5.0)
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+    @contextmanager
+    def _connect(self):
+        with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            yield connection
 
     @staticmethod
     def _record(row: tuple[Any, ...] | None) -> TransactionNeutralRecord | None:
