@@ -213,9 +213,18 @@ def test_backup_entrypoint_passes_loaded_config_to_default_application(monkeypat
     assert seen == [config]
 
 
-def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(monkeypatch):
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(
+    monkeypatch, preexisting, isolated_home, restored_process_environment
+):
     import server
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.bootstrap import legacy_root
     from sonder_runtime.__main__ import cmd_mcp
+
+    caller = object() if preexisting else None
+    monkeypatch.setattr(server, "_APP_GRAPH", caller)
+    monkeypatch.setattr(legacy_root, "_owned_application", None)
 
     calls = []
     monkeypatch.setattr(
@@ -223,8 +232,42 @@ def test_mcp_entrypoint_runs_unsafe_gate_before_adapter(monkeypatch):
     )
     monkeypatch.setattr(server.mcp, "run", lambda: calls.append("mcp"))
 
-    assert cmd_mcp(SimpleNamespace()) == 0
-    assert calls == ["gate", "mcp"]
+    owned = SimpleNamespace(close_providers=lambda **_kwargs: calls.append("close"))
+
+    def compose(*, config):
+        assert calls == ["gate"]
+        calls.append("configure")
+        return owned
+
+    # A real entrypoint starts in its own process. This test shares a process
+    # with legacy callers; isolate only its composition slots and restore the
+    # caller afterward. Never ask production to replace caller ownership.
+    with monkeypatch.context() as startup:
+        startup.setattr(server, "_APP_GRAPH", None)
+        startup.setattr(legacy_root, "_owned_application", None)
+        startup.setattr(bootstrap_app, "default_app", compose)
+        assert cmd_mcp(SimpleNamespace()) == 0
+        assert server._APP_GRAPH is owned
+        assert legacy_root._owned_application is owned
+    assert server._APP_GRAPH is caller
+    assert legacy_root._owned_application is None
+    assert calls == ["gate", "configure", "mcp", "close"]
+
+
+def test_legacy_composition_still_refuses_caller_owned_graph(monkeypatch):
+    import server
+    from sonder_runtime.bootstrap import legacy_root
+
+    closed = []
+    caller = SimpleNamespace(close_providers=lambda **_kwargs: closed.append("caller"))
+    proposed = SimpleNamespace(close_providers=lambda **_kwargs: closed.append("proposed"))
+    monkeypatch.setattr(server, "_APP_GRAPH", caller)
+    monkeypatch.setattr(legacy_root, "_owned_application", None)
+    with pytest.raises(RuntimeError, match="caller-owned application"):
+        legacy_root.configure_application(proposed)
+    assert server._APP_GRAPH is caller
+    assert legacy_root._owned_application is None
+    assert closed == []
 
 
 def test_migrate_and_smoke(isolated_home, capsys):
