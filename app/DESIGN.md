@@ -16,3 +16,5 @@ Chat, Agents, Runtime and Settings are peer destinations. Chat owns routing and 
 
 ## Motion and content
 Use existing Material motion only; no decorative animation. English labels name user actions directly. Pending messages and requested interruption are visible without implying worker acknowledgement. Server transcripts remain available after completion and reconnection.
+
+App control is a subordinate Chat toolbar flow. Its selected-conversation strip uses the existing panel and a restrained teal edge; the page keeps the shared reading width and natural narrow scrolling. New conversation fields, paged rows and confirmed revoke dialogs use the existing Material primitives and WorkspaceNotice. A compact Chat title variant preserves its project action when toolbar space is limited. Selection is explicitly separate from managed execution; credentials and technical request payloads never become visual content.

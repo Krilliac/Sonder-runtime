@@ -9,7 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  http: ^1.2.0
+  # App-control uses AbortableRequest for bounded native/browser cancellation.
+  http: ^1.6.0
   shared_preferences: ^2.2.0
   # API and launcher bearer tokens must never be persisted in the plaintext
   # preferences store. This uses the platform credential/key store instead.
