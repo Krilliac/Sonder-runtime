@@ -283,15 +283,31 @@ def test_report_pages_filter_actual_parent_and_ack_cannot_cross_lane(env):
 
 
 def test_foreign_principal_lane_is_not_controllable(env):
-    lane = child(env)
-    with env[1].transaction() as tx:
-        data = tx.lane(lane)
-        data["principal_id"] = "other-account"
-        tx.save(data)
+    from sonder_runtime.application.agents.interactive_lanes import AgentLaneService
+
+    _, store, sessions, model, context, root = env
+    foreign_context = replace(context, principal_id="other-account")
+
+    def foreign_grant(lane, current):
+        assert current is foreign_context
+        assert lane["principal_id"] == foreign_context.principal_id
+
+    service = AgentLaneService(
+        store, sessions, model, auto_start=False, authorize_grant=foreign_grant
+    )
+    lane = service.spawn(
+        command_id="foreign-spawn",
+        parent_session_id="foreign-parent",
+        task="parser task",
+        workspace_root=str(root / "child"),
+        context=foreign_context,
+    )["lane"]["id"]
+    before = service.inspect(lane, foreign_context)
     ui = facade(env)
     assert lane not in ui.run("list")
     assert "another principal" in ui.run("show " + lane)
     assert "another principal" in ui.run("cancel " + lane)
+    assert service.inspect(lane, foreign_context) == before
 
 
 def test_actual_named_command_dispatch_keeps_legacy_agents(env, monkeypatch, capsys):
