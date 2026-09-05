@@ -89,3 +89,7 @@ cross-process restart reconciliation and all-aggregate eligibility remain to be
 implemented. This prototype provides neither old-binary exclusion for unknown
 writers nor independent-host fencing, automatic takeover, or HA. It must not be
 used to advertise those capabilities. No installed data is changed by the tests.
+
+App-work startup registration returns a private, exact slot lease. The constructor commits it only after current configuration and inventory checks; listener sealing refuses an incomplete lease. A failed constructor can roll back only its own uncommitted lease, after the concrete dispatcher drain finishes within the deadline. Failed or late cleanup retains the slot and prevents replacement.
+
+Shutdown fences dispatch admission synchronously and cancels queued futures. One retained runtime-owned thread drains the concrete dispatcher. A deadline returns an unresolved component proof while that thread and dispatcher remain owned; later resource and OS containment cleanup can continue. Running Python callbacks are not terminated or reported clean merely because the deadline elapsed. Legacy caller-owned dispatcher close remains synchronous by default.

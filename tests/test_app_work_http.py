@@ -98,6 +98,7 @@ def work_http(control, monkeypatch):
     def register(application, dispatcher):
         assert application is app and dispatcher.application is app and not slot
         slot.append(dispatcher)
+        return SimpleNamespace(commit=lambda: None, rollback=lambda **kw: dispatcher.close())
 
     def require(application):
         if application is not app or not slot:

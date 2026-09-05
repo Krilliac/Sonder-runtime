@@ -488,12 +488,17 @@ class AppManagedWorkDispatcher:
             raise PermissionError("cleanup selection mismatch")
         return self._cleanup(entry)
 
-    def close(self):
+    def stop_admissions(self):
+        """Fence new submissions without waiting for existing callbacks."""
         with self._condition:
             self._closed = True
+
+    def close(self, *, cancel_pending=False):
+        self.stop_admissions()
+        with self._condition:
             while self._submitting:
                 self._condition.wait()
-        self._executor.shutdown(wait=True, cancel_futures=False)
+        self._executor.shutdown(wait=True, cancel_futures=cancel_pending)
         with self._lock:
             entries = tuple(self._runs.values())
         for entry in entries:
