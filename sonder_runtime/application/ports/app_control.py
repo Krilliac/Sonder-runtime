@@ -270,7 +270,14 @@ class CommandKey:
 
 
 ACTIONS = frozenset(
-    ("enroll", "create_binding", "select_binding", "clear_selection", "revoke_binding")
+    (
+        "enroll",
+        "create_binding",
+        "select_binding",
+        "clear_selection",
+        "revoke_binding",
+        "prepare_work",
+    )
 )
 
 

@@ -9,6 +9,13 @@ import sqlite3
 import stat
 import time
 import uuid
+from ...application.ports.app_managed_work import (
+    AppWorkRecord,
+    PreparedAppWork,
+    PreparedWorkbenchRun,
+    WorkSpec,
+    WorkAdmission,
+)
 
 from ...application.ports.app_control import (
     AppControlError,
@@ -33,6 +40,9 @@ from ...application.ports.app_control import (
 )
 
 _SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS app_managed_work (position INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, principal TEXT NOT NULL, session TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL, record TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS app_managed_work_scope ON app_managed_work(principal,session,position)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS app_managed_work_active_binding ON app_managed_work(binding) WHERE state IN ('prepared','admitted')",
     "CREATE TABLE IF NOT EXISTS app_control_meta (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS app_control_sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL, runtime TEXT NOT NULL, record TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS app_control_sessions_principal ON app_control_sessions(principal)",
@@ -44,6 +54,7 @@ _SCHEMA = (
 )
 
 _CONTROL_TABLES = (
+    "app_managed_work",
     "app_control_meta",
     "app_control_sessions",
     "app_host_bindings",
@@ -80,6 +91,19 @@ def _decode(raw, cls):
         if type(raw) is not str or len(raw.encode("utf8")) > 131072:
             raise ValueError()
         data = json.loads(raw, object_pairs_hook=_pairs)
+        if cls is AppWorkRecord:
+            prepared = data["prepared"]
+            grant = prepared["binding"]["grant"]
+            for key in ("roots", "tools", "catalog_file_identity"):
+                grant[key] = tuple(grant[key])
+            prepared["binding"]["grant"] = GrantSnapshot(**grant)
+            prepared["binding"] = BindingRecord(**prepared["binding"])
+            prepared["selection"] = SelectionRecord(**prepared["selection"])
+            prepared["command"] = CommandKey(**prepared["command"])
+            prepared["plan"]["spec"] = WorkSpec(**prepared["plan"]["spec"])
+            prepared["plan"]["model_ladder"] = tuple(prepared["plan"]["model_ladder"])
+            prepared["plan"] = PreparedWorkbenchRun(**prepared["plan"])
+            data["prepared"] = PreparedAppWork(**prepared)
         if cls in (BindingRecord, ControlSessionRecord):
             grant = data["grant"]
             for key in ("roots", "tools", "catalog_file_identity"):
@@ -261,6 +285,176 @@ class AppControlTransaction:
     def _check(self):
         if not self._active or not self._conn.in_transaction:
             raise StoreUnavailable("control transaction is no longer active")
+
+    def read_work(self, *, principal_id, control_session_id, work_id):
+        self._check()
+        principal(principal_id)
+        identifier(control_session_id)
+        identifier(work_id)
+        row = self._conn.execute(
+            "SELECT id,principal,session,binding,state,revision,record FROM app_managed_work "
+            "WHERE id=? AND principal=? AND session=?",
+            (work_id, principal_id, control_session_id),
+        ).fetchone()
+        if row is None:
+            return None
+        record = _decode(row[6], AppWorkRecord)
+        work = record.prepared
+        expected = (
+            work.work_id,
+            work.command.principal_id,
+            work.selection.control_session_id,
+            work.binding.binding_id,
+            record.state,
+            record.revision,
+        )
+        if tuple(row[:6]) != expected:
+            raise StoreUnavailable("work row scope mismatch")
+        return record
+
+    def _require_work(self, work):
+        if type(work) is not PreparedAppWork:
+            raise ValueError("typed prepared work required")
+        work.__post_init__()
+        session, binding, selection = self.require_selection(
+            principal_id=work.command.principal_id,
+            control_session_id=work.selection.control_session_id,
+            binding_id=work.binding.binding_id,
+            binding_revision=work.binding.revision,
+            selection_id=work.selection.selection_id,
+            epoch=work.selection.epoch,
+        )
+        if (
+            binding != work.binding
+            or selection != work.selection
+            or session.account_session_ref != work.account_session_ref
+            or session.grant != binding.grant
+            or not work.created_at
+            <= self._now()
+            < work.expires_at
+            <= session.expires_at
+        ):
+            raise CommandConflict("prepared work authority changed or expired")
+
+    def prepare_work(self, work):
+        self._require_work(work)
+        prior = self._start(work.command, "prepare_work", work.digest)
+        if prior:
+            result = self.read_work(
+                principal_id=work.command.principal_id,
+                control_session_id=work.selection.control_session_id,
+                work_id=prior.entity_id,
+            )
+            if result is None or result.prepared != work:
+                raise StoreUnavailable("prepared work receipt mismatch")
+            return result
+        if self._conn.execute(
+            "SELECT 1 FROM app_managed_work WHERE binding=?", (work.binding.binding_id,)
+        ).fetchone():
+            raise CommandConflict("binding already has retained work")
+        if (
+            self._conn.execute("SELECT COUNT(*) FROM app_managed_work").fetchone()[0]
+            >= 256
+        ):
+            raise CapacityExceeded("retained work capacity reached")
+        record = AppWorkRecord(work)
+        self._write_one(
+            "INSERT INTO app_managed_work(id,principal,session,binding,state,revision,record) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                work.work_id,
+                work.command.principal_id,
+                work.selection.control_session_id,
+                work.binding.binding_id,
+                record.state,
+                record.revision,
+                _encode(record),
+            ),
+        )
+        if (
+            self.read_work(
+                principal_id=work.command.principal_id,
+                control_session_id=work.selection.control_session_id,
+                work_id=work.work_id,
+            )
+            != record
+        ):
+            raise StoreUnavailable("work preparation readback mismatch")
+        self._finish(
+            work.command,
+            work.digest,
+            CommandReceipt(
+                work.command.command_id,
+                "prepare_work",
+                "COMMITTED",
+                work.work_id,
+                1,
+                work.selection.epoch,
+            ),
+        )
+        return record
+
+    def admit_work(
+        self,
+        *,
+        principal_id,
+        control_session_id,
+        work_id,
+        expected_revision,
+        dispatch_id,
+        process_incarnation,
+    ):
+        positive(expected_revision)
+        identifier(dispatch_id)
+        identifier(process_incarnation)
+        record = self.read_work(
+            principal_id=principal_id,
+            control_session_id=control_session_id,
+            work_id=work_id,
+        )
+        if record is None:
+            raise NotFound("work unavailable")
+        self._require_work(record.prepared)
+        if record.state == "admitted":
+            if (
+                expected_revision != 1
+                or record.dispatch_id != dispatch_id
+                or record.process_incarnation != process_incarnation
+            ):
+                raise CommandConflict("work was already admitted")
+            return WorkAdmission(record, False)
+        if expected_revision != record.revision:
+            raise CommandConflict("work revision changed")
+        admitted = replace(
+            record,
+            state="admitted",
+            revision=2,
+            dispatch_id=dispatch_id,
+            process_incarnation=process_incarnation,
+        )
+        self._write_one(
+            "UPDATE app_managed_work SET state=?,revision=?,record=? "
+            "WHERE id=? AND principal=? AND session=? AND revision=? AND state='prepared'",
+            (
+                admitted.state,
+                admitted.revision,
+                _encode(admitted),
+                work_id,
+                principal_id,
+                control_session_id,
+                expected_revision,
+            ),
+        )
+        if (
+            self.read_work(
+                principal_id=principal_id,
+                control_session_id=control_session_id,
+                work_id=work_id,
+            )
+            != admitted
+        ):
+            raise StoreUnavailable("work admission readback mismatch")
+        return WorkAdmission(admitted, True)
 
     def _now(self):
         self._check()
