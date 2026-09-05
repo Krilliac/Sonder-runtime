@@ -375,6 +375,51 @@ class AppControlTransaction:
             raise StoreUnavailable("work row scope mismatch")
         return record
 
+    def read_recovery_work(
+        self,
+        *,
+        principal_id,
+        control_session_id,
+        binding_id,
+        binding_revision,
+        selection_id,
+        epoch,
+        work_id,
+    ):
+        """Observe exact historical work under a current selection; never admit it.
+
+        Private composition must also apply current account authority around this
+        transaction. Original execution expiry and session identity stay immutable.
+        """
+        session, binding, _ = self.require_selection(
+            principal_id=principal_id,
+            control_session_id=control_session_id,
+            binding_id=binding_id,
+            binding_revision=binding_revision,
+            selection_id=selection_id,
+            epoch=epoch,
+        )
+        identifier(work_id)
+        row = self._conn.execute(
+            "SELECT session FROM app_managed_work WHERE id=? AND principal=? AND binding=?",
+            (work_id, principal_id, binding_id),
+        ).fetchone()
+        if row is None:
+            return None
+        record = self.read_work(
+            principal_id=principal_id, control_session_id=row[0], work_id=work_id
+        )
+        if (
+            record is None
+            or record.prepared.binding != binding
+            or record.prepared.binding.runtime_id != session.runtime_id
+            or record.prepared.binding.grant != session.grant
+        ):
+            raise CommandConflict(
+                "historical work does not match current project authority"
+            )
+        return record
+
     def _require_work(self, work):
         if type(work) is not PreparedAppWork:
             raise ValueError("typed prepared work required")
