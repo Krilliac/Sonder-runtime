@@ -85,7 +85,7 @@ def test_missing_schema_is_unavailable_and_lookup_does_not_initialize_it():
     conn = memory_store.connect(":memory:")
     try:
         with pytest.raises(sqlite3.OperationalError):
-            account_auth.read_session_reference(conn, "account-session-v1:" + "0" * 64)
+            account_auth.authenticate_session(conn, "unknown-session")
         assert not conn.in_transaction
         assert (
             conn.execute(
@@ -107,3 +107,32 @@ def test_reference_sees_committed_revocation_from_another_connection(login):
         writer.close()
     assert account_auth.read_session_reference(conn, identity.reference) is None
     assert not conn.in_transaction
+
+
+def test_auth_secret_rotation_invalidates_retained_reference(monkeypatch):
+    monkeypatch.setenv("SONDER_AUTH_SECRET", "A" * 64)
+    conn = memory_store.connect(":memory:")
+    try:
+        admin_auth.register(conn, "owner", "password123")
+        token, _ = admin_auth.login(conn, "owner", "password123")
+        identity = account_auth.authenticate_session(conn, token)
+        assert account_auth.read_session_reference(conn, identity.reference) == identity
+        monkeypatch.setenv("SONDER_AUTH_SECRET", "B" * 64)
+        assert admin_auth.authenticate(conn, token) is None
+        assert account_auth.authenticate_session(conn, token) is None
+        assert account_auth.read_session_reference(conn, identity.reference) is None
+    finally:
+        conn.close()
+
+
+def test_rotation_between_token_hash_and_reference_mac_refuses(monkeypatch):
+    monkeypatch.setenv("SONDER_AUTH_SECRET", "A" * 64)
+    conn = memory_store.connect(":memory:")
+    try:
+        admin_auth.register(conn, "owner", "password123")
+        token, _ = admin_auth.login(conn, "owner", "password123")
+        reads = iter(["A" * 64])
+        monkeypatch.setattr(admin_auth, "_secret", lambda: next(reads, "B" * 64))
+        assert account_auth.authenticate_session(conn, token) is None
+    finally:
+        conn.close()

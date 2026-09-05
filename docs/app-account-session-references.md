@@ -4,7 +4,11 @@
 account bearer and returns a frozen `AccountSessionIdentity`, or `None` for an
 invalid, expired, revoked or banned login. The identity includes normalized
 username, current role, strict absolute expiry and a repr-hidden private reference.
-The reference is a version-tagged existing token HMAC lookup key, not a new bearer.
+The reference contains a version-tagged existing token HMAC lookup key and a
+domain-separated HMAC binding that exact key to the current authentication secret.
+It is not a new bearer. Rotation of `SONDER_AUTH_SECRET` invalidates retained
+references as well as raw tokens. Both pre-query and post-query checks validate
+the current reference MAC; malformed and historical unbound references refuse.
 It is never part of public account JSON. No token, login, schema or account row is
 created or updated by these helpers.
 
