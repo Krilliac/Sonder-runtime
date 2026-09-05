@@ -543,6 +543,9 @@ class LaneContinuationService:
         )
         if (
             sealed.sha256 != identity.projection_digest
+            or sealed.binding.host_conversation_id != record["host_conversation_id"]
+            or sealed.binding.parent_session_id != identity.parent_session_id
+            or sealed.binding.parent_grant_revision != identity.parent_grant_revision
             or sealed.binding.revision != identity.projection_revision
             or sealed.binding.bundle_digest != identity.bundle_digest
             or sealed.binding.project_roots != prepared.roots
