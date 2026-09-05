@@ -294,9 +294,17 @@ class AppManagedAuthority:
         try:
             with account_admission(conn):
                 binding._source(conn)
+                key_digest = hashlib.sha256(account_auth._secret().encode()).hexdigest()
                 account = account_auth.read_session_reference(
                     conn, selection.account.reference
                 )
+                if (
+                    key_digest
+                    != hashlib.sha256(account_auth._secret().encode()).hexdigest()
+                ):
+                    raise PermissionError(
+                        "account signing key changed during reference read"
+                    )
                 if (
                     account != selection.account
                     or account is None
@@ -315,9 +323,7 @@ class AppManagedAuthority:
                     threading.get_ident(),
                     registration,
                 )
-                admission.key_digest = hashlib.sha256(
-                    account_auth._secret().encode()
-                ).hexdigest()
+                admission.key_digest = key_digest
                 with self._lock:
                     if len(self._admissions) >= 128:
                         raise PermissionError(
