@@ -1,6 +1,6 @@
 """Bounded app work data. These records do not confer execution authority."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import os
@@ -161,6 +161,27 @@ class PreparedAppWork:
 
 
 @dataclass(frozen=True)
+class WorkInterruption:
+    """Bounded observation of ambiguity, never evidence that execution failed."""
+
+    prior_state: str
+    code: str
+    evidence_digest: str
+
+    def __post_init__(self):
+        if self.prior_state not in ("admitted", "run_binding", "running"):
+            raise ValueError("post-admission phase required")
+        if self.code not in (
+            "CALLBACK_OUTCOME_UNKNOWN",
+            "HOST_LINK_OUTCOME_UNKNOWN",
+            "FINAL_PUBLICATION_UNKNOWN",
+            "OWNER_INTERRUPTED",
+        ):
+            raise ValueError("bounded interruption code required")
+        require_digest(self.evidence_digest)
+
+
+@dataclass(frozen=True)
 class AppWorkRecord:
     prepared: PreparedAppWork = field(repr=False)
     state: str = "prepared"
@@ -169,12 +190,27 @@ class AppWorkRecord:
     process_incarnation: str = ""
     run_id: str = ""
     host_turn: ManagedHostTurnLink | None = None
+    interruption: WorkInterruption | None = None
 
     def __post_init__(self):
         if type(self.prepared) is not PreparedAppWork:
             raise ValueError("typed prepared work required")
         self.prepared.__post_init__()
         positive(self.revision)
+        if self.state == "unknown":
+            if type(self.interruption) is not WorkInterruption:
+                raise ValueError("typed interruption required")
+            self.interruption.__post_init__()
+            # Validate the exact retained pre-interruption shape without discarding links.
+            replace(
+                self,
+                state=self.interruption.prior_state,
+                revision=self.revision - 1,
+                interruption=None,
+            )
+            return
+        if self.interruption is not None:
+            raise ValueError("only unknown work retains interruption evidence")
         if self.state == "prepared":
             if self.revision != 1 or self.dispatch_id or self.process_incarnation:
                 raise ValueError("prepared work cannot claim dispatch")

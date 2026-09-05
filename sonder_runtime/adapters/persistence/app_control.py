@@ -16,6 +16,7 @@ from ...application.ports.app_managed_work import (
     PreparedWorkbenchRun,
     WorkSpec,
     WorkAdmission,
+    WorkInterruption,
 )
 
 from ...application.ports.app_control import (
@@ -73,6 +74,8 @@ def _encode(value, limit=131072):
             data.pop("run_id")
         if value.host_turn is None:
             data.pop("host_turn")
+        if value.interruption is None:
+            data.pop("interruption")
     raw = json.dumps(
         data,
         sort_keys=True,
@@ -100,6 +103,8 @@ def _decode(raw, cls):
             raise ValueError()
         data = json.loads(raw, object_pairs_hook=_pairs)
         if cls is AppWorkRecord:
+            if data.get("interruption") is not None:
+                data["interruption"] = WorkInterruption(**data["interruption"])
             if data.get("host_turn") is not None:
                 data["host_turn"] = ManagedHostTurnLink(**data["host_turn"])
             prepared = data["prepared"]
@@ -501,6 +506,7 @@ class AppControlTransaction:
         process_incarnation,
         run_id=None,
         host_turn=None,
+        interruption=None,
     ):
         positive(expected_revision)
         current = self.read_work(
@@ -520,13 +526,26 @@ class AppControlTransaction:
         ).record
         if record.state == "prepared":
             raise CommandConflict("work is not admitted")
-        expected_state = "admitted" if host_turn is None else "run_binding"
+        expected_state = (
+            interruption.prior_state
+            if interruption is not None
+            else "admitted" if host_turn is None else "run_binding"
+        )
         if record.state != expected_state or record.revision != expected_revision:
             raise CommandConflict("work execution state changed")
         updated = (
-            replace(record, state="run_binding", revision=3, run_id=run_id)
-            if host_turn is None
-            else replace(record, state="running", revision=4, host_turn=host_turn)
+            replace(
+                record,
+                state="unknown",
+                revision=record.revision + 1,
+                interruption=interruption,
+            )
+            if interruption is not None
+            else (
+                replace(record, state="run_binding", revision=3, run_id=run_id)
+                if host_turn is None
+                else replace(record, state="running", revision=4, host_turn=host_turn)
+            )
         )
         self._write_one(
             "UPDATE app_managed_work SET state=?,revision=?,record=? "
@@ -560,6 +579,12 @@ class AppControlTransaction:
         if type(host_turn) is not ManagedHostTurnLink:
             raise CommandConflict("typed host turn required")
         return self._link_work(host_turn=host_turn, **scope)
+
+    def mark_work_unknown(self, *, interruption, **scope):
+        if type(interruption) is not WorkInterruption:
+            raise CommandConflict("typed interruption required")
+        interruption.__post_init__()
+        return self._link_work(interruption=interruption, **scope)
 
     def _now(self):
         self._check()
