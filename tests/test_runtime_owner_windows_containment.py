@@ -43,13 +43,14 @@ def test_handle_wait_uses_one_deadline(monkeypatch, force):
     assert token.cleanup_observation == (0, (258,))
 
 
-def test_failed_job_handle_close_retains_the_owned_handle():
+def test_failed_job_handle_close_retains_the_owned_handle(monkeypatch):
     from sonder_runtime.adapters.extensions.memory_limits import (
         _WindowsJobToken,
         ExtensionMemoryLimitError,
     )
 
     token = _WindowsJobToken(123, lambda handle: False)
+    monkeypatch.setattr(token, "_observe", lambda: (0, (0,)))
     with pytest.raises(ExtensionMemoryLimitError):
         token.close()
     assert token._handle == 123
@@ -58,9 +59,77 @@ def test_failed_job_handle_close_retains_the_owned_handle():
     assert token._handle is None
 
 
+def test_process_handle_close_failure_retains_job_and_retries(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+    calls = []
+    token = _WindowsJobToken(123, lambda h: calls.append(h) or False)
+    token._process_handles = [(1, 456)]
+    monkeypatch.setattr(token, "_observe", lambda: (0, (0,)))
+    with pytest.raises(Exception, match="process handle close"):
+        token.close()
+    assert calls == [456] and token._handle == 123
+    assert token._process_handles == [(1, 456)]
+    token._close_handle = lambda h: calls.append(h) or True
+    token.close()
+    assert calls == [456, 456, 123]
+    assert token._handle is None
+
+
+def test_unregistered_abort_releases_without_cleanup_proof():
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+    calls = []
+    token = _WindowsJobToken(123, lambda h: calls.append(("close", h)) or True,
+                             terminate=lambda h: calls.append(("terminate", h)) or True)
+    token._process_handles = [(1, 456)]
+    token._abort_unregistered()
+    assert calls == [("terminate", 123), ("close", 456), ("close", 123)]
+    assert not token._quiescent_proved
+    assert token._handle is None
+    token._published = True
+    with pytest.raises(Exception, match="published job"):
+        token._abort_unregistered()
+
+
 from sonder_runtime.adapters.extensions.memory_limits import (
     NativeExtensionMemoryLimiter,
 )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows Job attachment required")
+def test_failed_initial_observation_aborts_without_publishing(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import (
+        _WindowsJobToken, ExtensionMemoryLimitError,
+    )
+    limiter = NativeExtensionMemoryLimiter()
+    argv = (sys.executable, "-c", "import time; time.sleep(30)")
+    prepared = limiter.prepare_process_job("failed-attach", argv, None, 4)
+    process = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=prepared.launch_options["creationflags"] | subprocess.CREATE_NO_WINDOW,
+    )
+    tokens = []
+    original_abort = _WindowsJobToken._abort_unregistered
+    def unavailable(token):
+        raise ExtensionMemoryLimitError("initial observation unavailable")
+    def abort(token):
+        tokens.append(token)
+        return original_abort(token)
+    monkeypatch.setattr(_WindowsJobToken, "_observe", unavailable)
+    monkeypatch.setattr(_WindowsJobToken, "_abort_unregistered", abort)
+    try:
+        with pytest.raises(ExtensionMemoryLimitError, match="initial observation"):
+            limiter.apply_process_limits(process, None, 4)
+        process.wait(timeout=3)
+        assert len(tokens) == 1
+        assert tokens[0]._handle is None
+        assert tokens[0]._process_handles == []
+        assert not tokens[0]._published
+        assert not tokens[0]._quiescent_proved
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows Job Object required")

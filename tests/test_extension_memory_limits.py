@@ -171,17 +171,17 @@ def test_memory_limit_requires_positive_integer():
         ExtensionHostLimits(memory_limit_bytes=True)
 
 
-def test_windows_token_requires_observed_empty_job_before_close():
+def test_windows_token_requires_observed_empty_job_before_close(monkeypatch):
     from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
 
     calls = []
-    active = [2, 0]
+    observations = iter([(2, (258,)), (0, (0,))])
     token = _WindowsJobToken(
         123,
         lambda handle: calls.append("close") or True,
-        query_active=lambda handle: active.pop(0) if active else 0,
         terminate=lambda handle: calls.append("terminate") or True,
     )
+    monkeypatch.setattr(token, "_observe", lambda: next(observations))
     proof = token.quiesce(force=True)
     assert proof.complete and proof.forced
     assert calls == ["terminate"]
@@ -189,18 +189,18 @@ def test_windows_token_requires_observed_empty_job_before_close():
     assert calls == ["terminate", "close"]
 
 
-def test_windows_token_query_failure_does_not_claim_empty_or_drop_handle():
+def test_windows_token_query_failure_does_not_claim_empty_or_drop_handle(monkeypatch):
     from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
 
-    def failed_query(handle):
-        raise OSError("query failure")
+    def failed_query():
+        raise ExtensionMemoryLimitError("query failure")
 
     token = _WindowsJobToken(
         123,
         lambda handle: True,
-        query_active=failed_query,
         terminate=lambda handle: True,
     )
+    monkeypatch.setattr(token, "_observe", failed_query)
     assert not token.quiesce(force=True).complete
     with pytest.raises(Exception, match="quiescent"):
         token.close()

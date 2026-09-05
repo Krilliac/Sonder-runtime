@@ -56,9 +56,13 @@ class PreparedProcessContainment:
 
 
 class _WindowsJobToken:
-    def __init__(self, handle, close_handle) -> None:
+    def __init__(self, handle, close_handle, *, identity="", terminate=None) -> None:
         self._handle = handle
         self._close_handle = close_handle
+        self.identity = identity
+        self._terminate = terminate
+        self._quiescent_proved = False
+        self._published = False
         self._lock = RLock()
         self._process_handles = []
         self._last_observation = None
@@ -140,6 +144,7 @@ class _WindowsJobToken:
                     active, states = -1, ()
                 if (not self._proof_failed and active == 0 and states
                         and all(state == 0 for state in states)):
+                    self._quiescent_proved = True
                     return ProcessContainmentResult(True, forced=forced)
                 if any(state not in (0, 258) for state in states):
                     self._proof_failed = True
@@ -147,10 +152,7 @@ class _WindowsJobToken:
                 # Permission to force cleanup is not evidence it is necessary.
                 needs_termination = self._proof_failed or (active > 0 and 258 in states)
                 if force and not forced and needs_termination:
-                    terminate = ctypes.windll.kernel32.TerminateJobObject
-                    terminate.argtypes = [wintypes.HANDLE, wintypes.UINT]
-                    terminate.restype = wintypes.BOOL
-                    if not terminate(self._handle, 1):
+                    if not self._terminate_job():
                         return ProcessContainmentResult(False, detail="owned job termination failed")
                     forced = True
                 if self._proof_failed:
@@ -162,19 +164,45 @@ class _WindowsJobToken:
             return ProcessContainmentResult(False, forced=forced,
                                             detail="owned job cleanup deadline elapsed")
 
+    def _terminate_job(self):
+        if self._terminate is not None:
+            return self._terminate(self._handle)
+        import ctypes
+        from ctypes import wintypes
+        terminate = ctypes.windll.kernel32.TerminateJobObject
+        terminate.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        terminate.restype = wintypes.BOOL
+        return terminate(self._handle, 1)
+
+    def _release_handles(self):
+        while self._process_handles:
+            _, process_handle = self._process_handles[-1]
+            if not self._close_handle(process_handle):
+                raise ExtensionMemoryLimitError("owned process handle close failed")
+            self._process_handles.pop()
+        if self._handle:
+            result = self._close_handle(self._handle)
+            if result is not None and not result:
+                raise ExtensionMemoryLimitError("owned job handle close failed")
+            self._handle = None
+
+    def _abort_unregistered(self):
+        """Release a failed attachment; this never certifies quiescence."""
+        with self._lock:
+            if self._published:
+                raise ExtensionMemoryLimitError("published job requires proven cleanup")
+            try:
+                if self._handle:
+                    self._terminate_job()
+            finally:
+                self._release_handles()
+
     def close(self) -> None:
         with self._lock:
-            handle = self._handle
-            if handle:
-                result = self._close_handle(handle)
-                if result is not None and not result:
-                    raise ExtensionMemoryLimitError("owned job handle close failed")
-                self._handle = None
-            while self._process_handles:
-                _, process_handle = self._process_handles[-1]
-                if not self._close_handle(process_handle):
-                    raise ExtensionMemoryLimitError("owned process handle close failed")
-                self._process_handles.pop()
+            if self._handle and not self._quiescent_proved:
+                if not self.quiesce(force=True).complete:
+                    raise ExtensionMemoryLimitError("Windows job is not proven quiescent")
+            self._release_handles()
 
 
 class _PosixLimitToken:
@@ -661,13 +689,14 @@ class NativeExtensionMemoryLimiter:
         if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(int(handle))):
             kernel32.CloseHandle(job)
             raise ExtensionMemoryLimitError("AssignProcessToJobObject failed")
-        token = _WindowsJobToken(job, kernel32.CloseHandle)
+        token = _WindowsJobToken(job, kernel32.CloseHandle, identity=job_name)
         # Retain the suspended root before any user code or descendant can run.
         try:
             token._observe()
         except BaseException:
-            token.close()
+            token._abort_unregistered()
             raise
+        token._published = True
         return token
 
 
