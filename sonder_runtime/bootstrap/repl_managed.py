@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import time
 import uuid
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 from ..adapters.filesystem.file_ops import managed_root_scope
 from ..adapters.host_terminal_projection import TerminalProjectionCodec
@@ -17,13 +19,33 @@ from ..application.agents.lane_continuation import LaneContinuationService
 from ..application.context import local_owner_context
 from ..interfaces.standalone_agent_lanes import managed_controller_factory_scope
 from ..platform import paths
-from .managed_standalone import ManagedStandaloneSession
+from .managed_standalone import ManagedStandaloneSession, ManagedStandaloneRecovery
+from ..application.ports.lane_continuation import VerificationApprovalPending
 from .repl_host_selection import ReplHostPolicy, ReplHostSelectionAdapter
+
+
+@dataclass(frozen=True)
+class ReplRecoveryRequest:
+    continuation_id: str
+    command_id: str
+
+    def __post_init__(self):
+        for value in (self.continuation_id, self.command_id):
+            if not isinstance(value, str) or not 1 <= len(value) <= 128 or not all(
+                    char.isascii() and (char.isalnum() or char in '-_') for char in value):
+                raise ValueError('bounded recovery identities required')
+
+
+@dataclass(frozen=True)
+class ReplRecoveryResult:
+    code: str
+    approval_call_id: str = ''
+    output: str = ''
 
 
 def run_managed_repl_work(*, application, session_id, project, get_session,
                           run, permission_engine, additional_paths, ledger=None,
-                          recovery_cursor=None):
+                          recovery_cursor=None, recovery_request=None, verifier_factory=None):
     """Compose only from trusted host callbacks, never public tool arguments.
 
     ``additional_paths`` must enumerate constructor-owned private state before
@@ -34,6 +56,10 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
     if recovery_cursor is not None and (
             type(recovery_cursor) is not int or not 0 <= recovery_cursor < 2**63):
         raise ValueError('bounded recovery cursor required')
+    if recovery_request is not None:
+        if type(recovery_request) is not ReplRecoveryRequest or recovery_cursor is not None or not callable(verifier_factory):
+            raise ValueError('exact private recovery request and verifier required')
+        recovery_request.__post_init__()
     selected = Path(project).resolve() if project else None
     if selected is None or not selected.is_dir():
         raise PermissionError('select an existing project before managed work')
@@ -111,7 +137,9 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
         current_context()
         selector.authorize(admitted_context, selection.host_conversation_id)
         return bridge.authorize('workspace_run', prepared.approval_payload(),
-                                surface='agent', expires_at=expiry)
+                                surface='agent', expires_at=min(
+                                    expiry, getattr(prepared, 'expires_at', expiry),
+                                    time.time() + admitted_context.remaining_seconds))
 
     def factory(controller, current_application):
         nonlocal consumed
@@ -147,6 +175,43 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
         bridge = ContinuationApprovalBridge(ledger=ledger or permission_engine.approval_ledger().pinned(),
                                             decide=decide, digest_call=permission_engine.call_digest)
         try:
+            if recovery_request is not None:
+                host = LaneContinuationService(lanes, authorize_host=selector.authorize,
+                                               model_writable_roots=model_roots)
+                cursor, original = 0, None
+                while True:
+                    page = host.recovery_page(context, cursor=cursor, limit=128,
+                                               host_conversation_id=selection.host_conversation_id)
+                    original = next((item for item in page.items if item.continuation_id == recovery_request.continuation_id), None)
+                    if original is not None or not page.has_more:
+                        break
+                    cursor = page.next_cursor
+                if original is None or original.pending_identity is None:
+                    return ReplRecoveryResult('ORIGINAL_VERIFICATION_UNAVAILABLE')
+                current_context()
+                output_store = SQLiteTerminalOutputStore(output_root, model_writable_roots=model_roots)
+                host.projection_codec = TerminalProjectionCodec(output_store=output_store, output_context=current_context)
+                coordinator = ManagedStandaloneRecovery(
+                    controller=SimpleNamespace(run_id='repl-recovery-' + uuid.uuid4().hex),
+                    application=application, host=host, context=context,
+                    host_conversation_id=selection.host_conversation_id,
+                    private_paths=lambda: inventory().admission_directories,
+                    model_writable_roots=model_roots,
+                    approve_attachment=approve, approve_verification=approve,
+                )
+                prepared = coordinator.prepare(recovery_request.continuation_id,
+                                                command_id=recovery_request.command_id)
+                try:
+                    session = coordinator.execute(prepared)
+                except VerificationApprovalPending as pending:
+                    return ReplRecoveryResult('ATTACHMENT_APPROVAL_PENDING', pending.evidence.call_id)
+                active.append(session)
+                verdict = session.resume_pending_verification(original.pending_identity,
+                                                               verifier_factory=verifier_factory)
+                if session.published_terminal is not None:
+                    return ReplRecoveryResult('VERIFIED' if verdict.valid else verdict.code,
+                                               output=session.published_terminal.output)
+                return ReplRecoveryResult(verdict.code)
             with managed_controller_factory_scope(factory):
                 return run()
         finally:
