@@ -4,12 +4,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, replace
 import json
+import hashlib
 import math
 from pathlib import Path
 import threading
 import time
 import uuid
 
+from ..ports.managed_authority import ManagedAuthority
 from ..ports.lane_continuation import (
     ContinuationSelection,
     HostContinuationGrant,
@@ -30,6 +32,18 @@ _CURRENT_BOUND = ContextVar("lane_host_attachment", default=None)
 _PENDING_RESUME = ContextVar("lane_pending_verification_resume", default=None)
 
 
+@contextmanager
+def root_transaction(store, context):
+    """Acquire a bound host's authority guard before opening the fleet writer."""
+    bound = _CURRENT_BOUND.get()
+    if bound is not None and bound._service.store.path == store.path:
+        with bound._service._transaction(context) as tx:
+            yield tx
+    else:
+        with store.transaction() as tx:
+            yield tx
+
+
 def require_root_admission(tx, store, parent, context):
     """Called in the SAME transaction as root command/effect admission."""
     row = tx.conn.execute(
@@ -46,7 +60,7 @@ def require_root_admission(tx, store, parent, context):
         or context.principal_id != value["principal_id"]
     ):
         raise PermissionError("host attachment scope mismatch")
-    bound._require_current_tx(tx, value)
+    bound._require_current_tx(tx, value, context=context)
     return value
 
 
@@ -117,7 +131,7 @@ class BoundContinuation:
         self._closed = False
         self._lock = threading.RLock()
 
-    def _require_current_tx(self, tx, record, *, observe=False):
+    def _require_current_tx(self, tx, record, *, observe=False, context=None):
         if (
             self._closed
             or self._issuer is not self._service._issuer
@@ -128,10 +142,27 @@ class BoundContinuation:
             or record.get("attachment_state") != "active"
         ):
             raise PermissionError("host attachment is fenced")
-        self._service._current(tx, record, self._live_context, observe=observe)
+        if self._service.managed_authority is not None:
+            self._service.managed_authority.require_bound(
+                getattr(tx, "managed_admission", None),
+                self,
+                record,
+                context or self._live_context,
+                connection=tx.conn,
+            )
+        self._service._current(
+            tx,
+            record,
+            (
+                (context or self._live_context)
+                if self._service.managed_authority is not None
+                else self._live_context
+            ),
+            observe=observe,
+        )
 
     def require_current(self, *, context=None):
-        with self._lock, self._service.store.transaction() as tx:
+        with self._lock, self._service._transaction(self._live_context) as tx:
             self._require_current_tx(tx, self._service._row(tx, self.continuation_id))
             if context is not None:
                 ceiling = self._context
@@ -185,6 +216,8 @@ class BoundContinuation:
 
     def close(self):
         with self._lock:
+            if self._service.managed_authority is not None:
+                self._service.managed_authority.release_parent(self)
             self._closed = True
             self._lease.close()
 
@@ -195,7 +228,7 @@ class BoundContinuation:
         # The injected host validates its immutable command issuer and exact gate.
         action, payload = codec.decode_command(prepared_host_command)
         with self._scope() as context:
-            with self._service.store.transaction() as tx:
+            with self._service._transaction(self._live_context) as tx:
                 record = self._service._row(tx, self.continuation_id)
                 self._require_current_tx(tx, record)
             return self._service._dispatch(record, action, payload, context)
@@ -203,7 +236,7 @@ class BoundContinuation:
     def prepare_verification(self, verifier, *, command_id):
         self._verifier(verifier)
         with self._scope() as context:
-            with self._service.store.transaction() as tx:
+            with self._service._transaction(self._live_context) as tx:
                 record = self._service._row(tx, self.continuation_id)
                 self._require_current_tx(tx, record)
             return verifier.prepare(
@@ -218,7 +251,7 @@ class BoundContinuation:
         if action not in {"inspect", "validate", "reconcile"}:
             raise ValueError("unknown bound verification observation")
         with self._scope() as context:
-            with self._service.store.transaction() as tx:
+            with self._service._transaction(self._live_context) as tx:
                 record = self._service._row(tx, self.continuation_id)
                 self._require_current_tx(tx, record)
             return getattr(verifier, action)(
@@ -253,7 +286,7 @@ class BoundContinuation:
                 project_roots=prepared.roots,
             )
             sealed = seal_projection(codec, terminal_projection, expected)
-            with self._service.store.transaction() as tx:
+            with self._service._transaction(self._live_context) as tx:
                 record = self._service._row(tx, self.continuation_id)
                 self._require_current_tx(tx, record)
                 if (
@@ -304,7 +337,7 @@ class BoundContinuation:
 
     def pending_verification(self):
         with self._scope():
-            with self._service.store.transaction() as tx:
+            with self._service._transaction(self._live_context) as tx:
                 record = self._service._row(tx, self.continuation_id)
                 self._require_current_tx(tx, record)
                 value = record.get("pending_verification")
@@ -312,7 +345,7 @@ class BoundContinuation:
 
     def prepared_verification(self, identity):
         """Read the original immutable bundle; never prepare against a new context."""
-        with self._lock, self._service.store.transaction() as tx:
+        with self._lock, self._service._transaction(self._live_context) as tx:
             record = self._service._row(tx, self.continuation_id)
             self._require_current_tx(tx, record, observe=True)
             if not isinstance(identity, PendingVerificationIdentity) or record.get(
@@ -324,7 +357,7 @@ class BoundContinuation:
 
     def terminal_projection(self, identity):
         with self._scope() as context:
-            with self._service.store.transaction() as tx:
+            with self._service._transaction(self._live_context) as tx:
                 record = self._service._row(tx, self.continuation_id)
                 self._require_current_tx(tx, record)
                 if not isinstance(identity, PendingVerificationIdentity) or record.get(
@@ -365,7 +398,7 @@ class BoundContinuation:
         sealed = seal_projection(codec, host_result, expected)
         certificate_digest = codec.certificate_digest(host_result)
         with self._scope() as context:
-            with self._service.store.transaction() as tx:
+            with self._service._transaction(self._live_context) as tx:
                 record = self._service._row(tx, self.continuation_id)
                 self._require_current_tx(tx, record)
                 if record.get("pending_verification") != asdict(identity):
@@ -445,6 +478,8 @@ class LaneContinuationService:
         command_codec=None,
         terminal_result_codec=None,
         model_writable_roots=None,
+        managed_authority: ManagedAuthority | None = None,
+        authority_subject=None,
     ):
         self.lanes, self.store = lanes, lanes.store
         self.authorize_host, self.projection_codec = authorize_host, projection_codec
@@ -452,6 +487,89 @@ class LaneContinuationService:
         self.terminal_result_codec = terminal_result_codec
         self.model_writable_roots = model_writable_roots
         self._issuer = object()
+        if (managed_authority is None) != (authority_subject is None):
+            raise PermissionError(
+                "managed authority and private subject required together"
+            )
+        self.managed_authority = managed_authority
+        self.authority_subject = authority_subject
+        self._minted_parents = {}
+        self.cleanup_failures = []
+
+    @contextmanager
+    def _transaction(self, context):
+        if self.managed_authority is None:
+            with self.store.transaction() as tx:
+                yield tx
+            return
+        with self.managed_authority.admit(self.authority_subject, context) as admission:
+            with self.store.transaction() as tx:
+                tx.managed_admission = admission
+                try:
+                    yield tx
+                finally:
+                    tx.managed_admission = None
+
+    def open_parent(self, context):
+        if self.managed_authority is None:
+            return self.lanes.open_model_parent(context)
+        with self._transaction(context) as tx:
+            grant = self._grant(
+                context, self.authority_subject.host_conversation_id, tx=tx
+            )
+            result = self.store.open_parent(
+                context.principal_id,
+                transaction=tx,
+                expires_at=min(
+                    grant.expires_at, time.time() + context.remaining_seconds
+                ),
+            )
+            self._minted_parents[result["parent_session_id"]] = (
+                id(result),
+                hashlib.sha256(result["parent_token"].encode()).hexdigest(),
+                context,
+            )
+        return result
+
+    def discard_parent(self, parent, context):
+        """Revoke only the exact unconsumed private mint after constructor failure."""
+        if self.managed_authority is None:
+            return self.lanes.revoke_model_parent(
+                parent["parent_session_id"], parent["parent_token"], context
+            )
+        identity = parent["parent_session_id"]
+        if self._minted_parents.get(identity) != (
+            id(parent),
+            hashlib.sha256(parent["parent_token"].encode()).hexdigest(),
+            context,
+        ):
+            raise PermissionError("exact private parent mint required")
+        try:
+            with self.store.transaction() as tx:
+                row = self.store._verify_parent(
+                    tx, identity, parent["parent_token"], context.principal_id
+                )
+                tx.conn.execute(
+                    "UPDATE agent_lane_parent_grants SET revoked=1,revision=revision+1 WHERE session_id=? AND principal=?",
+                    (identity, context.principal_id),
+                )
+            self._minted_parents.pop(identity, None)
+        except BaseException:
+            if len(self.cleanup_failures) < 32:
+                self.cleanup_failures.append(
+                    (identity, "PARENT_REVOCATION_UNCONFIRMED")
+                )
+            raise
+
+    def _bound(self, record, context, lease):
+        bound = BoundContinuation(self, record, context, lease, self._issuer)
+        if self.managed_authority is not None:
+            try:
+                self.managed_authority.register_parent(bound, record, context)
+            except BaseException:
+                bound.close()
+                raise
+        return bound
 
     def _dispatch(self, record, action, payload, context):
         if not isinstance(payload, dict) or len(_json(payload).encode()) > 16384:
@@ -468,7 +586,7 @@ class LaneContinuationService:
         parent = record["parent_session_id"]
         lane_id = args.pop("lane_id", None)
         if lane_id:
-            with self.store.transaction() as tx:
+            with self._transaction(context) as tx:
                 require_root_admission(tx, self.store, parent, context)
                 lane = tx.lane(lane_id)
                 if lane["parent_session_id"] != parent:
@@ -589,9 +707,9 @@ class LaneContinuationService:
         except (ValueError, TypeError, KeyError, PermissionError):
             return "unavailable", "RECOVERY_METADATA_UNAVAILABLE", None, None
 
-    def _grant(self, context, host_id):
+    def _grant(self, context, host_id, *, tx):
         if (
-            self.authorize_host is None
+            (self.authorize_host is None and self.managed_authority is None)
             or context.expired
             or context.cancellation.cancelled
         ):
@@ -609,7 +727,16 @@ class LaneContinuationService:
             raise PermissionError(
                 "host continuation store overlaps model-writable scope"
             )
-        grant = self.authorize_host(context, host_id)
+        if self.managed_authority is None:
+            grant = self.authorize_host(context, host_id)
+        else:
+            grant = self.managed_authority.authorize_host(
+                getattr(tx, "managed_admission", None),
+                context,
+                host_id,
+                connection=tx.conn,
+            )
+
         if (
             not isinstance(grant, HostContinuationGrant)
             or grant.principal_id != context.principal_id
@@ -649,7 +776,7 @@ class LaneContinuationService:
         return grant
 
     def _current(self, tx, record, context, *, observe=False):
-        grant = self._grant(context, record["host_conversation_id"])
+        grant = self._grant(context, record["host_conversation_id"], tx=tx)
         now = time.time()
         if (
             record["principal_id"] != context.principal_id
@@ -693,14 +820,14 @@ class LaneContinuationService:
         command_id,
     ):
         _text(command_id)
-        grant = self._grant(context, host_conversation_id)
         remaining = context.remaining_seconds
         if remaining is None or not math.isfinite(remaining) or remaining <= 0:
             raise PermissionError("bounded original host deadline required")
         owner = "lane-owner-" + uuid.uuid4().hex
         lease = self.store.acquire_owner(owner)
         try:
-            with self.store.transaction() as tx:
+            with self._transaction(context) as tx:
+                grant = self._grant(context, host_conversation_id, tx=tx)
                 if (
                     tx.conn.execute(
                         "SELECT COUNT(*) FROM agent_lane_continuations WHERE principal=?",
@@ -769,14 +896,16 @@ class LaneContinuationService:
                         _json(record),
                     ),
                 )
-            return BoundContinuation(self, record, context, lease, self._issuer)
+            bound = self._bound(record, context, lease)
+            self._minted_parents.pop(parent_session_id, None)
+            return bound
         except BaseException:
             lease.close()
             raise
 
     def select(self, continuation_id, context):
         _text(continuation_id)
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             record = self._row(tx, continuation_id)
             self._current(tx, record, context)
         return ContinuationSelection(
@@ -791,7 +920,7 @@ class LaneContinuationService:
             or selection.principal_id != context.principal_id
         ):
             raise PermissionError("private host selection required")
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             record = self._row(tx, selection.continuation_id)
             self._current(tx, record, context)
             if record.get("attachment_state") == "approval_pending":
@@ -834,7 +963,7 @@ class LaneContinuationService:
         owner = "lane-owner-" + uuid.uuid4().hex
         lease = self.store.acquire_owner(owner)
         try:
-            with self.store.transaction() as tx:
+            with self._transaction(context) as tx:
                 record = self._row(tx, prepared.continuation_id)
                 self._current(tx, record, context)
                 expected = (
@@ -883,7 +1012,7 @@ class LaneContinuationService:
                 if pending.evidence.expires_at <= time.time():
                     raise PermissionError("pending attachment ledger record expired")
                 evidence = asdict(pending.evidence)
-                with self.store.transaction() as tx:
+                with self._transaction(context) as tx:
                     current = self._row(tx, prepared.continuation_id)
                     self._current(tx, current, context)
                     if current["owner"] != owner or current["epoch"] != record["epoch"]:
@@ -906,7 +1035,7 @@ class LaneContinuationService:
                 or approval.expires_at <= time.time()
             ):
                 raise PermissionError("typed exact host reattachment approval required")
-            with self.store.transaction() as tx:
+            with self._transaction(context) as tx:
                 current = self._row(tx, prepared.continuation_id)
                 self._current(tx, current, context)
                 if current["owner"] != owner or current["epoch"] != record["epoch"]:
@@ -923,7 +1052,7 @@ class LaneContinuationService:
                     attachment_state="active", attachment_approval=asdict(approval)
                 )
                 self._save(tx, current)
-            return BoundContinuation(self, current, context, lease, self._issuer)
+            return self._bound(current, context, lease)
         except BaseException:
             lease.close()
             raise
@@ -937,29 +1066,34 @@ class LaneContinuationService:
         ):
             raise ValueError("recovery page outside bounds")
         if (
-            self.authorize_host is None
+            (self.authorize_host is None and self.managed_authority is None)
             or context.expired
             or context.cancellation.cancelled
         ):
             raise PermissionError("live host authorizer unavailable")
         if host_conversation_id is not None:
-            if not isinstance(host_conversation_id, str) or not 1 <= len(host_conversation_id.encode()) <= 256:
+            if (
+                not isinstance(host_conversation_id, str)
+                or not 1 <= len(host_conversation_id.encode()) <= 256
+            ):
                 raise ValueError("bounded host conversation identity required")
-            self._grant(context, host_conversation_id)
         items = []
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
+            if host_conversation_id is not None:
+                self._grant(context, host_conversation_id, tx=tx)
             query = "SELECT position,data FROM agent_lane_continuations WHERE principal=? AND position>?"
             parameters = [context.principal_id, cursor]
             if host_conversation_id is not None:
                 query += " AND json_extract(data,'$.host_conversation_id')=?"
                 parameters.append(host_conversation_id)
-            rows = tx.conn.execute(query + " ORDER BY position LIMIT ?",
-                                   (*parameters, limit + 1)).fetchall()
+            rows = tx.conn.execute(
+                query + " ORDER BY position LIMIT ?", (*parameters, limit + 1)
+            ).fetchall()
             for row in rows[:limit]:
                 record = json.loads(row["data"])
                 if record["principal_id"] != context.principal_id:
                     raise PermissionError("stored recovery scope mismatch")
-                grant = self._grant(context, record["host_conversation_id"])
+                grant = self._grant(context, record["host_conversation_id"], tx=tx)
                 # Read-only recovery visibility is fresh host authorization, not
                 # authority to resume an expired original grant.
                 parent = tx.conn.execute(

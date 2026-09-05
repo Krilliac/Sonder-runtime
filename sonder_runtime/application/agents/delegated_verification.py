@@ -1,5 +1,7 @@
 """Local delegated verification with durable steering generation and dispatch barrier."""
 
+from .lane_continuation import root_transaction
+
 from dataclasses import replace, asdict
 from contextvars import copy_context
 import json
@@ -152,7 +154,7 @@ class DelegatedVerificationService:
         if self.gateway is None or not callable(self.process_evidence):
             raise PermissionError("delegated verifier unavailable")
         verification_id = "verification-" + uuid.uuid4().hex
-        with self.store.transaction() as tx:
+        with root_transaction(self.store, context) as tx:
             self._parent(tx, parent_session_id, context, bound_parent_revision)
             prior = tx.conn.execute(
                 "SELECT data FROM agent_verifications WHERE principal=? AND command_id=?",
@@ -237,7 +239,7 @@ class DelegatedVerificationService:
         ):
             raise PermissionError("prepared verification context changed")
         self.gateway.require_current(prepared.checks)
-        with self.store.transaction() as tx:
+        with root_transaction(self.store, context) as tx:
             self._parent(
                 tx, prepared.parent_session_id, context, prepared.parent_grant_revision
             )
@@ -257,7 +259,7 @@ class DelegatedVerificationService:
             self._proof(job, parent, context.principal_id)
 
     def _record(self, prepared, context):
-        with self.store.transaction() as tx:
+        with root_transaction(self.store, context) as tx:
             self._parent(
                 tx, prepared.parent_session_id, context, prepared.parent_grant_revision
             )
@@ -302,7 +304,7 @@ class DelegatedVerificationService:
         owner = "lane-owner-" + uuid.uuid4().hex
         owner_lease = self.store.acquire_owner(owner)
         try:
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 value = tx.verification_row(
                     prepared.verification_id, context.principal_id
                 )
@@ -345,7 +347,7 @@ class DelegatedVerificationService:
             raise
         try:
             self._require_current(prepared, context)
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 current_verification_binding(tx, self.store, prepared, context)
                 self._approval_snapshot(tx, prepared, context)
                 value = tx.verification_row(
@@ -379,7 +381,7 @@ class DelegatedVerificationService:
             if not isinstance(approval_id, str) or not 1 <= len(approval_id) <= 256:
                 raise PermissionError("independent exact approval is required")
             self._require_current(prepared, context)
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 current_verification_binding(tx, self.store, prepared, context)
                 value = tx.verification_row(
                     prepared.verification_id, context.principal_id
@@ -397,7 +399,7 @@ class DelegatedVerificationService:
                 )
                 tx.save_verification(value)
             before = self.snapshotter.capture(tuple(Path(p) for p in prepared.roots))
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 value = tx.verification_row(
                     prepared.verification_id, context.principal_id
                 )
@@ -420,7 +422,7 @@ class DelegatedVerificationService:
                 self._require_current(prepared, context)
                 call_id = prepared.verification_id + "-" + str(index)
                 job_id = "lane-test-" + call_id
-                with self.store.transaction() as tx:
+                with root_transaction(self.store, context) as tx:
                     value = tx.verification_row(
                         prepared.verification_id, context.principal_id
                     )
@@ -452,7 +454,7 @@ class DelegatedVerificationService:
             if before != after:
                 raise ValueError("source manifest changed during independent checks")
             self._require_current(prepared, context)
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 self._parent(
                     tx,
                     prepared.parent_session_id,
@@ -494,7 +496,7 @@ class DelegatedVerificationService:
             evidence = asdict(pending.evidence)
             if managed is None or evidence["expires_at"] <= time.time():
                 raise PermissionError("resumable pending approval unavailable")
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 current = current_verification_binding(
                     tx, self.store, prepared, context
                 )
@@ -527,7 +529,7 @@ class DelegatedVerificationService:
                     prepared.verification_id,
                 )
         except Exception as exc:
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 value = tx.verification_row(
                     prepared.verification_id, context.principal_id
                 )
@@ -601,7 +603,7 @@ class DelegatedVerificationService:
             identity
         )  # Trusted codec must restore original host evidence.
         with bound._scope() as context:
-            with self.store.transaction() as tx:
+            with root_transaction(self.store, context) as tx:
                 value = tx.verification_row(
                     identity.verification_id, context.principal_id
                 )
@@ -620,7 +622,7 @@ class DelegatedVerificationService:
                 try:
                     self._require_current(prepared, context)
                 except ValueError:
-                    with self.store.transaction() as tx:
+                    with root_transaction(self.store, context) as tx:
                         self._parent(
                             tx,
                             prepared.parent_session_id,
@@ -657,7 +659,7 @@ class DelegatedVerificationService:
     def inspect(
         self, parent_session_id, verification_id, *, context, bound_parent_revision
     ):
-        with self.store.transaction() as tx:
+        with root_transaction(self.store, context) as tx:
             self._parent(tx, parent_session_id, context, bound_parent_revision)
             value = tx.verification_row(verification_id, context.principal_id)
             if value["parent_session_id"] != parent_session_id:
@@ -705,7 +707,7 @@ class DelegatedVerificationService:
             context=context,
             bound_parent_revision=bound_parent_revision,
         )
-        with self.store.transaction() as tx:
+        with root_transaction(self.store, context) as tx:
             self._parent(tx, parent_session_id, context, bound_parent_revision)
             value = tx.verification_row(verification_id, context.principal_id)
             if value["state"] in {

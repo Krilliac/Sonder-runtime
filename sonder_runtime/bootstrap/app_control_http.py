@@ -117,9 +117,24 @@ class AppControlBinding:
             clock=clock,
         )
 
-    def _private(self):
+    def issue_selection(self, *, account_token, control_token, context):
+        authority = getattr(self, "_managed_authority", None)
+        if authority is None:
+            raise PermissionError("private app managed authority is not composed")
+        return authority.issue_selection(
+            account_token=account_token, control_token=control_token, context=context
+        )
+
+    def _private(self, *, context_roots=()):
         config = self._config_provider()
-        roots = tuple(Path(p).resolve() for p in config.state.workspace_roots)
+        if not isinstance(context_roots, tuple) or len(context_roots) > 32:
+            raise PermissionError("bounded immutable context roots required")
+        roots = tuple(
+            dict.fromkeys(
+                Path(p).resolve()
+                for p in (*config.state.workspace_roots, *context_roots)
+            )
+        )
         if not 1 <= len(roots) <= 256 or any(not p.is_dir() for p in roots):
             raise PermissionError("complete model roots unavailable")
         inventory = self._inventory()
