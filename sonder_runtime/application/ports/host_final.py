@@ -14,8 +14,12 @@ class HostFinalFacts:
     certificate_id: str = ''
     certificate_generation: int = 0
     certificate_code: str = ''
+    # None preserves legacy evidence as unknown, never as no delegated work.
+    delegated_work: bool | None = None
 
     def __post_init__(self):
+        if self.delegated_work is not None and type(self.delegated_work) is not bool:
+            raise ValueError('explicit delegated work observation required')
         if any(type(getattr(self, key)) is not bool for key in (
             'mutation_observed', 'validation_attempted', 'validation_passed',
         )):
