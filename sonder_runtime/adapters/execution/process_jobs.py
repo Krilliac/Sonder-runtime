@@ -170,6 +170,11 @@ class SubprocessJobProvider:
             )
             if not isinstance(prepared_scope, PreparedProcessContainment):
                 raise TypeError("native job containment returned an invalid preparation")
+            isolate_environment = getattr(self._memory_limiter, "isolated_process_environment", None)
+            if not request.inherit_environment and callable(isolate_environment):
+                prepared_scope = isolate_environment(prepared_scope, launch_argv, environment)
+                if not isinstance(prepared_scope, PreparedProcessContainment):
+                    raise TypeError("native isolated containment returned an invalid preparation")
             launch_argv = prepared_scope.argv
             prepared_options = dict(prepared_scope.launch_options)
             if "creationflags" in prepared_options and "creationflags" in launch_options:

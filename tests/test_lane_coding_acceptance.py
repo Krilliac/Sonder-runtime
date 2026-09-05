@@ -505,6 +505,7 @@ def test_real_test_process_receives_no_ambient_credentials_or_controls(
     assert result["exit_code"] == 0
     inherited = {name.upper() for name in json.loads(result["output"])}
     assert not inherited.intersection(name.upper() for name in names)
+    assert not inherited.intersection({"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"})
     if sys.platform == "win32":
         assert "SYSTEMROOT" in inherited
 
