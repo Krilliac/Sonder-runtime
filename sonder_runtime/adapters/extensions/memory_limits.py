@@ -55,14 +55,60 @@ class PreparedProcessContainment:
 
 
 class _WindowsJobToken:
-    def __init__(self, handle, close_handle) -> None:
-        self._handle = handle
-        self._close_handle = close_handle
+
+    def __init__(
+        self, handle, close_handle, *, query_active, terminate, identity=""
+    ) -> None:
+        import threading
+
+        self._handle, self._close_handle = handle, close_handle
+        self._query_active, self._terminate = query_active, terminate
+        self.identity = identity
+        self._lock = threading.RLock()
+
+    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+        import time
+
+        with self._lock:
+            if not self._handle:
+                return ProcessContainmentResult(
+                    False, detail="job handle already closed"
+                )
+            forced = False
+            try:
+                active = self._query_active(self._handle)
+                if active and force:
+                    if not self._terminate(self._handle):
+                        return ProcessContainmentResult(
+                            False, detail="TerminateJobObject failed"
+                        )
+                    forced = True
+                end = time.monotonic() + 2
+                while active and force and time.monotonic() < end:
+                    time.sleep(0.01)
+                    active = self._query_active(self._handle)
+                return ProcessContainmentResult(
+                    active == 0,
+                    forced=forced,
+                    detail="" if active == 0 else "Windows job remains populated",
+                )
+            except OSError:
+                return ProcessContainmentResult(
+                    False, forced=forced, detail="Windows job accounting unavailable"
+                )
 
     def close(self) -> None:
-        handle, self._handle = self._handle, None
-        if handle:
-            self._close_handle(handle)
+        with self._lock:
+            if self._handle:
+                if not self.quiesce(force=True).complete:
+                    raise ExtensionMemoryLimitError(
+                        "Windows job is not proven quiescent"
+                    )
+                if not self._close_handle(self._handle):
+                    raise ExtensionMemoryLimitError(
+                        "CloseHandle failed for Windows job"
+                    )
+                self._handle = None
 
 
 class _PosixLimitToken:
@@ -497,7 +543,42 @@ class NativeExtensionMemoryLimiter:
         kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
-        job = kernel32.CreateJobObjectW(None, None)
+        class BasicAccountingInformation(ctypes.Structure):
+            # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (JobObjectInformationClass=1).
+            _fields_ = [
+                (name, ctypes.c_longlong)
+                for name in (
+                    "TotalUserTime",
+                    "TotalKernelTime",
+                    "ThisPeriodTotalUserTime",
+                    "ThisPeriodTotalKernelTime",
+                )
+            ]
+            _fields_ += [
+                (name, wintypes.DWORD)
+                for name in (
+                    "TotalPageFaultCount",
+                    "TotalProcesses",
+                    "ActiveProcesses",
+                    "TotalTerminatedProcesses",
+                )
+            ]
+
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        import uuid
+
+        job_name = "Local\\SonderProcess-" + uuid.uuid4().hex
+        job = kernel32.CreateJobObjectW(None, job_name)
         if not job:
             raise ExtensionMemoryLimitError("CreateJobObjectW failed")
         info = ExtendedLimitInformation()
@@ -514,7 +595,22 @@ class NativeExtensionMemoryLimiter:
         if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(int(handle))):
             kernel32.CloseHandle(job)
             raise ExtensionMemoryLimitError("AssignProcessToJobObject failed")
-        return _WindowsJobToken(job, kernel32.CloseHandle)
+
+        def query_active(handle):
+            accounting = BasicAccountingInformation()
+            if not kernel32.QueryInformationJobObject(
+                handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None
+            ):
+                raise OSError("QueryInformationJobObject failed")
+            return accounting.ActiveProcesses
+
+        return _WindowsJobToken(
+            job,
+            kernel32.CloseHandle,
+            query_active=query_active,
+            terminate=lambda handle: kernel32.TerminateJobObject(handle, 1),
+            identity=job_name,
+        )
 
 
 __all__ = [

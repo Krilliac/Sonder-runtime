@@ -169,3 +169,39 @@ def test_memory_limit_requires_positive_integer():
         ExtensionHostLimits(memory_limit_bytes=0)
     with pytest.raises(ValueError, match="memory_limit_bytes"):
         ExtensionHostLimits(memory_limit_bytes=True)
+
+
+def test_windows_token_requires_observed_empty_job_before_close():
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    calls = []
+    active = [2, 0]
+    token = _WindowsJobToken(
+        123,
+        lambda handle: calls.append("close") or True,
+        query_active=lambda handle: active.pop(0) if active else 0,
+        terminate=lambda handle: calls.append("terminate") or True,
+    )
+    proof = token.quiesce(force=True)
+    assert proof.complete and proof.forced
+    assert calls == ["terminate"]
+    token.close()
+    assert calls == ["terminate", "close"]
+
+
+def test_windows_token_query_failure_does_not_claim_empty_or_drop_handle():
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+
+    def failed_query(handle):
+        raise OSError("query failure")
+
+    token = _WindowsJobToken(
+        123,
+        lambda handle: True,
+        query_active=failed_query,
+        terminate=lambda handle: True,
+    )
+    assert not token.quiesce(force=True).complete
+    with pytest.raises(Exception, match="quiescent"):
+        token.close()
+    assert token._handle == 123

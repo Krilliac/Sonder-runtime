@@ -19,6 +19,13 @@ from pathlib import Path
 from .fleet_store import _ensure_schema as _ensure_fleet_schema
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_parent_verification (
+ parent_session TEXT PRIMARY KEY, principal TEXT NOT NULL,
+ generation INTEGER NOT NULL DEFAULT 0, barrier TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS agent_verifications (
+ id TEXT PRIMARY KEY, parent_session TEXT NOT NULL, principal TEXT NOT NULL,
+ command_id TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(principal,command_id));
+
 CREATE TABLE IF NOT EXISTS agent_lanes (
  position INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
  principal TEXT NOT NULL, parent_session TEXT NOT NULL, data TEXT NOT NULL);
@@ -54,6 +61,94 @@ def encode(value):
 class LaneTransaction:
     def __init__(self, conn):
         self.conn = conn
+
+    def verification_generation(self, parent, principal):
+        row = self.conn.execute(
+            "SELECT principal,generation FROM agent_parent_verification WHERE parent_session=?",
+            (parent,),
+        ).fetchone()
+        if row is None:
+            self.root(parent, principal)
+            self.conn.execute(
+                "INSERT INTO agent_parent_verification VALUES (?,?,0,'')",
+                (parent, principal),
+            )
+            return 0
+        if row[0] != principal:
+            raise PermissionError("verification parent belongs to another principal")
+        return row[1]
+
+    def bump_verification(self, lane):
+        parent, principal = lane["parent_session_id"], lane["principal_id"]
+        self.verification_generation(parent, principal)
+        self.conn.execute(
+            "UPDATE agent_parent_verification SET generation=generation+1 WHERE parent_session=?",
+            (parent,),
+        )
+
+    def verification_barrier(self, parent, principal):
+        self.verification_generation(parent, principal)
+        return self.conn.execute(
+            "SELECT barrier FROM agent_parent_verification WHERE parent_session=?",
+            (parent,),
+        ).fetchone()[0]
+
+    def verification_dispatch_blocked(self, lane):
+        if self.verification_barrier(lane["parent_session_id"], lane["principal_id"]):
+            return True
+        rows = self.conn.execute(
+            "SELECT v.data FROM agent_verifications v JOIN agent_parent_verification p ON p.barrier=v.id LIMIT 10001"
+        ).fetchall()
+        if len(rows) > 10000:
+            raise ValueError("global verification barrier bound exceeded")
+        root = Path(lane["workspace_root"]).resolve()
+        for row in rows:
+            for raw in json.loads(row[0])["prepared"]["roots"]:
+                other = Path(raw).resolve()
+                if root == other or root in other.parents or other in root.parents:
+                    return True
+        return False
+
+    def acquire_verification_barrier(self, parent, principal, verification_id):
+        current = self.verification_barrier(parent, principal)
+        if current and current != verification_id:
+            raise ValueError("verification barrier already owned")
+        self.conn.execute(
+            "UPDATE agent_parent_verification SET barrier=? WHERE parent_session=?",
+            (verification_id, parent),
+        )
+
+    def release_verification_barrier(self, parent, principal, verification_id):
+        if self.verification_barrier(parent, principal) != verification_id:
+            raise ValueError("verification barrier ownership changed")
+        self.conn.execute(
+            "UPDATE agent_parent_verification SET barrier='' WHERE parent_session=?",
+            (parent,),
+        )
+
+    def verification_children(self, parent, principal):
+        self.verification_generation(parent, principal)
+        children = self.lanes(principal, parent, limit=257)
+        if len(children) > 256:
+            raise ValueError("verification child bound exceeded")
+        return [lane for _, lane in children]
+
+    def verification_row(self, verification_id, principal):
+        row = self.conn.execute(
+            "SELECT principal,data FROM agent_verifications WHERE id=?",
+            (verification_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError("verification not found")
+        if row[0] != principal:
+            raise PermissionError("verification belongs to another principal")
+        return json.loads(row[1])
+
+    def save_verification(self, value):
+        self.conn.execute(
+            "UPDATE agent_verifications SET data=? WHERE id=? AND principal=?",
+            (encode(value), value["verification_id"], value["principal_id"]),
+        )
 
     def lane(self, lane_id):
         row = self.conn.execute(
@@ -123,6 +218,7 @@ class LaneTransaction:
         )
 
     def insert(self, lane):
+        self.bump_verification(lane)
         self.agent(
             lane["id"],
             lane["principal_id"],
@@ -136,6 +232,7 @@ class LaneTransaction:
         )
 
     def save(self, lane):
+        self.bump_verification(lane)
         lane["revision"] += 1
         self.conn.execute(
             "UPDATE agent_lanes SET data=? WHERE id=?", (encode(lane), lane["id"])
@@ -521,6 +618,11 @@ class SQLiteAgentLaneStore:
         if row is None:
             raise KeyError("agent lane not found")
         return json.loads(row[0])
+
+    def owner_definitely_stopped(self, owner):
+        from .lane_owner import owner_definitely_stopped
+
+        return owner_definitely_stopped(self.path, owner)
 
     def acquire_owner(self, owner):
         from .lane_owner import LocalLaneOwner

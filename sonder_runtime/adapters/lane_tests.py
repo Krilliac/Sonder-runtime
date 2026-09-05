@@ -291,6 +291,13 @@ class LaneTestExecutor:
             raise
         if not cleanup_completed:
             raise RuntimeError("test process cleanup remains unresolved")
+        cleanup_proof = self.provider.cleanup_proof(job_id)
+        if cleanup_proof is None:
+            raise RuntimeError("test process cleanup proof is unavailable")
+        cleanup_completed = all(
+            cleanup_proof.get(k) is True
+            for k in ("process_exited", "containment_empty", "resources_released")
+        )
         page = self.provider.stream(job_id, max_events=64, max_bytes=16384)
         output = "".join(event.data for event in page.events)[:16384]
         body = dict(
@@ -300,6 +307,7 @@ class LaneTestExecutor:
             status=record.status.value,
             cancelled=cancelled,
             cleanup_completed=cleanup_completed,
+            cleanup_proof_digest=cleanup_proof["digest"],
             output=output,
             output_truncated=bool(page.has_more or page.truncated),
         )
@@ -318,6 +326,7 @@ class LaneTestExecutor:
                     "argv_digest": target.argv_digest,
                     "workspace_root": str(target.workspace_root),
                     "cleanup_completed": cleanup_completed,
+                    "cleanup_proof_digest": cleanup_proof["digest"],
                 }
             },
         )
