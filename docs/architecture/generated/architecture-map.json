@@ -787,6 +787,7 @@
         "sonder_runtime/domain/mode_tool_policy.py",
         "sonder_runtime/domain/model_capabilities.py",
         "sonder_runtime/domain/model_catalog.py",
+        "sonder_runtime/domain/model_conformance.py",
         "sonder_runtime/domain/model_deployment.py",
         "sonder_runtime/domain/model_error_formatting.py",
         "sonder_runtime/domain/model_response_detail.py",
