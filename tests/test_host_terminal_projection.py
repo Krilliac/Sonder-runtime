@@ -45,6 +45,19 @@ def test_completion_blockers_remain_failure_after_restart(tmp_path):
     assert codec.parent_effects_valid(codec.decode(codec.encode(projection))) is False
 
 
+@pytest.mark.parametrize("output,terminal", [
+    ("CANCELLED", "CANCELLED"),
+    ("  CANCELLED by host", "CANCELLED"),
+    ("EVIDENCE_REQUIRED", "EVIDENCE_REQUIRED"),
+    (" EVIDENCE_REQUIRED missing tool evidence", "EVIDENCE_REQUIRED"),
+])
+def test_host_no_colon_failure_markers_survive_restart(tmp_path, output, terminal):
+    codec = TerminalProjectionCodec()
+    projection = codec.decode(codec.encode(make(codec, tmp_path, output)))
+    assert projection.terminal_class == terminal
+    assert codec.parent_effects_valid(projection) is False
+
+
 def test_foreign_issuer_and_raw_dictionary_are_refused(tmp_path):
     first, second = TerminalProjectionCodec(), TerminalProjectionCodec()
     original = make(first, tmp_path)

@@ -12,6 +12,11 @@ from sonder_runtime.application.ports.lane_continuation import ProjectionBinding
 from .agent_terminal_evidence import HostObservationLedger
 
 _FAILURES = ("ERROR", "EVIDENCE_REQUIRED", "VALIDATION_FAILED", "CANCELLED")
+# Match the host's actual markers, including markers without a required colon.
+_FAILURE_MARKERS = (("ERROR:", "ERROR"),
+                    ("VALIDATION_FAILED:", "VALIDATION_FAILED"),
+                    ("EVIDENCE_REQUIRED", "EVIDENCE_REQUIRED"),
+                    ("CANCELLED", "CANCELLED"))
 
 
 def _canonical(value):
@@ -44,9 +49,9 @@ class TerminalProjectionCodec:
             raise ValueError("output requires bounded inline or immutable blob storage")
         if terminal_class not in ("NORMAL",) + _FAILURES:
             raise ValueError("unknown terminal class")
-        for prefix in _FAILURES:
-            if output.lstrip().startswith(prefix + ":"):
-                terminal_class = prefix
+        for marker, failure_class in _FAILURE_MARKERS:
+            if output.lstrip().startswith(marker):
+                terminal_class = failure_class
                 break
         if (not isinstance(blockers, tuple) or len(blockers) > 256
                 or any(not isinstance(b, str) or not 1 <= len(b.encode()) <= 256
