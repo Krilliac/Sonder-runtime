@@ -8,6 +8,24 @@ from tests.test_compute_job_http import _post
 from sonder_runtime.interfaces.http import serve
 
 
+def test_refresh_uses_shared_failed_auth_admission_before_body_or_app(http_server, monkeypatch):
+    failures = []
+    auth_calls = []
+    lifecycle = serve.sonder_lifecycle.get()
+    monkeypatch.setattr(lifecycle, "auth_attempt_allowed", lambda client: not failures)
+    monkeypatch.setattr(lifecycle, "record_auth_failure", lambda client, reason: failures.append(reason))
+    def denied(self):
+        auth_calls.append(True)
+        return {"authorized": False}
+    monkeypatch.setattr(serve.Handler, "_request_auth_context", denied)
+    monkeypatch.setattr(serve.Handler, "_read_json", lambda *a, **k: pytest.fail("denied request body read"))
+    monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app", lambda: pytest.fail("denied request constructed app"))
+    assert _post(http_server, "/v1/compute/nodes/refresh", {})[0] == 401
+    assert _post(http_server, "/v1/compute/nodes/refresh", {})[0] == 429
+    assert auth_calls == [True]
+    assert len(failures) == 1
+
+
 @pytest.mark.parametrize("authorized,role,status", [(False, None, 401), (True, "user", 403)])
 def test_inventory_is_admin_only_before_application_read(http_server, monkeypatch, authorized, role, status):
     monkeypatch.setattr(serve.Handler, "_request_auth_context", lambda self: {
@@ -92,6 +110,8 @@ def test_refresh_rejects_large_body_before_read_or_discard(monkeypatch):
             raise AssertionError("oversized refresh body read")
     handler = object.__new__(serve.Handler)
     handler.path = "/v1/compute/nodes/refresh"
+    handler.client_address = ("127.0.0.1", 0)
+    handler.command = "POST"
     handler.headers = Message()
     handler.headers["Content-Length"] = "32769"
     handler.headers["Content-Type"] = "application/json"

@@ -5051,6 +5051,8 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_admitted_compute_refresh(self):
         if self._reject_disallowed_origin():
             return True
+        if self._auth_rate_limited():
+            return True
         context = self._request_auth_context()
         if not context["authorized"]:
             self._send_auth_error()
