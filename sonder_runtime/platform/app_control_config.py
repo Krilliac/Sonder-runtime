@@ -59,6 +59,20 @@ def canonical_https_origin(value):
     return value
 
 
+def canonical_catalog_path(value):
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 4096
+        or any(ord(c) < 32 for c in value)
+    ):
+        raise ValueError("invalid private catalog path")
+    path = Path(value)
+    if not path.is_absolute() or str(path) != str(path.resolve()):
+        raise ValueError("catalog path must be canonical and absolute")
+    return path
+
+
 def app_control_errors(config):
     c = config.app_control
     errors = []
@@ -75,12 +89,13 @@ def app_control_errors(config):
             errors.append(f"[app_control].{key} must be boolean")
     if c.runtime_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", c.runtime_id):
         errors.append("[app_control].runtime_id must be a stable bounded identifier")
-    if c.catalog_file and (
-        not Path(c.catalog_file).is_absolute()
-        or len(c.catalog_file) > 4096
-        or any(ord(c) < 32 for c in c.catalog_file)
-    ):
-        errors.append("[app_control].catalog_file must be an absolute private path")
+    if c.catalog_file:
+        try:
+            canonical_catalog_path(c.catalog_file)
+        except (ValueError, OSError):
+            errors.append(
+                "[app_control].catalog_file must be a canonical absolute private path"
+            )
     for key, maximum in (
         ("session_ttl_seconds", 3600),
         ("binding_ttl_seconds", 86400),
