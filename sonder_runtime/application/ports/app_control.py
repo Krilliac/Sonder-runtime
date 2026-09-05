@@ -3,6 +3,7 @@
 from typing import Protocol
 from dataclasses import dataclass, field
 import math
+import os
 from pathlib import Path
 import re
 
@@ -136,8 +137,10 @@ class GrantSnapshot:
             raise ValueError("canonical root tuple required")
         for root in self.roots:
             text(root, maximum=4096)
-            if not Path(root).is_absolute() or str(Path(root)) != str(
-                Path(root).resolve()
+            if (
+                not Path(root).is_absolute()
+                or str(Path(root)) != root
+                or os.path.normpath(root) != root
             ):
                 raise ValueError("canonical absolute root required")
         if (
