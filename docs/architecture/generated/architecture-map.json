@@ -299,7 +299,7 @@
       ]
     },
     {
-      "file_count": 275,
+      "file_count": 277,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -338,6 +338,8 @@
         "sonder_runtime/application/compute_fabric/__init__.py",
         "sonder_runtime/application/compute_fabric/artifact_spool.py",
         "sonder_runtime/application/compute_fabric/capacity.py",
+        "sonder_runtime/application/compute_fabric/coordinator.py",
+        "sonder_runtime/application/compute_fabric/index.py",
         "sonder_runtime/application/compute_fabric/jobs.py",
         "sonder_runtime/application/compute_fabric/refresh.py",
         "sonder_runtime/application/compute_fabric/registry.py",
@@ -779,7 +781,7 @@
       ]
     },
     {
-      "file_count": 45,
+      "file_count": 46,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -802,6 +804,7 @@
         "sonder_runtime/interfaces/http/facades/agent_lanes.py",
         "sonder_runtime/interfaces/http/facades/artifact_transfer.py",
         "sonder_runtime/interfaces/http/facades/compute_fabric.py",
+        "sonder_runtime/interfaces/http/facades/compute_inventory.py",
         "sonder_runtime/interfaces/http/facades/control_plane.py",
         "sonder_runtime/interfaces/http/facades/extensions.py",
         "sonder_runtime/interfaces/http/facades/health_status.py",
