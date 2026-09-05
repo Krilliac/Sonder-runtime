@@ -370,7 +370,9 @@ class AppManagedWorkHttpBinding:
         )
 
     def _publish(self, selection, account_token, control_token, result, publish):
-        # No lifetime, future, or dispatcher call under account/fleet locks.
+        # Admit this one response under current account/fleet authority, then
+        # release both guards before socket I/O. Later revocation governs later
+        # admissions; it cannot retract a response already admitted here.
         # The worker may already have released this selection object.
         conn = self.control._open()
         try:
@@ -393,9 +395,9 @@ class AppManagedWorkHttpBinding:
                 if current != (session, selection.binding, selection.slot):
                     raise PermissionError("selected binding changed before publication")
                 self.control._current(conn, account_token, account, grant)
-                publish(*result)
         finally:
             conn.close()
+        publish(*result)
 
     def perform(self, action, payload, *, account_token, control_token, publish):
         selection = None
