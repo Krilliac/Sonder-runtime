@@ -182,10 +182,8 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
                 return current_run()
 
         def close():
-            try:
-                conversation.close()
-            finally:
-                selector.clear()
+            conversation.close()
+            selector.clear()
 
         conversation_slot.install(invoke, close)
         return conversation_slot.run(run)

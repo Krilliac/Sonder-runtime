@@ -11,6 +11,52 @@ from sonder_runtime.interfaces.standalone_agent_lanes import HostTerminalDraft
 from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
 
 
+@pytest.mark.parametrize('failure_after_release', [False, True])
+def test_failed_owner_close_retains_fenced_retry_handle(lanes, monkeypatch, failure_after_release):
+    from sonder_runtime.bootstrap.managed_conversation import (
+        ManagedConversationLifetime, ReplConversationSlot,
+    )
+    app = object()
+    owner = setup(lanes)[0]
+    lifetime = ManagedConversationLifetime(application=app,
+        session_factory=lambda controller, application: owner, require_current=lambda: None)
+    view = lifetime.factory(SimpleNamespace(run_id='closing-turn'), app)
+    slot = ReplConversationSlot()
+    slot.select('original')
+    slot.install(lambda callback: callback(), lifetime.close)
+    close = owner.close
+    calls = []
+    def flaky_close():
+        calls.append(owner)
+        if len(calls) == 1:
+            if failure_after_release:
+                close()
+            raise OSError('injected close failure')
+        close()
+    monkeypatch.setattr(owner, 'close', flaky_close)
+    try:
+        with pytest.raises(OSError):
+            slot.clear()
+        assert owner._bound._lease.handle.closed is failure_after_release
+        with pytest.raises(PermissionError):
+            view.require_current()
+        with pytest.raises(PermissionError):
+            lifetime.factory(SimpleNamespace(run_id='replacement'), app)
+        with pytest.raises(PermissionError):
+            slot.run(lambda: pytest.fail('closed slot ran'))
+        with pytest.raises(PermissionError):
+            slot.select('replacement')
+        with pytest.raises(PermissionError):
+            slot.install(lambda callback: callback(), lambda: None)
+        assert len(calls) == 1
+        slot.clear()
+        assert calls == [owner, owner]
+        assert owner._bound._lease.handle.closed
+        assert slot.select('replacement') is False
+    finally:
+        close()
+
+
 @pytest.mark.parametrize("damage", [None, "receipt", "cleanup", "projection"])
 def test_two_certified_turns_keep_parent_and_original_receipts(lanes, damage):
     from sonder_runtime.bootstrap.managed_conversation import (

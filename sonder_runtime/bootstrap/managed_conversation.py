@@ -24,6 +24,7 @@ class ManagedConversationLifetime:
         self._lock = RLock()
         self._owner = self._active = self._previous = None
         self._closed = False
+        self._released = False
 
     @property
     def context(self):
@@ -70,14 +71,17 @@ class ManagedConversationLifetime:
 
     def close(self):
         with self._lock:
-            if self._closed:
+            if self._released:
                 return
+            # Fence first, but retain the exact owner until cleanup succeeds.
+            # A failed release must remain explicitly retryable.
             self._closed = True
             if self._active is not None:
                 self._active._closed = True
                 self._active = None
             if self._owner is not None:
                 self._owner.close()
+            self._released = True
 
 
 class ReplConversationSlot:
@@ -86,9 +90,12 @@ class ReplConversationSlot:
     def __init__(self):
         self._lock = RLock()
         self._identity = self._invoke = self._close = None
+        self._closing = False
 
     def select(self, identity):
         with self._lock:
+            if self._closing:
+                raise PermissionError("private REPL cleanup requires explicit retry")
             if self._identity != identity:
                 self.clear()
                 self._identity = identity
@@ -96,22 +103,24 @@ class ReplConversationSlot:
 
     def install(self, invoke, close):
         with self._lock:
-            if self._invoke is not None or not callable(invoke) or not callable(close):
+            if self._closing or self._invoke is not None or not callable(invoke) or not callable(close):
                 raise PermissionError("private REPL selection already owns a lifetime")
             self._invoke, self._close = invoke, close
 
     def run(self, callback):
         with self._lock:
-            if self._invoke is None:
+            if self._closing or self._invoke is None:
                 raise PermissionError("private REPL lifetime unavailable")
             return self._invoke(callback)
 
     def clear(self):
         with self._lock:
             close = self._close
-            self._identity = self._invoke = self._close = None
+            self._closing = True
             if close is not None:
                 close()
+            self._identity = self._invoke = self._close = None
+            self._closing = False
 
 
 class _ManagedTurn:
