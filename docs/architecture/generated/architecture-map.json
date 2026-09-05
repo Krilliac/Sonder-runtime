@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 273,
+      "file_count": 274,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -240,6 +240,7 @@
         "sonder_runtime/adapters/persistence/sqlite/job_registry.py",
         "sonder_runtime/adapters/persistence/sqlite/loop_state.py",
         "sonder_runtime/adapters/persistence/sqlite/memory.py",
+        "sonder_runtime/adapters/persistence/sqlite/memory_projection.py",
         "sonder_runtime/adapters/persistence/sqlite/memory_replication.py",
         "sonder_runtime/adapters/persistence/sqlite/operations.py",
         "sonder_runtime/adapters/persistence/sqlite/outbox.py",
