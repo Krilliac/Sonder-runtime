@@ -49,6 +49,9 @@ def install_owned_work_http(control, *, application, runtime, permission_engine)
         register_owned=register_owned_app_work,
         require_owned=require_owned_app_work,
     )
+    from .app_work_recovery_http import install_owned_recovery_http
+
+    install_owned_recovery_http(result)
     control._work_binding = result
     return result
 
@@ -192,6 +195,13 @@ class AppManagedWorkHttpBinding:
             else:
                 self.dispatcher.close()
             raise
+
+    public_record = staticmethod(public_work)
+
+    def recovery_http(self):
+        from .app_work_recovery_http import current_recovery_http
+
+        return current_recovery_http(self)
 
     def require_current(self):
         if self._require_owned(self.application) is not self.dispatcher:

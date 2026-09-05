@@ -91,6 +91,17 @@ def _route(method, target):
             return "read_work", {"work_id": work[1]}
         if method == "POST" and work[2] == "/execute":
             return "execute_work", {"work_id": work[1]}
+    recovery_prepare = re.fullmatch(r"/work/([0-9a-f]{64})/recovery", suffix)
+    if method == "POST" and recovery_prepare is not None and not separator:
+        return "prepare_recovery", {"work_id": recovery_prepare[1]}
+    recovery = re.fullmatch(
+        r"/recovery/([0-9a-f]{64})(/(attach|resume|close))?", suffix
+    )
+    if recovery is not None and not separator:
+        if method == "GET" and recovery[2] is None:
+            return "inspect_recovery", {"attempt_id": recovery[1]}
+        if method == "POST" and recovery[3] is not None:
+            return recovery[3] + "_recovery", {"attempt_id": recovery[1]}
     if method == "GET" and suffix == "/selection" and not separator:
         return "read_selection", {}
     if method == "GET" and suffix in ("/bindings", "/recovery"):
@@ -181,21 +192,46 @@ def handle_app_control(
             account = _token(account)
             if method == "POST":
                 body = handler._read_json(max_bytes=16384)
-                if action == "execute_work":
+                if action in {
+                    "execute_work",
+                    "attach_recovery",
+                    "resume_recovery",
+                    "close_recovery",
+                }:
                     if type(body) is not dict or body:
                         raise ControlError(400, "INVALID_APP_CONTROL_REQUEST")
+                elif action == "prepare_recovery":
+                    if type(body) is not dict or set(body) != {
+                        "attachment_command_id",
+                        "completion_command_id",
+                    }:
+                        raise ControlError(400, "INVALID_APP_CONTROL_REQUEST")
+                    payload.update(body)
                 else:
                     payload = body
             elif handler.headers.get("Content-Length", "0") != "0":
                 raise ControlError(400, "INVALID_APP_CONTROL_REQUEST")
             target = binding
-            if action in {"prepare_work", "execute_work", "read_work"}:
+            if action in {
+                "prepare_work",
+                "execute_work",
+                "read_work",
+                "prepare_recovery",
+                "inspect_recovery",
+                "attach_recovery",
+                "resume_recovery",
+                "close_recovery",
+            }:
                 try:
                     target = work_binding() if callable(work_binding) else work_binding
                 except Exception:
                     raise ControlError(503, "APP_WORK_UNAVAILABLE") from None
                 if target is None or target.control is not binding:
                     raise ControlError(503, "APP_WORK_UNAVAILABLE")
+            if action.endswith("_recovery"):
+                target = target.recovery_http()
+                if target is None:
+                    raise ControlError(503, "APP_RECOVERY_UNAVAILABLE")
             target.perform(
                 action,
                 payload,
