@@ -18,6 +18,7 @@ from ..application.ports.app_managed_work import (
     PreparedAppWork,
     WorkInterruption,
     WorkCompletionEvidence,
+    WorkVerificationPending,
     canonical_digest,
 )
 from ..application.ports.host_turn_links import FinalizedHostResult
@@ -320,7 +321,8 @@ class AppManagedWorkDispatcher:
         try:
             current = self._read(selection, record.prepared.work_id)
             if (
-                current.state not in ("admitted", "run_binding", "running")
+                current.state
+                not in ("admitted", "run_binding", "running", "verification_pending")
                 or current.dispatch_id != record.dispatch_id
                 or current.process_incarnation != record.process_incarnation
             ):
@@ -410,6 +412,21 @@ class AppManagedWorkDispatcher:
                     terminal=finalized.receipt,
                     completion=completion,
                 )
+            elif (
+                eligibility.eligible is False
+                and eligibility.phase == "approval_pending"
+            ):
+                self._transition(
+                    entry,
+                    "record_work_verification_pending",
+                    pending=WorkVerificationPending(
+                        eligibility.pending_identity,
+                        eligibility.pending_approval,
+                        finalized.receipt,
+                    ),
+                )
+            else:
+                self._unknown(entry.selection, entry.record, stage)
         except BaseException:
             self._unknown(entry.selection, entry.record, stage)
         finally:
