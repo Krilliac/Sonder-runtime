@@ -7,11 +7,13 @@ durability, and network delivery guarantees around this journal.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import json
 import sqlite3
 from pathlib import Path
+
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
 from sonder_runtime.domain.memory.replication import (
     MemoryMutation,
@@ -61,6 +63,7 @@ class SQLiteMemoryReplicationJournal:
         self.path = str(path)
         self.source_id = source_id
         self.project_scope = project_scope
+        self._memory_connection = None
         # Validate identities and scope before creating any state.
         MemoryMutation(
             source_id=source_id, source_epoch=1, sequence=1,
@@ -70,7 +73,7 @@ class SQLiteMemoryReplicationJournal:
         )
         if project_scope is not None and project_scope == "":
             raise MemoryReplicationError("project scope must not be empty")
-        with self._connect() as connection:
+        with self._session() as connection:
             connection.executescript(_DDL)
             row = connection.execute(
                 "SELECT project_scope FROM memory_replication_meta WHERE source_id=?",
@@ -85,10 +88,36 @@ class SQLiteMemoryReplicationJournal:
                 )
 
     def _connect(self):
-        connection = sqlite3.connect(self.path)
+        # Use the explicit ownership factory so managed runtime children can
+        # account for every journal handle.  A journal's in-memory mode needs
+        # one keeper connection; reopening ``:memory:`` for each operation
+        # would silently create a fresh empty database on every call.
+        if self.path == ":memory:":
+            if self._memory_connection is None:
+                self._memory_connection = owned_sqlite_connect(
+                    self.path, check_same_thread=False,
+                )
+            return self._memory_connection
+        connection = owned_sqlite_connect(self.path)
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
+
+    def close(self) -> None:
+        """Close the keeper used by the optional in-memory journal."""
+        connection, self._memory_connection = self._memory_connection, None
+        if connection is not None:
+            connection.close()
+
+    @contextmanager
+    def _session(self):
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            if connection is not self._memory_connection:
+                connection.close()
 
     def _scope(self, project: str | None) -> str | None:
         if project is None:
@@ -146,7 +175,7 @@ class SQLiteMemoryReplicationJournal:
     def advance_epoch(self, source_epoch: int) -> None:
         if isinstance(source_epoch, bool) or not isinstance(source_epoch, int) or source_epoch < 1:
             raise MemoryReplicationError("source epoch must be positive")
-        with self._connect() as connection:
+        with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._meta(connection)[0]
             if source_epoch <= current:
@@ -165,7 +194,7 @@ class SQLiteMemoryReplicationJournal:
                 raise MemoryReplicationError("journal records must belong to this source")
             if self.project_scope is not None and record.project != self.project_scope:
                 raise MemoryReplicationError("project scope cannot be widened")
-        with self._connect() as connection:
+        with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             epoch, next_sequence, _scope = self._meta(connection)
             inserted = 0
@@ -229,7 +258,7 @@ class SQLiteMemoryReplicationJournal:
         if type(limit) is not int or not 1 <= limit <= _MAX_EXPORT_ROWS:
             raise ValueError(f"limit must be within 1..{_MAX_EXPORT_ROWS}")
         scope = self._scope(project)
-        with self._connect() as connection:
+        with self._session() as connection:
             epoch, _next_sequence, _persisted_scope = self._meta(connection)
             clauses = ["source_id=?", "sequence>?",]
             parameters: list[object] = [self.source_id, after_sequence]
@@ -255,7 +284,7 @@ class SQLiteMemoryReplicationJournal:
             for record in batch.records:
                 if record.project != self.project_scope:
                     raise MemoryReplicationError("project scope cannot be widened")
-        with self._connect() as connection:
+        with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT source_epoch,next_sequence FROM memory_replication_meta WHERE source_id=?",
@@ -333,7 +362,7 @@ class SQLiteMemoryReplicationJournal:
         if scope is not None:
             parameters.append(scope)
         parameters.extend(("delete" if tombstones else "upsert", limit))
-        with self._connect() as connection:
+        with self._session() as connection:
             rows = connection.execute(query, tuple(parameters)).fetchall()
         return tuple(self._row_to_mutation(row) for row in rows)
 
@@ -348,7 +377,7 @@ class SQLiteMemoryReplicationJournal:
             raise ValueError("sequence must be positive")
         if type(limit) is not int or not 1 <= limit <= _MAX_PRUNE_ROWS:
             raise ValueError(f"limit must be within 1..{_MAX_PRUNE_ROWS}")
-        with self._connect() as connection:
+        with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             protected = connection.execute(
                 "SELECT project,entity_kind,entity_id,MAX(version),"
