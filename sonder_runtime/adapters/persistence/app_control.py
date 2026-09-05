@@ -340,6 +340,16 @@ class AppControlTransaction:
         self._require_work(work)
         prior = self._start(work.command, "prepare_work", work.digest)
         if prior:
+            expected = CommandReceipt(
+                work.command.command_id,
+                "prepare_work",
+                "COMMITTED",
+                work.work_id,
+                1,
+                work.selection.epoch,
+            )
+            if prior != expected:
+                raise StoreUnavailable("prepared work receipt mismatch")
             result = self.read_work(
                 principal_id=work.command.principal_id,
                 control_session_id=work.selection.control_session_id,
