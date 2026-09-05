@@ -317,7 +317,7 @@
       ]
     },
     {
-      "file_count": 294,
+      "file_count": 296,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -475,8 +475,10 @@
         "sonder_runtime/application/ports/extensions.py",
         "sonder_runtime/application/ports/filesystem.py",
         "sonder_runtime/application/ports/host_final.py",
+        "sonder_runtime/application/ports/host_turn_links.py",
         "sonder_runtime/application/ports/jobs.py",
         "sonder_runtime/application/ports/lane_continuation.py",
+        "sonder_runtime/application/ports/managed_authority.py",
         "sonder_runtime/application/ports/memory.py",
         "sonder_runtime/application/ports/model_bootstrap.py",
         "sonder_runtime/application/ports/model_gateway.py",
@@ -617,13 +619,14 @@
       ]
     },
     {
-      "file_count": 32,
+      "file_count": 33,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
         "sonder_runtime/bootstrap/app.py",
         "sonder_runtime/bootstrap/app_control.py",
         "sonder_runtime/bootstrap/app_control_http.py",
+        "sonder_runtime/bootstrap/app_managed_authority.py",
         "sonder_runtime/bootstrap/artifact_transfer.py",
         "sonder_runtime/bootstrap/capabilities.py",
         "sonder_runtime/bootstrap/child_migration.py",
