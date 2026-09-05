@@ -658,7 +658,7 @@ def test_native_entrypoint_fences_safety_before_configuration(monkeypatch):
         lambda **kwargs: calls.append("build") or _app(),
     )
     monkeypatch.setattr(
-        native_mcp, "run_native_mcp", lambda application: calls.append("run") or 0,
+        native_mcp, "run_native_mcp", lambda application, *, close_compute_on_exit: calls.append("run") or 0,
     )
 
     assert entrypoint.cmd_mcp(SimpleNamespace(native=True)) == 0

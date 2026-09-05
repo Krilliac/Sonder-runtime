@@ -794,7 +794,7 @@ def cmd_mcp(args) -> int:
         except sonder_migrations.MigrationError as exc:
             print(f"migration failed: {exc}", file=sys.stderr)
             return 1
-        return run_native_mcp(build_application(config=config))
+        return run_native_mcp(build_application(config=config), close_compute_on_exit=True)
     def _configure_mcp_legacy() -> None:
         config = _load_config(args)
         _configure_typed_home(config)
