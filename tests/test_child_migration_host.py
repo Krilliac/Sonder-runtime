@@ -174,7 +174,7 @@ def test_same_logical_rows_in_replaced_source_file_do_not_prove_identity(tmp_pat
 def test_incomplete_cutover_blocks_start_and_retains_same_id(
     tmp_path, monkeypatch, failure
 ):
-    import sonder_runtime.bootstrap.child_migration_host as module
+    import sonder_runtime.bootstrap.child_migration_activation as module
 
     host = DisposableChildMigrationHost(tmp_path / "owned", writable_roots=lambda: ())
     try:

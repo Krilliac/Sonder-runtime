@@ -16,6 +16,8 @@ from ...application.ports.runtime_owner import OwnerUnsupported, OwnerRefused
 
 
 class WindowsOwnedRuntimeProcess:
+    child_module = "sonder_runtime.bootstrap.owned_http_runtime"
+
     def __init__(self, root):
         if os.name != "nt":
             raise OwnerUnsupported(
@@ -89,7 +91,7 @@ class WindowsOwnedRuntimeProcess:
             (
                 sys._base_executable,
                 "-m",
-                "sonder_runtime.bootstrap.owned_http_runtime",
+                self.child_module,
                 str(self.root),
                 namespace,
                 command.operation_id,
@@ -141,3 +143,7 @@ class WindowsOwnedRuntimeProcess:
             reader.join(max(0, deadline - time.monotonic()))
         if any(reader.is_alive() for reader in self._readers):
             raise OwnerRefused("owned process output handles remain live")
+
+
+class WindowsManagedRuntimeProcess(WindowsOwnedRuntimeProcess):
+    child_module = "sonder_runtime.bootstrap.managed_http_runtime"

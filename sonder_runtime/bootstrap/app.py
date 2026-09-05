@@ -1435,6 +1435,7 @@ def build_application(
 _default_config: SonderConfig | None = None
 _default_compute_close = None
 _default_delegation_close = None
+_owned_default_application = None
 
 
 def close_default_compute(timeout=None):
@@ -1473,10 +1474,35 @@ def _build_default_application() -> Application:
 _application_lifecycle = ApplicationLifecycle(_build_default_application)
 
 
+def install_owned_application(application: Application) -> None:
+    """Private required-new child composition; never an external factory seam."""
+    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close
+    if type(application) is not Application or not isinstance(application.config, SonderConfig):
+        raise TypeError("exact configured Application required")
+    _application_lifecycle.install_owned(application)
+    _owned_default_application = application
+    _default_config = application.config
+    _default_compute_close = application.close_compute
+    _default_delegation_close = application.close_delegation
+
+
+def stop_owned_application(application: Application) -> None:
+    """Freeze compatibility lookup; the live host still owns actual cleanup."""
+    global _default_compute_close, _default_delegation_close
+    if application is not _owned_default_application:
+        raise RuntimeError("exact owned Application required")
+    _application_lifecycle.stop_owned(application)
+    _default_compute_close = _default_delegation_close = None
+
+
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
     global _default_config, _default_compute_close, _default_delegation_close
+    if _owned_default_application is not None:
+        if config is not None and config is not _owned_default_application.config:
+            raise RuntimeError("owned application config selection is immutable")
+        return _application_lifecycle.get()
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
@@ -1498,6 +1524,8 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
 
 def reset_for_tests() -> None:
     global _default_config, _default_compute_close, _default_delegation_close
+    if _owned_default_application is not None:
+        raise RuntimeError("owned application cannot be reset")
     close_default_runtime_resources()
     _default_compute_close = None
     _default_delegation_close = None

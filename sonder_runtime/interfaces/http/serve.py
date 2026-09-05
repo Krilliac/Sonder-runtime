@@ -6377,7 +6377,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
 
-def main(config=None):
+def main(config=None, *, _server_factory=None, _close_default_resources=True):
     _serve_logger.info("HTTP server starting")
     _serve_logger.debug("main: starting HTTP server")
     global CONFIGURED_PORT
@@ -6419,7 +6419,8 @@ def main(config=None):
         raise SystemExit(1)
     lifecycle.begin_ollama_probe()
     try:
-        httpd = ThreadingHTTPServer((HOST, port), Handler)
+        factory = ThreadingHTTPServer if _server_factory is None else _server_factory
+        httpd = factory((HOST, port), Handler)
     except OSError:
         _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
         raise
@@ -6454,7 +6455,8 @@ def main(config=None):
         httpd.server_close()
         from sonder_runtime.bootstrap.app import close_default_runtime_resources
         try:
-            close_default_runtime_resources(timeout=5)
+            if _close_default_resources:
+                close_default_runtime_resources(timeout=5)
         finally:
             if _ARTIFACT_TRANSFER_BINDING is not None:
                 _ARTIFACT_TRANSFER_BINDING.close()
