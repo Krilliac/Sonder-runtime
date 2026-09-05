@@ -1,4 +1,6 @@
 """Shared bounded probe admission and per-node single-flight refresh."""
+
+from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import timedelta
 from threading import BoundedSemaphore, Condition
@@ -18,7 +20,7 @@ class ComputeRefreshCoordinator:
         self.refresh_after = refresh_after
         self._condition = Condition()
         self._inflight = {}
-        self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sonder-compute-probe")
+        self._executor = owned_runtime_pool(max_workers=8, thread_name_prefix="sonder-compute-probe")
         self._closed = False
         self._peak = 0
 

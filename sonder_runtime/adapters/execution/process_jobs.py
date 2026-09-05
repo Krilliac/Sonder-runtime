@@ -1,6 +1,8 @@
 """Concrete argv process provider wired to the typed tree supervisor."""
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import os
 import subprocess
 import threading
@@ -966,7 +968,7 @@ class SubprocessJobProvider:
         ):
             if not callable(getattr(stream, "readline", None)):
                 continue
-            reader = threading.Thread(
+            reader = owned_runtime_thread(
                 target=self._read_output,
                 args=(job_id, stream_name, stream),
                 name=f"sonder-job-output-{job_id}-{stream_name.value}",

@@ -1,6 +1,8 @@
 """Bounded concurrent refresh of configured remote compute observations."""
 from __future__ import annotations
 
+from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timedelta
 from typing import Callable
@@ -53,7 +55,7 @@ def refresh_remote_snapshots(
         received_at = now()
         return node, received_at, snapshot, None
 
-    with ThreadPoolExecutor(
+    with owned_runtime_pool(
         max_workers=min(max_workers, len(nodes)),
         thread_name_prefix="sonder-compute-probe",
     ) as executor:

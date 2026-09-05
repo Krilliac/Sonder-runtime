@@ -1,6 +1,8 @@
 """Host-I/O implementation of the startup preflight contract."""
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+
 import json
 import os
 import shutil
@@ -154,7 +156,7 @@ def _check_ollama_workers(
             timeout=timeout,
         )
 
-    with ThreadPoolExecutor(max_workers=min(4, len(entries))) as executor:
+    with owned_runtime_pool(max_workers=min(4, len(entries))) as executor:
         return list(executor.map(check, entries))
 
 

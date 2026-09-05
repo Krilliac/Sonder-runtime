@@ -1,5 +1,7 @@
 """Fixed child of the disposable owner; no external control/authentication API."""
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 from dataclasses import replace
 import os
 from pathlib import Path
@@ -132,7 +134,7 @@ def _run(root, namespace, job_id, workspace):
             watcher_failure.append(type(error).__name__)
             lifecycle.get().drain("owned control unavailable")
 
-    watcher = Thread(target=control, name="owned-runtime-control", daemon=True)
+    watcher = owned_runtime_thread(target=control, name="owned-runtime-control", daemon=True)
     watcher.start()
     try:
         serve.main(config=config)

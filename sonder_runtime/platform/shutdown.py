@@ -1,6 +1,8 @@
 """Canonical graceful-shutdown coordination boundary."""
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import signal
 import threading
 import time
@@ -65,7 +67,7 @@ class ShutdownCoordinator:
 
     def _on_signal(self, signum, frame) -> None:
         del frame
-        threading.Thread(
+        owned_runtime_thread(
             target=self._signal_drain,
             kwargs={"reason": f"signal {signal.Signals(signum).name}"},
             daemon=True,

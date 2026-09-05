@@ -174,3 +174,12 @@ def reset_for_tests():
             pass
     _LOCAL.conn = None
     _LOCAL.path = None
+
+
+def close_current_thread():
+    """Host cleanup: preserve the cached identity if native close fails."""
+    conn = getattr(_LOCAL, "conn", None)
+    if conn is not None:
+        conn.close()
+    _LOCAL.conn = None
+    _LOCAL.path = None

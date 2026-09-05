@@ -8,6 +8,8 @@ without trusting the old process' memory.
 """
 from __future__ import annotations
 
+from sonder_runtime.application.ports.runtime_threads import Thread as owned_runtime_thread
+
 from collections.abc import Callable, Mapping
 from threading import Event, Lock, Thread
 from typing import Protocol
@@ -257,7 +259,7 @@ class DurableContinuationService:
         )
         with self._lock:
             self._controls[child_id] = control
-            thread = Thread(target=self._run, args=(child_id, context, runner, control, record.lineage.chain[0]), daemon=True)
+            thread = owned_runtime_thread(target=self._run, args=(child_id, context, runner, control, record.lineage.chain[0]), daemon=True)
             self._threads[child_id] = thread
         thread.start()
         return _Handle(self, child_id, record.request.parent_id)
