@@ -12,7 +12,8 @@ from sonder_runtime.application.ports.runtime_owner import (
 
 
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows contained runtime required")
-def test_owned_http_runtime_clean_stop_and_exact_replay(tmp_path):
+@pytest.mark.parametrize("attempt", range(3))
+def test_owned_http_runtime_clean_stop_and_exact_replay(tmp_path, attempt):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -56,6 +57,88 @@ def test_owned_http_runtime_clean_stop_and_exact_replay(tmp_path):
 def test_unknown_existing_namespace_never_becomes_an_owner(tmp_path):
     with pytest.raises(OwnerUnsupported):
         DisposableRuntimeOwner(tmp_path, writable_roots=lambda: ())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows owner composition required")
+def test_existing_workspace_is_never_adopted(tmp_path):
+    workspace = tmp_path / "owner-workspace"
+    workspace.mkdir()
+    (workspace / "untouched.txt").write_text("existing")
+    with pytest.raises(OwnerUnsupported):
+        DisposableRuntimeOwner(tmp_path / "owner", writable_roots=lambda: ())
+    assert not (tmp_path / "owner").exists()
+    assert (workspace / "untouched.txt").read_text() == "existing"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory anchor required")
+def test_workspace_anchor_blocks_replacement_and_closes_with_owner(tmp_path):
+    owner = DisposableRuntimeOwner(tmp_path / "owner", writable_roots=lambda: ())
+    workspace = tmp_path / "owner-workspace"
+    try:
+        assert workspace.is_dir()
+        with pytest.raises(OSError):
+            workspace.rename(tmp_path / "moved")
+    finally:
+        owner.close()
+    workspace.rename(tmp_path / "moved")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction required")
+def test_existing_workspace_junction_never_redirects_child(tmp_path):
+    import subprocess
+    target = tmp_path / "unrelated"
+    target.mkdir()
+    marker = target / "untouched.txt"
+    marker.write_text("existing")
+    workspace = tmp_path / "owner-workspace"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(workspace), str(target)],
+        capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert result.returncode == 0
+    try:
+        with pytest.raises(OwnerUnsupported):
+            DisposableRuntimeOwner(tmp_path / "owner", writable_roots=lambda: ())
+        assert not (tmp_path / "owner").exists()
+        assert list(target.iterdir()) == [marker]
+        assert marker.read_text() == "existing"
+    finally:
+        # Remove only this test-created junction, never its target.
+        workspace.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory anchor required")
+def test_workspace_live_validation_precedes_journal_admission(tmp_path, monkeypatch):
+    owner = DisposableRuntimeOwner(tmp_path / "owner", writable_roots=lambda: ())
+    try:
+        before = owner.journal.status()
+        def refused():
+            raise OwnerRefused("workspace anchor changed")
+        monkeypatch.setattr(owner._workspace_anchor, "validate", refused)
+        with pytest.raises(OwnerRefused, match="workspace anchor"):
+            owner.prepare("select", "select", {"config": {"port": 12345}})
+        assert owner.journal.status() == before
+    finally:
+        owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory anchor required")
+def test_failed_owner_composition_releases_both_directory_anchors(tmp_path, monkeypatch):
+    import sonder_runtime.bootstrap.runtime_owner as module
+    def failed_process(*args):
+        raise OwnerRefused("test construction failure")
+    monkeypatch.setattr(module, "WindowsOwnedRuntimeProcess", failed_process)
+    with pytest.raises(OwnerRefused, match="construction failure"):
+        DisposableRuntimeOwner(tmp_path / "owner", writable_roots=lambda: ())
+    (tmp_path / "owner").rename(tmp_path / "owner-released")
+    (tmp_path / "owner-workspace").rename(tmp_path / "workspace-released")
+
+
+def test_required_new_anchor_refuses_existing_directory(tmp_path):
+    from sonder_runtime.application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
+    with PrivateDirectoryAnchor.open_base(tmp_path / "anchor", require_new=True):
+        with pytest.raises(FileExistsError):
+            PrivateDirectoryAnchor.open_base(tmp_path / "anchor", require_new=True)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows owner composition required")

@@ -5,13 +5,16 @@ import sys
 import pytest
 
 
-def test_zero_accounting_waits_for_exact_retained_handles(monkeypatch):
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("settling", [(0, (258,)), (1, (0,))])
+def test_zero_accounting_waits_for_exact_retained_handles(monkeypatch, force, settling):
     from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
     token = _WindowsJobToken(123, lambda handle: True)
-    observations = iter([(0, (258,)), (0, (0,))])
+    observations = iter([settling, (0, (0,))])
     monkeypatch.setattr(token, "_observe", lambda: next(observations), raising=False)
-    proof = token.quiesce(force=False)
+    proof = token.quiesce(force=force)
     assert proof.complete
+    assert not proof.forced
     assert token.cleanup_observation == (0, (0,))
 
 
@@ -24,7 +27,8 @@ def test_invalid_retained_handle_never_proves_cleanup(monkeypatch):
     assert not token.quiesce(force=False).complete
 
 
-def test_handle_wait_uses_one_deadline(monkeypatch):
+@pytest.mark.parametrize("force", [False, True])
+def test_handle_wait_uses_one_deadline(monkeypatch, force):
     from types import SimpleNamespace
     from sonder_runtime.adapters.extensions import memory_limits
     token = memory_limits._WindowsJobToken(123, lambda handle: True)
@@ -34,7 +38,7 @@ def test_handle_wait_uses_one_deadline(monkeypatch):
     monkeypatch.setattr(memory_limits, "time", SimpleNamespace(
         monotonic=lambda: clock[0], sleep=sleep))
     monkeypatch.setattr(token, "_observe", lambda: (0, (258,)))
-    assert not token.quiesce(force=False).complete
+    assert not token.quiesce(force=force).complete
     assert clock[0] == 3
     assert token.cleanup_observation == (0, (258,))
 

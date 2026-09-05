@@ -62,9 +62,21 @@ bounded Job membership queries capture observed descendants and verify each
 opened handle belongs to that Job. A single three-second cleanup deadline covers
 observation, termination and handle polling. At most 256 handles are retained per
 token; missing, invalid or excess evidence permanently refuses clean proof.
+Accounting and handle signaling may settle in either order; this bounded wait
+does not itself request termination or mark cooperative shutdown as forced.
+Termination requires live-process evidence or an unavailable-proof cleanup path.
 This is bounded evidence for the owned Job and observed handles, not an audit of
 unknown writers or installed processes. The last accounting/handle-wait tuple is
 available for diagnostics. Closing a token discards its ability to certify cleanup.
+
+Both the private owner directory and sibling model workspace must be newly created;
+existing paths, including junctions, are refused before launch. The owner holds
+no-reparse directory anchors and validates both before each admission. The child
+only opens the already-created workspace. Windows anchors include directory-list
+access and omit delete sharing to prevent rename while held; metadata-only access
+does not provide that protection. Anchors close after owned process cleanup or
+failed construction. The workspace is a model grant, not private configuration
+inventory, and remains separate from the owner's private-source path tuple.
 
 `execute(timeout=...)` accepts 1–30 seconds. Native termination/handle cleanup has
 its own finite cleanup windows and can finish after that observation deadline;

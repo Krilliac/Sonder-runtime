@@ -9,6 +9,18 @@ from threading import Event, Thread
 
 
 def run(root, namespace, job_id):
+    from ..application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
+
+    root = Path(root).absolute()
+    workspace = root.parent / (root.name + "-workspace")
+    # The live owner created and pinned this required-new directory before launch.
+    # The child only validates/holds it; it must never create or adopt a redirect.
+    with PrivateDirectoryAnchor(workspace) as workspace_anchor:
+        workspace_anchor.validate()
+        return _run(root, namespace, job_id, workspace)
+
+
+def _run(root, namespace, job_id, workspace):
     # Only process-created environment and fixed namespace data are consumed.
     # Before importing the HTTP stack, prove this actual process was attached
     # to the canonical job record while its launch was durably pending.
@@ -46,8 +58,6 @@ def run(root, namespace, job_id):
     from ..adapters.inference import ollama_endpoint
 
     config = SonderConfig()
-    workspace = root.parent / (root.name + "-workspace")
-    workspace.mkdir(exist_ok=True)
     config = replace(
         config,
         server=replace(
