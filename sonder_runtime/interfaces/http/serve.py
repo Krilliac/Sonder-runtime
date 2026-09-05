@@ -3558,7 +3558,8 @@ class Handler(BaseHTTPRequestHandler):
         bytes do not turn the close into a reset that erases the error the
         caller needs to see.
         """
-        if getattr(self, "_artifact_transfer_request", False):
+        if (getattr(self, "_artifact_transfer_request", False)
+                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")):
             return
         if not self.close_connection:
             return
@@ -3861,7 +3862,8 @@ class Handler(BaseHTTPRequestHandler):
         is closed instead. See MAX_DISCARDED_BODY_BYTES.
         """
         pending = self._unread_request_body_bytes()
-        if getattr(self, "_artifact_transfer_request", False) and pending != 0:
+        if (getattr(self, "_artifact_transfer_request", False)
+                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")) and pending != 0:
             return True
         if pending == 0:
             self._request_body_consumed = True
@@ -4183,6 +4185,9 @@ class Handler(BaseHTTPRequestHandler):
         if self._auth_rate_limited():
             return
         if self._handle_agent_lane_request("GET", path):
+            return
+        if path == "/v1/compute/nodes":
+            self._with_compute_inventory_admission(self._handle_compute_inventory_read)
             return
         if path == "/v1/compute/snapshot":
             context = self._request_auth_context()
@@ -5005,6 +5010,72 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json_payload(server.permission_mode_data())
 
+    def _with_compute_inventory_admission(self, handler):
+        from sonder_runtime.interfaces.http.facades.compute_inventory import inventory_request_slot
+        with inventory_request_slot() as admitted:
+            if not admitted:
+                self._send_json_payload({"error": {"code": "COMPUTE_INVENTORY_BUSY"}}, status=429)
+                return
+            handler()
+
+    def _handle_compute_inventory_read(self):
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return
+        try:
+            self._validate_request_framing()
+            if self._unread_request_body_bytes() != 0:
+                raise ValueError("inventory reads do not accept a body")
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True, max_num_fields=2)
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.interfaces.http.facades.compute_inventory import dispatch_compute_inventory
+            status, body = dispatch_compute_inventory(default_app().compute_inventory_page, query)
+        except (ValueError, HTTPRequestError):
+            status, body = 400, {"error": {"code": "INVALID_INVENTORY_QUERY"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "COMPUTE_INVENTORY_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+        return
+
+    def _handle_compute_inventory_refresh(self):
+        if _request_route(self.path) != "/v1/compute/nodes/refresh":
+            return False
+        self._with_compute_inventory_admission(self._handle_admitted_compute_refresh)
+        return True
+
+    def _handle_admitted_compute_refresh(self):
+        if self._reject_disallowed_origin():
+            return True
+        if self._auth_rate_limited():
+            return True
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return True
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return True
+        try:
+            if "?" in self.path:
+                raise ValueError("refresh accepts JSON pagination only")
+            payload = self._read_json(max_bytes=32 * 1024)
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.interfaces.http.facades.compute_inventory import dispatch_compute_refresh
+            status, body = dispatch_compute_refresh(default_app().compute_refresh_page, payload)
+        except HTTPRequestError as error:
+            status, body = error.status, {"error": {"code": "INVALID_REFRESH_REQUEST"}}
+        except (ValueError, TypeError):
+            status, body = 400, {"error": {"code": "INVALID_REFRESH_REQUEST"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "COMPUTE_REFRESH_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+        return True
+
     def do_POST(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
@@ -5016,6 +5087,8 @@ class Handler(BaseHTTPRequestHandler):
         self._chat_completion_metrics_recorded = False
         self._request_body_consumed = False
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
+        if self._handle_compute_inventory_refresh():
             return
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
         _serve_logger.debug(f"do_POST: path={_request_route(self.path)!r}, peer={self._peer()!r}, is_chat_completion={is_chat_completion}")
@@ -6253,6 +6326,8 @@ def main(config=None):
         if not lifecycle.coordinator.draining:
             lifecycle.drain("server stopping")
         httpd.server_close()
+        from sonder_runtime.bootstrap.app import close_default_compute
+        close_default_compute()
         if _ARTIFACT_TRANSFER_BINDING is not None:
             _ARTIFACT_TRANSFER_BINDING.close()
         _serve_logger.info("HTTP server stopped")

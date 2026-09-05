@@ -11,9 +11,12 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import importlib
 import logging
 import os
+from threading import RLock
+from time import monotonic
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -123,6 +126,7 @@ from ..domain.compute_fabric import (
     ComputeCapability,
     ComputeNode,
     ComputePlacementScheduler,
+    PlacementPolicy,
     NodeSnapshot,
     NodeHealth,
     WorkloadKind,
@@ -212,6 +216,9 @@ class Application:
     tools: ToolApplicationFacade | None = None
     container_world_provider: Any | None = None
     remote_world_provider: Any | None = None
+    compute_inventory_page: Callable[..., dict] | None = None
+    compute_refresh_page: Callable[..., dict] | None = None
+    close_compute: Callable[..., None] | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -293,7 +300,13 @@ class Application:
 
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce and unpublish composed providers before process shutdown."""
-        self.specialized_providers.close(timeout=timeout)
+        started = monotonic()
+        try:
+            if self.close_compute is not None:
+                self.close_compute(timeout=timeout)
+        finally:
+            remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
+            self.specialized_providers.close(timeout=remaining)
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -452,6 +465,18 @@ def build_application(
     compute_service: ComputeFabricService | None = None
     compute_remote_snapshot_source = None
     compute_remote_transport = None
+    compute_refresh_coordinator = None
+    compute_composition_lock = RLock()
+
+    def compute_component(operation):
+        # Registry, source, worker, service and coordinator form one graph.
+        # Reentrancy permits lazy dependencies to call each other. Remote probes
+        # runs outside this lock; close shares it with coordinator publication.
+        @wraps(operation)
+        def synchronized(*args, **kwargs):
+            with compute_composition_lock:
+                return operation(*args, **kwargs)
+        return synchronized
     effective_config = config or SonderConfig()
     compute_scheduler = ComputePlacementScheduler(
         snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
@@ -568,6 +593,7 @@ def build_application(
             )
         return process_job_provider
 
+    @compute_component
     def get_compute_registry() -> ComputeNodeRegistry:
         nonlocal compute_registry
         if compute_registry is None:
@@ -614,6 +640,7 @@ def build_application(
             )
         return compute_registry
 
+    @compute_component
     def get_compute_snapshot() -> NodeSnapshot:
         nonlocal compute_snapshot_source
         if compute_snapshot_source is None:
@@ -639,6 +666,7 @@ def build_application(
         )
         return registry.observe(snapshot)
 
+    @compute_component
     def get_compute_job_worker() -> ComputeJobWorker:
         nonlocal compute_job_worker
         if compute_job_worker is None:
@@ -699,35 +727,49 @@ def build_application(
             )
         return compute_job_worker
 
-    def refresh_compute_snapshots() -> None:
-        nonlocal compute_remote_snapshot_source
-        get_compute_snapshot()
-        if not effective_config.compute.nodes:
-            return
+    def get_compute_refresh_coordinator():
+        nonlocal compute_remote_snapshot_source, compute_refresh_coordinator
         if not effective_config.compute.allow_remote:
-            return
+            raise PermissionError("remote compute is disabled by host configuration")
         if not effective_config.secrets.api_key:
             raise ValueError("remote compute requires SONDER_API_KEY")
-        if compute_remote_snapshot_source is None:
-            from ..adapters.compute_fabric.http_client import (
-                HttpsComputeSnapshotSource,
-            )
+        with compute_composition_lock:
+            if compute_refresh_coordinator is None:
+                from ..adapters.compute_fabric.http_client import HttpsComputeSnapshotSource
+                from ..application.compute_fabric.coordinator import ComputeRefreshCoordinator
+                compute_remote_snapshot_source = HttpsComputeSnapshotSource(
+                    api_key=effective_config.secrets.api_key,
+                    timeout_seconds=effective_config.compute.probe_timeout_ms / 1000.0,
+                )
+                registry = get_compute_registry()
+                compute_refresh_coordinator = ComputeRefreshCoordinator(registry, compute_remote_snapshot_source,
+                    now=lambda: datetime.now(timezone.utc), refresh_after=registry.snapshot_ttl / 2)
+            return compute_refresh_coordinator
 
-            compute_remote_snapshot_source = HttpsComputeSnapshotSource(
-                api_key=effective_config.secrets.api_key,
-                timeout_seconds=effective_config.compute.probe_timeout_ms / 1000.0,
-            )
-        registry = get_compute_registry()
-        from ..application.compute_fabric.refresh import refresh_remote_snapshots
+    def refresh_compute_snapshots(request=None) -> None:
+        get_compute_snapshot()
+        if not effective_config.compute.nodes or not effective_config.compute.allow_remote:
+            return
+        if request is not None and (request.local_only or not request.allow_remote
+                                    or request.placement_policy is PlacementPolicy.LOCAL_ONLY):
+            return
+        get_compute_refresh_coordinator().refresh(request)
 
-        refresh_remote_snapshots(
-            registry,
-            compute_remote_snapshot_source,
-            now=lambda: datetime.now(timezone.utc),
-            max_workers=8,
-            refresh_after=registry.snapshot_ttl / 2,
-        )
+    def compute_refresh_page(*, limit=32, cursor=None):
+        return get_compute_refresh_coordinator().refresh_page(limit=limit, cursor=cursor)
 
+    def close_compute(timeout=None):
+        nonlocal compute_refresh_coordinator
+        with compute_composition_lock:
+            if compute_refresh_coordinator is not None:
+                compute_refresh_coordinator.close(timeout=timeout)
+                compute_refresh_coordinator = None
+
+    def compute_inventory_page(*, limit=32, cursor=None):
+        # Inventory reads never trigger network/hardware probing or enrollment.
+        return get_compute_registry().inventory_page(now=datetime.now(timezone.utc), limit=limit, cursor=cursor)
+
+    @compute_component
     def get_compute_service() -> ComputeFabricService:
         nonlocal compute_service, compute_remote_transport
         if compute_service is None:
@@ -754,7 +796,7 @@ def build_application(
                 transport=compute_remote_transport,
                 local_worker=get_compute_job_worker(),
                 now=lambda: datetime.now(timezone.utc),
-                refresh=refresh_compute_snapshots,
+                refresh_candidates=refresh_compute_snapshots,
                 placement_registry=get_job_registry(),
                 metrics=runtime_lifecycle.get().metrics,
             )
@@ -1317,6 +1359,9 @@ def build_application(
         compute_scheduler=compute_scheduler,
         compute_job_worker=get_compute_job_worker,
         compute_service=get_compute_service,
+        compute_inventory_page=compute_inventory_page,
+        compute_refresh_page=compute_refresh_page,
+        close_compute=close_compute,
         delegation_service=get_delegation_service,
         agent_lanes=get_agent_lanes,
         agent_workflow_service=get_agent_workflow_service,
@@ -1329,6 +1374,13 @@ def build_application(
 
 
 _default_config: SonderConfig | None = None
+_default_compute_close = None
+
+
+def close_default_compute(timeout=None):
+    if _default_compute_close is not None:
+        _default_compute_close(timeout=timeout)
+
 
 
 def _build_default_application() -> Application:
@@ -1343,7 +1395,7 @@ _application_lifecycle = ApplicationLifecycle(_build_default_application)
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
-    global _default_config
+    global _default_config, _default_compute_close
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
@@ -1351,9 +1403,11 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
             # Explicit entrypoint configuration is startup authority.  Reset
             # the lazy compatibility cache so repeated in-process CLI calls
             # cannot retain a prior command's config object.
+            close_default_compute()
             _default_config = config
             _application_lifecycle.reset()
     application = _application_lifecycle.get()
+    _default_compute_close = getattr(application, "close_compute", None)
     if config is not None and application.config is not config:
         logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
         raise RuntimeError("default application was already built without this config")
@@ -1361,7 +1415,9 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
 
 
 def reset_for_tests() -> None:
-    global _default_config
+    global _default_config, _default_compute_close
+    close_default_compute()
+    _default_compute_close = None
     _default_config = None
     _application_lifecycle.reset()
     runtime_paths.reset_home()

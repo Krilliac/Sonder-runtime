@@ -505,7 +505,7 @@ def native_tool_registry() -> InMemoryToolRegistry:
 
 def run_native_mcp(application, *, input_stream: TextIO | None = None,
                    output_stream: TextIO | None = None,
-                   task_handler=None) -> int:
+                   task_handler=None, close_compute_on_exit: bool = False) -> int:
     """Serve native MCP over stdio using the application tool port."""
     logger.info("native MCP server starting")
     logger.debug("run_native_mcp starting")
@@ -857,7 +857,13 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         tool_handler=execute,
         task_handler=task_handler,
     )
-    return transport.serve()
+    try:
+        return transport.serve()
+    finally:
+        if close_compute_on_exit:
+            close_compute = getattr(application, "close_compute", None)
+            if callable(close_compute):
+                close_compute()
 
 
 __all__ = ["native_tool_registry", "run_native_mcp"]
