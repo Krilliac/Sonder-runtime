@@ -31,3 +31,7 @@ def test_retired_runner_is_unavailable_before_any_host_effect(monkeypatch, level
 def test_retired_adapter_uses_one_compatibility_type_family():
     assert sandbox.IsolationLevel is legacy_types.IsolationLevel
     assert sandbox.SandboxResult is legacy_types.SandboxResult
+    assert set(sandbox.__all__) == {
+        "IsolationLevel", "SandboxPolicy", "SandboxResult",
+        "run_isolated", "run_python_isolated",
+    }
