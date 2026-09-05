@@ -6,6 +6,8 @@ projection failure never loses an accepted command and is retried before work.
 """
 
 from __future__ import annotations
+
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -613,7 +615,7 @@ class SQLiteAgentLaneStore:
             conn.executescript(_SCHEMA)
 
     def connect(self):
-        conn = sqlite3.connect(self.path, timeout=5)
+        conn = owned_sqlite_connect(self.path, timeout=5)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")

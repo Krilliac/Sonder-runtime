@@ -13,6 +13,8 @@ Every read path fail-softs to empty so a corrupt store never breaks a session.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import json
 import sqlite3
 import threading
@@ -79,7 +81,7 @@ def _connection():
     if conn is not None:
         with _suppress_sqlite():
             conn.close()
-    conn = sqlite3.connect(path, timeout=5.0)
+    conn = owned_sqlite_connect(path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)

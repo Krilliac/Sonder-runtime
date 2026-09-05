@@ -13,6 +13,8 @@ that was duplicated across 16+ stores with inconsistent settings.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import logging
 import os
 import sqlite3
@@ -42,7 +44,7 @@ def connect(
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(path, timeout=timeout, check_same_thread=check_same_thread)
+    conn = owned_sqlite_connect(path, timeout=timeout, check_same_thread=check_same_thread)
 
     if row_factory:
         conn.row_factory = sqlite3.Row

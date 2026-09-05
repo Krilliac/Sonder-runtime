@@ -7,6 +7,8 @@ server layer.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import contextlib
 import contextvars
 import fnmatch
@@ -2158,7 +2160,7 @@ def _inspect_sqlite(p: Path) -> dict:
     import sqlite3
 
     uri = "file:%s?mode=ro" % p.as_posix()
-    conn = sqlite3.connect(uri, uri=True)
+    conn = owned_sqlite_connect(uri, uri=True)
     try:
         tables = [
             row[0]

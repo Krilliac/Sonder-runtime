@@ -1,5 +1,7 @@
 """Single-host scoped transfer ledger and immutable files in an anchored private spool."""
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from contextlib import contextmanager
 import hashlib
 import json
@@ -82,7 +84,7 @@ class SQLiteArtifactTransferStore:
                         or path.is_symlink()
                     ):
                         raise TransferError("UNSAFE_STORE")
-            conn = sqlite3.connect(self.root / "transfers.sqlite", timeout=1)
+            conn = owned_sqlite_connect(self.root / "transfers.sqlite", timeout=1)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA synchronous=FULL")
             try:

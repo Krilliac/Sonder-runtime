@@ -1,6 +1,8 @@
 """SQLite-backed durable job registry (JOB-002/003/004)."""
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
@@ -141,7 +143,7 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
         self._clock, self._max_events, self._max_bytes = clock, max_events, max_bytes
         if connect_factory is not None and not callable(connect_factory):
             raise TypeError("connect_factory must be callable")
-        self._connect_factory = connect_factory or sqlite3.connect
+        self._connect_factory = connect_factory or owned_sqlite_connect
         self._lock = Lock()
         with self._connect() as connection:
             initialize_schema(connection)

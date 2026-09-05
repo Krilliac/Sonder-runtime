@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from dataclasses import asdict
 from contextlib import contextmanager
 from functools import wraps
@@ -174,7 +176,7 @@ class SQLiteDurableContinuationRepository:
             self._live_connections += 1
         connection = None
         try:
-            connection = sqlite3.connect(str(self._path), timeout=5.0)
+            connection = owned_sqlite_connect(str(self._path), timeout=5.0)
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA foreign_keys=ON")
             if connection.execute(

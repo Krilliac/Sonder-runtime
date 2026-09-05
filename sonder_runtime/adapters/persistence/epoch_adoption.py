@@ -1,6 +1,8 @@
 """Read-only epoch-2 adoption and temporary-schema cleanup checks."""
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -35,7 +37,7 @@ class Epoch2CleanupReport:
 def _temporary_objects(path: Path) -> tuple[str, ...]:
     if not path.is_file():
         return ()
-    conn = sqlite3.connect(str(path))
+    conn = owned_sqlite_connect(str(path))
     try:
         names = {
             row[0] for row in conn.execute(

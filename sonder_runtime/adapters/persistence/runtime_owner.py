@@ -1,5 +1,7 @@
 """Atomic owner lifecycle journal. It contains no executable task queue."""
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from contextlib import contextmanager
 import hashlib
 import json
@@ -47,7 +49,7 @@ class SQLiteRuntimeOwnerJournal:
     def _transaction(self, command=None):
         if not self.path.is_file():
             raise OwnerRefused("owner journal is missing")
-        connection = sqlite3.connect(
+        connection = owned_sqlite_connect(
             self.path.as_uri() + "?mode=rw", uri=True, timeout=1, isolation_level=None
         )
         try:

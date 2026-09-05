@@ -8,6 +8,8 @@ process, and it fails closed if durable metadata outlives that process.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
@@ -102,7 +104,7 @@ class _SQLiteTerminalJournal:
             connection.executescript(_DDL)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=5.0)
+        connection = owned_sqlite_connect(str(self.path), timeout=5.0)
         connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
