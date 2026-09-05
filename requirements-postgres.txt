@@ -1,0 +1,3 @@
+# Optional child aggregate backend. SQLite installations do not need these.
+psycopg[binary]==3.3.5
+psycopg-pool==3.3.0

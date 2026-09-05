@@ -6326,10 +6326,12 @@ def main(config=None):
         if not lifecycle.coordinator.draining:
             lifecycle.drain("server stopping")
         httpd.server_close()
-        from sonder_runtime.bootstrap.app import close_default_compute
-        close_default_compute()
-        if _ARTIFACT_TRANSFER_BINDING is not None:
-            _ARTIFACT_TRANSFER_BINDING.close()
+        from sonder_runtime.bootstrap.app import close_default_runtime_resources
+        try:
+            close_default_runtime_resources(timeout=5)
+        finally:
+            if _ARTIFACT_TRANSFER_BINDING is not None:
+                _ARTIFACT_TRANSFER_BINDING.close()
         _serve_logger.info("HTTP server stopped")
 
 

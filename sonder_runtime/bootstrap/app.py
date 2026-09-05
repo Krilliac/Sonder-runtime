@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import importlib
+import atexit
 import logging
 import os
 from threading import RLock
@@ -219,6 +220,7 @@ class Application:
     compute_inventory_page: Callable[..., dict] | None = None
     compute_refresh_page: Callable[..., dict] | None = None
     close_compute: Callable[..., None] | None = None
+    close_delegation: Callable[..., None] | None = None
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -302,8 +304,13 @@ class Application:
         """Quiesce and unpublish composed providers before process shutdown."""
         started = monotonic()
         try:
-            if self.close_compute is not None:
-                self.close_compute(timeout=timeout)
+            try:
+                if self.close_delegation is not None:
+                    self.close_delegation(timeout=timeout)
+            finally:
+                if self.close_compute is not None:
+                    remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
+                    self.close_compute(timeout=remaining)
         finally:
             remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
             self.specialized_providers.close(timeout=remaining)
@@ -336,11 +343,20 @@ def build_application(
     """
     logger.info(f"build_application starting, profile={profile!r}")
     logger.debug(f"build_application starting, profile={profile!r}, config_provided={config is not None}")
+    if config is None and any(name.startswith("SONDER_CHILD_STORAGE_") for name in os.environ):
+        # Compatibility entrypoints must not ignore an explicit backend opt-in.
+        from ..platform.config import load_config
+        config = load_config()
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
         from ..platform.config import validate_deployment
         validate_deployment(config)
+        from ..platform.child_storage_config import child_storage_errors
+        from ..platform.config import ConfigError
+        child_errors = child_storage_errors(config)
+        if child_errors:
+            raise ConfigError(child_errors)
         profile = config.profile
         logger.info(f"config applied, effective profile={profile!r}")
         logger.debug(f"config supplied, effective profile={profile!r}, home={config.state.home!r}")
@@ -481,7 +497,9 @@ def build_application(
     compute_scheduler = ComputePlacementScheduler(
         snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
     )
-    continuation_repository: SQLiteDurableContinuationRepository | None = None
+    continuation_repository = None
+    delegation_lock = RLock()
+    delegation_closed = False
     continuation_service: DurableContinuationService | None = None
     subagent_provider: LocalSubagentProvider | None = None
     delegation: DelegationService | None = None
@@ -870,22 +888,43 @@ def build_application(
 
     def get_delegation_service() -> DelegationService:
         nonlocal continuation_repository, continuation_service, subagent_provider, delegation
-        if delegation is None:
-            from ..platform.paths import state_path
-            db_path = state_path("child-sessions.db", "SONDER_CHILD_SESSIONS_DB")
-            logger.debug(f"lazy-init delegation subsystem at {db_path!r}")
-            continuation_repository = SQLiteDurableContinuationRepository(db_path)
-            continuation_service = DurableContinuationService(continuation_repository)
-            from ..adapters.conversational_subagents import conversational_runner_factory
-            subagent_provider = LocalSubagentProvider(
-                continuation_service,
-                runner_factory=conversational_runner_factory(
-                    gateway, get_session_repository(), get_session_capture_service(),
-                ),
-            )
-            delegation = DelegationService(subagent_provider, events)
-            logger.info("delegation service initialized")
-        return delegation
+        with delegation_lock:
+            if delegation_closed:
+                raise ProviderLifecycleError('delegation service is closed')
+            if delegation is None:
+                from .child_storage import compose_child_repository
+                continuation_repository = compose_child_repository(config or SonderConfig())
+                continuation_service = DurableContinuationService(continuation_repository)
+                from ..adapters.conversational_subagents import conversational_runner_factory
+                subagent_provider = LocalSubagentProvider(
+                    continuation_service,
+                    runner_factory=conversational_runner_factory(
+                        gateway, get_session_repository(), get_session_capture_service(),
+                    ),
+                )
+                delegation = DelegationService(subagent_provider, events)
+                logger.info("delegation service initialized")
+            return delegation
+
+    def close_delegation(timeout=None):
+        nonlocal delegation_closed
+        timeout = 5 if timeout is None else max(0, timeout)
+        started = monotonic()
+        with delegation_lock:
+            delegation_closed = True
+            service, repository = continuation_service, continuation_repository
+        if service is None:
+            return
+        stop = getattr(repository, 'stop_admissions', None)
+        if stop is not None:
+            stop()
+        if not service.close(timeout):
+            raise ProviderLifecycleError('child runner cleanup is incomplete')
+        close = getattr(repository, 'close', None)
+        if close is not None:
+            remaining = 5 if timeout is None else max(0, timeout - (monotonic() - started))
+            if not close(runners_stopped=True, timeout=remaining):
+                raise ProviderLifecycleError('child storage cleanup is incomplete')
 
     def get_agent_workflow_service() -> AgentWorkflowService:
         nonlocal agent_workflow
@@ -1292,7 +1331,7 @@ def build_application(
 
     logger.info(f"application graph assembled, profile={profile!r}")
     logger.debug(f"assembling Application graph for profile={profile!r}")
-    return Application(
+    application = Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
         provider_bindings=provider_bindings,
@@ -1362,6 +1401,7 @@ def build_application(
         compute_inventory_page=compute_inventory_page,
         compute_refresh_page=compute_refresh_page,
         close_compute=close_compute,
+        close_delegation=close_delegation,
         delegation_service=get_delegation_service,
         agent_lanes=get_agent_lanes,
         agent_workflow_service=get_agent_workflow_service,
@@ -1371,15 +1411,44 @@ def build_application(
         ),
         remote_world_provider=None,
     )
+    if config is not None and config.child_storage.backend == 'postgresql':
+        try:
+            application.delegation_service()
+        except Exception:
+            application.close_providers(timeout=5)
+            raise
+    return application
 
 
 _default_config: SonderConfig | None = None
 _default_compute_close = None
+_default_delegation_close = None
 
 
 def close_default_compute(timeout=None):
     if _default_compute_close is not None:
         _default_compute_close(timeout=timeout)
+
+
+def close_default_runtime_resources(timeout=5):
+    """Close only the already composed default graph, without creating one."""
+    timeout = 5 if timeout is None else max(0, timeout)
+    started = monotonic()
+    try:
+        if _default_delegation_close is not None:
+            _default_delegation_close(timeout=timeout)
+    finally:
+        close_default_compute(timeout=max(0, timeout - (monotonic() - started)))
+
+
+def _close_default_at_exit():
+    try:
+        close_default_runtime_resources(timeout=5)
+    except Exception:
+        logger.error("default runtime cleanup incomplete; recovery proof may be required")
+
+
+atexit.register(_close_default_at_exit)
 
 
 
@@ -1395,7 +1464,7 @@ _application_lifecycle = ApplicationLifecycle(_build_default_application)
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
-    global _default_config, _default_compute_close
+    global _default_config, _default_compute_close, _default_delegation_close
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
@@ -1403,11 +1472,12 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
             # Explicit entrypoint configuration is startup authority.  Reset
             # the lazy compatibility cache so repeated in-process CLI calls
             # cannot retain a prior command's config object.
-            close_default_compute()
+            close_default_runtime_resources()
             _default_config = config
             _application_lifecycle.reset()
     application = _application_lifecycle.get()
     _default_compute_close = getattr(application, "close_compute", None)
+    _default_delegation_close = getattr(application, "close_delegation", None)
     if config is not None and application.config is not config:
         logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
         raise RuntimeError("default application was already built without this config")
@@ -1415,9 +1485,10 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
 
 
 def reset_for_tests() -> None:
-    global _default_config, _default_compute_close
-    close_default_compute()
+    global _default_config, _default_compute_close, _default_delegation_close
+    close_default_runtime_resources()
     _default_compute_close = None
+    _default_delegation_close = None
     _default_config = None
     _application_lifecycle.reset()
     runtime_paths.reset_home()

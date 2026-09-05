@@ -32,6 +32,9 @@ from urllib.parse import urlsplit
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform.artifact_transfer_config import ArtifactTransferConfig, artifact_transfer_errors
+from sonder_runtime.platform.child_storage_config import (
+    ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
+)
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -252,6 +255,7 @@ class SonderConfig:
     # Provenance for diagnostics: which layers actually contributed.
     sources: tuple[str, ...] = ()
     artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
+    child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -319,6 +323,11 @@ class SonderConfig:
             ],
         }
         out["secrets"] = self.secrets.as_redacted_dict()
+        out['child_storage'] = {
+            item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
+            if item.name == 'binding_file' else getattr(self.child_storage, item.name)
+            for item in fields(self.child_storage)
+        }
         return out
 
 
@@ -384,6 +393,7 @@ _SECTION_TYPES = {
     "server": ServerConfig,
     "deployment": DeploymentConfig,
     "artifact_transfer": ArtifactTransferConfig,
+    "child_storage": ChildStorageConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -800,6 +810,7 @@ def _apply_environment(
         compute=compute,
         features=features,
         secrets=secrets,
+        child_storage=apply_child_storage_environment(config.child_storage, env, errors),
     )
 
 
@@ -839,6 +850,7 @@ def validate_deployment(config: SonderConfig) -> None:
 
 
 def _validate(config: SonderConfig, errors: list[str]) -> None:
+    errors.extend(child_storage_errors(config))
     errors.extend(artifact_transfer_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
