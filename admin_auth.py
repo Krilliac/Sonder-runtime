@@ -357,6 +357,57 @@ def authenticate(conn: sqlite3.Connection, token: str) -> dict | None:
     return account
 
 
+def authenticate_session(conn: sqlite3.Connection, token: str):
+    """Resolve an explicit account bearer to a private exact-login reference.
+
+    No credential is minted and no schema, session or account row is changed.
+    This is separate from public account serialization and supplies no step-up,
+    project grant, human-presence proof or permission to execute work.
+    """
+    if conn.in_transaction:
+        raise PermissionError("session lookup requires an idle owned connection")
+    if (type(token) is not str or not 1 <= len(token) <= 512
+            or any(not 33 <= ord(char) <= 126 for char in token)):
+        return None
+    return read_session_reference(conn, "account-session-v1:" + _hash_token(token))
+
+
+def read_session_reference(conn: sqlite3.Connection, reference: str):
+    """Read one exact login for private background admission, without its bearer.
+
+    Callers must obtain the reference from trusted composition, never a request
+    field. This result is a point-in-time account snapshot, not a cross-store
+    transaction or distributed lease. A missing initialized account schema is a
+    storage error, not implicit authorization. Caller transactions are preserved.
+    """
+    from sonder_runtime.application.ports.account_auth import AccountSessionIdentity
+
+    if conn.in_transaction:
+        raise PermissionError("session lookup requires an idle owned connection")
+    prefix = "account-session-v1:"
+    if (type(reference) is not str or len(reference) != len(prefix) + 64
+            or not reference.startswith(prefix)
+            or any(char not in "0123456789abcdef" for char in reference[len(prefix):])):
+        return None
+    conn.execute("BEGIN")
+    try:
+        row = conn.execute(
+            "SELECT a.username,a.role,a.banned,s.expires_ts,s.revoked "
+            "FROM account_sessions s JOIN accounts a ON a.username=s.username "
+            "WHERE s.token_hash=?", (reference[len(prefix):],),
+        ).fetchone()
+        if (row is None or row["banned"] or row["revoked"]
+                or type(row["expires_ts"]) is not int or row["expires_ts"] <= _now()):
+            return None
+        if (type(row["username"]) is not str or not row["username"]
+                or len(row["username"]) > MAX_USERNAME_CHARS
+                or row["role"] not in {"user", "developer", "admin"}):
+            return None
+        return AccountSessionIdentity(reference, row["username"], row["role"], row["expires_ts"])
+    finally:
+        conn.rollback()
+
+
 def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
     if not account:
         return False, "login required"
