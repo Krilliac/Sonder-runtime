@@ -264,7 +264,9 @@ class SubprocessJobProvider:
                     request.memory_limit_bytes,
                     request.max_descendants + 1,
                 )
-            elif request.memory_limit_bytes is not None:
+            elif memory_token is None and request.memory_limit_bytes is not None:
+                # A prepared scope already owns both process and memory limits.
+                # Replacing its token loses descendant containment and cleanup proof.
                 memory_token = self._memory_limiter.apply(
                     process, request.memory_limit_bytes,
                 )
