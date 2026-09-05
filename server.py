@@ -18,6 +18,9 @@ Tiers (escalation ladder, cheapest first):
     cloud-code/cloud-general -> configured hosted defaults (no local memory cost)
 """
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+
 import collections
 import base64
 import contextlib
@@ -2636,7 +2639,7 @@ def _execute_selfmod_run(run_id, explicit_tests=None):
         while not heartbeat_stop.wait(30):
             if not selfmod.heartbeat(run_id, owner):
                 return
-    heartbeat_thread = threading.Thread(
+    heartbeat_thread = owned_runtime_thread(
         target=heartbeat_worker, name="sonder-selfmod-heartbeat", daemon=True,
     )
     heartbeat_thread.start()
@@ -4753,7 +4756,7 @@ def prewarm_model(tier: str = "") -> bool:
             with _PREWARM_LOCK:
                 _PREWARM_INFLIGHT.discard(model)
 
-    threading.Thread(
+    owned_runtime_thread(
         target=_load, daemon=True, name="sonder-prewarm"
     ).start()
     return True
@@ -6719,7 +6722,7 @@ def parallel_generate_run(
                 "seconds": 0,
             }
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = {pool.submit(one, i): i for i in range(variants)}
         for future in as_completed(futures):
             result = future.result()
@@ -6840,7 +6843,7 @@ def parallel_generate_run_languages(
                 "seconds": 0,
             }
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = [
             pool.submit(one, index, lang, variant)
             for index, (lang, variant) in enumerate(jobs)
@@ -7040,7 +7043,7 @@ def campaign_generate_compile_execute_record(
 
     started = time.time()
     results = [None] * len(jobs)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = [pool.submit(run_one, *job) for job in jobs]
         for future in as_completed(futures):
             result = future.result()
@@ -7355,7 +7358,7 @@ def campaign_repo_repair(
 
     started = time.time()
     results = [None] * len(jobs)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with owned_runtime_pool(max_workers=max_workers) as pool:
         futures = [pool.submit(run_one, *job) for job in jobs]
         for future in as_completed(futures):
             outcome = future.result()
@@ -14020,7 +14023,7 @@ def game_generation_campaign(
                 }
 
     started = time.time()
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with owned_runtime_pool(max_workers=workers) as pool:
         futures = {pool.submit(one, index): index for index in range(total)}
         for future in as_completed(futures):
             results[futures[future]] = future.result()
@@ -21204,7 +21207,7 @@ def _autopilot_heartbeat(run_id: str, owner_id: str, stop: threading.Event) -> N
 def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False, request_owner: str | None = None) -> dict:
     owner_id = "auto-%s-%s" % (os.getpid(), time.time_ns())
     stop = threading.Event()
-    heartbeat = threading.Thread(
+    heartbeat = owned_runtime_thread(
         target=_autopilot_heartbeat,
         args=(run_id, owner_id, stop),
         name="sonder-autopilot-heartbeat",
@@ -21268,7 +21271,7 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner
             alive = sum(1 for t in _AUTOPILOT_THREADS.values() if t.is_alive())
             if alive >= _MAX_AUTOPILOT_RUNS:
                 return False
-        thread = threading.Thread(
+        thread = owned_runtime_thread(
             target=_autopilot_thread_main,
             args=(run_id, int(max_cycles), bool(plan_only), request_owner),
             name="sonder-autopilot-%s" % run_id,
@@ -23188,7 +23191,7 @@ def _execute_fanout_run(run_id):
     pending_cloud = []
     if row is not None:
         pending_cloud.append(row)
-    with ThreadPoolExecutor(max_workers=limits["cloud_workers"]) as pool:
+    with owned_runtime_pool(max_workers=limits["cloud_workers"]) as pool:
         inflight = {}
         while True:
             while pending_cloud and len(inflight) < limits["cloud_workers"]:
