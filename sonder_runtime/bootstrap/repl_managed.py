@@ -206,14 +206,17 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
             if recovery_request is not None:
                 host = LaneContinuationService(lanes, authorize_host=selector.authorize,
                                                model_writable_roots=model_roots)
-                cursor, original = 0, None
-                while True:
-                    page = host.recovery_page(context, cursor=cursor, limit=128,
-                                               host_conversation_id=selection.host_conversation_id)
-                    original = next((item for item in page.items if item.continuation_id == recovery_request.continuation_id), None)
-                    if original is not None or not page.has_more:
-                        break
-                    cursor = page.next_cursor
+                def recovery_item():
+                    cursor = 0
+                    while True:
+                        page = host.recovery_page(context, cursor=cursor, limit=128,
+                                                  host_conversation_id=selection.host_conversation_id)
+                        item = next((item for item in page.items if item.continuation_id == recovery_request.continuation_id), None)
+                        if item is not None or not page.has_more:
+                            return item
+                        cursor = page.next_cursor
+
+                original = recovery_item()
                 if original is None or original.pending_identity is None:
                     return ReplRecoveryResult('ORIGINAL_VERIFICATION_UNAVAILABLE')
                 current_context()
@@ -236,6 +239,16 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
                 active.append(session)
                 verdict = session.resume_pending_verification(original.pending_identity,
                                                                verifier_factory=verifier_factory)
+                if not verdict.valid and verdict.code == 'APPROVAL_PENDING':
+                    current_context()
+                    pending = recovery_item()
+                    if (pending is None or pending.pending_identity != original.pending_identity
+                            or pending.verification_phase != 'approval_pending'
+                            or pending.verification_code != 'APPROVAL_PENDING'
+                            or pending.pending_approval is None):
+                        return ReplRecoveryResult('RECOVERY_METADATA_UNAVAILABLE')
+                    return ReplRecoveryResult('VERIFICATION_APPROVAL_PENDING',
+                                              pending.pending_approval.call_id)
                 if session.published_terminal is not None:
                     return ReplRecoveryResult('VERIFIED' if verdict.valid else verdict.code,
                                                output=session.published_terminal.output)

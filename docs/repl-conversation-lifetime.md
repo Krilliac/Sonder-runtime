@@ -60,3 +60,26 @@ durable turn before returning the completed text. Missing, corrupt or failed
 final persistence prevents advancement; it does not discard original evidence
 or rerun a model. Retained history keeps both records. Older turns without a
 final receipt are not silently upgraded or accepted for advancement.
+
+
+## Permission discovery and staged recovery approval
+
+The actual slash-command dispatch remains in `main`; a wrapping decorator owns
+the conversation lifetime. Static command discovery therefore sees the same
+branches the operator invokes. `/recover` declares `workspace_run`, matching its
+inner prepared attachment and verification approval policy; a missing or changed
+catalog marker refuses before dispatch. The outer gate does not spend a coarse
+approval ahead of either exact prepared command.
+
+A recovery retry waiting for verification approval returns
+`VERIFICATION_APPROVAL_PENDING` and the exact persisted approval call ID. The host
+reloads scoped recovery metadata after the attempt and requires the same original
+pending identity, phase and code before displaying it. Metadata disagreement
+remains unavailable. No pending result publishes the original output.
+
+Each invocation releases its attachment before returning. If attachment approval
+is issued first and verification approval later, a subsequent invocation requires
+fresh attachment approval for its new ownership epoch. The original attachment
+nonce cannot be reused. Repeating the original recovery command preserves the
+pending verification identity; after current attachment and original verification
+approvals are available, the test runs once and the original result is published.

@@ -456,6 +456,7 @@ _UNREGISTERED_BRANCH_WORK = {
     # The scoped console facade gates the immutable prepared command itself.
     # Declare its work here even though static discovery cannot follow it.
     "/lanes": "agent_lane",
+    "/recover": "workspace_run",
     "/selfmod": "selfmod",
     "/selfmodify": "selfmod",
     "/mcp": "mcp",

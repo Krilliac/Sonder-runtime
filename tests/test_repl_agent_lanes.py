@@ -332,6 +332,16 @@ def test_read_lane_command_is_in_catalog_and_not_an_execution_gate():
     assert repl._named_command_gate("/lanes", "list")[0]
 
 
+def test_recovery_catalog_keeps_exact_inner_approval_gate(monkeypatch):
+    from sonder_runtime.adapters.command_catalog import command_catalog
+
+    assert command_catalog.console_tools()["/recover"] == ("workspace_run",)
+    monkeypatch.setattr(repl, "_gate_tools", lambda *a: pytest.fail("coarse gate spent approval"))
+    assert repl._named_command_gate("/recover", "resume continuation command") == (True, "")
+    monkeypatch.setattr(command_catalog, "console_tools", lambda: {})
+    assert not repl._named_command_gate("/recover", "resume continuation command")[0]
+
+
 def test_oversized_escaped_confirmation_is_refused_before_approval(env):
     lane = child(env)
     calls = []

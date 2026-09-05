@@ -230,11 +230,35 @@ def test_explicit_recovery_preserves_original_and_spends_separate_approvals(
     attachment = ledger.resolve_call(call_id)
     attachment_nonce = ledger.issue(attachment.tool, attachment.digest, approver='operator').nonce
     verification = ledger.resolve_call(permission_modes.call_digest('workspace_run', prepared.approval_payload()))
+    pending_verification = recover()
+    if entry == 'console':
+        assert 'VERIFICATION_APPROVAL_PENDING' in pending_verification
+        assert verification.call_id in pending_verification
+        assert 'original verified answer' not in pending_verification
+    else:
+        assert pending_verification.code == 'VERIFICATION_APPROVAL_PENDING'
+        assert pending_verification.approval_call_id == verification.call_id
+    assert ledger.get(attachment_nonce).spent
+    assert gateway.calls == 0
     verification_nonce = ledger.issue(verification.tool, verification.digest, approver='operator').nonce
+    result = recover()
+    if entry == 'console':
+        assert 'ATTACHMENT_APPROVAL_PENDING' in result
+        assert 'original verified answer' not in result
+        fresh_call_id = re.search(r'Pending approval: ([0-9a-f]{16})', result).group(1)
+    else:
+        assert result.code == 'ATTACHMENT_APPROVAL_PENDING' and not result.output
+        fresh_call_id = result.approval_call_id
+    assert fresh_call_id != call_id
+    assert gateway.calls == 0 and not ledger.get(verification_nonce).spent
+    fresh_attachment = ledger.resolve_call(fresh_call_id)
+    fresh_nonce = ledger.issue(fresh_attachment.tool, fresh_attachment.digest, approver='operator').nonce
+    assert len({attachment_nonce, verification_nonce, fresh_nonce}) == 3
     result = recover()
     if entry == 'console':
         assert 'Recovery: VERIFIED' in result and 'original verified answer' in result
     else:
         assert result.code == 'VERIFIED' and result.output == 'original verified answer'
     assert ledger.get(attachment_nonce).spent and ledger.get(verification_nonce).spent
+    assert ledger.get(fresh_nonce).spent
     assert gateway.calls == 1

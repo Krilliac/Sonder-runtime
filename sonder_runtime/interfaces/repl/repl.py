@@ -516,12 +516,15 @@ def _named_command_gate(cmd, argument=""):
         tools = command_catalog.console_tools().get(cmd, ())
     except command_catalog.CatalogUnavailable as exc:
         return False, "refused %s: %s" % (cmd, exc)
-    if cmd == "/lanes":
+    if cmd in ("/lanes", "/recover"):
         # LaneConsoleFacade separates reads from effects and gates effects with
         # their prepared principal/root/payload. A coarse gate here would consume
         # a one-shot approval before that exact command reaches its own gate.
-        if set(tools) != {"agent_lane"}:
-            return False, "refused /lanes: scoped command catalog is unavailable"
+        # Recovery likewise uses its original prepared attachment/verification
+        # identities and real approval ledger inside the managed host boundary.
+        expected = "agent_lane" if cmd == "/lanes" else "workspace_run"
+        if set(tools) != {expected}:
+            return False, "refused %s: scoped command catalog is unavailable" % cmd
         return True, ""
     # Workspace creation is implemented by a nested REPL helper, so it is not
     # visible to the catalog's top-level branch scanner.  Keep its filesystem
@@ -1951,6 +1954,8 @@ def _recovery_command(session_id, project, argument):
         lines = ['Recovery: ' + terminal_text(page.code)]
         if page.approval_call_id:
             lines.append('Pending approval: ' + terminal_text(page.approval_call_id))
+            if page.code == 'ATTACHMENT_APPROVAL_PENDING':
+                lines.append('Reattachment approval applies to this ownership attempt; a released attempt needs fresh approval.')
             lines.append('After approval, repeat the same recovery command and command-id.')
         if page.output:
             lines.extend(('Original terminal output:', terminal_text(page.output, limit=1048576)))
@@ -1993,12 +1998,19 @@ def _run_session_work(session_id, *, host_project, **arguments):
     return server._run_managed_repl_work(session_id, memory_database=memory_database, **arguments)
 
 
+def _with_conversation_lifetime(function):
+    from functools import wraps
+
+    @wraps(function)
+    def invoke(*args, **kwargs):
+        with server._managed_repl_conversation_scope():
+            return function(*args, **kwargs)
+
+    return invoke
+
+
+@_with_conversation_lifetime
 def main(*, machine_output=False):
-    with server._managed_repl_conversation_scope():
-        return _main(machine_output=machine_output)
-
-
-def _main(*, machine_output=False):
     global CURRENT_TOKEN
     trace = False
     strict = None  # None = env default
