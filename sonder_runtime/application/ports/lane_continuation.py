@@ -10,6 +10,8 @@ MAX_PROJECTION_BYTES = 65536
 
 @dataclass(frozen=True)
 class ProjectionBinding:
+    continuation_id: str
+    principal_id: str
     run_id: str
     host_conversation_id: str
     parent_session_id: str
@@ -21,6 +23,8 @@ class ProjectionBinding:
 
     def __post_init__(self):
         for value in (
+            self.continuation_id,
+            self.principal_id,
             self.run_id,
             self.host_conversation_id,
             self.parent_session_id,

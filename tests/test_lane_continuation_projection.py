@@ -68,7 +68,7 @@ def setup_projection(tmp_path):
     from sonder_runtime.application.ports.lane_continuation import ProjectionBinding
 
     binding = ProjectionBinding(
-        "run", "host-task", "parent", 1, "verify", "b" * 64, (str(tmp_path),), 1
+        "continuation", "owner", "run", "host-task", "parent", 1, "verify", "b" * 64, (str(tmp_path),), 1
     )
     codec = Codec()
     return codec, HostProjection(binding, True, "VALIDATION_FAILED", codec.issuer)
@@ -148,6 +148,10 @@ def test_scoped_projection_link_is_immutable_and_survives_store_reopen(tmp_path)
         )
         with pytest.raises(ValueError):
             tx.link_terminal_projection("continuation", "owner", changed)
+        with pytest.raises(PermissionError):
+            tx.link_terminal_projection("foreign-continuation", "owner", sealed)
+        with pytest.raises(PermissionError):
+            tx.link_terminal_projection("continuation", "foreign-principal", sealed)
     assert open_projection(codec, restored, original.binding) == original
 
 
@@ -166,3 +170,16 @@ def test_projection_store_corruption_is_not_decoded_as_clean(tmp_path):
     with store.transaction() as tx:
         with pytest.raises(ValueError):
             tx.terminal_projection("continuation", "owner", "verify")
+
+
+@pytest.mark.parametrize("column,value", [("principal", "foreign"), ("continuation_id", "foreign")])
+def test_projection_store_scope_tamper_is_detected_on_read(tmp_path, column, value):
+    from sonder_runtime.application.ports.lane_continuation import seal_projection
+    codec, original = setup_projection(tmp_path)
+    store = SQLiteAgentLaneStore(tmp_path / "fleet.db", SQLiteSessionRepository(tmp_path / "sessions.db"))
+    with store.transaction() as tx:
+        tx.link_terminal_projection("continuation", "owner", seal_projection(codec, original, original.binding))
+        tx.conn.execute("UPDATE agent_lane_terminal_projections SET " + column + "=?", (value,))
+        with pytest.raises(PermissionError):
+            tx.terminal_projection(value if column == "continuation_id" else "continuation",
+                                   value if column == "principal" else "owner", "verify")
