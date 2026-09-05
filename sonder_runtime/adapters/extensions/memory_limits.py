@@ -143,7 +143,10 @@ class _WindowsJobToken:
                     return ProcessContainmentResult(True, forced=forced)
                 if any(state not in (0, 258) for state in states):
                     self._proof_failed = True
-                if force and not forced:
+                # Accounting and process signaling can settle in either order.
+                # Permission to force cleanup is not evidence it is necessary.
+                needs_termination = self._proof_failed or (active > 0 and 258 in states)
+                if force and not forced and needs_termination:
                     terminate = ctypes.windll.kernel32.TerminateJobObject
                     terminate.argtypes = [wintypes.HANDLE, wintypes.UINT]
                     terminate.restype = wintypes.BOOL
@@ -153,7 +156,7 @@ class _WindowsJobToken:
                 if self._proof_failed:
                     return ProcessContainmentResult(False, forced=forced,
                                                     detail="owned process handle proof unavailable")
-                if active and not force:
+                if needs_termination and not force:
                     return ProcessContainmentResult(False, detail="owned job still contains processes")
                 time.sleep(min(0.02, max(0, deadline - time.monotonic())))
             return ProcessContainmentResult(False, forced=forced,

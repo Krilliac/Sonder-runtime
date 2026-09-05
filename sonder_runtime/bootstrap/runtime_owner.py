@@ -42,7 +42,8 @@ class _LaunchPermit:
 class DisposableRuntimeOwner:
     def __init__(self, path, *, writable_roots):
         self.path = Path(path).absolute()
-        if self.path.exists():
+        self.workspace = self.path.parent / (self.path.name + "-workspace")
+        if os.path.lexists(self.path) or os.path.lexists(self.workspace):
             raise OwnerUnsupported(
                 "cannot adopt an existing or installed owner namespace"
             )
@@ -50,17 +51,23 @@ class DisposableRuntimeOwner:
         self._live = True
         self._lock = RLock()
         self._anchor = None
+        self._workspace_anchor = None
         self._gate = None
+        self._gate_entered = False
         self._process = None
         self._launch_id = None
         self._stopped = None
         self.namespace = uuid.uuid4().hex
         self._private_source_paths = (str(self.path),)
         self._validate()
-        self._anchor = PrivateDirectoryAnchor.open_base(self.path)
         try:
+            self._anchor = PrivateDirectoryAnchor.open_base(self.path, require_new=True)
+            self._workspace_anchor = PrivateDirectoryAnchor.open_base(
+                self.workspace, require_new=True
+            )
             self._gate = file_lock(self.path / "launch", timeout=0)
             self._gate.__enter__()
+            self._gate_entered = True
             for name in ("state", "temp", "profile"):
                 (self.path / name).mkdir()
             self.journal = SQLiteRuntimeOwnerJournal(
@@ -69,9 +76,13 @@ class DisposableRuntimeOwner:
             self._process = WindowsOwnedRuntimeProcess(self.path)
         except BaseException:
             self._live = False
-            if self._gate is not None:
+            if self._gate_entered:
                 self._gate.__exit__(None, None, None)
-            self._anchor.close()
+                self._gate_entered = False
+            if self._workspace_anchor is not None:
+                self._workspace_anchor.close()
+            if self._anchor is not None:
+                self._anchor.close()
             raise
 
     @property
@@ -94,6 +105,8 @@ class DisposableRuntimeOwner:
             raise OwnerRefused("live owner launch exclusion is no longer held")
         if self._anchor is not None:
             self._anchor.validate()
+        if self._workspace_anchor is not None:
+            self._workspace_anchor.validate()
         for root in self._roots():
             candidates = (Path(os.path.abspath(root)), Path(root).resolve())
             for private in (self.path, self.path.resolve()):
@@ -264,4 +277,6 @@ class DisposableRuntimeOwner:
                 self._launch_id = None
             self._live = False
             self._gate.__exit__(None, None, None)
+            self._gate_entered = False
+            self._workspace_anchor.close()
             self._anchor.close()
