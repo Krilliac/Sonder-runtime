@@ -19661,6 +19661,7 @@ def _agent_turn(
                 certificate_id=certificate_fields.get('verification_certificate_id', ''),
                 certificate_generation=certificate_fields.get('verification_generation', 0),
                 certificate_code=certificate_fields.get('verification_code', ''),
+                delegated_work=bool(delegated),
             ))
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(

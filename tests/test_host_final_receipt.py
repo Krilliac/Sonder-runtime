@@ -16,7 +16,8 @@ def test_final_receipt_is_distinct_exact_immutable_and_required(lanes):
     view = lifetime.factory(SimpleNamespace(run_id='final-receipt-turn'), app)
     draft = HostTerminalDraft(HostObservationLedger(project_scope=str(lanes[3])).seal(),
                               'model claims finished', 'NORMAL', ())
-    facts = HostFinalFacts((), str(lanes[3]), True, False, False, 'VALIDATION_FAILED')
+    facts = HostFinalFacts((), str(lanes[3]), True, False, False, 'VALIDATION_FAILED',
+                          delegated_work=True)
     output = 'VALIDATION_FAILED: tests not run\n\nmodel claims finished'
     try:
         view.capture_terminal(draft)
@@ -33,12 +34,22 @@ def test_final_receipt_is_distinct_exact_immutable_and_required(lanes):
             decoded = open_projection(bound._service.projection_codec, final, final.binding)
             assert decoded.output == output
             assert turn['final_receipt']['facts']['validation_passed'] is False
+            assert turn['final_receipt']['facts']['delegated_work'] is True
             assert turn['final_receipt']['original_digest'] == turn['projection_digest']
         view.close()
         next_view = lifetime.factory(SimpleNamespace(run_id='next-turn'), app)
         assert next_view is not view
     finally:
         lifetime.close()
+
+
+def test_legacy_final_facts_do_not_imply_absence_of_delegation():
+    legacy = dict(tools=(), project_scope="project", mutation_observed=False,
+        validation_attempted=False, validation_passed=False, terminal_class="NORMAL")
+    assert HostFinalFacts(**legacy).delegated_work is None
+    assert HostFinalFacts(**legacy, delegated_work=False).delegated_work is False
+    with pytest.raises(ValueError):
+        HostFinalFacts(**legacy, delegated_work=0)
 
 
 def test_original_capture_alone_cannot_close_turn(lanes):
