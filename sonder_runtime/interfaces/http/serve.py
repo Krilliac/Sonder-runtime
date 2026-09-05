@@ -1432,6 +1432,14 @@ def _app_control_deployment_authorized(authorization, config):
         or sonder_secrets.previous_key_valid(_bearer_token(authorization)))
 
 
+def _app_managed_work_binding():
+    # Startup owns registration/drain. A request cannot create an executor.
+    service = getattr(_APP_CONTROL_BINDING, "_work_binding", None)
+    if service is not None:
+        service.require_current()
+    return service
+
+
 def _effective_auth_mode():
     if REQUIRE_ACCOUNT and not API_KEY and AUTH_MODE in ("local-open", "api-key"):
         return "account"
@@ -3672,7 +3680,8 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         if handle_app_control(self, "OPTIONS", _APP_CONTROL_BINDING,
-                deployment_authorized=_app_control_deployment_authorized):
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
             return
         if handle_artifact_transfer(self, "OPTIONS", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
@@ -4195,7 +4204,8 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         if handle_app_control(self, "PUT", _APP_CONTROL_BINDING,
-                deployment_authorized=_app_control_deployment_authorized):
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
             return
         if not handle_artifact_transfer(self, "PUT", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             self._send_not_found()
@@ -4208,7 +4218,8 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         if handle_app_control(self, "GET", _APP_CONTROL_BINDING,
-                deployment_authorized=_app_control_deployment_authorized):
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
             return
         if handle_artifact_transfer(self, "GET", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
@@ -5198,7 +5209,8 @@ class Handler(BaseHTTPRequestHandler):
         self._request_body_consumed = False
         self._app_control_request = False
         if handle_app_control(self, "POST", _APP_CONTROL_BINDING,
-                deployment_authorized=_app_control_deployment_authorized):
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
             return
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
