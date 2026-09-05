@@ -24,6 +24,12 @@ class AccountAuthProvider:
     def revoke_session(self, connection, token):
         return _engine().revoke_session(connection, token)
 
+    def authenticate_session(self, connection, token):
+        return _engine().authenticate_session(connection, token)
+
+    def read_session_reference(self, connection, reference):
+        return _engine().read_session_reference(connection, reference)
+
     def require(self, account, role="user"):
         return _engine().require(account, role)
 
