@@ -48,6 +48,7 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_managed_work (position INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, principal TEXT NOT NULL, session TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL, record TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS app_managed_work_scope ON app_managed_work(principal,session,position)",
     "CREATE UNIQUE INDEX IF NOT EXISTS app_managed_work_active_binding ON app_managed_work(binding) WHERE state IN ('prepared','admitted')",
+    "CREATE UNIQUE INDEX IF NOT EXISTS app_managed_work_active_binding_v2 ON app_managed_work(binding) WHERE state != 'terminal'",
     "CREATE TABLE IF NOT EXISTS app_control_meta (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS app_control_sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL, runtime TEXT NOT NULL, record TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS app_control_sessions_principal ON app_control_sessions(principal)",
@@ -383,10 +384,24 @@ class AppControlTransaction:
             if result is None or result.prepared != work:
                 raise StoreUnavailable("prepared work receipt mismatch")
             return result
-        if self._conn.execute(
-            "SELECT 1 FROM app_managed_work WHERE binding=?", (work.binding.binding_id,)
-        ).fetchone():
-            raise CommandConflict("binding already has retained work")
+        retained = self._conn.execute(
+            "SELECT principal,session,id FROM app_managed_work WHERE binding=? LIMIT 257",
+            (work.binding.binding_id,),
+        ).fetchall()
+        if len(retained) > 256:
+            raise CapacityExceeded("retained work capacity exceeded")
+        for owner, session, work_id in retained:
+            previous = self.read_work(
+                principal_id=owner, control_session_id=session, work_id=work_id
+            )
+            if (
+                previous is None
+                or previous.prepared.binding.binding_id != work.binding.binding_id
+                or owner != work.binding.principal_id
+            ):
+                raise StoreUnavailable("retained binding work mismatch")
+            if previous.state != "terminal":
+                raise CommandConflict("binding already has active work")
         if (
             self._conn.execute("SELECT COUNT(*) FROM app_managed_work").fetchone()[0]
             >= 256
