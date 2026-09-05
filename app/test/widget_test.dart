@@ -837,14 +837,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(find.text('Runtime architecture'), findsNothing);
     expect(
       find.textContaining('not a standalone foundation model'),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.textContaining('training uses PEFT/Hugging Face'),
-      findsOneWidget,
+      findsNothing,
     );
 
     await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');

@@ -54,7 +54,8 @@ void main() {
       await tester.tap(find.text('Login'));
       await tester.pumpAndSettle();
       expect(find.text('deployment'), findsOneWidget);
-      expect(find.textContaining('Account session bound to https://host.test'),
+      expect(find.textContaining('Sign out revokes this session'), findsOneWidget);
+      expect(find.textContaining('Signed-in server: https://host.test'),
           findsOneWidget);
       await tester.tap(find.text('Login'));
       await tester.pumpAndSettle();
