@@ -159,3 +159,51 @@ def test_lost_commit_response_retains_original_receipt_and_exact_command(
     replay = store.complete(command, {"replacement": True}, "STOPPED_CLEAN")
     assert replay["result"] == {"original": True}
     assert store.status()["revision"] == 2
+
+
+@pytest.mark.parametrize("kind", ["object", "lookalike"])
+def test_completion_rejects_untrusted_command_shape_without_effects(tmp_path, kind):
+    store = SQLiteRuntimeOwnerJournal(
+        tmp_path / "owner.db", namespace="fixture", create=True
+    )
+    command = prepare_owner_operation("same", "select", 0, {"config": {"port": 12345}})
+    store.prepare(command)
+    before = store.status()
+
+    class Lookalike:
+        operation_id = command.operation_id
+        action = command.action
+        expected_revision = command.expected_revision
+        payload = command.payload
+        digest = command.digest
+
+    candidate = object() if kind == "object" else Lookalike()
+    with pytest.raises(OwnerRefused):
+        store.complete(candidate, {}, "STOPPED_CLEAN")
+    assert store.status() == before
+    assert store.pending() == command
+    assert store.prepare(command) is None
+
+
+def test_ignored_receipt_update_never_advances_owner(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "owner.db"
+    store = SQLiteRuntimeOwnerJournal(path, namespace="fixture", create=True)
+    command = prepare_owner_operation("same", "select", 0, {"config": {"port": 12345}})
+    store.prepare(command)
+    before = store.status()
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TRIGGER fixture_ignore BEFORE UPDATE ON operation BEGIN SELECT RAISE(IGNORE); END"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(OwnerRefused, match="receipt was not retained"):
+        store.complete(command, {}, "STOPPED_CLEAN")
+    assert store.status() == before
+    assert store.pending() == command
+    with pytest.raises(OwnerRefused, match="no immutable"):
+        store.selected_config()
