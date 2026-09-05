@@ -37,7 +37,27 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _isolate_fleet_ledger():
+def _isolate_runtime_home():
+    """Restore process-local path configuration after entrypoint tests.
+
+    Typed startup deliberately overrides per-store environment paths. Leaving
+    that override behind makes later tests write into an earlier test's home
+    even when they set their own database environment variables.
+    """
+    from sonder_runtime.platform import paths
+
+    previous = paths._configured_home()
+    try:
+        yield
+    finally:
+        if previous is None:
+            paths.reset_home()
+        else:
+            paths.configure_home(previous)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fleet_ledger(_isolate_runtime_home):
     """Clear the shared fleet ledger before each test.
 
     fleet_store is a process-shared sqlite ledger, and a test that leaves

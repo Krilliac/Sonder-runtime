@@ -81,6 +81,7 @@ _COMPUTE_TOOLS = (
             "idempotent": _BOOL,
             "allow_remote": _BOOL,
             "allow_local_fallback": _BOOL,
+            "placement_policy": {"type": "string", "enum": ["local-only", "prefer-remote", "rank-all"]},
         }, "required": [
             "request_id", "workload", "catalog_entry_id", "workspace_mapping",
             "allow_remote",
@@ -438,7 +439,19 @@ _INSPECTION_TOOLS = (
         }, "required": ["left", "right"], "additionalProperties": False},
     ),
 )
-_NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS
+_AGENT_LANE_TOOL = ToolDescriptor(
+    "agent_lane", "Open a fresh parent with open_parent; retain its scoped capability to control independent agent conversations. Never place the capability in task text or files.",
+    {"type": "object", "properties": {
+        "action": {"type": "string", "enum": [
+            "open_parent", "rotate_parent", "revoke_parent", "spawn", "list", "inspect",
+            "send_message", "wait", "interrupt", "resume", "cancel", "reports", "ack",
+        ]},
+        "payload": {"type": "object", "maxProperties": 32},
+        "parent_session_id": {"type": "string", "maxLength": 128},
+        "parent_token": {"type": "string", "maxLength": 256},
+    }, "required": ["action", "payload"], "additionalProperties": False},
+)
+_NATIVE_TOOLS += _INSPECTION_TOOLS + _COMPUTE_TOOLS + (_AGENT_LANE_TOOL,)
 # Only the inspections the inspection service can run go to it. The catalog
 # groups the web, weather, location, process and artifact tools with the
 # inspections for presentation, but they run through the packaged executor;
@@ -492,7 +505,7 @@ def native_tool_registry() -> InMemoryToolRegistry:
 
 def run_native_mcp(application, *, input_stream: TextIO | None = None,
                    output_stream: TextIO | None = None,
-                   task_handler=None) -> int:
+                   task_handler=None, close_compute_on_exit: bool = False) -> int:
     """Serve native MCP over stdio using the application tool port."""
     logger.info("native MCP server starting")
     logger.debug("run_native_mcp starting")
@@ -517,7 +530,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
 
     def compute_result(name: str, arguments: dict) -> dict:
         from ..application.compute_fabric.jobs import DigestBoundInput, RemoteJobEnvelope
-        from ..domain.compute_fabric import WorkloadKind, WorkloadRequest
+        from ..domain.compute_fabric import PlacementPolicy, WorkloadKind, WorkloadRequest
 
         service_factory = getattr(application, "compute_service", None)
         if not callable(service_factory):
@@ -542,6 +555,8 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                     workspace_mapping=workspace,
                     allow_remote=allow_remote,
                     allow_local_fallback=allow_local_fallback,
+                    placement_policy=(PlacementPolicy(arguments["placement_policy"])
+                                      if "placement_policy" in arguments else None),
                     idempotent=idempotent,
                 )
                 environment = arguments.get("environment", {})
@@ -725,6 +740,28 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             workspace_roots=roots,
             timeout_seconds=60.0,
         )
+        if canonical_name == "agent_lane":
+            from ..adapters.security.permission_policy import permission_policy
+            from ..domain.common.errors import SonderError
+            from ..interfaces.agent_lane_entrypoint import lane_approval_arguments, execute_lane_command
+            try:
+                safe = lane_approval_arguments(application, context, canonical_arguments)
+                decision = permission_policy.decide_for_caller(
+                    canonical_name, interactive=False, gate_control_exempt=False,
+                    surface="native-mcp", arguments=safe,
+                )
+                if decision is not None and decision.action != permission_policy.allow_action():
+                    return {"output": decision.reason, "isError": True, "error": "permission_denied",
+                            "evidence": {"call_id": getattr(decision, "call_id", "")}}
+                result = execute_lane_command(application, context, canonical_arguments)
+                return {"output": json.dumps(result, ensure_ascii=False), "isError": False,
+                        "error": None, "evidence": {"tool": canonical_name}}
+            except (SonderError, ValueError, TypeError, PermissionError) as error:
+                return {"output": str(error), "isError": True,
+                        "error": "FORBIDDEN" if isinstance(error, PermissionError)
+                        else getattr(error, "code", "INVALID_INPUT"), "evidence": {}}
+            finally:
+                permission_policy.forget_spent_approval()
         if canonical_name in _COMPUTE_NAMES:
             logger.debug(f"routing to compute handler: {canonical_name!r}")
             if canonical_name in {"compute_submit", "compute_cancel"}:
@@ -820,7 +857,18 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         tool_handler=execute,
         task_handler=task_handler,
     )
-    return transport.serve()
+    try:
+        return transport.serve()
+    finally:
+        if close_compute_on_exit:
+            try:
+                close_delegation = getattr(application, "close_delegation", None)
+                if callable(close_delegation):
+                    close_delegation(timeout=5)
+            finally:
+                close_compute = getattr(application, "close_compute", None)
+                if callable(close_compute):
+                    close_compute()
 
 
 __all__ = ["native_tool_registry", "run_native_mcp"]

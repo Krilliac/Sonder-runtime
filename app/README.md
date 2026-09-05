@@ -262,3 +262,7 @@ Requires the [Flutter SDK](https://docs.flutter.dev/get-started/install)
 (stable channel). Android builds also need a JDK (17) and the Android SDK;
 Linux desktop needs `libgtk-3-dev` and friends (see the workflow for the exact
 package list).
+
+Account sessions use platform secure storage independently of the deployment API key. Login no longer replaces the deployment key, allowing servers configured with `auth_mode=both`. Sign out uses the exact-session `/v1/sonder/logout` endpoint; failed or unknown revocation offers retry or explicit local forgetting. A local forget cannot revoke a copied token. Account credentials are origin-bound, and authenticated API requests do not follow redirects. A changed server must be handled explicitly in Settings.
+
+The Chat toolbar's **App control** action manages server conversation bindings through the dedicated `/v1/app-control` routes. Enrollment requires an explicit project and password check. Its credential stays only in memory and never enters chat, tools, preferences, secure storage or fallback requests. Account/server changes, expiry, disconnect and app closure clear it. Unknown outcomes retain the exact command for an explicit check; enrollment checks require the password again. Creating/selecting/clearing/revoking a binding does not enable managed execution. See [the interaction contract](UX-CONTRACT.md#app-control-conversation-bindings).

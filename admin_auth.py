@@ -26,6 +26,9 @@ MAX_PASSWORD_CHARS = 1_024
 PUBLIC_DEV_SECRET = "sonder-local-dev-secret"
 
 
+from sonder_runtime.adapters.security.account_admission import coordinated_account_mutation
+
+
 def _auth_secret_file() -> Path:
     """Per-install location of the derived account-session HMAC secret."""
     return sonder_paths.ensure_home() / "secrets" / "auth_secret"
@@ -164,6 +167,7 @@ def account_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
 
 
+@coordinated_account_mutation
 def register(
     conn: sqlite3.Connection,
     username: str,
@@ -242,6 +246,10 @@ def public_account(conn: sqlite3.Connection, username: str) -> dict:
     ).fetchone()
     if not row:
         raise ValueError("unknown account")
+    return _public_account_row(row)
+
+
+def _public_account_row(row) -> dict:
     return {
         "username": row["username"],
         "role": row["role"],
@@ -253,6 +261,7 @@ def public_account(conn: sqlite3.Connection, username: str) -> dict:
     }
 
 
+@coordinated_account_mutation
 def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, dict]:
     init(conn)
     username = _username(username, generic_error=True)
@@ -276,6 +285,68 @@ def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, 
     return token, public_account(conn, username)
 
 
+def reauthenticate(conn: sqlite3.Connection, token: str, password: str) -> dict:
+    """Check fresh password against the exact live login; mint no credential.
+
+    Intended for private host control enrollment. Consumers must still validate
+    current roles, project grants and session revocation at every later action.
+    This is not evidence of human presence or permission to execute work.
+    """
+    refusal = "session reauthentication required"
+    if not isinstance(token, str) or not 1 <= len(token) <= 512:
+        raise PermissionError(refusal)
+    try:
+        password = _password(password, generic_error=True)
+    except ValueError:
+        raise PermissionError(refusal) from None
+    # init() commits schema work; never commit a caller's existing transaction.
+    if conn.in_transaction:
+        raise PermissionError("reauthentication requires an idle owned connection")
+    init(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT a.*,s.expires_ts AS session_expires,s.revoked AS session_revoked "
+            "FROM account_sessions s JOIN accounts a ON a.username=s.username "
+            "WHERE s.token_hash=?", (_hash_token(token),),
+        ).fetchone()
+        if (row is None or row['banned'] or row['session_revoked']
+                or int(row['session_expires'] or 0) <= _now()):
+            raise PermissionError(refusal)
+        _, digest = _hash_password(password, row['password_salt'])
+        if (not hmac.compare_digest(digest, row['password_hash'])
+                or int(row['session_expires'] or 0) <= _now()):
+            raise PermissionError(refusal)
+        return _public_account_row(row)
+    finally:
+        conn.rollback()
+
+
+@coordinated_account_mutation
+def revoke_session(conn: sqlite3.Connection, token: str) -> None:
+    """Durably revoke only this bearer; retries disclose no session existence.
+
+    Callers own an idle connection. A committed revocation remains effective
+    after response loss; dependent control admissions must check this session
+    live instead of treating a cached account row as authority.
+    """
+    if not isinstance(token, str) or not 1 <= len(token) <= 512:
+        raise ValueError('account session required')
+    if conn.in_transaction:
+        raise PermissionError('session revocation requires an idle owned connection')
+    init(conn)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            'UPDATE account_sessions SET revoked=1 WHERE token_hash=? AND revoked=0',
+            (_hash_token(token),),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def authenticate(conn: sqlite3.Connection, token: str) -> dict | None:
     init(conn)
     if not token:
@@ -292,6 +363,78 @@ def authenticate(conn: sqlite3.Connection, token: str) -> dict | None:
     return account
 
 
+def _session_reference_mac(token_hash: str, secret: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        ("sonder-private-account-reference-v1\0" + token_hash).encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def authenticate_session(conn: sqlite3.Connection, token: str):
+    """Resolve an explicit account bearer to a private exact-login reference.
+
+    No credential is minted and no schema, session or account row is changed.
+    This is separate from public account serialization and supplies no step-up,
+    project grant, human-presence proof or permission to execute work.
+    """
+    if conn.in_transaction:
+        raise PermissionError("session lookup requires an idle owned connection")
+    if (type(token) is not str or not 1 <= len(token) <= 512
+            or any(not 33 <= ord(char) <= 126 for char in token)):
+        return None
+    # Both MACs must use one key snapshot. Rotation before the live lookup
+    # rejects the reference instead of re-signing an old token hash with a new key.
+    secret = _secret()
+    token_hash = hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+    return read_session_reference(
+        conn, "account-session-v1:" + token_hash + "." + _session_reference_mac(token_hash, secret)
+    )
+
+
+def read_session_reference(conn: sqlite3.Connection, reference: str):
+    """Read one exact login for private background admission, without its bearer.
+
+    Callers must obtain the reference from trusted composition, never a request
+    field. This result is a point-in-time account snapshot, not a cross-store
+    transaction or distributed lease. A missing initialized account schema is a
+    storage error, not implicit authorization. Caller transactions are preserved.
+    """
+    from sonder_runtime.application.ports.account_auth import AccountSessionIdentity
+
+    if conn.in_transaction:
+        raise PermissionError("session lookup requires an idle owned connection")
+    prefix = "account-session-v1:"
+    if (type(reference) is not str or len(reference) != len(prefix) + 129
+            or not reference.startswith(prefix)):
+        return None
+    token_hash, separator, mac = reference[len(prefix):].partition(".")
+    if (separator != "." or len(token_hash) != 64 or len(mac) != 64
+            or any(char not in "0123456789abcdef" for char in token_hash + mac)
+            or not hmac.compare_digest(mac, _session_reference_mac(token_hash, _secret()))):
+        return None
+    conn.execute("BEGIN")
+    try:
+        row = conn.execute(
+            "SELECT a.username,a.role,a.banned,s.expires_ts,s.revoked "
+            "FROM account_sessions s JOIN accounts a ON a.username=s.username "
+            "WHERE s.token_hash=?", (token_hash,),
+        ).fetchone()
+        if (row is None or row["banned"] or row["revoked"]
+                or type(row["expires_ts"]) is not int or row["expires_ts"] <= _now()):
+            return None
+        if (type(row["username"]) is not str or not row["username"]
+                or len(row["username"]) > MAX_USERNAME_CHARS
+                or row["role"] not in {"user", "developer", "admin"}):
+            return None
+        # A key rotation during database I/O must fence this lookup too.
+        if not hmac.compare_digest(mac, _session_reference_mac(token_hash, _secret())):
+            return None
+        return AccountSessionIdentity(reference, row["username"], row["role"], row["expires_ts"])
+    finally:
+        conn.rollback()
+
+
 def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
     if not account:
         return False, "login required"
@@ -303,6 +446,7 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
     return True, ""
 
 
+@coordinated_account_mutation
 def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
     init(conn)
     username = _username(username)

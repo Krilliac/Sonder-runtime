@@ -1,3 +1,4 @@
+import 'account_session.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -5,6 +6,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'agent_lanes.dart';
 
 /// Return the catalog spelling of a saved model selector when it still exists.
 ///
@@ -758,7 +760,103 @@ class PermissionMode {
 /// with an optional `Authorization: Bearer <key>` header when the host
 /// enabled auth. This mirrors sonder_client.py, but for a GUI.
 class SonderApi {
+  Future<Map<String, dynamic>> _agentRequest(
+    String path, {
+    Map<String, String>? query,
+    Map<String, dynamic>? body,
+  }) async {
+    final uri = _uri('/v1/agent-lanes$path').replace(queryParameters: query);
+    final response =
+        await (body == null
+                ? _requestGet(uri, headers: _headers())
+                : _requestPost(uri, headers: _headers(), body: jsonEncode(body)))
+            .timeout(const Duration(seconds: 35));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _responseException(
+        response,
+        'Could not load agent conversations (HTTP ${response.statusCode}).',
+      );
+    }
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw SonderException('Invalid agent conversation response.');
+    }
+    return decoded;
+  }
+
+  Future<AgentLanePage> agentLanes({
+    int cursor = 0,
+    String? parentSessionId,
+  }) async => AgentLanePage.fromJson(
+    await _agentRequest(
+      '',
+      query: {
+        'cursor': '$cursor',
+        'limit': '50',
+        if (parentSessionId != null) 'parent_session_id': parentSessionId,
+      },
+    ),
+  );
+  Future<AgentSnapshot> agentInspect(
+    String id, {
+    int cursor = 0,
+    bool wait = false,
+  }) async => AgentSnapshot.fromJson(
+    await _agentRequest(
+      '/${Uri.encodeComponent(id)}${wait ? '/wait' : ''}',
+      query: {
+        'cursor': '$cursor',
+        'limit': '100',
+        if (wait) 'timeout_seconds': '25',
+      },
+    ),
+  );
+  Future<AgentReceipt> agentCommand(
+    String id,
+    String action, {
+    required String commandId,
+    String? content,
+  }) async {
+    if (!const {'messages', 'interrupt', 'resume', 'cancel'}.contains(action)) {
+      throw ArgumentError.value(action);
+    }
+    return AgentReceipt.fromJson(
+      await _agentRequest(
+        '/${Uri.encodeComponent(id)}/$action',
+        body: {
+          'command_id': commandId,
+          if (content != null) 'content': content,
+        },
+      ),
+    );
+  }
+
+  Future<AgentReportPage> agentReports(
+    String parentSessionId, {
+    int cursor = 0,
+  }) async => AgentReportPage.fromJson(
+    await _agentRequest(
+      '/reports',
+      query: {
+        'parent_session_id': parentSessionId,
+        'cursor': '$cursor',
+        'limit': '50',
+      },
+    ),
+  );
+  Future<AgentReceipt> agentAcknowledge(
+    String id, {
+    required String commandId,
+  }) async => AgentReceipt.fromJson(
+    await _agentRequest(
+      '/reports/${Uri.encodeComponent(id)}/ack',
+      body: {'command_id': commandId},
+    ),
+  );
+
+
   final String baseUrl; // e.g. https://sonder.example.com
+  final AccountSession? accountSession;
   final String apiKey; // empty when the server has auth disabled
   final String localFallbackUrl;
 
@@ -767,6 +865,7 @@ class SonderApi {
   SonderApi({
     required this.baseUrl,
     this.apiKey = '',
+    this.accountSession,
     this.localFallbackUrl = 'http://127.0.0.1:11435',
   });
 
@@ -852,8 +951,7 @@ class SonderApi {
         'success,message,country,country_code,region,region_code,city,'
         'timezone';
     try {
-      final response = await http
-          .get(Uri.parse('https://ipwho.is/?fields=$fields'))
+      final response = await _requestGet(Uri.parse('https://ipwho.is/?fields=$fields'))
           .timeout(const Duration(seconds: 10));
       if (response.statusCode != 200) return null;
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
@@ -897,6 +995,9 @@ class SonderApi {
     if (key.trim().isNotEmpty) {
       h['Authorization'] = 'Bearer ${key.trim()}';
     }
+    if (keyOverride == null && accountSession?.matches(baseUrl) == true) {
+      h['X-Sonder-Account-Token'] = accountSession!.token;
+    }
     return h;
   }
 
@@ -917,8 +1018,7 @@ class SonderApi {
   Future<List<String>> listModels() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/models'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/models'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       // A silent local retry made connection tests authenticate a different
@@ -949,8 +1049,7 @@ class SonderApi {
   Future<SystemInfo> systemInfo() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/sonder/status'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/sonder/status'), headers: _headers())
           .timeout(const Duration(seconds: 20));
     } catch (e) {
       // Status must stay bound to the configured host; otherwise polling can
@@ -979,8 +1078,7 @@ class SonderApi {
   Future<UpdateStatus?> fetchUpdateStatus() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/admin/updates/status'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/admin/updates/status'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1010,8 +1108,7 @@ class SonderApi {
   Future<ExtensionRegistryStatus?> fetchExtensionRegistry() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/extensions'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/extensions'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1040,8 +1137,7 @@ class SonderApi {
   Future<CommandCatalog> fetchCommands() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/commands'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/commands'), headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1075,8 +1171,7 @@ class SonderApi {
         .replace(queryParameters: {'q': q, 'limit': '$limit'});
     late http.Response resp;
     try {
-      resp = await http
-          .get(uri, headers: _headers())
+      resp = await _requestGet(uri, headers: _headers())
           .timeout(const Duration(seconds: 10));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1108,8 +1203,7 @@ class SonderApi {
         _uri('/v1/commands/help').replace(queryParameters: {'topic': topic});
     late http.Response resp;
     try {
-      resp = await http
-          .get(uri, headers: _headers())
+      resp = await _requestGet(uri, headers: _headers())
           .timeout(const Duration(seconds: 15));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1139,8 +1233,7 @@ class SonderApi {
   Future<PermissionMode?> fetchPermissionMode() async {
     late http.Response resp;
     try {
-      resp = await http
-          .get(_uri('/v1/permission-mode'), headers: _headers())
+      resp = await _requestGet(_uri('/v1/permission-mode'), headers: _headers())
           .timeout(const Duration(seconds: 10));
     } catch (e) {
       throw SonderException('Cannot reach server: $e');
@@ -1171,8 +1264,7 @@ class SonderApi {
     }
     late http.Response resp;
     try {
-      resp = await http
-          .post(
+      resp = await _requestPost(
             _uri('/v1/permission-mode'),
             headers: _headers(),
             body: jsonEncode({'mode': wanted}),
@@ -1278,7 +1370,7 @@ class SonderApi {
 
     late http.Response resp;
     String warning = '';
-    final client = http.Client();
+    final client = _NoRedirectClient(http.Client());
     _chatClient = client;
     try {
       resp = await client
@@ -1374,26 +1466,40 @@ class SonderApi {
     }
   }
 
+  Future<void> logout() async {
+    if (accountSession?.matches(baseUrl) != true) {
+      throw SonderException('No account session for this server.');
+    }
+    try {
+      final response = await _requestPost(_uri('/v1/sonder/logout'), headers: _headers(), body: '{}').timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200 || jsonDecode(response.body)['ok'] != true) {
+        throw SonderException('Account revocation was not confirmed. Retry sign out.');
+      }
+    } catch (_) {
+      throw SonderException('Account revocation was not confirmed. Retry sign out.');
+    }
+  }
+
   Future<String> register(String username, String password) async {
     return _accountAction('/v1/sonder/register', username, password);
   }
 
   Future<String> login(String username, String password) async {
+    serverOrigin(baseUrl);
     late http.Response resp;
     try {
-      resp = await http
-          .post(
+      resp = await _requestPost(
             _uri('/v1/sonder/login'),
             headers: _headers(),
             body: jsonEncode({'username': username, 'password': password}),
           )
           .timeout(const Duration(seconds: 20));
     } catch (e) {
-      throw SonderException('Login failed: $e');
+      throw SonderException('Login could not be completed.');
     }
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
-      throw SonderException(obj['message']?.toString() ?? 'Login failed.');
+      throw SonderException('Login was not accepted.');
     }
     return obj['token']?.toString() ?? '';
   }
@@ -1403,17 +1509,17 @@ class SonderApi {
     String username,
     String password,
   ) async {
+    serverOrigin(baseUrl);
     late http.Response resp;
     try {
-      resp = await http
-          .post(
+      resp = await _requestPost(
             _uri(path),
             headers: _headers(),
             body: jsonEncode({'username': username, 'password': password}),
           )
           .timeout(const Duration(seconds: 20));
     } catch (e) {
-      throw SonderException('Account request failed: $e');
+      throw SonderException('Account request could not be completed.');
     }
     final obj = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     if (resp.statusCode != 200 || obj['ok'] != true) {
@@ -3016,4 +3122,24 @@ class SystemModel {
       ownedBy: json['owned_by']?.toString() ?? '',
     );
   }
+}
+
+class _NoRedirectClient extends http.BaseClient {
+  final http.Client inner;
+  _NoRedirectClient(this.inner);
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    request.followRedirects = false;
+    return inner.send(request);
+  }
+  @override
+  void close() => inner.close();
+}
+Future<http.Response> _requestGet(Uri uri, {Map<String, String>? headers}) async {
+  final client = _NoRedirectClient(http.Client());
+  try { return await client.get(uri, headers: headers); } finally { client.close(); }
+}
+Future<http.Response> _requestPost(Uri uri, {Map<String, String>? headers, Object? body}) async {
+  final client = _NoRedirectClient(http.Client());
+  try { return await client.post(uri, headers: headers, body: body); } finally { client.close(); }
 }

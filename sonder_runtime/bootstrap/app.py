@@ -1,6 +1,6 @@
 """Deterministic composition root (SPEC-3 R-M8).
 
-Runtime variants are assembled here — never through import-time global
+Runtime variants are assembled here â€” never through import-time global
 initialization. Importing this module creates no directories, opens no
 databases, reads no mutable environment state, starts no threads, probes
 no hardware, and contacts no services; construction happens inside
@@ -11,9 +11,13 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import importlib
+import atexit
 import logging
 import os
+from threading import RLock
+from time import monotonic
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -123,6 +127,7 @@ from ..domain.compute_fabric import (
     ComputeCapability,
     ComputeNode,
     ComputePlacementScheduler,
+    PlacementPolicy,
     NodeSnapshot,
     NodeHealth,
     WorkloadKind,
@@ -203,6 +208,7 @@ class Application:
     compute_job_worker: Callable[[], ComputeJobWorker] | None = None
     compute_service: Callable[[], ComputeFabricService] | None = None
     delegation_service: Callable[[], DelegationService] | None = None
+    agent_lanes: Callable[[], object] | None = None
     agent_workflow_service: Callable[[], AgentWorkflowService] | None = None
     lineage_query: Callable[[], DurableLineageQuery] | None = None
     # The typed tool boundary: the read-only workbench family runs through it
@@ -211,6 +217,15 @@ class Application:
     tools: ToolApplicationFacade | None = None
     container_world_provider: Any | None = None
     remote_world_provider: Any | None = None
+    compute_inventory_page: Callable[..., dict] | None = None
+    compute_refresh_page: Callable[..., dict] | None = None
+    close_compute: Callable[..., None] | None = None
+    close_delegation: Callable[..., None] | None = None
+
+    @property
+    def private_source_paths(self) -> tuple[str, ...]:
+        """Exact host-loaded provenance, never inferred from diagnostic labels."""
+        return self.config.private_source_paths if self.config is not None else ()
 
     def provider_health(self):
         """Return a typed, fail-closed snapshot of published provider health."""
@@ -292,7 +307,18 @@ class Application:
 
     def close_providers(self, timeout: float | None = None) -> None:
         """Quiesce and unpublish composed providers before process shutdown."""
-        self.specialized_providers.close(timeout=timeout)
+        started = monotonic()
+        try:
+            try:
+                if self.close_delegation is not None:
+                    self.close_delegation(timeout=timeout)
+            finally:
+                if self.close_compute is not None:
+                    remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
+                    self.close_compute(timeout=remaining)
+        finally:
+            remaining = None if timeout is None else max(0, timeout - (monotonic() - started))
+            self.specialized_providers.close(timeout=remaining)
 
 
 # Compatibility name for callers that used the bootstrap-private selector.
@@ -313,6 +339,7 @@ def build_application(
     update_activator=None,
     extension_provenance: ProvenanceInventory | None = None,
     control_plane_snapshot_service: ControlPlaneSnapshotService | None = None,
+    child_repository_factory=None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -322,9 +349,20 @@ def build_application(
     """
     logger.info(f"build_application starting, profile={profile!r}")
     logger.debug(f"build_application starting, profile={profile!r}, config_provided={config is not None}")
+    if config is None and any(name.startswith("SONDER_CHILD_STORAGE_") for name in os.environ):
+        # Compatibility entrypoints must not ignore an explicit backend opt-in.
+        from ..platform.config import load_config
+        config = load_config()
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
+        from ..platform.config import validate_deployment
+        validate_deployment(config)
+        from ..platform.child_storage_config import child_storage_errors
+        from ..platform.config import ConfigError
+        child_errors = child_storage_errors(config)
+        if child_errors:
+            raise ConfigError(child_errors)
         profile = config.profile
         logger.info(f"config applied, effective profile={profile!r}")
         logger.debug(f"config supplied, effective profile={profile!r}, home={config.state.home!r}")
@@ -357,7 +395,7 @@ def build_application(
     logger.debug("resolving legacy model provider factories")
     from .legacy_model import lazy_legacy_model_provider_factories
     target_resolver, generate_factory = lazy_legacy_model_provider_factories()
-    # SPEC-3 Phase 3: the real transport adapter behind the port — consent
+    # SPEC-3 Phase 3: the real transport adapter behind the port â€” consent
     # enforced against the OperationContext, driver errors mapped into the
     # domain taxonomy. Backend is Ollama by default, selectable via env.
     provider_registry = ScopedProviderRegistry()
@@ -449,14 +487,29 @@ def build_application(
     compute_service: ComputeFabricService | None = None
     compute_remote_snapshot_source = None
     compute_remote_transport = None
+    compute_refresh_coordinator = None
+    compute_composition_lock = RLock()
+
+    def compute_component(operation):
+        # Registry, source, worker, service and coordinator form one graph.
+        # Reentrancy permits lazy dependencies to call each other. Remote probes
+        # runs outside this lock; close shares it with coordinator publication.
+        @wraps(operation)
+        def synchronized(*args, **kwargs):
+            with compute_composition_lock:
+                return operation(*args, **kwargs)
+        return synchronized
     effective_config = config or SonderConfig()
     compute_scheduler = ComputePlacementScheduler(
         snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
     )
-    continuation_repository: SQLiteDurableContinuationRepository | None = None
+    continuation_repository = None
+    delegation_lock = RLock()
+    delegation_closed = False
     continuation_service: DurableContinuationService | None = None
     subagent_provider: LocalSubagentProvider | None = None
     delegation: DelegationService | None = None
+    interactive_lanes = None
     agent_workflow: AgentWorkflowService | None = None
     lineage: DurableLineageQuery | None = None
 
@@ -564,6 +617,7 @@ def build_application(
             )
         return process_job_provider
 
+    @compute_component
     def get_compute_registry() -> ComputeNodeRegistry:
         nonlocal compute_registry
         if compute_registry is None:
@@ -610,6 +664,7 @@ def build_application(
             )
         return compute_registry
 
+    @compute_component
     def get_compute_snapshot() -> NodeSnapshot:
         nonlocal compute_snapshot_source
         if compute_snapshot_source is None:
@@ -635,6 +690,7 @@ def build_application(
         )
         return registry.observe(snapshot)
 
+    @compute_component
     def get_compute_job_worker() -> ComputeJobWorker:
         nonlocal compute_job_worker
         if compute_job_worker is None:
@@ -653,6 +709,7 @@ def build_application(
                         job.allowed_relative_path_options
                     ),
                     memory_limit_bytes=job.memory_limit_bytes,
+                    memory_reservation_bytes=job.memory_reservation_bytes,
                     artifact_paths=job.artifact_paths,
                 )
                 for job in effective_config.compute.jobs
@@ -670,42 +727,73 @@ def build_application(
                 if effective_config.state.workspace_roots
                 else Path.cwd().resolve()
             )
+            from ..application.compute_fabric.capacity import WorkerBudget, measured_worker_budget
+
+            def worker_budget() -> WorkerBudget:
+                configured = effective_config.compute.worker_memory_budget_bytes
+                if configured is None:
+                    return measured_worker_budget(
+                        get_compute_snapshot(), effective_config.compute.worker_host_id,
+                    )
+                return WorkerBudget(
+                    effective_config.compute.worker_host_id, configured,
+                    effective_config.compute.worker_max_jobs,
+                )
+
             compute_job_worker = ComputeJobWorker(
                 worker_id=effective_config.compute.node_id,
                 catalog=catalog,
                 workspace_mappings=roots,
                 provider=get_process_job_provider(),
+                capacity=get_job_registry(),
+                budget=worker_budget,
+                reservation_seconds=effective_config.compute.worker_reservation_seconds,
             )
         return compute_job_worker
 
-    def refresh_compute_snapshots() -> None:
-        nonlocal compute_remote_snapshot_source
-        get_compute_snapshot()
-        if not effective_config.compute.nodes:
-            return
+    def get_compute_refresh_coordinator():
+        nonlocal compute_remote_snapshot_source, compute_refresh_coordinator
         if not effective_config.compute.allow_remote:
-            return
+            raise PermissionError("remote compute is disabled by host configuration")
         if not effective_config.secrets.api_key:
             raise ValueError("remote compute requires SONDER_API_KEY")
-        if compute_remote_snapshot_source is None:
-            from ..adapters.compute_fabric.http_client import (
-                HttpsComputeSnapshotSource,
-            )
+        with compute_composition_lock:
+            if compute_refresh_coordinator is None:
+                from ..adapters.compute_fabric.http_client import HttpsComputeSnapshotSource
+                from ..application.compute_fabric.coordinator import ComputeRefreshCoordinator
+                compute_remote_snapshot_source = HttpsComputeSnapshotSource(
+                    api_key=effective_config.secrets.api_key,
+                    timeout_seconds=effective_config.compute.probe_timeout_ms / 1000.0,
+                )
+                registry = get_compute_registry()
+                compute_refresh_coordinator = ComputeRefreshCoordinator(registry, compute_remote_snapshot_source,
+                    now=lambda: datetime.now(timezone.utc), refresh_after=registry.snapshot_ttl / 2)
+            return compute_refresh_coordinator
 
-            compute_remote_snapshot_source = HttpsComputeSnapshotSource(
-                api_key=effective_config.secrets.api_key,
-                timeout_seconds=effective_config.compute.probe_timeout_ms / 1000.0,
-            )
-        registry = get_compute_registry()
-        from ..application.compute_fabric.refresh import refresh_remote_snapshots
+    def refresh_compute_snapshots(request=None) -> None:
+        get_compute_snapshot()
+        if not effective_config.compute.nodes or not effective_config.compute.allow_remote:
+            return
+        if request is not None and (request.local_only or not request.allow_remote
+                                    or request.placement_policy is PlacementPolicy.LOCAL_ONLY):
+            return
+        get_compute_refresh_coordinator().refresh(request)
 
-        refresh_remote_snapshots(
-            registry,
-            compute_remote_snapshot_source,
-            now=lambda: datetime.now(timezone.utc),
-            max_workers=8,
-        )
+    def compute_refresh_page(*, limit=32, cursor=None):
+        return get_compute_refresh_coordinator().refresh_page(limit=limit, cursor=cursor)
 
+    def close_compute(timeout=None):
+        nonlocal compute_refresh_coordinator
+        with compute_composition_lock:
+            if compute_refresh_coordinator is not None:
+                compute_refresh_coordinator.close(timeout=timeout)
+                compute_refresh_coordinator = None
+
+    def compute_inventory_page(*, limit=32, cursor=None):
+        # Inventory reads never trigger network/hardware probing or enrollment.
+        return get_compute_registry().inventory_page(now=datetime.now(timezone.utc), limit=limit, cursor=cursor)
+
+    @compute_component
     def get_compute_service() -> ComputeFabricService:
         nonlocal compute_service, compute_remote_transport
         if compute_service is None:
@@ -732,7 +820,7 @@ def build_application(
                 transport=compute_remote_transport,
                 local_worker=get_compute_job_worker(),
                 now=lambda: datetime.now(timezone.utc),
-                refresh=refresh_compute_snapshots,
+                refresh_candidates=refresh_compute_snapshots,
                 placement_registry=get_job_registry(),
                 metrics=runtime_lifecycle.get().metrics,
             )
@@ -769,23 +857,86 @@ def build_application(
             agent_registry.register_workbench_modes()
         return agent_registry
 
-    def _noop_runner(state, save, control):
-        return ""
+    def get_agent_lanes():
+        nonlocal interactive_lanes
+        if interactive_lanes is None:
+            from ..adapters.persistence.agent_lanes import SQLiteAgentLaneStore
+            from ..adapters.persistence.fleet_store import database_path
+            from ..application.agents.interactive_lanes import AgentLaneService
+            sessions = get_session_repository()
+            lane_tools = tools
+            lane_test_catalog = None
+            catalog_path = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()
+            if catalog_path:
+                from ..adapters.lane_tests import LaneTestCatalog
+                from .lane_tests import compose_lane_test_tools
+                lane_test_catalog = LaneTestCatalog.load(catalog_path)
+                lane_tools = compose_lane_test_tools(
+                    tools, lane_test_catalog, get_process_job_provider(), audit=tool_audit,
+                )
+            def authorize_lane_grant(lane, context):
+                from ..application.context import LOCAL_OWNER
+                from ..adapters.filesystem.file_ops import allowed_roots
+                if lane_test_catalog is not None:
+                    lane_test_catalog.require_current()
+                if context.principal_id != LOCAL_OWNER:
+                    raise PermissionError("account lanes require a configured live account authorizer")
+                root = Path(lane['workspace_root']).resolve()
+                if not any(root == current.resolve() or current.resolve() in root.parents
+                           for current in allowed_roots()):
+                    raise PermissionError("configured workspace grant was removed")
+            interactive_lanes = AgentLaneService(
+                SQLiteAgentLaneStore(database_path(), sessions), sessions, gateway, lane_tools,
+                authorize_grant=authorize_lane_grant,
+                allowed_tools=tuple(item.name for item in lane_tools.graph.registry.list_all()),
+            )
+        return interactive_lanes
 
     def get_delegation_service() -> DelegationService:
         nonlocal continuation_repository, continuation_service, subagent_provider, delegation
-        if delegation is None:
-            from ..platform.paths import state_path
-            db_path = state_path("child-sessions.db", "SONDER_CHILD_SESSIONS_DB")
-            logger.debug(f"lazy-init delegation subsystem at {db_path!r}")
-            continuation_repository = SQLiteDurableContinuationRepository(db_path)
-            continuation_service = DurableContinuationService(continuation_repository)
-            subagent_provider = LocalSubagentProvider(
-                continuation_service, _noop_runner,
-            )
-            delegation = DelegationService(subagent_provider, events)
-            logger.info("delegation service initialized")
-        return delegation
+        with delegation_lock:
+            if delegation_closed:
+                raise ProviderLifecycleError('delegation service is closed')
+            if delegation is None:
+                from .child_storage import compose_child_repository
+                if child_repository_factory is None:
+                    continuation_repository = compose_child_repository(config or SonderConfig())
+                else:
+                    from .child_storage import HostChildRepositoryFactory
+                    if not isinstance(child_repository_factory, HostChildRepositoryFactory):
+                        raise TypeError("child repository factory requires trusted host composition")
+                    continuation_repository = child_repository_factory(config or SonderConfig())
+                continuation_service = DurableContinuationService(continuation_repository)
+                from ..adapters.conversational_subagents import conversational_runner_factory
+                subagent_provider = LocalSubagentProvider(
+                    continuation_service,
+                    runner_factory=conversational_runner_factory(
+                        gateway, get_session_repository(), get_session_capture_service(),
+                    ),
+                )
+                delegation = DelegationService(subagent_provider, events)
+                logger.info("delegation service initialized")
+            return delegation
+
+    def close_delegation(timeout=None):
+        nonlocal delegation_closed
+        timeout = 5 if timeout is None else max(0, timeout)
+        started = monotonic()
+        with delegation_lock:
+            delegation_closed = True
+            service, repository = continuation_service, continuation_repository
+        if service is None:
+            return
+        stop = getattr(repository, 'stop_admissions', None)
+        if stop is not None:
+            stop()
+        if not service.close(timeout):
+            raise ProviderLifecycleError('child runner cleanup is incomplete')
+        close = getattr(repository, 'close', None)
+        if close is not None:
+            remaining = 5 if timeout is None else max(0, timeout - (monotonic() - started))
+            if not close(runners_stopped=True, timeout=remaining):
+                raise ProviderLifecycleError('child storage cleanup is incomplete')
 
     def get_agent_workflow_service() -> AgentWorkflowService:
         nonlocal agent_workflow
@@ -1173,24 +1324,26 @@ def build_application(
     logger.debug("composing typed tool application facade")
     from ..platform.logging import Redactor as _Redactor
 
+    tool_audit = DurableToolAuditRepository(
+        runtime_paths.state_path(
+            os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT",
+        ),
+        limits=ToolAuditLimits(),
+    )
+
     tools = ToolApplicationFacade.compose(
         typed_tool_registry(),
         PackagedToolExecutor(),
         policy=typed_tool_policy(),
         redactor=PatternOutputRedactor(_Redactor().redact),
         receipts=ReceiptStore(),
-        audit=DurableToolAuditRepository(
-            runtime_paths.state_path(
-                os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT",
-            ),
-            limits=ToolAuditLimits(),
-        ),
+        audit=tool_audit,
         permissions=(PermissionModesEvaluator(policy_names=POLICY_NAMES),),
     )
 
     logger.info(f"application graph assembled, profile={profile!r}")
     logger.debug(f"assembling Application graph for profile={profile!r}")
-    return Application(
+    application = Application(
         profile=profile,
         runtime_policy=RuntimePolicyService(RuntimePolicyRepository()),
         provider_bindings=provider_bindings,
@@ -1257,7 +1410,12 @@ def build_application(
         compute_scheduler=compute_scheduler,
         compute_job_worker=get_compute_job_worker,
         compute_service=get_compute_service,
+        compute_inventory_page=compute_inventory_page,
+        compute_refresh_page=compute_refresh_page,
+        close_compute=close_compute,
+        close_delegation=close_delegation,
         delegation_service=get_delegation_service,
+        agent_lanes=get_agent_lanes,
         agent_workflow_service=get_agent_workflow_service,
         lineage_query=get_lineage_query,
         container_world_provider=GuardedContainerWorld(
@@ -1265,9 +1423,46 @@ def build_application(
         ),
         remote_world_provider=None,
     )
+    if config is not None and config.child_storage.backend == 'postgresql':
+        try:
+            application.delegation_service()
+        except Exception:
+            application.close_providers(timeout=5)
+            raise
+    return application
 
 
 _default_config: SonderConfig | None = None
+_default_compute_close = None
+_default_delegation_close = None
+_owned_default_application = None
+
+
+def close_default_compute(timeout=None):
+    if _default_compute_close is not None:
+        _default_compute_close(timeout=timeout)
+
+
+def close_default_runtime_resources(timeout=5):
+    """Close only the already composed default graph, without creating one."""
+    timeout = 5 if timeout is None else max(0, timeout)
+    started = monotonic()
+    try:
+        if _default_delegation_close is not None:
+            _default_delegation_close(timeout=timeout)
+    finally:
+        close_default_compute(timeout=max(0, timeout - (monotonic() - started)))
+
+
+def _close_default_at_exit():
+    try:
+        close_default_runtime_resources(timeout=5)
+    except Exception:
+        logger.error("default runtime cleanup incomplete; recovery proof may be required")
+
+
+atexit.register(_close_default_at_exit)
+
 
 
 def _build_default_application() -> Application:
@@ -1279,10 +1474,35 @@ def _build_default_application() -> Application:
 _application_lifecycle = ApplicationLifecycle(_build_default_application)
 
 
+def install_owned_application(application: Application) -> None:
+    """Private required-new child composition; never an external factory seam."""
+    global _owned_default_application, _default_config, _default_compute_close, _default_delegation_close
+    if type(application) is not Application or not isinstance(application.config, SonderConfig):
+        raise TypeError("exact configured Application required")
+    _application_lifecycle.install_owned(application)
+    _owned_default_application = application
+    _default_config = application.config
+    _default_compute_close = application.close_compute
+    _default_delegation_close = application.close_delegation
+
+
+def stop_owned_application(application: Application) -> None:
+    """Freeze compatibility lookup; the live host still owns actual cleanup."""
+    global _default_compute_close, _default_delegation_close
+    if application is not _owned_default_application:
+        raise RuntimeError("exact owned Application required")
+    _application_lifecycle.stop_owned(application)
+    _default_compute_close = _default_delegation_close = None
+
+
 def default_app(*, config: SonderConfig | None = None) -> Application:
     """Process-wide default graph for compatibility shims."""
     logger.debug(f"default_app called, config_provided={config is not None}")
-    global _default_config
+    global _default_config, _default_compute_close, _default_delegation_close
+    if _owned_default_application is not None:
+        if config is not None and config is not _owned_default_application.config:
+            raise RuntimeError("owned application config selection is immutable")
+        return _application_lifecycle.get()
     if config is not None:
         if not isinstance(config, SonderConfig):
             raise TypeError("config must be a SonderConfig when provided")
@@ -1290,9 +1510,12 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
             # Explicit entrypoint configuration is startup authority.  Reset
             # the lazy compatibility cache so repeated in-process CLI calls
             # cannot retain a prior command's config object.
+            close_default_runtime_resources()
             _default_config = config
             _application_lifecycle.reset()
     application = _application_lifecycle.get()
+    _default_compute_close = getattr(application, "close_compute", None)
+    _default_delegation_close = getattr(application, "close_delegation", None)
     if config is not None and application.config is not config:
         logger.critical("default application was already built with a different config object -- process-wide state is inconsistent and cannot be recovered")
         raise RuntimeError("default application was already built without this config")
@@ -1300,7 +1523,12 @@ def default_app(*, config: SonderConfig | None = None) -> Application:
 
 
 def reset_for_tests() -> None:
-    global _default_config
+    global _default_config, _default_compute_close, _default_delegation_close
+    if _owned_default_application is not None:
+        raise RuntimeError("owned application cannot be reset")
+    close_default_runtime_resources()
+    _default_compute_close = None
+    _default_delegation_close = None
     _default_config = None
     _application_lifecycle.reset()
     runtime_paths.reset_home()

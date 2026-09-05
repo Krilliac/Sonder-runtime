@@ -6,6 +6,8 @@ trace/strict mode, teach outcomes back, and surface stats/lessons. The legacy
 runtime is an explicit composition dependency; this interface never discovers
 it at import time.
 """
+
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 import json
 import getpass
 import inspect
@@ -516,6 +518,16 @@ def _named_command_gate(cmd, argument=""):
         tools = command_catalog.console_tools().get(cmd, ())
     except command_catalog.CatalogUnavailable as exc:
         return False, "refused %s: %s" % (cmd, exc)
+    if cmd in ("/lanes", "/recover"):
+        # LaneConsoleFacade separates reads from effects and gates effects with
+        # their prepared principal/root/payload. A coarse gate here would consume
+        # a one-shot approval before that exact command reaches its own gate.
+        # Recovery likewise uses its original prepared attachment/verification
+        # identities and real approval ledger inside the managed host boundary.
+        expected = "agent_lane" if cmd == "/lanes" else "workspace_run"
+        if set(tools) != {expected}:
+            return False, "refused %s: scoped command catalog is unavailable" % cmd
+        return True, ""
     # Workspace creation is implemented by a nested REPL helper, so it is not
     # visible to the catalog's top-level branch scanner.  Keep its filesystem
     # mutation in the same single choke-point gate as every other command.
@@ -1313,6 +1325,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /improve           show the next system improvement checklist
   /master [mode] ... run orchestration: ask, inline, delegate, or fleet
   /agents            show live master/subagent activity
+  /lanes [help]      inspect and control durable agent conversations
+  /recover [cursor] inspect managed work; /recover resume <id> <command-id> resumes verification
   /fanouts [N|active]  list safe recent durable model-fanout summaries
   /capacity [N]      show queued-agent ceiling and safe concurrent worker slots
   /agentcancel <id>  cooperatively cancel an agent/master prefix or all
@@ -1471,7 +1485,7 @@ class _WorkingIndicator:
         self.label = str(label or "Sonder")
         self.stream = stream or sys.stdout
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = owned_runtime_thread(target=self._run, daemon=True)
 
     def start(self):
         self._thread.start()
@@ -1752,6 +1766,36 @@ def _format_fanout_summaries(payload):
     return "\n".join(lines)
 
 
+def _approve_lane_command(arguments):
+    """Approve the exact console command without consuming piped input."""
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import terminal_text
+    decision = permission_policy.decide_for_caller(
+        "agent_lane", interactive=_console_has_operator(), gate_control_exempt=False,
+        surface="repl", arguments=arguments,
+    )
+    if decision is None or decision.action == permission_policy.allow_action():
+        return True, ""
+    if decision.action == permission_policy.deny_action():
+        reason = decision.reason
+        if getattr(decision, "call_id", "") and getattr(decision, "source", "") == "unattended":
+            reason += "\nApprove once: /approve " + decision.call_id
+        return False, reason
+    if not _console_has_operator():
+        return False, "interactive approval unavailable; use an operator console or an exact one-shot approval"
+    detail = terminal_text(json.dumps(arguments, ensure_ascii=False, indent=2),
+                           width=shutil.get_terminal_size((80, 24)).columns, limit=20000)
+    if _confirm("run this lane action?\n" + detail + "\n" + terminal_text(decision.reason)):
+        return True, ""
+    return False, "operator declined"
+
+
+def _lanes_command(arg):
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import LaneConsoleFacade
+    return LaneConsoleFacade(lambda: server._application(), _approve_lane_command).run(
+        arg, width=shutil.get_terminal_size((80, 24)).columns,
+    )
+
+
 def _fanout_recent_command(arg):
     text = (arg or "").strip().casefold()
     include_finished, limit = True, 20
@@ -1870,6 +1914,104 @@ def _print_facts(project):
         print("  - %s  %s" % (f["id"], f["text"]))
 
 
+def _recovery_command(session_id, project, argument):
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import terminal_text
+    text = argument.strip()
+    parts = text.split()
+    request = None
+    if parts and parts[0] == 'resume':
+        if len(parts) != 3 or any(not 1 <= len(value) <= 128 or not all(
+                char.isascii() and (char.isalnum() or char in '-_') for char in value)
+                for value in parts[1:]):
+            return 'Usage: /recover resume <continuation-id> <command-id>. Repeat the same command-id for a pending attempt.'
+        request = tuple(parts[1:])
+        cursor = None
+    elif text and (not text.isascii() or not text.isdecimal() or len(text) > 19):
+        return 'Usage: /recover [numeric cursor]. Inspection does not resume work.'
+    else:
+        cursor = int(text or '0')
+    if cursor is not None and cursor >= 2**63:
+        return 'Recovery cursor is outside its supported range.'
+    if not project:
+        return 'Select a workspace with /workspace before inspecting managed work.'
+    connection = server._open_db()
+    try:
+        if memory_store.get_session(connection, session_id) is None:
+            return 'No managed work for this conversation.'
+        databases = connection.execute('PRAGMA database_list').fetchall()
+        database = next((row[2] for row in databases if row[1] == 'main'), '')
+        if not database:
+            raise PermissionError('durable memory database identity unavailable')
+    finally:
+        connection.close()
+    try:
+        page = server._run_managed_repl_work(session_id, memory_database=database,
+                                             project=project, _recovery_cursor=cursor,
+                                             _recovery_request=request)
+    except PermissionError:
+        return 'Recovery unavailable: inspect the current authority and any unresolved prior outcome.'
+    except ValueError:
+        return 'Recovery request no longer matches its stored identity; inspect the run and reuse the original command-id.'
+    if request is not None:
+        lines = ['Recovery: ' + terminal_text(page.code)]
+        if page.approval_call_id:
+            lines.append('Pending approval: ' + terminal_text(page.approval_call_id))
+            if page.code == 'ATTACHMENT_APPROVAL_PENDING':
+                lines.append('Reattachment approval applies to this ownership attempt; a released attempt needs fresh approval.')
+            lines.append('After approval, repeat the same recovery command and command-id.')
+        if page.output:
+            lines.extend(('Original terminal output:', terminal_text(page.output, limit=1048576)))
+        return '\n'.join(lines)
+    lines = ['Managed work — inspection only']
+    for item in page.items:
+        lines.append('%s | owner: %s | authority: %s | verification: %s' % (
+            terminal_text(item.continuation_id), terminal_text(item.owner_state),
+            terminal_text(item.authority_state), terminal_text(item.verification_phase or 'none')))
+        if item.verification_code:
+            lines.append('  ' + terminal_text(item.verification_code))
+        if item.pending_approval is not None:
+            lines.append('  pending approval: ' + terminal_text(item.pending_approval.call_id))
+    if not page.items:
+        lines.append('No managed work on this page.')
+    if page.has_more:
+        lines.append('Next page: /recover %s' % page.next_cursor)
+    lines.append('No work was resumed and no approval was consumed.')
+    return '\n'.join(lines)
+
+
+def _run_session_work(session_id, *, host_project, **arguments):
+    """Persist the exact REPL-selected conversation before standalone work.
+
+    This private wrapper is not a public session argument or attachment grant.
+    The managed host-selection adapter must still authorize this persisted row.
+    """
+    conn = server._open_db()
+    try:
+        memory_store.touch_session(conn, session_id, project=host_project)
+        row = memory_store.get_session(conn, session_id)
+        if row is None or row['session_id'] != session_id:
+            raise PermissionError('selected host conversation unavailable')
+        databases = conn.execute('PRAGMA database_list').fetchall()
+        memory_database = next((entry[2] for entry in databases if entry[1] == 'main'), '')
+        if not memory_database:
+            raise PermissionError('durable memory database identity unavailable')
+    finally:
+        conn.close()
+    return server._run_managed_repl_work(session_id, memory_database=memory_database, **arguments)
+
+
+def _with_conversation_lifetime(function):
+    from functools import wraps
+
+    @wraps(function)
+    def invoke(*args, **kwargs):
+        with server._managed_repl_conversation_scope():
+            return function(*args, **kwargs)
+
+    return invoke
+
+
+@_with_conversation_lifetime
 def main(*, machine_output=False):
     global CURRENT_TOKEN
     trace = False
@@ -1939,6 +2081,7 @@ def main(*, machine_output=False):
             print("workspace: %s" % (workspace_root or "(not selected)"))
             return
         if text.lower() in ("none", "clear", "off"):
+            server._clear_managed_repl_conversation()
             workspace_root = ""
             print("workspace cleared; the next work request will ask for a directory")
             return
@@ -1946,6 +2089,7 @@ def main(*, machine_output=False):
         if error:
             print(error + "\nuse /workspace-create <path> to create a new guarded directory")
             return
+        server._clear_managed_repl_conversation()
         workspace_root = path
         print("workspace: %s" % workspace_root)
         _queue_pending_workspace_work()
@@ -1964,6 +2108,7 @@ def main(*, machine_output=False):
         if error:
             print(error)
             return
+        server._clear_managed_repl_conversation()
         workspace_root = path
         print("workspace: %s" % workspace_root)
         _queue_pending_workspace_work()
@@ -1985,7 +2130,7 @@ def main(*, machine_output=False):
         started_at = time.monotonic()
         indicator = _begin_chat_turn("Sonder work")
         try:
-            out = server.workbench_agent(
+            out = _run_session_work(session_id, host_project=project,
                 prompt=task, tier=active_model or active_tier or "auto",
                 max_steps=12, project=workspace_root,
             )
@@ -2586,6 +2731,10 @@ def main(*, machine_output=False):
                 print(server.preference_command(arg))
             elif cmd in ("/improve", "/improvements"):
                 print(server.system_improvement_report(session=session_id, project=project))
+            elif cmd == "/lanes":
+                print(_lanes_command(arg))
+            elif cmd == "/recover":
+                print(_recovery_command(session_id, workspace_root, arg))
             elif cmd in ("/agents", "/masterstatus"):
                 print(server.master_status())
             elif cmd == "/fanouts":
@@ -2639,7 +2788,7 @@ def main(*, machine_output=False):
                 if not arg.strip():
                     print("usage: /work <task>")
                 else:
-                    out = server.workbench_agent(
+                    out = _run_session_work(session_id, host_project=project,
                         prompt=arg.strip(), tier=active_model or active_tier or "auto",
                         project=workspace_root or project, max_steps=12,
                     )
@@ -2833,6 +2982,7 @@ def main(*, machine_output=False):
                 if n is not None:
                     _run_train(n)
             elif cmd == "/new":
+                server._clear_managed_repl_conversation()
                 session_id = memory_store.new_id()
                 last_iid = None
                 last_response = None
@@ -2854,6 +3004,7 @@ def main(*, machine_output=False):
                     finally:
                         conn.close()
                     if found:
+                        server._clear_managed_repl_conversation()
                         session_id = found
                         last_iid = None
                         last_response = None

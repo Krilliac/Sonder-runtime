@@ -1,4 +1,6 @@
 """SQLite-backed memory adapter for the Sonder learning loop. Stdlib only."""
+
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 import array
 import base64
 from dataclasses import dataclass
@@ -255,7 +257,7 @@ END;
 
 
 def connect(path=":memory:", check_same_thread=True):
-    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
+    conn = owned_sqlite_connect(path, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     # busy_timeout must be the FIRST statement executed. Setting journal_mode
     # takes a brief exclusive lock, and init_db opens with BEGIN IMMEDIATE --

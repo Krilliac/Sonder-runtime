@@ -14,6 +14,12 @@ import command_catalog
 def _inject_legacy_runtime(monkeypatch):
     monkeypatch.setattr(sonder_repl, "_legacy_runtime", None)
     sonder_repl.configure_legacy_runtime(server)
+    # These input-routing tests stub the work executor. Real host selection,
+    # stores and admission are exercised in test_repl_managed_composition.
+    def managed_work(session_id, *, memory_database, **arguments):
+        assert session_id and memory_database
+        return server.workbench_agent(**arguments)
+    monkeypatch.setattr(server, '_run_managed_repl_work', managed_work)
 
 
 def test_piped_utf8_bom_does_not_hide_slash_command():

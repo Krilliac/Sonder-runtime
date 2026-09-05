@@ -9,6 +9,13 @@ from .legacy_root import runtime as legacy_runtime, runtime_proxy
 logger = logging.getLogger(__name__)
 
 
+def configure_legacy_application(application) -> None:
+    """Bind the owned Application through the existing interface bootstrap seam."""
+    from .legacy_root import configure_application
+
+    configure_application(application)
+
+
 def configure_legacy_interfaces(runtime: ModuleType | None = None) -> None:
     """Inject the historical runtime into interfaces before they execute.
 
@@ -51,4 +58,4 @@ def configure_legacy_capacity(
     )
 
 
-__all__ = ["configure_legacy_capacity", "configure_legacy_interfaces"]
+__all__ = ["configure_legacy_application", "configure_legacy_capacity", "configure_legacy_interfaces"]

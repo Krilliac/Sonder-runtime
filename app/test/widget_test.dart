@@ -18,6 +18,34 @@ import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/system_screen.dart';
 
 void main() {
+  testWidgets('desktop workspace navigation connects chat, agents and settings', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(1200, 850);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final client = MockClient((request) async => http.Response('{}', 200));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(const SonderRuntimeApp(manageLocalServer: false));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Agents'));
+      await tester.pumpAndSettle();
+      expect(find.text('Conversations'), findsOneWidget);
+      await tester.tap(find.byTooltip('Workspace navigation'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Settings'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsScreen), findsOneWidget);
+      await tester.tap(find.text('Chat'));
+      await tester.pumpAndSettle();
+      expect(find.text('New chat'), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+    tester.view.resetPhysicalSize(); tester.view.resetDevicePixelRatio();
+  });
+
   testWidgets('App boots to the chat screen', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
@@ -809,14 +837,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Runtime architecture'), findsOneWidget);
+    expect(find.text('Runtime architecture'), findsNothing);
     expect(
       find.textContaining('not a standalone foundation model'),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.textContaining('training uses PEFT/Hugging Face'),
-      findsOneWidget,
+      findsNothing,
     );
 
     await tester.enterText(find.byType(TextField).first, 'http://127.0.0.1:1');

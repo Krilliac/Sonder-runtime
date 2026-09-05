@@ -359,29 +359,34 @@ def _open_file_no_follow(path: Path) -> int:
 class PrivateDirectoryAnchor:
     """Hold a private directory by identity and address children beneath it."""
 
-    def __init__(self, path: Path, *, create: bool = False) -> None:
+    def __init__(self, path: Path, *, create: bool = False, require_new: bool = False) -> None:
         raw = Path(os.path.abspath(str(path)))
         parent = raw.parent
         if _normalized(parent) != _normalized(Path(os.path.realpath(parent))):
             raise ArtifactSpoolError("private artifact spool traverses a symlink or junction")
         if create:
             if os.name == "nt":
-                _windows_create_private_directory(raw)
+                created = _windows_create_private_directory(raw)
+                if require_new and not created:
+                    raise FileExistsError("required-new anchored directory already exists")
             else:
                 try:
                     raw.mkdir(mode=0o700, parents=False, exist_ok=False)
                 except FileExistsError:
-                    pass
+                    if require_new:
+                        raise
+        elif require_new:
+            raise ValueError("require_new needs directory creation")
         self.path = raw
         self.fd: int | None = None
         self.handle = None
         self._open()
 
     @classmethod
-    def open_base(cls, path: Path) -> "PrivateDirectoryAnchor":
+    def open_base(cls, path: Path, *, require_new: bool = False) -> "PrivateDirectoryAnchor":
         raw = Path(os.path.abspath(str(path)))
         raw.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return cls(raw, create=True)
+        return cls(raw, create=True, require_new=require_new)
 
     def _open(self) -> None:
         if _is_reparse(self.path):
@@ -397,10 +402,11 @@ class PrivateDirectoryAnchor:
                 ctypes.c_void_p,
             ]
             create.restype = ctypes.c_void_p
-            # Keep delete sharing disabled so the validated directory cannot be
-            # renamed or replaced while path-based Windows operations use it.
+            # FILE_LIST_DIRECTORY makes share checking apply: metadata-only
+            # READ_ATTRIBUTES/READ_CONTROL handles do not prevent rename.
+            # Keep delete sharing disabled while path-based operations use it.
             self.handle = create(
-                str(self.path), 0x00000080 | 0x00020000,
+                str(self.path), 0x00000001 | 0x00000080 | 0x00020000,
                 0x00000001 | 0x00000002,
                 None, 3, 0x02000000 | 0x00200000, None,
             )

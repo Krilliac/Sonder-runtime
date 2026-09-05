@@ -1,6 +1,8 @@
 """SQLite-backed durable job registry (JOB-002/003/004)."""
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
@@ -35,7 +37,14 @@ from sonder_runtime.domain.common.errors import (
 )
 
 
+from .worker_capacity import CAPACITY_DDL, SQLiteWorkerCapacity
+
+
 _DDL = """
+CREATE TABLE IF NOT EXISTS durable_process_cleanup (
+ job_id TEXT PRIMARY KEY REFERENCES durable_job(job_id) ON DELETE CASCADE,
+ evidence TEXT NOT NULL);
+
 CREATE TABLE IF NOT EXISTS durable_job (
     job_id TEXT PRIMARY KEY, kind TEXT NOT NULL, operation_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL, parent_job_id TEXT, parent_session_id TEXT,
@@ -112,7 +121,7 @@ def _storage_failure(exc: BaseException) -> SonderError:
     return DependencyUnavailable("durable job storage is unavailable")
 
 
-class SQLiteDurableJobRegistry:
+class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
     """Durable implementation of the parent-linked job lifecycle.
 
     Each mutating operation is transaction-scoped.  Process termination is
@@ -134,10 +143,11 @@ class SQLiteDurableJobRegistry:
         self._clock, self._max_events, self._max_bytes = clock, max_events, max_bytes
         if connect_factory is not None and not callable(connect_factory):
             raise TypeError("connect_factory must be callable")
-        self._connect_factory = connect_factory or sqlite3.connect
+        self._connect_factory = connect_factory or owned_sqlite_connect
         self._lock = Lock()
         with self._connect() as connection:
             initialize_schema(connection)
+            connection.executescript(CAPACITY_DDL)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -224,6 +234,34 @@ class SQLiteDurableJobRegistry:
             identity, JobStatus.PENDING, 0, now, now,
             attempt=0, max_attempts=max_attempts,
         )
+
+    def _record_process_cleanup(self, job_id, proof):
+        from ....application.jobs.durable_registry import _validate_cleanup_evidence
+
+        encoded = _json(proof)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            record = self._record(self._row(connection, job_id))
+            if record is None:
+                raise KeyError("job not found")
+            _validate_cleanup_evidence(record, proof)
+            prior = connection.execute(
+                "SELECT evidence FROM durable_process_cleanup WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if prior is not None:
+                if prior[0] != encoded:
+                    raise ValueError("immutable process cleanup evidence conflict")
+                return
+            connection.execute(
+                "INSERT INTO durable_process_cleanup VALUES (?,?)", (job_id, encoded)
+            )
+
+    def process_cleanup_proof(self, job_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT evidence FROM durable_process_cleanup WHERE job_id=?", (job_id,)
+            ).fetchone()
+        return None if row is None else json.loads(row[0])
 
     def attach_process(
         self,

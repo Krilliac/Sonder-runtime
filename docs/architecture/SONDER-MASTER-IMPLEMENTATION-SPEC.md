@@ -715,6 +715,9 @@ These are design inputs, not dependencies or claims of code reuse:
 
 ## 24. Internal references
 
+- [Typed-chat pre-dispatch capture](evidence/TYPED-CHAT-PREDISPATCH-CAPTURE.md)
+  records partial SESSION-004/005/007 evidence. Other inference entrypoints and
+  distributed ownership remain open; no whole requirement is checked off here.
 - `ARCHITECTURE.md` — product and current high-level runtime boundary.
 - `SECURITY.md` and `docs/security/` — current security and isolation contracts.
 - `SELFMOD.md` — current guarded/unrestricted selfmod behavior.

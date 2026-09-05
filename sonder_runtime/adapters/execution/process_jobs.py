@@ -1,6 +1,8 @@
 """Concrete argv process provider wired to the typed tree supervisor."""
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import os
 import subprocess
 import threading
@@ -21,6 +23,22 @@ from ..extensions.memory_limits import (
     PreparedProcessContainment,
     ProcessContainmentResult,
 )
+
+
+class _ProcessSlotLease:
+    """One acquired semaphore slot, returned at most once across cleanup races."""
+
+    def __init__(self, semaphore):
+        self._semaphore = semaphore
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self):
+        with self._lock:
+            if not self._released:
+                self._released = True
+                if self._semaphore is not None:
+                    self._semaphore.release()
 
 
 class SubprocessJobProvider:
@@ -94,6 +112,9 @@ class SubprocessJobProvider:
             if max_concurrent_processes is not None and max_concurrent_processes >= 1
             else None
         )
+        self._process_slot_owners: dict[str, _ProcessSlotLease] = {}
+        self._failed_launches: set[str] = set()
+        self._cleanup_observations: dict[str, int] = {}
         self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
@@ -103,7 +124,20 @@ class SubprocessJobProvider:
             raise RuntimeError(
                 f"tool process capacity exhausted ({self._max_concurrent_processes} concurrent)"
             )
-        environment = runtime_logging.child_environment()
+        lease = _ProcessSlotLease(self._process_slots)
+        try:
+            return self._start_reserved(request, lease)
+        except BaseException:
+            # A launched process with unresolved teardown retains its lease.
+            # Only pre-launch or proven-clean failures return local capacity.
+            with self._timer_lock:
+                retained = self._process_slot_owners.get(request.identity.job_id) is lease
+            if not retained:
+                lease.release()
+            raise
+
+    def _start_reserved(self, request, lease):
+        environment = runtime_logging.child_environment() if request.inherit_environment else {}
         environment.update(request.environment)
         launch_options: dict[str, Any] = {
             "cwd": None if request.cwd is None else str(Path(request.cwd)),
@@ -136,6 +170,11 @@ class SubprocessJobProvider:
             )
             if not isinstance(prepared_scope, PreparedProcessContainment):
                 raise TypeError("native job containment returned an invalid preparation")
+            isolate_environment = getattr(self._memory_limiter, "isolated_process_environment", None)
+            if not request.inherit_environment and callable(isolate_environment):
+                prepared_scope = isolate_environment(prepared_scope, launch_argv, environment)
+                if not isinstance(prepared_scope, PreparedProcessContainment):
+                    raise TypeError("native isolated containment returned an invalid preparation")
             launch_argv = prepared_scope.argv
             prepared_options = dict(prepared_scope.launch_options)
             if "creationflags" in prepared_options and "creationflags" in launch_options:
@@ -185,12 +224,16 @@ class SubprocessJobProvider:
             self._limits[request.identity.job_id] = request.max_descendants
             self._memory_tokens[request.identity.job_id] = memory_token
         launch_lock.acquire()
+        capacity_dispatched = False
         try:
             if deadline_at is not None:
                 self._schedule_deadline_at(request.identity.job_id, deadline_at)
             current = self._registry.poll(request.identity.job_id)
             if current.is_terminal or current.status is JobStatus.CANCELLATION_REQUESTED:
                 raise RuntimeError("process deadline expired before launch")
+            if request.capacity_token is not None:
+                self._registry.dispatch_capacity(request.identity.job_id, request.capacity_token)
+                capacity_dispatched = True
             process = self._launcher(list(launch_argv), **launch_options)
             process_id = getattr(process, "pid", None)
             if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
@@ -226,7 +269,9 @@ class SubprocessJobProvider:
                     request.memory_limit_bytes,
                     request.max_descendants + 1,
                 )
-            elif request.memory_limit_bytes is not None:
+            elif memory_token is None and request.memory_limit_bytes is not None:
+                # A prepared scope already owns both process and memory limits.
+                # Replacing its token loses descendant containment and cleanup proof.
                 memory_token = self._memory_limiter.apply(
                     process, request.memory_limit_bytes,
                 )
@@ -241,6 +286,7 @@ class SubprocessJobProvider:
                 process_group_id=process_group_id,
                 metadata={
                     "launch_state": "attached",
+                    "containment_identity": getattr(memory_token, "identity", ""),
                     "process_instance_identity": process_instance_identity,
                     "process_exited_before_fingerprint": (
                         "1" if exited_before_fingerprint else "0"
@@ -254,20 +300,38 @@ class SubprocessJobProvider:
                 and callable(resume_process)
             ):
                 resume_process(process)
-            self._processes[request.identity.job_id] = process
+            with self._timer_lock:
+                # A consumer may complete a process as soon as it is visible.
+                # Its capacity lease must already be available for release.
+                self._process_slot_owners[request.identity.job_id] = lease
+                self._processes[request.identity.job_id] = process
             self._limits[request.identity.job_id] = request.max_descendants
             if memory_token is not None:
                 self._memory_tokens[request.identity.job_id] = memory_token
             self._start_output_readers(request.identity.job_id, process)
-        except Exception as exc:
+        except BaseException as exc:
             if process is not None:
-                self._abort_unregistered(process)
-                containment = self._quiesce_containment(
-                    request.identity.job_id, force=True,
-                )
+                # Publish unresolved ownership before cleanup can itself fail.
+                with self._timer_lock:
+                    self._failed_launches.add(request.identity.job_id)
+                    self._process_slot_owners[request.identity.job_id] = lease
+                    self._processes[request.identity.job_id] = process
+                try:
+                    process_exited = self._abort_unregistered(process)
+                except Exception:
+                    process_exited = False
+                try:
+                    containment = self._quiesce_containment(
+                        request.identity.job_id, force=True,
+                    )
+                except Exception:
+                    containment = ProcessContainmentResult(
+                        False, detail="process launch containment cleanup failed",
+                    )
             else:
+                process_exited = True
                 containment = None
-            cleanup_complete = containment is None or containment.complete
+            cleanup_complete = process_exited and (containment is None or containment.complete)
             if memory_token is not None and cleanup_complete:
                 try:
                     memory_token.close()
@@ -277,7 +341,14 @@ class SubprocessJobProvider:
                 else:
                     self._memory_tokens.pop(request.identity.job_id, None)
             current = self._registry.poll(request.identity.job_id)
+            # A throwing launcher has not returned a process handle; retain
+            # the durable reservation unless containment proves the scope empty.
+            if capacity_dispatched and containment is not None and cleanup_complete:
+                self._release_capacity(request.identity.job_id)
             if cleanup_complete:
+                self._processes.pop(request.identity.job_id, None)
+                self._failed_launches.discard(request.identity.job_id)
+                self._release_process_slot(request.identity.job_id)
                 self._limits.pop(request.identity.job_id, None)
                 self._discard_deadline(request.identity.job_id)
                 if not current.is_terminal:
@@ -367,10 +438,22 @@ class SubprocessJobProvider:
             records = self._jobs.cancel(
                 job_id, reason, max_descendants=self._limits.get(job_id, 64),
             )
-            self._forget_local_job(job_id)
+            self._cleanup_observations[job_id] = exit_code
+            try:
+                self._forget_local_job(job_id)
+                self._publish_cleanup(job_id, exit_code)
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
             return ProcessJobWait(records[-1], exit_code)
-        if containment is not None:
-            self._release_memory_limit(job_id)
+        if containment is not None or job_id in self._cleanup_observations:
+            self._cleanup_observations[job_id] = exit_code
+            try:
+                self._release_memory_limit(job_id)
+                self._release_capacity(job_id)
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         output_failure = self._take_output_failure(job_id)
         status = (
             JobStatus.SUCCEEDED
@@ -390,14 +473,20 @@ class SubprocessJobProvider:
         )
         if self._jobs._lifecycle is not None:
             self._jobs._lifecycle.record(record)
-        had_process = self._processes.pop(job_id, None) is not None
+        self._processes.pop(job_id, None)
+        self._failed_launches.discard(job_id)
         self._limits.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
-        if had_process and self._process_slots is not None:
-            self._process_slots.release()
+        self._release_process_slot(job_id)
         if containment is None:
             self._release_memory_limit(job_id)
+        if job_id in self._cleanup_observations:
+            try:
+                self._publish_cleanup(job_id, self._cleanup_observations[job_id])
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         return ProcessJobWait(record, exit_code)
 
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
@@ -410,6 +499,10 @@ class SubprocessJobProvider:
 
     def _cancel_owned(self, job_id: str, reason: str) -> JobCancellationResult:
         limit = self._limits.get(job_id, 64)
+        process_exited = True
+        if job_id in self._failed_launches:
+            process = self._processes.get(job_id)
+            process_exited = process is not None and self._abort_unregistered(process)
         unresolved_scope = self._unresolved_scopes.get(job_id)
         if unresolved_scope is not None and not self._restore_scope_owner(
             job_id, unresolved_scope,
@@ -429,7 +522,7 @@ class SubprocessJobProvider:
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
             return result
         containment = self._quiesce_containment(job_id, force=True)
-        if containment is not None and not containment.complete:
+        if not process_exited or (containment is not None and not containment.complete):
             records = self._jobs.request_cancellation(
                 job_id,
                 reason,
@@ -438,7 +531,8 @@ class SubprocessJobProvider:
             result = JobCancellationResult(
                 records,
                 cleanup_completed=False,
-                detail=containment.detail or "job scope cleanup is incomplete",
+                detail=(containment.detail if containment is not None else "")
+                or "process exit or job scope cleanup is incomplete",
             )
         elif containment is not None:
             current = self._registry.poll(job_id)
@@ -460,18 +554,101 @@ class SubprocessJobProvider:
             self._jobs._lifecycle.record_many(result.records)
         if result.cleanup_completed:
             process = self._processes.get(job_id)
-            self._forget_local_job(job_id)
+            observed_exit = None
             if process is not None:
                 try:
-                    process.wait(timeout=0)
+                    observed_exit = process.wait(timeout=0)
                 except (subprocess.TimeoutExpired, OSError):
                     pass
+            if process is not None and observed_exit is None:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                return JobCancellationResult(
+                    result.records,
+                    cleanup_completed=False,
+                    detail="root process exit remains unobserved",
+                )
+            if (
+                containment is not None
+                and containment.complete
+                and observed_exit is not None
+            ):
+                self._cleanup_observations[job_id] = observed_exit
+            try:
+                self._forget_local_job(job_id)
+                if job_id in self._cleanup_observations:
+                    self._publish_cleanup(job_id, self._cleanup_observations[job_id])
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         else:
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
         return result
 
+    def _publish_cleanup(self, job_id, exit_code):
+        """Publish only from the provider's observed exit/containment release path."""
+        import hashlib
+        import json
+
+        view = self._registry.view(job_id)
+        metadata = view.metadata or {}
+        if metadata.get("require_job_scope") != "1":
+            self._cleanup_observations.pop(job_id, None)
+            return
+        if any(
+            job_id in collection
+            for collection in (
+                self._memory_tokens,
+                self._unresolved_scopes,
+                self._process_slot_owners,
+            )
+        ):
+            raise RuntimeError("process resources remain owned")
+        proof = dict(
+            job_id=job_id,
+            job_revision=view.record.revision,
+            parent_session_id=view.record.identity.parent_session_id,
+            principal_id=metadata.get("principal_id", ""),
+            process_id=view.process_id,
+            process_identity=metadata.get("process_instance_identity"),
+            scope_identity={
+                k: v
+                for k, v in metadata.items()
+                if k.startswith("containment_") or k.startswith("job_scope")
+            },
+            process_exited=True,
+            containment_empty=True,
+            resources_released=True,
+            status=view.record.status.value,
+            exit_code=exit_code,
+        )
+        proof["digest"] = hashlib.sha256(
+            json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self._registry._record_process_cleanup(job_id, proof)
+        self._cleanup_observations.pop(job_id, None)
+
+    def cleanup_proof(self, job_id):
+        read = getattr(self._registry, "process_cleanup_proof", None)
+        proof = None if read is None else read(job_id)
+        if proof is None:
+            return None
+        record = self._registry.poll(job_id)
+        if (
+            not record.is_terminal
+            or record.revision != proof.get("job_revision")
+            or record.status.value != proof.get("status")
+            or record.identity.parent_session_id != proof.get("parent_session_id")
+        ):
+            return None
+        return proof
+
     def poll(self, job_id: str):
         return self._registry.poll(job_id)
+
+    def snapshot_output_readers(self, job_id: str):
+        """Retain exact owned handles for a containing host's cleanup proof."""
+        with self._timer_lock:
+            return tuple(self._output_threads.get(job_id, ()))
 
     def stream(
         self,
@@ -522,6 +699,12 @@ class SubprocessJobProvider:
         try:
             record = self._registry.poll(job_id)
             if record.is_terminal:
+                if job_id in self._cleanup_observations:
+                    exit_code = self._cleanup_observations[job_id]
+                    self._forget_local_job(job_id)
+                    self._publish_cleanup(job_id, exit_code)
+                elif self._owns_cleanup_resources(job_id):
+                    self.cancel(job_id, reason="terminal job resource cleanup retry")
                 return
             process = self._processes.get(job_id)
             if process is not None:
@@ -568,15 +751,30 @@ class SubprocessJobProvider:
         except KeyError:
             # A normal completion or concurrent cancellation may win the race.
             return
-        except OSError:
+        except Exception:
             retry_cleanup = True
         finally:
             if retry_cleanup:
                 try:
-                    if not self._registry.poll(job_id).is_terminal:
+                    if (
+                        not self._registry.poll(job_id).is_terminal
+                        or self._owns_cleanup_resources(job_id)
+                        or job_id in self._cleanup_observations
+                    ):
                         self._schedule_deadline(job_id, self._cleanup_retry_seconds)
                 except KeyError:
                     pass
+
+    def _owns_cleanup_resources(self, job_id):
+        return any(
+            job_id in collection
+            for collection in (
+                self._processes,
+                self._memory_tokens,
+                self._unresolved_scopes,
+                self._process_slot_owners,
+            )
+        )
 
     def _schedule_deadline(self, job_id: str, delay_seconds: float) -> None:
         timer = self._timer_factory(
@@ -734,20 +932,33 @@ class SubprocessJobProvider:
         self._unresolved_scopes.pop(job_id, None)
         return True
 
+    def _release_capacity(self, job_id: str) -> None:
+        release = getattr(self._registry, "release_capacity", None)
+        if callable(release):
+            release(job_id)
+
     def _forget_local_job(self, job_id: str) -> None:
-        had_process = self._processes.pop(job_id, None) is not None
+        self._release_memory_limit(job_id)
+        self._release_capacity(job_id)
+        self._processes.pop(job_id, None)
+        self._failed_launches.discard(job_id)
         self._limits.pop(job_id, None)
-        if had_process and self._process_slots is not None:
-            self._process_slots.release()
+        self._release_process_slot(job_id)
         self._unresolved_scopes.pop(job_id, None)
         self._output_threads.pop(job_id, None)
         self._discard_deadline(job_id)
-        self._release_memory_limit(job_id)
+
+    def _release_process_slot(self, job_id: str) -> None:
+        with self._timer_lock:
+            lease = self._process_slot_owners.pop(job_id, None)
+        if lease is not None:
+            lease.release()
 
     def _release_memory_limit(self, job_id: str) -> None:
-        token = self._memory_tokens.pop(job_id, None)
+        token = self._memory_tokens.get(job_id)
         if token is not None:
             token.close()
+            self._memory_tokens.pop(job_id, None)
 
     def _start_output_readers(self, job_id: str, process: Any) -> None:
         """Publish stdout/stderr incrementally when the process exposes pipes.
@@ -764,7 +975,7 @@ class SubprocessJobProvider:
         ):
             if not callable(getattr(stream, "readline", None)):
                 continue
-            reader = threading.Thread(
+            reader = owned_runtime_thread(
                 target=self._read_output,
                 args=(job_id, stream_name, stream),
                 name=f"sonder-job-output-{job_id}-{stream_name.value}",
@@ -824,15 +1035,16 @@ class SubprocessJobProvider:
             raise KeyError(f"no live process for job {job_id!r}") from exc
 
     @staticmethod
-    def _abort_unregistered(process: Any) -> None:
+    def _abort_unregistered(process: Any) -> bool:
         try:
             process.kill()
         except (AttributeError, OSError):
             pass
         try:
-            process.wait(timeout=1)
+            exit_code = process.wait(timeout=1)
         except (AttributeError, OSError, subprocess.TimeoutExpired):
-            pass
+            return False
+        return isinstance(exit_code, int) and not isinstance(exit_code, bool)
 
 
 __all__ = ["SubprocessJobProvider"]

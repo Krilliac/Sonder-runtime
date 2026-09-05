@@ -8,6 +8,12 @@ process, and it fails closed if durable metadata outlives that process.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
+from contextlib import contextmanager
+
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
@@ -101,11 +107,12 @@ class _SQLiteTerminalJournal:
         with self._connect() as connection:
             connection.executescript(_DDL)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=5.0)
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+    @contextmanager
+    def _connect(self):
+        with owned_sqlite_transaction(str(self.path), timeout=5.0) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
+            yield connection
 
     def create(self, terminal_id: str, world_id: str, columns: int, rows: int, pid: int) -> None:
         with self.lock, self._connect() as connection:
@@ -431,7 +438,7 @@ class SQLitePersistentTerminalService(TerminalService):
                 # Process teardown closes pipes; no output is fabricated.
                 return
 
-        threading.Thread(target=read_loop, name=f"sonder-terminal-{terminal_id}-{stream}", daemon=True).start()
+        owned_runtime_thread(target=read_loop, name=f"sonder-terminal-{terminal_id}-{stream}", daemon=True).start()
 
     def _send(self, terminal_id: str, process: _ProcessLike, data: str) -> None:
         if not isinstance(data, str):

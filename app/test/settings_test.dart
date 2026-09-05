@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'package:sonder_runtime/account_session.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/settings.dart';
@@ -34,6 +36,45 @@ class _FailingCredentialStore implements CredentialStore {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('malformed restored account tokens are never activated or rewritten', () async {
+    SharedPreferences.setMockInitialValues({'sonder_server_url':'https://host.test'});
+    final store = _MemoryCredentialStore();
+    for(final token in ['x' * 513, 'has space', 'has\u0000control']) {
+      final raw = jsonEncode({'token':token,'origin':'https://host.test'});
+      store.values['sonder_account_session'] = raw;
+      final loaded = await Settings.load(credentialStore:store);
+      expect(loaded.accountSession,isNull);
+      expect(store.values['sonder_account_session'],raw);
+    }
+  });
+  test('account record is secure, origin-bound and independent', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = _MemoryCredentialStore();
+    final settings = Settings(
+        serverUrl: 'https://host.test',
+        apiKey: 'deployment',
+        accountSession:
+            AccountSession(token: 'account', origin: 'https://host.test'));
+    await settings.save(credentialStore: store);
+    final restored = await Settings.load(credentialStore: store);
+    expect(restored.apiKey, 'deployment');
+    expect(restored.accountSession!.token, 'account');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.containsKey('sonder_account_session'), isFalse);
+    await prefs.setString('sonder_server_url', 'https://foreign.test');
+    final mismatched = await Settings.load(credentialStore: store);
+    expect(mismatched.accountSession!.origin, 'https://host.test');
+    final before = Map<String, String>.from(store.values);
+    await expectLater(mismatched.save(credentialStore: store), throwsStateError);
+    expect(store.values, before);
+    mismatched.serverUrl = 'http://remote.test';
+    await expectLater(mismatched.save(credentialStore: store), throwsStateError);
+    expect(store.values, before);
+    await Settings(serverUrl: 'https://foreign.test').save(credentialStore: store);
+    expect(store.values['sonder_account_session'], before['sonder_account_session']);
+    await Settings.clearAccountSession(credentialStore: store);
+    expect(store.values['sonder_api_key'], 'deployment');
+  });
   test('launcher URL is never derived from the configured chat host', () {
     final settings = Settings(serverUrl: 'https://sonder.example:11435/v1');
     expect(settings.effectiveLauncherUrl, '');
@@ -51,7 +92,8 @@ void main() {
       launcherToken: 'xxxxxxxxxxxxxxxxxxxxxxxx',
     );
     expect(embedded.usesHostLauncher, isFalse);
-    expect(embedded.launcherConfigurationError, contains('without credentials'));
+    expect(
+        embedded.launcherConfigurationError, contains('without credentials'));
 
     final weak = Settings(
       launcherUrl: 'https://host.test:11436',

@@ -31,6 +31,8 @@ through the platform redactor before it is written.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import contextlib
 import secrets
 import sqlite3
@@ -186,12 +188,25 @@ class ApprovalLedger:
             return self._path
         return runtime_paths.state_path(DATABASE_NAME, DATABASE_ENV)
 
+    def pinned(self):
+        """Resolve configuration once for one multi-operation host decision.
+
+        Preserve the adapter's preview redactor and injected adapter behavior,
+        while preventing a concurrent home/config change from splitting a
+        decision and its confirmation between databases.
+        """
+        import copy
+
+        pinned = copy.copy(self)
+        pinned._path = str(Path(self.path).resolve())
+        return pinned
+
     # -- connections -------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
         path = self.path
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+        conn = owned_sqlite_connect(path, timeout=5.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
         for statement in _SCHEMA:
             conn.execute(statement)

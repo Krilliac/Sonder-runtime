@@ -4,6 +4,28 @@ from __future__ import annotations
 from types import ModuleType
 import threading
 
+_owned_application = None
+
+
+def configure_application(application) -> None:
+    """Bind an entrypoint-owned typed graph without replacing caller ownership."""
+    global _owned_application
+    legacy = runtime()
+    if not legacy._APP_GRAPH_LOCK.acquire(timeout=5):
+        raise RuntimeError("legacy application composition is busy")
+    try:
+        current = legacy._APP_GRAPH
+        if current is application:
+            return
+        if current is not None:
+            if current is not _owned_application:
+                raise RuntimeError("legacy runtime retains a caller-owned application")
+            current.close_providers(timeout=5)
+        legacy._APP_GRAPH = application
+        _owned_application = application
+    finally:
+        legacy._APP_GRAPH_LOCK.release()
+
 def runtime() -> ModuleType:
     """Return the already-composed historical runtime module."""
     import server
@@ -58,4 +80,4 @@ def configure_capacity(
     )
 
 
-__all__ = ["LazyRuntimeProxy", "configure_capacity", "runtime", "runtime_proxy"]
+__all__ = ["LazyRuntimeProxy", "configure_application", "configure_capacity", "runtime", "runtime_proxy"]

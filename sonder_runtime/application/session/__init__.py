@@ -23,7 +23,7 @@ from .query_export import (
     SessionQueryPage,
     TranscriptRecord,
 )
-from .capture import CapturedTool, CapturedTurn, SessionCaptureService
+from .capture import CapturedRequest, CapturedTool, CapturedTurn, SessionCaptureService
 from .continuity import RetentionExecution, SessionContinuityService
 from .trajectory import TrajectoryExport, TrajectoryStep, project_trajectory
 
@@ -51,6 +51,7 @@ __all__ = [
     "SessionQueryPage",
     "TranscriptRecord",
     "CapturedTool",
+    "CapturedRequest",
     "CapturedTurn",
     "SessionCaptureService",
     "RetentionExecution",

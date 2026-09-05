@@ -81,9 +81,12 @@ def test_learn_from_example_records_distilled_lesson(monkeypatch, tmp_path):
         conn.close()
 
 
-@pytest.mark.parametrize("tool", [server.record_outcome, server.learn_from_example])
-def test_learning_tools_reject_unknown_signals_with_typed_error(tool):
-    args = ("I1",) if tool is server.record_outcome else ("task", "solution")
+@pytest.mark.parametrize("tool_name", ["record_outcome", "learn_from_example"])
+def test_learning_tools_reject_unknown_signals_with_typed_error(tool_name):
+    # Other boundary tests reload server after collection. Resolve the current
+    # callable here instead of comparing an obsolete function object by identity.
+    tool = getattr(server, tool_name)
+    args = ("I1",) if tool_name == "record_outcome" else ("task", "solution")
     with pytest.raises(InvalidInput, match="unknown signal 'bogus'"):
         tool(*args, signal="bogus")
 

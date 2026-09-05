@@ -7,6 +7,8 @@ timed out, and output pipes are continuously drained with capped retention.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import fnmatch
 import hashlib
 import heapq
@@ -917,18 +919,18 @@ def run_program(
     stdout_state = {"bytes": 0}
     stderr_state = {"bytes": 0}
     readers = [
-        threading.Thread(
+        owned_runtime_thread(
             target=_drain_pipe,
             args=(proc.stdout, stdout_bytes, stdout_state, output_limit),
             daemon=True,
         ),
-        threading.Thread(
+        owned_runtime_thread(
             target=_drain_pipe,
             args=(proc.stderr, stderr_bytes, stderr_state, output_limit),
             daemon=True,
         ),
     ]
-    writer = threading.Thread(
+    writer = owned_runtime_thread(
         target=_write_stdin, args=(proc.stdin, input_bytes), daemon=True,
     )
     for thread in readers:

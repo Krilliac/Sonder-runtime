@@ -11,7 +11,11 @@ Run:
 
 Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key).
 """
+
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 import json
+import functools
+import inspect
 import contextlib
 import hmac
 import hashlib
@@ -26,9 +30,19 @@ import time
 import urllib.parse
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+
+_APP_CONTROL_BINDING = None
+_APP_CONTROL_CONFIG = None
+from sonder_runtime.interfaces.http.app_control import handle_app_control, is_app_control_route
+
+_ARTIFACT_TRANSFER_BINDING = None
+_ARTIFACT_TRANSFER_CONFIG = None
+_ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
 
 import logging as _logging_module
 _serve_logger = _logging_module.getLogger(__name__)
@@ -193,7 +207,7 @@ class _LiveSessionCaptureFailure(RuntimeError):
 
 
 def _capture_live_session_turn(*, session_id, prompt, history, model, content,
-                               request_id, turn_id, stream):
+                               request_id, turn_id, stream, provider_capture=None):
     """Capture only a named, model-backed HTTP turn through the app graph.
 
     Legacy control/web/execution routes intentionally do not enter this seam.
@@ -204,6 +218,12 @@ def _capture_live_session_turn(*, session_id, prompt, history, model, content,
         return None
     try:
         from sonder_runtime.bootstrap.app import default_app
+
+        if provider_capture is not None:
+            capture, pending = provider_capture
+            if pending.session_id != session_id or pending.request_id != request_id:
+                raise ValueError("provider admission owner mismatch")
+            return capture.complete_request(pending, model_response=content)
 
         request = ModelRequest(
             prompt=prompt,
@@ -669,6 +689,8 @@ class TurnResult:
     # when the turn never consulted the cache.  A closed set by construction,
     # so it is safe to surface in the bounded HTTP receipt.
     cache: str = ""
+    # Internal-only admission carrier; never part of the HTTP response body.
+    provider_capture: tuple | None = None
 
 
 class _LegacyConversationState:
@@ -770,6 +792,36 @@ def configure_typed_config(config) -> None:
     global STREAM_IDLE_TIMEOUT_SECONDS, HTTP_SESSION_STATE_LIMIT
     global HTTP_SESSION_STATE_OWNER_LIMIT, TRAIN_MAX_N
 
+    global _ARTIFACT_TRANSFER_CONFIG, _ARTIFACT_TRANSFER_BINDING
+    from sonder_runtime.bootstrap.artifact_transfer import ArtifactTransferBinding
+    # Validate before applying. Existing in-flight calls consult this live source.
+    candidate = ArtifactTransferBinding(lambda: config)
+    candidate.start()
+    global _APP_CONTROL_BINDING, _APP_CONTROL_CONFIG
+    from sonder_runtime.bootstrap.app_control_http import AppControlBinding
+    from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths, live_control_plane_inventory
+    from sonder_runtime.bootstrap.app import default_app
+    from pathlib import Path
+    try:
+        candidate_control = AppControlBinding(lambda: config, account_open=lambda: server._open_db(),
+            account_path=lambda: Path(server._DB_PATH).resolve(),
+            private_inventory=lambda: live_control_plane_inventory(additional=lambda: ControlPlanePaths(
+                databases=(Path(server._DB_PATH).resolve(),),
+                files=tuple(Path(p) for p in config.private_source_paths))),
+            lanes_provider=lambda: default_app().agent_lanes())
+        candidate_control.start()
+    except BaseException:
+        candidate.close()
+        raise
+    previous = _ARTIFACT_TRANSFER_BINDING
+    _ARTIFACT_TRANSFER_CONFIG = config
+    candidate._config_provider = lambda: _ARTIFACT_TRANSFER_CONFIG
+    _ARTIFACT_TRANSFER_BINDING = candidate
+    if previous is not None:
+        previous.close()
+    _APP_CONTROL_CONFIG = config
+    candidate_control._config_provider = lambda: _APP_CONTROL_CONFIG
+    _APP_CONTROL_BINDING = candidate_control
     server_config = config.server
     from sonder_runtime.adapters.web import listener_probe
     listener_probe.configure_typed_config(config)
@@ -1367,6 +1419,25 @@ def _auth_account(auth_header):
     if not token:
         return None
     return _legacy_runtime()._admin_account_from_token(token)
+
+
+def _app_control_deployment_authorized(authorization, config):
+    # Bind this check to the same live typed snapshot as app policy. Generic
+    # local compatibility downgrades do not relax an explicit control mode.
+    required = config.server.auth_mode in ("api-key", "both") or bool(config.secrets.api_key)
+    if not required:
+        return True
+    return bool(config.secrets.api_key) and (
+        check_auth(authorization, config.secrets.api_key)
+        or sonder_secrets.previous_key_valid(_bearer_token(authorization)))
+
+
+def _app_managed_work_binding():
+    # Startup owns registration/drain. A request cannot create an executor.
+    service = getattr(_APP_CONTROL_BINDING, "_work_binding", None)
+    if service is not None:
+        service.require_current()
+    return service
 
 
 def _effective_auth_mode():
@@ -2993,9 +3064,51 @@ def _turn_reasoning():
     return record.get("text") or ""
 
 
+def _capture_http_provider_request(function):
+    """Bind HTTP-owned identities only on the ordinary/structured model route."""
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        from sonder_runtime.application.session.provider_attempts import (
+            ProviderCaptureFailure, deferred_provider_request_scope,
+        )
+
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        enabled = bool(values.get("session") and values.get("capture_request_id"))
+
+        def admit():
+            from sonder_runtime.bootstrap.app import default_app
+
+            capture = default_app().session_capture_service()
+            pending = capture.begin_request(
+                values["session"], values["capture_turn_id"],
+                ModelRequest(prompt=values["prompt"], tier=values.get("tier") or "code",
+                             history=tuple(values.get("history") or ()),
+                             options={"stream": bool(values.get("capture_stream"))}),
+                request_id=values["capture_request_id"], user_message=values["prompt"],
+            )
+            return capture, pending
+
+        try:
+            with deferred_provider_request_scope(admit if enabled else None) as scope:
+                result = function(*args, **kwargs)
+                if enabled and isinstance(result, TurnResult):
+                    result = replace(result, provider_capture=scope.admission)
+                return result
+        except ProviderCaptureFailure as error:
+            raise _LiveSessionCaptureFailure from error
+
+    return wrapped
+
+
+@_capture_http_provider_request
 def _run_prompt(
     prompt, history=None, tier=None, context_size="", session="", project="",
     state=None, return_result=False, metrics=None, augment=True, cache_scope="",
+    capture_request_id="", capture_turn_id="", capture_stream=False,
 ):
     """Call Sonder Runtime's learning loop with the UI's prior turns; returns UI text."""
     _serve_logger.debug(f"_run_prompt: tier={tier!r}, session={session!r}, project={project!r}, augment={augment}")
@@ -3063,8 +3176,10 @@ def _run_prompt(
     return result if return_result else result.content
 
 
+@_capture_http_provider_request
 def _run_structured_prompt(
     prompt, history, tier, schema, context_size="", metrics=None,
+    session="", capture_request_id="", capture_turn_id="", capture_stream=False,
 ):
     """Run the isolated structured path; never add a footer or activity text."""
     resolved_target = {}
@@ -3488,6 +3603,10 @@ class Handler(BaseHTTPRequestHandler):
         bytes do not turn the close into a reset that erases the error the
         caller needs to see.
         """
+        if (getattr(self, "_artifact_transfer_request", False)
+                or getattr(self, "_app_control_request", False)
+                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")):
+            return
         if not self.close_connection:
             return
         if getattr(self, "_request_body_consumed", True):
@@ -3522,21 +3641,33 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         origin = self.headers.get("Origin")
         if origin is not None and origin in CORS_ORIGINS:
-            _serve_logger.debug(f"_cors: allowing origin={origin!r}")
+            if not (getattr(self, "_artifact_transfer_request", False) or getattr(self, "_app_control_request", False)):
+                _serve_logger.debug(f"_cors: allowing origin={origin!r}")
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
-                "X-Sonder-Bootstrap-Secret, Idempotency-Key",
+                "X-Sonder-Bootstrap-Secret, X-Sonder-App-Control, Idempotency-Key",
             )
             self.send_header(
                 "Access-Control-Expose-Headers",
                 "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id",
             )
 
+    def send_error(self, code, message=None, explain=None):
+        if is_app_control_route(getattr(self, "path", "")) and hasattr(self, "headers"):
+            self._app_control_request = True
+            self._send_json_payload({"ok": False, "error": {"code": "APP_CONTROL_REQUEST_REFUSED"}},
+                status=code, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+            return
+        super().send_error(code, message, explain)
+
     def log_message(self, fmt, *args):
+        if is_artifact_route(getattr(self, "path", "")) or is_app_control_route(getattr(self, "path", "")):
+            sys.stderr.write("[sonder_serve] artifact transfer response\n")
+            return
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))
 
     def do_OPTIONS(self):
@@ -3547,6 +3678,13 @@ class Handler(BaseHTTPRequestHandler):
         self._operation_context = None
         self._request_started = time.monotonic()
         self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "OPTIONS", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
+            return
+        if handle_artifact_transfer(self, "OPTIONS", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
         if self._reject_disallowed_origin():
             return
         must_close = self._close_for_unread_body()
@@ -3706,7 +3844,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def start_drain():
             _serve_logger.info("Admin drain requested, initiating graceful shutdown")
-            threading.Thread(
+            owned_runtime_thread(
                 target=lifecycle.drain,
                 kwargs={"reason": "admin drain request"},
                 daemon=True,
@@ -3783,6 +3921,10 @@ class Handler(BaseHTTPRequestHandler):
         is closed instead. See MAX_DISCARDED_BODY_BYTES.
         """
         pending = self._unread_request_body_bytes()
+        if (getattr(self, "_artifact_transfer_request", False)
+                or getattr(self, "_app_control_request", False)
+                or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")) and pending != 0:
+            return True
         if pending == 0:
             self._request_body_consumed = True
             return False
@@ -3822,6 +3964,9 @@ class Handler(BaseHTTPRequestHandler):
         return must_close
 
     def _send_json_payload(self, payload, status=200, headers=None, elapsed_ms=None):
+        if _request_route(getattr(self, 'path', '')) == '/v1/sonder/logout':
+            headers = {**(headers or {}), 'Cache-Control': 'no-store',
+                       'Referrer-Policy': 'no-referrer'}
         _serve_logger.debug(f"_send_json_payload: status={status}")
         body = json.dumps(payload).encode("utf-8")
         # Keep this low-level delivery helper usable by the focused socket
@@ -3856,7 +4001,7 @@ class Handler(BaseHTTPRequestHandler):
             # This is a delivery failure, not a server traceback.
             return False
 
-    def _send_binary_payload(self, body, *, content_type, digest, status=200):
+    def _send_binary_payload(self, body, *, content_type, digest, status=200, headers=None):
         if not isinstance(body, bytes):
             raise TypeError("binary response body must be bytes")
         must_close = self._close_for_unread_body()
@@ -3869,6 +4014,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("X-Sonder-Artifact-Sha256", digest)
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
             return True
@@ -3904,7 +4051,7 @@ class Handler(BaseHTTPRequestHandler):
             # must not become dependent on its optional inspection surface.
             pass
 
-    def _read_json(self):
+    def _read_json(self, *, max_bytes=None):
         # HTTP framing must be unambiguous before this handler reads a body.
         self._validate_request_framing()
         content_lengths = self.headers.get_all("Content-Length") or ()
@@ -3914,7 +4061,7 @@ class Handler(BaseHTTPRequestHandler):
         if not raw_length.strip().isdigit():
             raise HTTPRequestError(400, "Content-Length must be a nonnegative integer")
         length = int(raw_length)
-        if length > MAX_REQUEST_BYTES:
+        if length > (MAX_REQUEST_BYTES if max_bytes is None else min(MAX_REQUEST_BYTES, max_bytes)):
             raise HTTPRequestError(413, "request body is too large")
         media_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if media_type != "application/json":
@@ -3955,12 +4102,127 @@ class Handler(BaseHTTPRequestHandler):
         if len(content_lengths) > 1:
             raise HTTPRequestError(400, "multiple Content-Length headers are not supported")
 
+    def _handle_agent_lane_request(self, method, path, payload=None):
+        """Bind lane commands to authenticated identity and configured scope."""
+        if path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
+            return False
+        auth = self._request_auth_context()
+        if not auth.get("authorized"):
+            self._send_auth_error()
+            return True
+        from dataclasses import replace
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.domain.common.errors import SonderError
+        from sonder_runtime.adapters.security.permission_policy import permission_policy as lane_policy
+
+        try:
+            application = default_app()
+            factory = getattr(application, "agent_lanes", None)
+            if not callable(factory):
+                raise DependencyUnavailable("agent conversations are unavailable")
+            query_values = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True, max_num_fields=16,
+            )
+            if any(len(values) != 1 for values in query_values.values()):
+                raise InvalidInput("query fields must occur only once")
+            query = {key: values[0] for key, values in query_values.items()}
+            context = sonder_lifecycle.get().operation_context(self._correlation(), auth)
+            account = auth.get("account")
+            if account is not None:
+                identity = _account_identity(account)
+                if not identity:
+                    raise PermissionError("authenticated account identity is unavailable")
+                principal = "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            else:
+                # Local-open and the sole deployment API key address the same
+                # operator conversations as native MCP. Accounts never alias it.
+                principal = "owner"
+            state = getattr(getattr(application, "config", None), "state", None)
+            roots = tuple(Path(root).resolve() for root in getattr(state, "workspace_roots", ())) \
+                if _admin_authorized(auth) else ()
+            context = replace(context, principal_id=principal, workspace_roots=roots)
+            from sonder_runtime.interfaces.agent_lane_entrypoint import http_parent_scope
+            if payload is not None and not isinstance(payload, dict):
+                raise InvalidInput("request must be an object")
+            payload = dict(payload or {})
+            for fields in (payload, query):
+                if "parent_session_id" in fields:
+                    fields["parent_session_id"] = http_parent_scope(fields["parent_session_id"], principal)
+            if method != "GET":
+                # The approval ledger is process-wide. Bind HTTP approvals to
+                # authenticated identity and effective roots as well as the
+                # exact request; another account cannot spend this approval.
+                arguments = {
+                    "method": method, "path": path, "payload": payload or {},
+                    "query": query, "principal_id": principal,
+                    "workspace_roots": [str(root) for root in roots],
+                }
+                decision = lane_policy.decide_for_caller(
+                    "agent_lane", interactive=False, gate_control_exempt=False,
+                    surface="http", arguments=arguments,
+                )
+                if decision is not None and decision.action != lane_policy.allow_action():
+                    raise PermissionError(decision.reason)
+            from sonder_runtime.interfaces.http.facades.agent_lanes import dispatch_agent_lane_route
+            result = dispatch_agent_lane_route(
+                factory(), method, path, payload or {}, query, context,
+            )
+            if result is None:
+                self._send_not_found()
+            else:
+                self._send_json_payload(result.body, status=result.status_code)
+        except (SonderError, ValueError, TypeError, PermissionError) as error:
+            code = getattr(error, "code", "INVALID_INPUT")
+            if isinstance(error, PermissionError):
+                code = "FORBIDDEN"
+            status = {
+                "UNAUTHENTICATED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404,
+                "CONFLICT": 409, "CONCURRENCY_CONFLICT": 409,
+                "CAPACITY_EXCEEDED": 429, "DEPENDENCY_UNAVAILABLE": 503,
+                "INTEGRITY_FAILURE": 503, "INTERNAL_FAILURE": 503,
+                "DEADLINE_EXCEEDED": 408, "CANCELLED": 409,
+            }.get(code, 400)
+            self._send_json_payload(
+                {"error": {"code": code, "message": str(error), "type": "agent_lane_error"}},
+                status=status,
+            )
+        except Exception:
+            _serve_logger.exception("agent lane request failed, correlation=%r", self._correlation())
+            self._send_json_payload(
+                {"error": {"code": "DEPENDENCY_UNAVAILABLE",
+                           "message": "agent conversations are unavailable", "type": "server_error"}},
+                status=503,
+            )
+        finally:
+            lane_policy.forget_spent_approval()
+        return True
+
+    def do_PUT(self):
+        self._correlation_id = ""
+        self._request_started = time.monotonic()
+        self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "PUT", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
+            return
+        if not handle_artifact_transfer(self, "PUT", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            self._send_not_found()
+
     def do_GET(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
         self._correlation_id = ""
         self._request_started = time.monotonic()
         self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "GET", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
+            return
+        if handle_artifact_transfer(self, "GET", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
         if self._reject_disallowed_origin():
             return
         path = _request_route(self.path)
@@ -3994,6 +4256,11 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if self._auth_rate_limited():
+            return
+        if self._handle_agent_lane_request("GET", path):
+            return
+        if path == "/v1/compute/nodes":
+            self._with_compute_inventory_admission(self._handle_compute_inventory_read)
             return
         if path == "/v1/compute/snapshot":
             context = self._request_auth_context()
@@ -4816,6 +5083,120 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json_payload(server.permission_mode_data())
 
+    def _with_compute_inventory_admission(self, handler):
+        from sonder_runtime.interfaces.http.facades.compute_inventory import inventory_request_slot
+        with inventory_request_slot() as admitted:
+            if not admitted:
+                self._send_json_payload({"error": {"code": "COMPUTE_INVENTORY_BUSY"}}, status=429)
+                return
+            handler()
+
+    def _handle_compute_inventory_read(self):
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return
+        try:
+            self._validate_request_framing()
+            if self._unread_request_body_bytes() != 0:
+                raise ValueError("inventory reads do not accept a body")
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True, max_num_fields=2)
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.interfaces.http.facades.compute_inventory import dispatch_compute_inventory
+            status, body = dispatch_compute_inventory(default_app().compute_inventory_page, query)
+        except (ValueError, HTTPRequestError):
+            status, body = 400, {"error": {"code": "INVALID_INVENTORY_QUERY"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "COMPUTE_INVENTORY_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+        return
+
+    def _handle_compute_inventory_refresh(self):
+        if _request_route(self.path) != "/v1/compute/nodes/refresh":
+            return False
+        self._with_compute_inventory_admission(self._handle_admitted_compute_refresh)
+        return True
+
+    def _handle_admitted_compute_refresh(self):
+        if self._reject_disallowed_origin():
+            return True
+        if self._auth_rate_limited():
+            return True
+        context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return True
+        if not _admin_authorized(context):
+            self._send_json_payload({"error": {"code": "FORBIDDEN"}}, status=403)
+            return True
+        try:
+            if "?" in self.path:
+                raise ValueError("refresh accepts JSON pagination only")
+            payload = self._read_json(max_bytes=32 * 1024)
+            from sonder_runtime.bootstrap.app import default_app
+            from sonder_runtime.interfaces.http.facades.compute_inventory import dispatch_compute_refresh
+            status, body = dispatch_compute_refresh(default_app().compute_refresh_page, payload)
+        except HTTPRequestError as error:
+            status, body = error.status, {"error": {"code": "INVALID_REFRESH_REQUEST"}}
+        except (ValueError, TypeError):
+            status, body = 400, {"error": {"code": "INVALID_REFRESH_REQUEST"}}
+        except Exception:
+            status, body = 503, {"error": {"code": "COMPUTE_REFRESH_UNAVAILABLE"}}
+        self._send_json_payload(body, status=status, headers={"Cache-Control": "no-store"})
+        return True
+
+    def _handle_account_logout(self):
+        """Revoke an explicitly supplied login; never infer a target account.
+
+        Retrying a revoked/unknown token is deliberately indistinguishable.
+        API-key deployment requirements still apply, but an API key cannot
+        name a session through Authorization or request-body account fields.
+        """
+        response_headers = {'Cache-Control': 'no-store',
+                            'Referrer-Policy': 'no-referrer'}
+        def reply(payload, status=200):
+            self._send_json_payload(payload, status=status, headers=response_headers)
+
+        values = self.headers.get_all('X-Sonder-Account-Token') or ()
+        token = _bearer_token(values[0]) if len(values) == 1 else ''
+        if not isinstance(token, str) or not 1 <= len(token) <= 512:
+            reply({'ok': False, 'message': 'account session required'}, 401)
+            return
+        mode = _effective_auth_mode()
+        authorization = self.headers.get('Authorization', '')
+        api_key_ok = bool(API_KEY) and (
+            check_auth(authorization, API_KEY)
+            or sonder_secrets.previous_key_valid(_bearer_token(authorization))
+        )
+        if mode in ('api-key', 'both') and not api_key_ok:
+            reply({'ok': False, 'message': 'authentication required'}, 401)
+            return
+        try:
+            request = self._read_json(max_bytes=1024)
+        except HTTPRequestError as error:
+            reply({'ok': False, 'message': error.message}, error.status)
+            return
+        if request != {}:
+            reply({'ok': False, 'message': 'logout requires an empty object'}, 400)
+            return
+        conn = None
+        try:
+            conn = server._open_db()
+            admin_auth.revoke_session(conn, token)
+        except Exception:
+            # No exception text or credentials in logs or response. A lost
+            # commit response is safe to retry with the exact same token.
+            reply({'ok': False, 'message': 'session revocation unavailable'}, 503)
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+        reply({'ok': True})
+
     def do_POST(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
@@ -4826,6 +5207,15 @@ class Handler(BaseHTTPRequestHandler):
         # and so is the record of whether this request's body was read.
         self._chat_completion_metrics_recorded = False
         self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "POST", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized,
+                work_binding=_app_managed_work_binding):
+            return
+        if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
+        if self._handle_compute_inventory_refresh():
+            return
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
         _serve_logger.debug(f"do_POST: path={_request_route(self.path)!r}, peer={self._peer()!r}, is_chat_completion={is_chat_completion}")
         model_operation = ""
@@ -4853,6 +5243,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/admin/drain":
             self._handle_admin_drain()
             return
+        if path == '/v1/sonder/logout':
+            if not _ACCOUNT_LOGOUT_ADMISSION.acquire(blocking=False):
+                self._send_json_payload(
+                    {'ok': False, 'message': 'session revocation busy'},
+                    status=429, headers={'Retry-After': '1'},
+                )
+                return
+            try:
+                self._handle_account_logout()
+            finally:
+                _ACCOUNT_LOGOUT_ADMISSION.release()
+            return
         if self._auth_rate_limited():
             return
         try:
@@ -4871,6 +5273,8 @@ class Handler(BaseHTTPRequestHandler):
             operation_context(self._correlation(), context)
             if callable(operation_context) else None
         )
+        if self._handle_agent_lane_request("POST", path, req):
+            return
         compute_route = _compute_job_route(path)
         if compute_route is not None and compute_route[0] in ("submit", "cancel"):
             if not context["authorized"]:
@@ -5599,6 +6003,8 @@ class Handler(BaseHTTPRequestHandler):
                         turn = _run_structured_prompt(
                             prompt, history, model_selector, structured_schema,
                             context_size=context_size, metrics=_lifecycle.metrics,
+                            session=storage_session, capture_request_id=self._correlation(),
+                            capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
                         )
                         content = turn.content
                         response_model = turn.resolved_model
@@ -5672,6 +6078,8 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project,
                             state=state,
                             return_result=True,
+                            capture_request_id=self._correlation(),
+                            capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
                             # The deterministic request cache is offered only
                             # to this plain, non-streaming generation
                             # fall-through: every control/tool/web/work/agent
@@ -5722,6 +6130,7 @@ class Handler(BaseHTTPRequestHandler):
                         request_id=self._correlation(),
                         turn_id=response_iid or uuid.uuid4().hex,
                         stream=stream,
+                        provider_capture=turn.provider_capture,
                     )
         except sonder_lifecycle.AdmissionRejected as rejection:
             _serve_logger.error(f"request admission rejected: code={rejection.code!r}, retryable={rejection.retryable}, correlation={self._correlation()!r}")
@@ -5980,7 +6389,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
 
-def main(config=None):
+def main(config=None, *, _server_factory=None, _close_default_resources=True):
     _serve_logger.info("HTTP server starting")
     _serve_logger.debug("main: starting HTTP server")
     global CONFIGURED_PORT
@@ -6022,13 +6431,14 @@ def main(config=None):
         raise SystemExit(1)
     lifecycle.begin_ollama_probe()
     try:
-        httpd = ThreadingHTTPServer((HOST, port), Handler)
+        factory = ThreadingHTTPServer if _server_factory is None else _server_factory
+        httpd = factory((HOST, port), Handler)
     except OSError:
         _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
         raise
     # After a drain completes (signal or /v1/admin/drain), stop accepting.
     lifecycle.coordinator.add_flush_hook(
-        lambda: threading.Thread(
+        lambda: owned_runtime_thread(
             target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
         ).start()
     )
@@ -6055,6 +6465,13 @@ def main(config=None):
         if not lifecycle.coordinator.draining:
             lifecycle.drain("server stopping")
         httpd.server_close()
+        from sonder_runtime.bootstrap.app import close_default_runtime_resources
+        try:
+            if _close_default_resources:
+                close_default_runtime_resources(timeout=5)
+        finally:
+            if _ARTIFACT_TRANSFER_BINDING is not None:
+                _ARTIFACT_TRANSFER_BINDING.close()
         _serve_logger.info("HTTP server stopped")
 
 

@@ -8,17 +8,20 @@ import 'local_manager.dart';
 import 'models.dart';
 import 'settings.dart';
 import 'theme.dart';
+import 'workspace_ui.dart';
 
 class SystemScreen extends StatefulWidget {
   final Settings settings;
   final SystemInfo? initialInfo;
   final bool liveUpdates;
+  final ValueChanged<WorkspaceDestination>? onNavigate;
 
   const SystemScreen({
     super.key,
     required this.settings,
     this.initialInfo,
     this.liveUpdates = true,
+    this.onNavigate,
   });
 
   @override
@@ -69,6 +72,7 @@ class _SystemScreenState extends State<SystemScreen>
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
+        accountSession: widget.settings.accountSession,
       );
 
   SonderLauncherApi get _launcherApi => SonderLauncherApi(
@@ -666,6 +670,8 @@ class _SystemScreenState extends State<SystemScreen>
         ),
         title: const Text('System'),
         actions: [
+          if (widget.onNavigate != null)
+            WorkspaceMenu(current: WorkspaceDestination.runtime, onSelected: widget.onNavigate!),
           // No Tooltip wrapper here. The button already carries a visible
           // "Chat" label, so a hover tooltip only added a floating box in the
           // top-right corner, where it collided with the window's own Close
@@ -722,7 +728,14 @@ class _SystemScreenState extends State<SystemScreen>
             _ExtensionRegistrySection(key: _systemExtensionsKey, status: _extensionRegistry!),
             const SizedBox(height: 12),
           ],
-          if (localInfo != null) ...[
+          if (!LocalManager.canRunLocalTools) ...[
+            const WorkspaceNotice(
+              message: 'This client cannot inspect local files or launch local processes. '
+                  'Use the desktop app for local setup. Authenticated host-launcher controls remain available when configured in Settings.',
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (localInfo != null && LocalManager.canRunLocalTools) ...[
             _Section(
               title: 'Install',
               child: Column(
@@ -1381,8 +1394,7 @@ class _SystemScreenState extends State<SystemScreen>
             'Desktop builds look for a bundled local-system folder next to the app. '
             'A sealed engine payload can include Python, Ollama, and models for offline setup; '
             'otherwise setup uses installed runtimes and may download missing components. '
-            'Runtime memory is shared through '
-            '${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. '
+            '${LocalManager.canRunLocalTools ? 'Runtime memory is shared through ${localInfo?.sharedHome ?? LocalManager.sharedHomePath()}. ' : 'This client cannot inspect the host memory directory. '}'
             'Android, iOS, and other client-only builds use the authenticated '
             'host launcher to start or stop the configured computer without '
             'exposing a remote shell.',
@@ -2957,7 +2969,9 @@ class _SystemRail extends StatelessWidget {
       minExtendedWidth: 220,
       selectedIndex: null,
       onDestinationSelected: (index) => onSelect(destinations[index].key),
-      labelType: NavigationRailLabelType.all,
+      labelType: MediaQuery.sizeOf(context).width >= 1200
+          ? NavigationRailLabelType.none
+          : NavigationRailLabelType.all,
       destinations: [
         for (final destination in destinations)
           NavigationRailDestination(

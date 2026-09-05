@@ -6,6 +6,8 @@ anonymous-or-delete-on-close handle and relies on handle closure for cleanup.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import os
 import platform
 import shutil
@@ -300,7 +302,7 @@ def throughput_probe(path: str | os.PathLike) -> dict[str, Any]:
     )
     assert process.stdout is not None
     output = bytearray()
-    reader = threading.Thread(
+    reader = owned_runtime_thread(
         target=_bounded_worker_output, args=(process.stdout, output),
         name="sonder-storage-probe-result", daemon=True,
     )

@@ -1,7 +1,7 @@
-"""Sandbox domain types (pure value objects).
+"""Deprecated sandbox compatibility types; they confer no execution authority.
 
-Execution logic (subprocess, os.environ) lives in
-``sonder_runtime.adapters.execution.sandbox``.
+The legacy adapter re-exports these types but always returns unavailable.
+Current sandbox lifecycle contracts live in application.ports.sandbox.
 """
 from __future__ import annotations
 

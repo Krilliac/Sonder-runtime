@@ -1,6 +1,8 @@
 """SQLite persistence adapter for extension registry state."""
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
+
 import json
 from pathlib import Path
 import sqlite3
@@ -89,11 +91,11 @@ class SQLiteExtensionStateRepository:
             raise ValueError("max_records must be between 1 and 4096")
         self._path, self._max_records = Path(db_path), max_records
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self._path)) as connection:
+        with owned_sqlite_transaction(str(self._path)) as connection:
             connection.execute(_DDL)
 
     def load(self) -> tuple[ExtensionInstallRecord, ...]:
-        with sqlite3.connect(str(self._path)) as connection:
+        with owned_sqlite_transaction(str(self._path)) as connection:
             rows = connection.execute("SELECT slot, record_json FROM extension_registry_state ORDER BY slot").fetchall()
         decoded = tuple((slot, _decode(record_json)) for slot, record_json in rows)
         if any(slot != record.key[0] + ":" + record.key[1] + ":" + record.key[2] for slot, record in decoded):
@@ -111,7 +113,7 @@ class SQLiteExtensionStateRepository:
         for record in records:
             _validate_record(record)
         encoded = [(record.key[0] + ":" + record.key[1] + ":" + record.key[2], json.dumps(_record(record), sort_keys=True, separators=(",", ":"))) for record in records]
-        with sqlite3.connect(str(self._path)) as connection:
+        with owned_sqlite_transaction(str(self._path)) as connection:
             connection.execute("DELETE FROM extension_registry_state")
             connection.executemany("INSERT INTO extension_registry_state(slot, record_json) VALUES (?, ?)", encoded)
 

@@ -31,6 +31,11 @@ from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
+from sonder_runtime.platform.artifact_transfer_config import ArtifactTransferConfig, artifact_transfer_errors
+from sonder_runtime.platform.app_control_config import AppControlConfig, app_control_errors
+from sonder_runtime.platform.child_storage_config import (
+    ChildStorageConfig, child_storage_errors, apply_child_storage_environment,
+)
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -54,12 +59,13 @@ _COMPUTE_CAPABILITIES = frozenset({
 # process environment.  Their presence in TOML fails validation.
 SECRET_ENV_KEYS = (
     "SONDER_API_KEY",
+    "SONDER_ARTIFACT_TRANSFER_KEY",
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
 )
 _SECRET_TOML_KEYS = frozenset(
-    {"api_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
+    {"api_key", "artifact_transfer_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
 )
 
 MIN_API_KEY_LENGTH = 24
@@ -147,16 +153,29 @@ class ComputeJobConfig:
     allowed_relative_path_options: tuple[str, ...] = ()
     memory_limit_bytes: int | None = None
     artifact_paths: tuple[str, ...] = ()
+    memory_reservation_bytes: int | None = None
 
 
 @dataclass(frozen=True)
 class ComputeConfig:
+    worker_host_id: str = "local"
+    worker_memory_budget_bytes: int | None = None
+    worker_max_jobs: int = 1
+    worker_reservation_seconds: int = 30
     allow_remote: bool = False
     node_id: str = "local"
     snapshot_ttl_seconds: int = 30
     probe_timeout_ms: int = 2_000
     nodes: tuple[ComputeNodeConfig, ...] = ()
     jobs: tuple[ComputeJobConfig, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeploymentConfig:
+    profile: str = "single-host"
+    preferred_primary: str = ""
+    automatic_takeover: bool = False
+    automatic_failback: bool = False
 
 
 @dataclass(frozen=True)
@@ -209,10 +228,12 @@ class Secrets:
     api_key: str = ""
     auth_secret: str = ""
     backup_key_file: str = ""
+    artifact_transfer_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
             "api_key": redact_presence(self.api_key),
+            "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": self.backup_key_file or "[unset]",
         }
@@ -226,6 +247,7 @@ class SonderConfig:
     state: StateConfig = field(default_factory=StateConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
+    deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     capacity: CapacityConfig = field(default_factory=CapacityConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -233,6 +255,10 @@ class SonderConfig:
     secrets: Secrets = field(default_factory=Secrets)
     # Provenance for diagnostics: which layers actually contributed.
     sources: tuple[str, ...] = ()
+    private_source_paths: tuple[str, ...] = field(default=(), repr=False)
+    artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
+    child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
+    app_control: AppControlConfig = field(default_factory=AppControlConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -242,6 +268,8 @@ class SonderConfig:
         }
         for section in (
             "server",
+            "deployment",
+            "artifact_transfer",
             "state",
             "ollama",
             "features",
@@ -257,6 +285,10 @@ class SonderConfig:
                 for f in fields(value)
             }
         out["compute"] = {
+            "worker_host_id": self.compute.worker_host_id,
+            "worker_memory_budget_bytes": self.compute.worker_memory_budget_bytes,
+            "worker_max_jobs": self.compute.worker_max_jobs,
+            "worker_reservation_seconds": self.compute.worker_reservation_seconds,
             "allow_remote": self.compute.allow_remote,
             "node_id": self.compute.node_id,
             "snapshot_ttl_seconds": self.compute.snapshot_ttl_seconds,
@@ -287,12 +319,23 @@ class SonderConfig:
                         job.allowed_relative_path_options
                     ),
                     "memory_limit_bytes": job.memory_limit_bytes,
+                    "memory_reservation_bytes": job.memory_reservation_bytes,
                     "artifact_paths": list(job.artifact_paths),
                 }
                 for job in self.compute.jobs
             ],
         }
+        out['app_control'] = {
+            item.name: ('<configured>' if self.app_control.catalog_file else '<unset>')
+            if item.name == 'catalog_file' else getattr(self.app_control, item.name)
+            for item in fields(self.app_control)
+        }
         out["secrets"] = self.secrets.as_redacted_dict()
+        out['child_storage'] = {
+            item.name: ('<configured>' if self.child_storage.binding_file else '<unset>')
+            if item.name == 'binding_file' else getattr(self.child_storage, item.name)
+            for item in fields(self.child_storage)
+        }
         return out
 
 
@@ -356,6 +399,10 @@ def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
 
 _SECTION_TYPES = {
     "server": ServerConfig,
+    "deployment": DeploymentConfig,
+    "artifact_transfer": ArtifactTransferConfig,
+    "child_storage": ChildStorageConfig,
+    "app_control": AppControlConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -421,12 +468,24 @@ def _apply_compute_section(
 ) -> ComputeConfig:
     known = {
         "allow_remote", "node_id", "snapshot_ttl_seconds", "probe_timeout_ms",
-        "nodes", "jobs",
+        "nodes", "jobs", "worker_host_id", "worker_memory_budget_bytes",
+        "worker_max_jobs", "worker_reservation_seconds",
     }
     for key in raw:
         if key not in known:
             errors.append(f"unknown key [compute].{key}")
 
+    capacity_values = {}
+    for key in ("worker_host_id", "worker_memory_budget_bytes", "worker_max_jobs", "worker_reservation_seconds"):
+        value = raw.get(key, getattr(current, key))
+        expected = str if key == "worker_host_id" else int
+        if key == "worker_memory_budget_bytes" and value is None and key not in raw:
+            capacity_values[key] = None
+            continue
+        if not isinstance(value, expected) or isinstance(value, bool):
+            errors.append(f"[compute].{key} has an invalid type")
+            value = getattr(current, key)
+        capacity_values[key] = value
     allow_remote = raw.get("allow_remote", current.allow_remote)
     if not isinstance(allow_remote, bool):
         errors.append("[compute].allow_remote must be a boolean")
@@ -489,7 +548,7 @@ def _apply_compute_section(
             "environment_allowlist", "workspace_mappings",
             "allowed_flags", "allowed_bounded_options",
             "allowed_relative_path_options",
-            "memory_limit_bytes",
+            "memory_limit_bytes", "memory_reservation_bytes",
             "artifact_paths",
         }
         for index, item in enumerate(jobs_raw):
@@ -534,6 +593,7 @@ def _apply_compute_section(
                     and not isinstance(item.get("memory_limit_bytes"), bool)
                     else None
                 ),
+                memory_reservation_bytes=item.get("memory_reservation_bytes"),
                 artifact_paths=_string_list(item, "artifact_paths", where, errors),
             ))
             if (
@@ -545,6 +605,7 @@ def _apply_compute_section(
             ):
                 errors.append(f"{where}.memory_limit_bytes must be an integer")
     return ComputeConfig(
+        **capacity_values,
         allow_remote=allow_remote,
         node_id=local_node_id,
         snapshot_ttl_seconds=snapshot_ttl,
@@ -741,6 +802,8 @@ def _apply_environment(
         )
     if env.get("SONDER_API_KEY", "").strip():
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
+    if env.get("SONDER_ARTIFACT_TRANSFER_KEY", "").strip():
+        secrets = replace(secrets, artifact_transfer_key=env["SONDER_ARTIFACT_TRANSFER_KEY"].strip())
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
@@ -756,10 +819,50 @@ def _apply_environment(
         compute=compute,
         features=features,
         secrets=secrets,
+        child_storage=apply_child_storage_environment(config.child_storage, env, errors),
     )
 
 
+def deployment_errors(config: SonderConfig) -> list[str]:
+    """Validate only implemented topology promises, including typed startup."""
+    deployment = config.deployment
+    errors: list[str] = []
+    if deployment.profile not in ("single-host", "pooled-pair"):
+        errors.append(
+            "[deployment].profile must be single-host or pooled-pair; "
+            "HA/quorum provider integration is not available"
+        )
+    members = (config.compute.node_id, *(node.node_id for node in config.compute.nodes))
+    if deployment.profile == "pooled-pair" and (len(members) != 2 or len(set(members)) != 2):
+        errors.append("[deployment].pooled-pair requires one local node and exactly one distinct configured compute peer")
+    if not isinstance(deployment.preferred_primary, str) or (
+        deployment.preferred_primary and deployment.preferred_primary not in members
+    ):
+        errors.append("[deployment].preferred_primary must name a configured member")
+    for setting in ("automatic_takeover", "automatic_failback"):
+        value = getattr(deployment, setting)
+        if not isinstance(value, bool):
+            errors.append(f"[deployment].{setting} must be a boolean")
+        elif value:
+            errors.append(
+                f"[deployment].{setting} is unavailable: independent old-owner fencing, "
+                "acknowledged durable-state replication, and worker ownership-epoch enforcement "
+                "are not integrated"
+            )
+    return errors
+
+
+def validate_deployment(config: SonderConfig) -> None:
+    errors = deployment_errors(config)
+    if errors:
+        raise ConfigError(errors)
+
+
 def _validate(config: SonderConfig, errors: list[str]) -> None:
+    errors.extend(child_storage_errors(config))
+    errors.extend(app_control_errors(config))
+    errors.extend(artifact_transfer_errors(config))
+    errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
             f"unsupported configuration schema_version {config.schema_version}"
@@ -1011,11 +1114,31 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             for item in node.workspace_mappings
         ):
             errors.append(f"{where}.workspace_mappings contains an invalid identity")
+    if not isinstance(compute.worker_host_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", compute.worker_host_id
+    ):
+        errors.append("[compute].worker_host_id must be a bounded stable identity")
+    for key, minimum, maximum in (
+        ("worker_memory_budget_bytes", 0, 1 << 50),
+        ("worker_max_jobs", 1, 1024),
+        ("worker_reservation_seconds", 1, 300),
+    ):
+        value = getattr(compute, key)
+        if key == "worker_memory_budget_bytes" and value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            errors.append(f"[compute].{key} must be within {minimum}..{maximum}")
     job_ids = [job.job_id for job in compute.jobs]
     if len(job_ids) != len(set(job_ids)):
         errors.append("[compute].jobs contains duplicate job identities")
     for index, job in enumerate(compute.jobs):
         where = f"[compute].jobs[{index}]"
+        if job.memory_reservation_bytes is not None and (
+            isinstance(job.memory_reservation_bytes, bool)
+            or not isinstance(job.memory_reservation_bytes, int)
+            or not 1 <= job.memory_reservation_bytes <= 1 << 50
+        ):
+            errors.append(f"{where}.memory_reservation_bytes must be within 1..2^50")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", job.job_id):
             errors.append(f"{where}.id must be a bounded stable identity")
         try:
@@ -1133,10 +1256,12 @@ def load_config(
     """
     errors: list[str] = []
     sources: list[str] = ["defaults"]
+    private_source_paths: list[str] = []
     config = SonderConfig()
 
     if toml_path is not None:
         path = Path(toml_path)
+        private_source_paths.append(str(path.resolve()))
         try:
             with path.open("rb") as fh:
                 raw = tomllib.load(fh)
@@ -1183,6 +1308,7 @@ def load_config(
     merged_env: dict[str, str] = {}
     if secrets_path is not None:
         spath = Path(secrets_path)
+        private_source_paths.append(str(spath.resolve()))
         if not spath.exists():
             errors.append(f"secrets file not found: {spath}")
         else:
@@ -1224,7 +1350,11 @@ def load_config(
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
-    return replace(config, sources=tuple(sources))
+    if config.app_control.catalog_file:
+        private_source_paths.append(str(Path(config.app_control.catalog_file).resolve()))
+    if config.child_storage.binding_file:
+        private_source_paths.append(str(Path(config.child_storage.binding_file).resolve()))
+    return replace(config, sources=tuple(sources), private_source_paths=tuple(dict.fromkeys(private_source_paths)))
 
 
 _OVERRIDE_PATTERN = re.compile(r"^[a-z_]+\.[a-z_]+$")
