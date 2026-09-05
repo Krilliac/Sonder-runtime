@@ -80,10 +80,17 @@ def _route(method, target):
         "/select": "select_binding",
         "/clear": "clear_selection",
         "/revoke": "revoke_binding",
+        "/work": "prepare_work",
     }
     suffix = path.removeprefix("/v1/app-control")
     if method == "POST" and suffix in post and not separator:
         return post[suffix], {}
+    work = re.fullmatch(r"/work/([0-9a-f]{64})(/execute)?", suffix)
+    if work is not None and not separator:
+        if method == "GET" and work[2] is None:
+            return "read_work", {"work_id": work[1]}
+        if method == "POST" and work[2] == "/execute":
+            return "execute_work", {"work_id": work[1]}
     if method == "GET" and suffix == "/selection" and not separator:
         return "read_selection", {}
     if method == "GET" and suffix in ("/bindings", "/recovery"):
@@ -109,7 +116,9 @@ def _route(method, target):
     raise ControlError(404, "APP_CONTROL_ROUTE_NOT_FOUND")
 
 
-def handle_app_control(handler, method, binding, *, deployment_authorized):
+def handle_app_control(
+    handler, method, binding, *, deployment_authorized, work_binding=None
+):
     if not is_app_control_route(handler.path):
         return False
     handler._app_control_request = True
@@ -171,10 +180,23 @@ def handle_app_control(handler, method, binding, *, deployment_authorized):
                 raise ControlError(401, "APP_CONTROL_AUTH_REQUIRED")
             account = _token(account)
             if method == "POST":
-                payload = handler._read_json(max_bytes=16384)
+                body = handler._read_json(max_bytes=16384)
+                if action == "execute_work":
+                    if type(body) is not dict or body:
+                        raise ControlError(400, "INVALID_APP_CONTROL_REQUEST")
+                else:
+                    payload = body
             elif handler.headers.get("Content-Length", "0") != "0":
                 raise ControlError(400, "INVALID_APP_CONTROL_REQUEST")
-            binding.perform(
+            target = binding
+            if action in {"prepare_work", "execute_work", "read_work"}:
+                try:
+                    target = work_binding() if callable(work_binding) else work_binding
+                except Exception:
+                    raise ControlError(503, "APP_WORK_UNAVAILABLE") from None
+                if target is None or target.control is not binding:
+                    raise ControlError(503, "APP_WORK_UNAVAILABLE")
+            target.perform(
                 action,
                 payload,
                 account_token=account,
