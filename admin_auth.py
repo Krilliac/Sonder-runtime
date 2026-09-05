@@ -26,6 +26,9 @@ MAX_PASSWORD_CHARS = 1_024
 PUBLIC_DEV_SECRET = "sonder-local-dev-secret"
 
 
+from sonder_runtime.adapters.security.account_admission import coordinated_account_mutation
+
+
 def _auth_secret_file() -> Path:
     """Per-install location of the derived account-session HMAC secret."""
     return sonder_paths.ensure_home() / "secrets" / "auth_secret"
@@ -164,6 +167,7 @@ def account_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
 
 
+@coordinated_account_mutation
 def register(
     conn: sqlite3.Connection,
     username: str,
@@ -257,6 +261,7 @@ def _public_account_row(row) -> dict:
     }
 
 
+@coordinated_account_mutation
 def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, dict]:
     init(conn)
     username = _username(username, generic_error=True)
@@ -317,6 +322,7 @@ def reauthenticate(conn: sqlite3.Connection, token: str, password: str) -> dict:
         conn.rollback()
 
 
+@coordinated_account_mutation
 def revoke_session(conn: sqlite3.Connection, token: str) -> None:
     """Durably revoke only this bearer; retries disclose no session existence.
 
@@ -440,6 +446,7 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
     return True, ""
 
 
+@coordinated_account_mutation
 def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
     init(conn)
     username = _username(username)
