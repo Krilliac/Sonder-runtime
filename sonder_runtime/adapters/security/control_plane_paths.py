@@ -31,7 +31,11 @@ STATE_DATABASES = (
 
 def _canonical(value):
     path = Path(value).expanduser()
-    if len(str(path).encode()) > 4096:
+    try:
+        encoded = os.fsencode(path)
+    except (UnicodeError, TypeError, ValueError):
+        raise ValueError("private path encoding is unavailable") from None
+    if len(encoded) > 4096:
         raise ValueError("private path exceeds bound")
     return path.resolve()
 

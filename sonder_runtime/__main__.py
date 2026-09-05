@@ -755,11 +755,11 @@ def cmd_repl(args) -> int:
 
     configure_legacy_interfaces()
     from sonder_runtime.bootstrap.app import default_app
-    from sonder_runtime.bootstrap.legacy_root import configure_application
+    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_application
     owned_application = None
     try:
         owned_application = default_app(config=config)
-        configure_application(owned_application)
+        configure_legacy_application(owned_application)
         if args.json:
             sonder_repl.run_jsonl()
         else:
@@ -817,9 +817,9 @@ def cmd_mcp(args) -> int:
         )
         _export_runtime_environment(config)
         from sonder_runtime.bootstrap.app import default_app
-        from sonder_runtime.bootstrap.legacy_root import configure_application
+        from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
         owned_application = default_app(config=config)
-        configure_application(owned_application)
+        configure_legacy_application(owned_application)
         from sonder_runtime.adapters.inference import ollama_endpoint
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
         from sonder_runtime.adapters.inference import ollama_pool

@@ -19,6 +19,13 @@ LEGACY_MCP_DECLARATION = LegacyMcpContract(
 )
 
 
+def configure_legacy_application(application) -> None:
+    """Bind the owned Application through the existing MCP bootstrap seam."""
+    from .legacy_root import configure_application
+
+    configure_application(application)
+
+
 def build_legacy_server_mcp_runtime(
     runtime: ModuleType | None = None,
 ) -> LegacyServerMcpRuntime:
@@ -38,4 +45,4 @@ def build_legacy_server_mcp_runtime(
     )
 
 
-__all__ = ["LEGACY_MCP_DECLARATION", "build_legacy_server_mcp_runtime"]
+__all__ = ["LEGACY_MCP_DECLARATION", "build_legacy_server_mcp_runtime", "configure_legacy_application"]

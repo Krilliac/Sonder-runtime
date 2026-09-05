@@ -1,7 +1,39 @@
 from pathlib import Path
+import os
 import pytest
 from sonder_runtime.platform import paths
 from sonder_runtime.adapters.filesystem import file_ops
+
+
+def test_supported_surrogate_names_keep_private_classification(tmp_path):
+    from sonder_runtime.adapters.security.control_plane_paths import ControlPlaneInventory
+
+    private = tmp_path / ("private-" + chr(0xDCFF))
+    try:
+        private.write_bytes(b"private")
+    except (OSError, UnicodeError):
+        pytest.skip("filesystem does not support surrogate test names")
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    inventory = ControlPlaneInventory(frozenset({private.resolve()}), (owned,), (), (), ())
+    assert inventory.protects(private)
+    assert inventory.protects(owned / private.name)
+    assert not inventory.protects(tmp_path / ("ordinary-" + chr(0xDCFF)))
+
+
+def test_inventory_path_bounds_use_filesystem_bytes_and_encoding_refuses(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.security.control_plane_paths import ControlPlaneInventory
+
+    inventory = ControlPlaneInventory(frozenset(), (), (), (), ())
+    with pytest.raises(ValueError, match="exceeds bound"):
+        inventory.protects(tmp_path / ("é" * 4096))
+
+    def unavailable(path):
+        raise UnicodeError("encoding unavailable")
+
+    monkeypatch.setattr(os, "fsencode", unavailable)
+    with pytest.raises(ValueError, match="encoding is unavailable"):
+        inventory.protects(tmp_path / "ordinary")
 
 
 @pytest.fixture
