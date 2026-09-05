@@ -486,3 +486,48 @@ def test_localized_warning_stops_success_and_next_transaction(repository, sqlsta
     with pytest.raises(ContinuationStorageFailure):
         repository._transport.run(warned)
     assert after == []
+
+
+def test_owner_loss_during_commit_never_publishes_success(repository, monkeypatch):
+    from sonder_runtime.application.ports.continuation_mutations import (
+        ContinuationCommitAmbiguous,
+        ContinuationStorageFailure,
+    )
+
+    command = prepare_call("create", new_record())
+    capacity = repository._capacity
+    calls = []
+
+    def lose_owner_after_state_authorization(connection, extra=0):
+        capacity(connection, extra)
+        calls.append(True)
+        if len(calls) == 3:
+            repository._owner_connection.close()
+
+    monkeypatch.setattr(repository, "_capacity", lose_owner_after_state_authorization)
+    try:
+        with pytest.raises(ContinuationCommitAmbiguous) as failure:
+            repository.mutate(command)
+        assert failure.value.prepared == command
+    finally:
+        with pytest.raises(ContinuationStorageFailure):
+            repository.get(command.child_id)
+    assert repository._owner_fenced
+    # A separate test-owned read connection observes the committed logical
+    # receipt. It cannot authorize a runner or clear the durable owner marker.
+    connection = repository._transport.connection_class.connect(
+        **repository.binding.connection_kwargs(repository.config)
+    )
+    try:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM sonder_child.receipt WHERE operation_id=%s",
+                (command.operation_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert not connection.execute(
+            "SELECT clean FROM sonder_child.owner WHERE id=1"
+        ).fetchone()[0]
+    finally:
+        connection.close()
