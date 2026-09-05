@@ -4,7 +4,13 @@ from typing import Protocol
 
 from ...domain.common.errors import DependencyUnavailable
 from ...domain.compute_fabric import NodeSnapshot
-from ...domain.worker_capacity import CapacityReservation, WorkerBudget, bounded_positive
+from ...domain.worker_capacity import (
+    CapacityReconciliation,
+    CapacityReservation,
+    CapacityReservationView,
+    WorkerBudget,
+    bounded_positive,
+)
 
 
 class WorkerCapacity(Protocol):
@@ -12,6 +18,9 @@ class WorkerCapacity(Protocol):
                          memory_bytes: int | None, *, lease_seconds: int = 30) -> CapacityReservation: ...
     def dispatch_capacity(self, job_id: str, token: str) -> None: ...
     def release_capacity(self, job_id: str) -> None: ...
+    def reconcile_capacity(self, *, now: datetime | None = None, limit: int = 1024) -> CapacityReconciliation: ...
+    def list_capacity(self, *, host_id: str | None = None, include_released: bool = False,
+                      limit: int = 256) -> tuple[CapacityReservationView, ...]: ...
 
 
 def measured_worker_budget(snapshot: NodeSnapshot, host_id: str, *, now: datetime | None = None) -> WorkerBudget:

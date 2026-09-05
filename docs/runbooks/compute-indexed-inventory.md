@@ -4,6 +4,13 @@ Production configuration still allows at most 15 remote hosts plus the local hos
 
 Placement uses configured and observed capability/workload postings to find structurally possible candidates. The existing scheduler still evaluates freshness, health, resource evidence and ranking for every candidate. Model absence can prune selection but cannot prune refresh of a configured-possible host. Local-only, remote-first with optional fallback, and rank-all retain their policy phases. Placement diagnostics include `inventory_scope`; rejected candidate details cover the stated phase and structurally possible subset, not the full fleet. Cached snapshot digests are replaced on observation. Hash work moves to observation time.
 
+Call `ComputeNodeRegistry.capability_candidates(...)` when a caller needs an
+indexed capability view before selecting a workload. It intersects all required
+capability postings and unions each any-of group, while leaving health,
+freshness, resource, consent, and placement-policy checks to the scheduler.
+The returned scope uses the same bounded diagnostic metadata as ordinary
+indexed candidates and never reserves worker capacity.
+
 The composed refresh coordinator shares eight submitted/running probe slots across this Python process and joins concurrent requests for the same node within one coordinator. Due candidates are traversed in pages of 32, with at most eight pending futures per caller; placement waits for the complete due candidate traversal. Warm fresh observations avoid probes. Failed probes become unhealthy. Candidate-ID collection and homogeneous ranking remain proportional to the matching inventory. This is not an HTTP connection limit or a cross-process fleet-wide authority. The legacy refresh helper remains available for compatibility; production composition uses the coordinator.
 
 ## Administrator inventory API

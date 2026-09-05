@@ -1,6 +1,7 @@
 """Compute-fabric application services."""
 
 from .registry import ComputeNodeRegistry
+from .placement_queue import PlacementQueue
 from .jobs import (
     ArgumentPolicy,
     ComputeJobWorker,
@@ -18,4 +19,5 @@ __all__ = [
     "RemoteArtifactReceipt",
     "RemoteJobEnvelope",
     "RemoteJobReceipt",
+    "PlacementQueue",
 ]
