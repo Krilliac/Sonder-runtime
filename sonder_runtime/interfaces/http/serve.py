@@ -34,6 +34,10 @@ from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
 
+_APP_CONTROL_BINDING = None
+_APP_CONTROL_CONFIG = None
+from sonder_runtime.interfaces.http.app_control import handle_app_control, is_app_control_route
+
 _ARTIFACT_TRANSFER_BINDING = None
 _ARTIFACT_TRANSFER_CONFIG = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
@@ -797,6 +801,21 @@ def configure_typed_config(config) -> None:
     _ARTIFACT_TRANSFER_BINDING = candidate
     if previous is not None:
         previous.close()
+    global _APP_CONTROL_BINDING, _APP_CONTROL_CONFIG
+    from sonder_runtime.bootstrap.app_control_http import AppControlBinding
+    from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths, live_control_plane_inventory
+    from sonder_runtime.bootstrap.app import default_app
+    from pathlib import Path
+    candidate_control = AppControlBinding(lambda: config, account_open=lambda: server._open_db(),
+        account_path=lambda: Path(server._DB_PATH).resolve(),
+        private_inventory=lambda: live_control_plane_inventory(additional=lambda: ControlPlanePaths(
+            databases=(Path(server._DB_PATH).resolve(),),
+            files=tuple(Path(p) for p in config.private_source_paths))),
+        lanes_provider=lambda: default_app().agent_lanes())
+    candidate_control.start()
+    _APP_CONTROL_CONFIG = config
+    candidate_control._config_provider = lambda: _APP_CONTROL_CONFIG
+    _APP_CONTROL_BINDING = candidate_control
     server_config = config.server
     from sonder_runtime.adapters.web import listener_probe
     listener_probe.configure_typed_config(config)
@@ -1394,6 +1413,17 @@ def _auth_account(auth_header):
     if not token:
         return None
     return _legacy_runtime()._admin_account_from_token(token)
+
+
+def _app_control_deployment_authorized(authorization, config):
+    # Bind this check to the same live typed snapshot as app policy. Generic
+    # local compatibility downgrades do not relax an explicit control mode.
+    required = config.server.auth_mode in ("api-key", "both") or bool(config.secrets.api_key)
+    if not required:
+        return True
+    return bool(config.secrets.api_key) and (
+        check_auth(authorization, config.secrets.api_key)
+        or sonder_secrets.previous_key_valid(_bearer_token(authorization)))
 
 
 def _effective_auth_mode():
@@ -3560,6 +3590,7 @@ class Handler(BaseHTTPRequestHandler):
         caller needs to see.
         """
         if (getattr(self, "_artifact_transfer_request", False)
+                or getattr(self, "_app_control_request", False)
                 or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")):
             return
         if not self.close_connection:
@@ -3596,7 +3627,7 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         origin = self.headers.get("Origin")
         if origin is not None and origin in CORS_ORIGINS:
-            if not getattr(self, "_artifact_transfer_request", False):
+            if not (getattr(self, "_artifact_transfer_request", False) or getattr(self, "_app_control_request", False)):
                 _serve_logger.debug(f"_cors: allowing origin={origin!r}")
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
@@ -3604,15 +3635,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Sonder-Account-Token, "
-                "X-Sonder-Bootstrap-Secret, Idempotency-Key",
+                "X-Sonder-Bootstrap-Secret, X-Sonder-App-Control, Idempotency-Key",
             )
             self.send_header(
                 "Access-Control-Expose-Headers",
                 "X-Sonder-Elapsed-Ms, X-Sonder-Correlation-Id",
             )
 
+    def send_error(self, code, message=None, explain=None):
+        if is_app_control_route(getattr(self, "path", "")) and hasattr(self, "headers"):
+            self._app_control_request = True
+            self._send_json_payload({"ok": False, "error": {"code": "APP_CONTROL_REQUEST_REFUSED"}},
+                status=code, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+            return
+        super().send_error(code, message, explain)
+
     def log_message(self, fmt, *args):
-        if is_artifact_route(getattr(self, "path", "")):
+        if is_artifact_route(getattr(self, "path", "")) or is_app_control_route(getattr(self, "path", "")):
             sys.stderr.write("[sonder_serve] artifact transfer response\n")
             return
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))
@@ -3625,6 +3664,10 @@ class Handler(BaseHTTPRequestHandler):
         self._operation_context = None
         self._request_started = time.monotonic()
         self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "OPTIONS", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized):
+            return
         if handle_artifact_transfer(self, "OPTIONS", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
         if self._reject_disallowed_origin():
@@ -3864,6 +3907,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         pending = self._unread_request_body_bytes()
         if (getattr(self, "_artifact_transfer_request", False)
+                or getattr(self, "_app_control_request", False)
                 or _request_route(getattr(self, "path", "")) in ("/v1/compute/nodes", "/v1/compute/nodes/refresh")) and pending != 0:
             return True
         if pending == 0:
@@ -4143,6 +4187,10 @@ class Handler(BaseHTTPRequestHandler):
         self._correlation_id = ""
         self._request_started = time.monotonic()
         self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "PUT", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized):
+            return
         if not handle_artifact_transfer(self, "PUT", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             self._send_not_found()
 
@@ -4152,6 +4200,10 @@ class Handler(BaseHTTPRequestHandler):
         self._correlation_id = ""
         self._request_started = time.monotonic()
         self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "GET", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized):
+            return
         if handle_artifact_transfer(self, "GET", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
         if self._reject_disallowed_origin():
@@ -5138,6 +5190,10 @@ class Handler(BaseHTTPRequestHandler):
         # and so is the record of whether this request's body was read.
         self._chat_completion_metrics_recorded = False
         self._request_body_consumed = False
+        self._app_control_request = False
+        if handle_app_control(self, "POST", _APP_CONTROL_BINDING,
+                deployment_authorized=_app_control_deployment_authorized):
+            return
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
         if self._handle_compute_inventory_refresh():
