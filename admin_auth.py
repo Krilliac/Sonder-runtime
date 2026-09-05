@@ -357,6 +357,14 @@ def authenticate(conn: sqlite3.Connection, token: str) -> dict | None:
     return account
 
 
+def _session_reference_mac(token_hash: str, secret: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        ("sonder-private-account-reference-v1\0" + token_hash).encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def authenticate_session(conn: sqlite3.Connection, token: str):
     """Resolve an explicit account bearer to a private exact-login reference.
 
@@ -369,7 +377,13 @@ def authenticate_session(conn: sqlite3.Connection, token: str):
     if (type(token) is not str or not 1 <= len(token) <= 512
             or any(not 33 <= ord(char) <= 126 for char in token)):
         return None
-    return read_session_reference(conn, "account-session-v1:" + _hash_token(token))
+    # Both MACs must use one key snapshot. Rotation before the live lookup
+    # rejects the reference instead of re-signing an old token hash with a new key.
+    secret = _secret()
+    token_hash = hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+    return read_session_reference(
+        conn, "account-session-v1:" + token_hash + "." + _session_reference_mac(token_hash, secret)
+    )
 
 
 def read_session_reference(conn: sqlite3.Connection, reference: str):
@@ -385,16 +399,20 @@ def read_session_reference(conn: sqlite3.Connection, reference: str):
     if conn.in_transaction:
         raise PermissionError("session lookup requires an idle owned connection")
     prefix = "account-session-v1:"
-    if (type(reference) is not str or len(reference) != len(prefix) + 64
-            or not reference.startswith(prefix)
-            or any(char not in "0123456789abcdef" for char in reference[len(prefix):])):
+    if (type(reference) is not str or len(reference) != len(prefix) + 129
+            or not reference.startswith(prefix)):
+        return None
+    token_hash, separator, mac = reference[len(prefix):].partition(".")
+    if (separator != "." or len(token_hash) != 64 or len(mac) != 64
+            or any(char not in "0123456789abcdef" for char in token_hash + mac)
+            or not hmac.compare_digest(mac, _session_reference_mac(token_hash, _secret()))):
         return None
     conn.execute("BEGIN")
     try:
         row = conn.execute(
             "SELECT a.username,a.role,a.banned,s.expires_ts,s.revoked "
             "FROM account_sessions s JOIN accounts a ON a.username=s.username "
-            "WHERE s.token_hash=?", (reference[len(prefix):],),
+            "WHERE s.token_hash=?", (token_hash,),
         ).fetchone()
         if (row is None or row["banned"] or row["revoked"]
                 or type(row["expires_ts"]) is not int or row["expires_ts"] <= _now()):
@@ -402,6 +420,9 @@ def read_session_reference(conn: sqlite3.Connection, reference: str):
         if (type(row["username"]) is not str or not row["username"]
                 or len(row["username"]) > MAX_USERNAME_CHARS
                 or row["role"] not in {"user", "developer", "admin"}):
+            return None
+        # A key rotation during database I/O must fence this lookup too.
+        if not hmac.compare_digest(mac, _session_reference_mac(token_hash, _secret())):
             return None
         return AccountSessionIdentity(reference, row["username"], row["role"], row["expires_ts"])
     finally:
