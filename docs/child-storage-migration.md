@@ -37,3 +37,25 @@ SQLite retirement preserves the source database under a new private filename and
 Activation records retirement intent, source retirement, target readiness, private host selection switch and completion as immutable phase entries. Same-ID retries in the still-live owning host retain source retirement after a lost target response. The process-local provider cannot resume activation after losing its from-inception ownership proof; a production service-manager provider with durable launch exclusion and authoritative cleanup remains required. Export and staged import remain usable without that provider.
 
 The current host switches its own private selection record and validates the matching typed backend when constructing its next Application. It does not rewrite installed TOML, service definitions or live runtime configuration. Full installed migration, multi-host execution fencing, general unclean-owner recovery, and broader replicated Sonder state remain outstanding roadmap work.
+# Migration authority identity and incomplete activation
+
+PostgreSQL bundle and private selection identities bind the namespace, endpoint,
+owner, durability, exact standby policy, operation/cancellation deadlines, and
+an opaque digest of the anchored private binding closure (including TLS policy).
+Changing that policy requires a fresh export; bundles from the earlier endpoint-only
+identity implementation cannot be activated. Individual credential hashes are
+never public status fields. Every migration authority admission revalidates the
+live private closure. Starting the selected Application compares a freshly opened
+binding against the retained policy before constructing its repository.
+
+A PostgreSQL source must retain the exact exported owner incarnation and barrier,
+even if no child rows changed. Retirement checks both again under the held aggregate
+authority and row locks. A clean Application start/stop therefore requires a fresh
+export before migration.
+
+Any failure after cutover admission retains an incomplete-activation latch. The
+disposable host refuses Application start and other migration IDs until the same
+ID reconciles retirement, target readiness, its exact private selection marker,
+and durable COMPLETE. Final selection is published only after COMPLETE. Unexpected
+selection marker edits remain fenced. This latch belongs to the original live
+host; it does not provide the still-missing installed service-manager crash recovery.

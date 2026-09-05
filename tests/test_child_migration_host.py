@@ -166,3 +166,70 @@ def test_same_logical_rows_in_replaced_source_file_do_not_prove_identity(tmp_pat
             assert source.path.is_file()
     finally:
         host.close()
+
+
+@pytest.mark.parametrize(
+    "failure", ["selection", "CONFIG_SWITCHED", "COMPLETE", "COMPLETE-response"]
+)
+def test_incomplete_cutover_blocks_start_and_retains_same_id(
+    tmp_path, monkeypatch, failure
+):
+    import sonder_runtime.bootstrap.child_migration_host as module
+
+    host = DisposableChildMigrationHost(tmp_path / "owned", writable_roots=lambda: ())
+    try:
+        host.start(SonderConfig())
+        add_terminal(host._repository, "original")
+        host.quiesce()
+        source = host.selected_store
+        target = SQLiteChildMigrationStore(host.path / "next.sqlite")
+        with ChildMigrationBundle(
+            tmp_path / "bundle", writable_roots=lambda: ()
+        ) as bundle:
+            manifest = export_snapshot(source, bundle, target_identity=target.identity)
+            stage_snapshot(bundle, target)
+            phase = bundle.record_phase
+            write = module.write_json_atomic
+
+            def fail_phase(name, value):
+                if failure == "COMPLETE-response" and name == "COMPLETE":
+                    phase(name, value)
+                    raise OSError("injected completed phase response failure")
+                if name == failure:
+                    raise OSError("injected phase response failure")
+                return phase(name, value)
+
+            def fail_write(*args, **kwargs):
+                write(*args, **kwargs)
+                raise OSError("injected selection response failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(bundle, "record_phase", fail_phase)
+                if failure == "selection":
+                    patch.setattr(module, "write_json_atomic", fail_write)
+                with pytest.raises(OSError):
+                    host.activate(bundle, source, target)
+            assert host.selected_store is source
+            with pytest.raises(MigrationRefused, match="incomplete"):
+                host.start(SonderConfig())
+            assert host._repository is None
+            if failure == "selection":
+                write(host.path / "selection.json", {"unexpected": True})
+                with pytest.raises(MigrationRefused, match="selection marker changed"):
+                    host.activate(bundle, source, target)
+                with pytest.raises(MigrationRefused, match="incomplete"):
+                    host.start(SonderConfig())
+                write(
+                    host.path / "selection.json",
+                    {
+                        "migration_id": manifest["migration_id"],
+                        "manifest_digest": module.digest(manifest),
+                        "target_identity": target.identity,
+                    },
+                )
+            assert host.activate(bundle, source, target)["phase"] == "COMPLETE"
+            assert bundle.has_phase("COMPLETE", manifest)
+            assert host.selected_store is target
+            host.start(SonderConfig())
+    finally:
+        host.close()

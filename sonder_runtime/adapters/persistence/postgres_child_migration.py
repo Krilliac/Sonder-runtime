@@ -121,9 +121,8 @@ class PostgresChildMigrationStore:
         self.config, self.binding = config, binding
         # Identity binds the host-selected endpoint without exposing credentials.
         values = binding.connection_kwargs(config)
-        self.identity = hashlib.sha256(
-            encode({key: values[key] for key in ("host", "port", "dbname", "user")})
-        ).hexdigest()
+        self._policy_identity = self._live_policy_identity()
+        self.identity = self._policy_identity
         self._transport = PostgresContinuationTransport(config, binding)
         self._owner_connection = None
         self._closed = False
@@ -201,6 +200,7 @@ class PostgresChildMigrationStore:
             raise
 
     def _held(self, connection):
+        self.validate_policy()
         if self._closed or self._owner_connection.closed:
             raise MigrationRefused("migration lock session was lost")
         held = connection.execute(
@@ -209,6 +209,34 @@ class PostgresChildMigrationStore:
         ).fetchone()[0]
         if not held:
             raise MigrationRefused("migration lock identity was lost")
+
+    def _live_policy_identity(self, binding=None):
+        binding = self.binding if binding is None else binding
+        values = binding.connection_kwargs(self.config)
+        return hashlib.sha256(
+            encode(
+                {
+                    "endpoint": {
+                        key: values[key] for key in ("host", "port", "dbname", "user")
+                    },
+                    "policy": {
+                        key: getattr(self.config, key)
+                        for key in (
+                            "owner_id",
+                            "durability",
+                            "required_standby",
+                            "operation_timeout_seconds",
+                            "cancel_timeout_seconds",
+                        )
+                    },
+                    "binding": binding.private_closure_identity(),
+                }
+            )
+        ).hexdigest()
+
+    def validate_policy(self, binding=None):
+        if self._live_policy_identity(binding) != self._policy_identity:
+            raise MigrationRefused("PostgreSQL migration policy changed")
 
     def close(self, timeout=5):
         if self._closed:
@@ -254,8 +282,9 @@ class PostgresChildMigrationStore:
 
         return self._transport.run(write)
 
-    @staticmethod
-    def _current(connection, manifest):
+    def _current(self, connection, manifest):
+        if manifest["target_identity"] != self.identity:
+            raise MigrationRefused("migration target policy identity conflict")
         row = connection.execute(
             "SELECT migration_id,manifest_digest,phase FROM sonder_child.migration WHERE id=1 FOR UPDATE"
         ).fetchone()
@@ -264,6 +293,9 @@ class PostgresChildMigrationStore:
         return row[2]
 
     def prepare(self, manifest):
+        if manifest["target_identity"] != self.identity:
+            raise MigrationRefused("migration target policy identity conflict")
+
         def prepare(connection):
             exists = connection.execute(
                 "SELECT to_regclass('sonder_child.migration')"
@@ -295,6 +327,9 @@ class PostgresChildMigrationStore:
         self._write(prepare)
 
     def status(self, manifest):
+        self.validate_policy()
+        if manifest["target_identity"] != self.identity:
+            raise MigrationRefused("migration target policy identity conflict")
         return {
             "phase": self._write(
                 lambda connection: self._current(connection, manifest)
@@ -444,6 +479,9 @@ class PostgresChildMigrationStore:
             require_host_guard,
         )
 
+        self.validate_policy()
+        if manifest["source_identity"] != self.identity:
+            raise MigrationRefused("migration source policy identity conflict")
         require_host_guard(guard, manifest)
 
         def retire(connection):
@@ -459,6 +497,22 @@ class PostgresChildMigrationStore:
                 "SELECT owner_id,incarnation,clean FROM sonder_child.owner WHERE id=1 FOR UPDATE"
             ).fetchone()
             retired_incarnation = "retired-" + manifest["migration_id"]
+            barrier = connection.execute(
+                "SELECT barrier FROM sonder_child.meta WHERE id=1 FOR UPDATE"
+            ).fetchone()[0]
+            already_retired = owner == (
+                self.config.owner_id,
+                retired_incarnation,
+                False,
+            )
+            if already_retired:
+                if barrier != manifest["source"]["barrier"] + 1:
+                    raise MigrationRefused("retired source barrier changed")
+            elif (
+                list(owner or ()) != manifest["source"]["owner"]
+                or barrier != manifest["source"]["barrier"]
+            ):
+                raise MigrationRefused("source ownership changed after export")
             if (
                 owner is None
                 or owner[0] != self.config.owner_id
@@ -474,9 +528,10 @@ class PostgresChildMigrationStore:
             connection.execute(
                 "UPDATE sonder_child.migration SET phase='RETIRED' WHERE id=1"
             )
-            connection.execute(
-                "UPDATE sonder_child.meta SET barrier=barrier+1 WHERE id=1"
-            )
+            if not already_retired:
+                connection.execute(
+                    "UPDATE sonder_child.meta SET barrier=barrier+1 WHERE id=1"
+                )
 
         self._write(retire)
         require_host_guard(guard, manifest)
