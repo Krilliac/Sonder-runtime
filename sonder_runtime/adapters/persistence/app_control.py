@@ -1,6 +1,8 @@
 """Durable app-control metadata on the existing private fleet database."""
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from sonder_runtime.adapters.persistence.owned_sqlite import (
+    connect as owned_sqlite_connect,
+)
 
 from dataclasses import asdict, replace
 import hashlib
@@ -13,6 +15,7 @@ import time
 import uuid
 from ...application.ports.lane_continuation import (
     PendingVerificationIdentity,
+    PendingApprovalEvidence,
     TerminalProjectionReceipt,
 )
 from ...application.ports.host_turn_links import (
@@ -27,6 +30,7 @@ from ...application.ports.app_managed_work import (
     WorkAdmission,
     WorkInterruption,
     WorkCompletionEvidence,
+    WorkVerificationPending,
 )
 
 from ...application.ports.app_control import (
@@ -91,6 +95,8 @@ def _encode(value, limit=131072):
             data.pop("terminal")
         if value.completion is None:
             data.pop("completion")
+        if value.verification_pending is None:
+            data.pop("verification_pending")
     raw = json.dumps(
         data,
         sort_keys=True,
@@ -118,6 +124,17 @@ def _decode(raw, cls):
             raise ValueError()
         data = json.loads(raw, object_pairs_hook=_pairs)
         if cls is AppWorkRecord:
+            if data.get("verification_pending") is not None:
+                pending = data["verification_pending"]
+                pending["identity"] = PendingVerificationIdentity(**pending["identity"])
+                pending["approval"] = PendingApprovalEvidence(**pending["approval"])
+                pending["original_terminal"]["turn"] = ManagedHostTurnLink(
+                    **pending["original_terminal"]["turn"]
+                )
+                pending["original_terminal"] = ManagedHostTerminalLink(
+                    **pending["original_terminal"]
+                )
+                data["verification_pending"] = WorkVerificationPending(**pending)
             if data.get("completion") is not None:
                 completion = data["completion"]
                 if completion.get("pending_identity") is not None:
@@ -554,6 +571,7 @@ class AppControlTransaction:
         interruption=None,
         terminal=None,
         completion=None,
+        pending=None,
     ):
         positive(expected_revision)
         current = self.read_work(
@@ -573,6 +591,10 @@ class AppControlTransaction:
         ).record
         if record.state == "prepared":
             raise CommandConflict("work is not admitted")
+        if pending is not None and record.verification_pending is not None:
+            if record.verification_pending == pending and expected_revision == 4:
+                return record
+            raise CommandConflict("pending verification evidence is immutable")
         if terminal is not None and record.state == "terminal":
             if (
                 record.terminal == terminal
@@ -586,8 +608,10 @@ class AppControlTransaction:
             if interruption is not None
             else "admitted" if host_turn is None else "run_binding"
         )
+        if pending is not None:
+            expected_state = "running"
         if terminal is not None:
-            if record.state not in ("running", "unknown"):
+            if record.state not in ("running", "unknown", "verification_pending"):
                 raise CommandConflict("retained running host required")
             expected_state = record.state
         if record.state != expected_state or record.revision != expected_revision:
@@ -599,6 +623,15 @@ class AppControlTransaction:
                 revision=record.revision + 1,
                 terminal=terminal,
                 completion=completion,
+            )
+        elif pending is not None:
+            if pending.approval.expires_at <= self._now():
+                raise CommandConflict("new pending approval observation has expired")
+            updated = replace(
+                record,
+                state="verification_pending",
+                revision=5,
+                verification_pending=pending,
             )
         elif interruption is not None:
             updated = replace(
@@ -649,6 +682,12 @@ class AppControlTransaction:
             raise CommandConflict("typed interruption required")
         interruption.__post_init__()
         return self._link_work(interruption=interruption, **scope)
+
+    def record_work_verification_pending(self, *, pending, **scope):
+        if type(pending) is not WorkVerificationPending:
+            raise CommandConflict("typed pending verification required")
+        pending.__post_init__()
+        return self._link_work(pending=pending, **scope)
 
     def record_work_terminal(self, *, terminal, completion=None, **scope):
         """Record a link validated by private host composition; no authority is minted."""

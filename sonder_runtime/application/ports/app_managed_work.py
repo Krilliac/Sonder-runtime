@@ -6,7 +6,11 @@ import json
 import os
 from pathlib import Path
 from .host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink
-from .lane_continuation import PendingVerificationIdentity, TerminalProjectionReceipt
+from .lane_continuation import (
+    PendingVerificationIdentity,
+    TerminalProjectionReceipt,
+    PendingApprovalEvidence,
+)
 
 from .app_control import digest as require_digest
 from .app_control import (
@@ -170,7 +174,12 @@ class WorkInterruption:
     evidence_digest: str
 
     def __post_init__(self):
-        if self.prior_state not in ("admitted", "run_binding", "running"):
+        if self.prior_state not in (
+            "admitted",
+            "run_binding",
+            "running",
+            "verification_pending",
+        ):
             raise ValueError("post-admission phase required")
         if self.code not in (
             "CALLBACK_OUTCOME_UNKNOWN",
@@ -235,6 +244,49 @@ class WorkCompletionEvidence:
 
 
 @dataclass(frozen=True)
+class WorkVerificationPending:
+    """Exact host-observed approval wait; no bearer or resumable authority."""
+
+    identity: PendingVerificationIdentity
+    approval: PendingApprovalEvidence
+    original_terminal: ManagedHostTerminalLink
+
+    def __post_init__(self):
+        if (
+            type(self.identity) is not PendingVerificationIdentity
+            or type(self.approval) is not PendingApprovalEvidence
+            or type(self.original_terminal) is not ManagedHostTerminalLink
+        ):
+            raise ValueError("exact typed pending verification evidence required")
+        self.approval.__post_init__()
+        self.original_terminal.__post_init__()
+        timestamp(self.approval.expires_at)
+        if self.approval.tool != "workspace_run":
+            raise ValueError("verification execution approval required")
+        _text(self.approval.surface, 128)
+        identity = self.identity
+        for value in (
+            identity.continuation_id,
+            identity.verification_id,
+            identity.parent_session_id,
+            identity.command_id,
+        ):
+            _text(value, 256)
+        for value in (identity.bundle_digest, identity.projection_digest):
+            require_digest(value)
+        positive(identity.parent_grant_revision)
+        positive(identity.projection_revision)
+        if type(identity.generation) is not int or not 0 <= identity.generation < 2**63:
+            raise ValueError("bounded pending generation required")
+        turn = self.original_terminal.turn
+        if (
+            identity.continuation_id != turn.continuation_id
+            or identity.parent_session_id != turn.parent_session_id
+        ):
+            raise ValueError("pending verification belongs to another host")
+
+
+@dataclass(frozen=True)
 class AppWorkRecord:
     prepared: PreparedAppWork = field(repr=False)
     state: str = "prepared"
@@ -246,13 +298,36 @@ class AppWorkRecord:
     interruption: WorkInterruption | None = None
     terminal: ManagedHostTerminalLink | None = None
     completion: WorkCompletionEvidence | None = None
+    verification_pending: WorkVerificationPending | None = None
 
     def __post_init__(self):
         if type(self.prepared) is not PreparedAppWork:
             raise ValueError("typed prepared work required")
         self.prepared.__post_init__()
         positive(self.revision)
+        pending = self.verification_pending
+        if pending is not None:
+            if type(pending) is not WorkVerificationPending:
+                raise ValueError("typed pending verification required")
+            pending.__post_init__()
+            if pending.original_terminal.turn != self.host_turn or self.state not in (
+                "verification_pending",
+                "unknown",
+                "terminal",
+            ):
+                raise ValueError(
+                    "pending verification must bind exact retained host turn"
+                )
         if self.state == "terminal":
+            if pending is not None and (
+                self.terminal != pending.original_terminal
+                or self.completion is None
+                or self.completion.phase not in ("certified", "certified_after_return")
+                or self.completion.pending_identity != pending.identity
+            ):
+                raise ValueError(
+                    "pending completion must preserve original evidence and exact verification"
+                )
             if self.completion is not None:
                 if type(self.completion) is not WorkCompletionEvidence:
                     raise ValueError("typed completion evidence required")
@@ -269,16 +344,20 @@ class AppWorkRecord:
             self.terminal.__post_init__()
             if self.terminal.turn != self.host_turn:
                 raise ValueError("terminal must bind exact retained host turn")
-            if (
-                self.interruption is not None
-                and self.interruption.prior_state != "running"
+            if self.interruption is not None and self.interruption.prior_state not in (
+                "running",
+                "verification_pending",
             ):
                 raise ValueError(
                     "terminal reconciliation requires a retained running host"
                 )
             replace(
                 self,
-                state="unknown" if self.interruption is not None else "running",
+                state=(
+                    "unknown"
+                    if self.interruption is not None
+                    else "verification_pending" if pending is not None else "running"
+                ),
                 revision=self.revision - 1,
                 terminal=None,
                 completion=None,
@@ -288,6 +367,11 @@ class AppWorkRecord:
             raise ValueError("only terminal work retains a terminal link")
         if self.completion is not None:
             raise ValueError("only terminal work retains completion evidence")
+        if self.state == "verification_pending":
+            if pending is None or self.interruption is not None or self.revision != 5:
+                raise ValueError("exact pending verification revision required")
+            replace(self, state="running", revision=4, verification_pending=None)
+            return
         if self.state == "unknown":
             if type(self.interruption) is not WorkInterruption:
                 raise ValueError("typed interruption required")
