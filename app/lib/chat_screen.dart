@@ -196,6 +196,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
+        accountSession: widget.settings.accountSession,
       );
 
   @override
