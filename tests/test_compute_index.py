@@ -145,6 +145,42 @@ def test_native_submit_uses_real_composed_index_and_durable_placement(tmp_path, 
         assert len(placements) == 1
         payload = app.job_registry().view(placements[0].identity.job_id).metadata["placement_payload"]
         assert payload["inventory_scope"]["considered_count"] == 2
-        assert payload["inventory_scope"]["configured_count"] == 15
+        assert payload["inventory_scope"]["configured_count"] == 15  # Remote policy phase.
+        assert app.compute_inventory_page(limit=64)["configured_count"] == 16
+        app.close_compute()
+        assert app.compute_refresh_page(limit=64)["selected_remote_count"] == 15  # Explicit safe recreation.
     finally:
         app.close_providers()
+
+
+@pytest.mark.parametrize("size", [16, 64, 256])
+@pytest.mark.parametrize("policy", list(PlacementPolicy))
+@pytest.mark.parametrize("fallback", [False, True])
+def test_indexed_policy_matrix_mixed_evidence_models_workloads_and_ties(size, policy, fallback):
+    registry, snapshots = inventory(size, homogeneous=True)
+    canonical = []
+    for i, item in enumerate(snapshots):
+        variant = i % 8
+        item = replace(item, models=("model-a",) if variant != 1 else ("model-b",),
+            resources=replace(item.resources, free_ram_bytes=None if variant == 2 else 8 << 30),
+            health=NodeHealth.UNKNOWN if variant == 3 else NodeHealth.UNHEALTHY if variant == 4 else NodeHealth.HEALTHY,
+            advertised_workloads=frozenset({WorkloadKind.TEST}) if variant == 5 else item.advertised_workloads,
+            observed_at=NOW + timedelta(seconds=60) if variant == 6 else NOW - timedelta(seconds=31) if variant == 7 else NOW)
+        canonical.append(registry.observe(item, received_at=max(NOW, item.observed_at)))
+    query = request(placement_policy=policy, required_model="model-a", min_free_ram_bytes=1,
+                    allow_local_fallback=fallback)
+    scheduler = ComputePlacementScheduler()
+    if policy is PlacementPolicy.LOCAL_ONLY:
+        expected = scheduler.place(query, [item for item in canonical if item.node.local], now=NOW)
+    elif policy is PlacementPolicy.RANK_ALL:
+        expected = scheduler.place(query, canonical, now=NOW)
+    else:
+        expected = scheduler.place(query, [item for item in canonical if not item.node.local], now=NOW)
+        if expected.selected_node_id is None and fallback:
+            expected = scheduler.place(query, [item for item in canonical if item.node.local], now=NOW)
+    service = ComputeFabricService(registry=registry, scheduler=scheduler, transport=_Transport(),
+        local_worker=_LocalWorker(), now=lambda: NOW)
+    actual = service._place(query)
+    assert actual.selected_node_id == expected.selected_node_id
+    assert actual.ranked_node_ids == expected.ranked_node_ids
+    assert actual.ranked_node_ids == tuple(sorted(actual.ranked_node_ids))  # Exact score ties.
