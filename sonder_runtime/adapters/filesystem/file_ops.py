@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.git_discovery as git_discovery
 from sonder_runtime.platform import paths as runtime_paths
+from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
 
 # Preserve the packaged filesystem adapter's historical attribute shape while
 # callers migrate from the old root ``sonder_paths`` name.  This is an alias
@@ -325,6 +326,7 @@ def _control_plane_paths() -> set[Path]:
         fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
         root / "fanout.db", root / "fanout.db-wal", root / "fanout.db-shm", root / "fanout.db-journal",
     })
+    paths.update(live_control_plane_inventory().exact_files)
     return {_resolve_best_effort(path) for path in paths}
 
 
@@ -346,6 +348,7 @@ def _is_sensitive_control_path(path: Path) -> bool:
     name = path.name.lower()
     return (
         path in _control_plane_paths()
+        or live_control_plane_inventory().protects(path)
         or name in CONTROL_CONFIG_FILES
         or name in {
             "memory.db", "memory.db-wal", "memory.db-shm",
