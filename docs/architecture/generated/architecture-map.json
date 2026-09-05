@@ -43,7 +43,7 @@
       "python_files": []
     },
     {
-      "file_count": 268,
+      "file_count": 269,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -217,6 +217,7 @@
         "sonder_runtime/adapters/persistence/migration_rehearsal.py",
         "sonder_runtime/adapters/persistence/migrations.py",
         "sonder_runtime/adapters/persistence/operations_store.py",
+        "sonder_runtime/adapters/persistence/owned_sqlite.py",
         "sonder_runtime/adapters/persistence/postgres_binding.py",
         "sonder_runtime/adapters/persistence/postgres_child_migration.py",
         "sonder_runtime/adapters/persistence/postgres_continuation.py",
@@ -619,7 +620,7 @@
       ]
     },
     {
-      "file_count": 33,
+      "file_count": 34,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -648,6 +649,7 @@
         "sonder_runtime/bootstrap/model_gateways.py",
         "sonder_runtime/bootstrap/native_mcp.py",
         "sonder_runtime/bootstrap/owned_http_runtime.py",
+        "sonder_runtime/bootstrap/prepared_workbench.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
         "sonder_runtime/bootstrap/repl_host_selection.py",
         "sonder_runtime/bootstrap/repl_managed.py",
