@@ -24,6 +24,7 @@ from .query_export import (
     TranscriptRecord,
 )
 from .capture import CapturedRequest, CapturedTool, CapturedTurn, SessionCaptureService
+from .model_steps import run_legacy_model_step, run_model_step, wrap_model_generator
 from .continuity import RetentionExecution, SessionContinuityService
 from .trajectory import TrajectoryExport, TrajectoryStep, project_trajectory
 
@@ -54,6 +55,9 @@ __all__ = [
     "CapturedRequest",
     "CapturedTurn",
     "SessionCaptureService",
+    "run_model_step",
+    "run_legacy_model_step",
+    "wrap_model_generator",
     "RetentionExecution",
     "SessionContinuityService",
     "TrajectoryExport",
