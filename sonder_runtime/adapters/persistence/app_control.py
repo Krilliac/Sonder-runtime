@@ -9,7 +9,10 @@ import sqlite3
 import stat
 import time
 import uuid
-from ...application.ports.host_turn_links import ManagedHostTurnLink
+from ...application.ports.host_turn_links import (
+    ManagedHostTurnLink,
+    ManagedHostTerminalLink,
+)
 from ...application.ports.app_managed_work import (
     AppWorkRecord,
     PreparedAppWork,
@@ -76,6 +79,8 @@ def _encode(value, limit=131072):
             data.pop("host_turn")
         if value.interruption is None:
             data.pop("interruption")
+        if value.terminal is None:
+            data.pop("terminal")
     raw = json.dumps(
         data,
         sort_keys=True,
@@ -103,6 +108,11 @@ def _decode(raw, cls):
             raise ValueError()
         data = json.loads(raw, object_pairs_hook=_pairs)
         if cls is AppWorkRecord:
+            if data.get("terminal") is not None:
+                data["terminal"]["turn"] = ManagedHostTurnLink(
+                    **data["terminal"]["turn"]
+                )
+                data["terminal"] = ManagedHostTerminalLink(**data["terminal"])
             if data.get("interruption") is not None:
                 data["interruption"] = WorkInterruption(**data["interruption"])
             if data.get("host_turn") is not None:
@@ -507,6 +517,7 @@ class AppControlTransaction:
         run_id=None,
         host_turn=None,
         interruption=None,
+        terminal=None,
     ):
         positive(expected_revision)
         current = self.read_work(
@@ -526,27 +537,39 @@ class AppControlTransaction:
         ).record
         if record.state == "prepared":
             raise CommandConflict("work is not admitted")
+        if terminal is not None and record.state == "terminal":
+            if record.terminal == terminal and record.revision == expected_revision + 1:
+                return record
+            raise CommandConflict("terminal link is immutable")
         expected_state = (
             interruption.prior_state
             if interruption is not None
             else "admitted" if host_turn is None else "run_binding"
         )
+        if terminal is not None:
+            if record.state not in ("running", "unknown"):
+                raise CommandConflict("retained running host required")
+            expected_state = record.state
         if record.state != expected_state or record.revision != expected_revision:
             raise CommandConflict("work execution state changed")
-        updated = (
-            replace(
+        if terminal is not None:
+            updated = replace(
+                record,
+                state="terminal",
+                revision=record.revision + 1,
+                terminal=terminal,
+            )
+        elif interruption is not None:
+            updated = replace(
                 record,
                 state="unknown",
                 revision=record.revision + 1,
                 interruption=interruption,
             )
-            if interruption is not None
-            else (
-                replace(record, state="run_binding", revision=3, run_id=run_id)
-                if host_turn is None
-                else replace(record, state="running", revision=4, host_turn=host_turn)
-            )
-        )
+        elif host_turn is not None:
+            updated = replace(record, state="running", revision=4, host_turn=host_turn)
+        else:
+            updated = replace(record, state="run_binding", revision=3, run_id=run_id)
         self._write_one(
             "UPDATE app_managed_work SET state=?,revision=?,record=? "
             "WHERE id=? AND principal=? AND session=? AND revision=? AND state=?",
@@ -585,6 +608,12 @@ class AppControlTransaction:
             raise CommandConflict("typed interruption required")
         interruption.__post_init__()
         return self._link_work(interruption=interruption, **scope)
+
+    def record_work_terminal(self, *, terminal, **scope):
+        """Record a link validated by private host composition; no authority is minted."""
+        if type(terminal) is not ManagedHostTerminalLink:
+            raise CommandConflict("typed terminal link required")
+        return self._link_work(terminal=terminal, **scope)
 
     def _now(self):
         self._check()

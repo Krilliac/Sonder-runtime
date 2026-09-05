@@ -60,6 +60,7 @@ def test_link_cannot_admit_prepared_work_or_change_original_encoding(state):
     old.pop("run_id")
     old.pop("host_turn")
     old.pop("interruption", None)
+    old.pop("terminal", None)
     raw = json.dumps(old, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     assert _encode(record) == raw
     assert _decode(raw, AppWorkRecord) == record
@@ -122,3 +123,76 @@ def test_interruption_retains_links_and_never_allows_redispatch(state, phase):
         )
     with pytest.raises(CommandConflict):
         admit(reopened, process_incarnation="replacement")
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_terminal_link_reconciliation_is_exact_and_non_dispatchable(state, interrupted):
+    from sonder_runtime.application.ports.host_turn_links import ManagedHostTerminalLink
+    from sonder_runtime.application.ports.app_managed_work import WorkInterruption
+
+    store, work = preparation(state)
+    store.atomic(lambda tx: tx.prepare_work(work))
+    admit(store)
+    scope = dict(
+        principal_id=OWNER,
+        control_session_id="session1",
+        work_id="work1",
+        dispatch_id="dispatch1",
+        process_incarnation="process1",
+    )
+    store.atomic(
+        lambda tx: tx.bind_work_run(**scope, expected_revision=2, run_id="run1")
+    )
+    link = ManagedHostTurnLink(
+        "continuation1", "parent1", work.binding.canonical_host_id, OWNER, "run1", 1
+    )
+    record = store.atomic(
+        lambda tx: tx.bind_work_host(**scope, expected_revision=3, host_turn=link)
+    )
+    if interrupted:
+        record = store.atomic(
+            lambda tx: tx.mark_work_unknown(
+                **scope,
+                expected_revision=4,
+                interruption=WorkInterruption(
+                    "running", "FINAL_PUBLICATION_UNKNOWN", "a" * 64
+                )
+            )
+        )
+    terminal = ManagedHostTerminalLink(
+        link, "original1", "a" * 64, "final1", "b" * 64, "c" * 64, "d" * 64
+    )
+    with pytest.raises(ValueError):
+        store.atomic(
+            lambda tx: tx.record_work_terminal(
+                **scope,
+                expected_revision=record.revision,
+                terminal=replace(
+                    terminal, turn=replace(link, parent_session_id="foreign")
+                )
+            )
+        )
+    completed = store.atomic(
+        lambda tx: tx.record_work_terminal(
+            **scope, expected_revision=record.revision, terminal=terminal
+        )
+    )
+    assert completed.state == "terminal" and completed.terminal == terminal
+    assert completed.interruption == record.interruption
+    assert (
+        store.atomic(
+            lambda tx: tx.record_work_terminal(
+                **scope, expected_revision=record.revision, terminal=terminal
+            )
+        )
+        == completed
+    )
+    with pytest.raises(CommandConflict):
+        store.atomic(
+            lambda tx: tx.record_work_terminal(
+                **scope,
+                expected_revision=record.revision,
+                terminal=replace(terminal, output_digest="e" * 64)
+            )
+        )
+    assert admit(store).record == completed and not admit(store).newly_admitted

@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from .host_turn_links import ManagedHostTurnLink
+from .host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink
 
 from .app_control import digest as require_digest
 from .app_control import (
@@ -191,12 +191,35 @@ class AppWorkRecord:
     run_id: str = ""
     host_turn: ManagedHostTurnLink | None = None
     interruption: WorkInterruption | None = None
+    terminal: ManagedHostTerminalLink | None = None
 
     def __post_init__(self):
         if type(self.prepared) is not PreparedAppWork:
             raise ValueError("typed prepared work required")
         self.prepared.__post_init__()
         positive(self.revision)
+        if self.state == "terminal":
+            if type(self.terminal) is not ManagedHostTerminalLink:
+                raise ValueError("typed terminal link required")
+            self.terminal.__post_init__()
+            if self.terminal.turn != self.host_turn:
+                raise ValueError("terminal must bind exact retained host turn")
+            if (
+                self.interruption is not None
+                and self.interruption.prior_state != "running"
+            ):
+                raise ValueError(
+                    "terminal reconciliation requires a retained running host"
+                )
+            replace(
+                self,
+                state="unknown" if self.interruption is not None else "running",
+                revision=self.revision - 1,
+                terminal=None,
+            )
+            return
+        if self.terminal is not None:
+            raise ValueError("only terminal work retains a terminal link")
         if self.state == "unknown":
             if type(self.interruption) is not WorkInterruption:
                 raise ValueError("typed interruption required")
