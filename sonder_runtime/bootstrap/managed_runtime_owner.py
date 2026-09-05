@@ -33,10 +33,18 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
         self._tracked = 0
         self._cutover_manifest = self._cutover_bundle = self._cutover_selection = None
         self._cutover_stores = ()
-        self._selection = SQLiteChildMigrationStore(self.path / "children.sqlite")
-        self._catalog = set()
-        self._activations = {}
-        _register_host_issuer(self, self._require_quiescent)
+        self._selection = None
+        try:
+            self._selection = SQLiteChildMigrationStore(self.path / "children.sqlite")
+            self._catalog = set()
+            self._activations = {}
+            _register_host_issuer(self, self._require_quiescent)
+        except BaseException:
+            try:
+                _unregister_host_issuer(self)
+            finally:
+                DisposableRuntimeOwner.close(self)
+            raise
 
     @property
     def selected_store(self):
