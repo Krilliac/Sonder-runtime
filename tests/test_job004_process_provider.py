@@ -1449,3 +1449,23 @@ def test_prepared_scope_memory_limit_preserves_exact_cleanup_owner(cancel):
     finally:
         if "scope-memory" in provider._processes:
             provider.cancel("scope-memory", reason="test fixture cleanup")
+
+
+@pytest.mark.parametrize("key", ["SECRET_TOKEN", "LD_PRELOAD", "DBUS_SESSION_BUS_ADDRESS"])
+def test_unsupported_isolated_systemd_environment_refuses_before_launch(key):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from sonder_runtime.adapters.extensions.memory_limits import NativeExtensionMemoryLimiter, ExtensionMemoryLimitUnsupported
+    commands = []
+    launches = []
+    limiter = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", environ={}, geteuid=lambda: 1000),
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}",
+        command_runner=lambda *args, **kwargs: commands.append(args))
+    provider = SubprocessJobProvider(DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: launches.append(args), platform_name="posix", memory_limiter=limiter)
+    request = replace(_request("unsupported-env"), require_job_scope=True, inherit_environment=False,
+        environment=((key, "secret-value"),))
+    with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported keys"):
+        provider.start(request)
+    assert not launches and not commands and not provider._processes and not provider._memory_tokens

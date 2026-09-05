@@ -506,6 +506,8 @@ def test_real_test_process_receives_no_ambient_credentials_or_controls(
     inherited = {name.upper() for name in json.loads(result["output"])}
     assert not inherited.intersection(name.upper() for name in names)
     assert not inherited.intersection({"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"})
+    from sonder_runtime.adapters.lane_tests import _minimal_environment
+    assert inherited == {name.upper() for name, _ in _minimal_environment(sys.executable)}
     if sys.platform == "win32":
         assert "SYSTEMROOT" in inherited
 

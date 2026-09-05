@@ -217,7 +217,10 @@ def test_isolated_scope_bus_context_is_wrapper_only(user_scope):
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
     result = limiter.isolated_process_environment(prepared, argv, environment)
     assert result.token is prepared.token
-    assert result.argv[-8:] == ("/usr/bin/env", "-i", "--", "LANG=C.UTF-8", "PATH=/usr/bin:/bin", *argv)
+    if not user_scope:
+        assert result is prepared
+        return
+    assert result.argv[-7:] == ("/usr/bin/env", "-u", "DBUS_SESSION_BUS_ADDRESS", "--", *argv)
     wrapper = result.launch_options["env"]
     assert "SECRET" not in wrapper
     assert "malicious" not in result.argv
@@ -226,3 +229,15 @@ def test_isolated_scope_bus_context_is_wrapper_only(user_scope):
         assert wrapper["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
     else:
         assert wrapper == environment
+
+
+@pytest.mark.parametrize("key", ["LD_PRELOAD", "LD_LIBRARY_PATH", "GLIBC_TUNABLES", "SECRET_TOKEN", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SYSTEMD_UNIT_PATH"])
+def test_isolated_scope_rejects_unsupported_environment_without_values_in_argv(key):
+    limiter = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", environ={}, geteuid=lambda: 1000),
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}")
+    argv = ("/usr/bin/python3", "-c", "pass")
+    prepared = limiter.prepare_process_job("unsupported-env", argv, 1024 * 1024, 3)
+    with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported keys"):
+        limiter.isolated_process_environment(prepared, argv, {key: "secret-must-never-enter-argv"})
+    assert "secret-must-never-enter-argv" not in " ".join(prepared.argv)
