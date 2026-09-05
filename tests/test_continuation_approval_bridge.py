@@ -60,3 +60,48 @@ def test_rule_allow_is_policy_evidence_without_approval_nonce(tmp_path):
     assert allowed.source == "policy"
     assert allowed.approval_nonce == ""
     assert allowed.decision_id
+
+
+def test_consumption_exception_never_becomes_resumable_pending(tmp_path):
+    class UncertainLedger(ApprovalLedger):
+        def consume(self, *args, **kwargs):
+            super().consume(*args, **kwargs)
+            raise OSError("lost response")
+    ledger = UncertainLedger(tmp_path / "approvals.db")
+    issued = ledger.issue("workspace_run", permission_modes.call_digest("workspace_run", {}),
+                          approver="operator")
+    with pytest.raises(PermissionError, match="APPROVAL_OUTCOME_UNKNOWN"):
+        bridge(ledger).authorize("workspace_run", {}, surface="agent", expires_at=time.time() + 60)
+    assert ledger.get(issued.nonce).spent
+    assert ledger.pending() == []
+
+
+def test_runtime_home_change_cannot_redirect_decision_ledger(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.security import approval_ledger as module
+    selected = {"path": str(tmp_path / "first.db")}
+    monkeypatch.setattr(module.runtime_paths, "state_path", lambda *args: selected["path"])
+    ledger = ApprovalLedger()
+    args = {"program": "python"}
+    issued = ledger.issue("workspace_run", permission_modes.call_digest("workspace_run", args), approver="operator")
+    def decide(tool, **kwargs):
+        selected["path"] = str(tmp_path / "second.db")
+        return permission_modes.decide(tool, interactive=False, mode="manual", rule_lookup=lambda _: None, **kwargs)
+    gate = ContinuationApprovalBridge(ledger=ledger, decide=decide, digest_call=permission_modes.call_digest)
+    allowed = gate.authorize("workspace_run", args, surface="agent", expires_at=time.time() + 60)
+    assert allowed.approval_nonce == issued.nonce
+    assert not (tmp_path / "second.db").exists()
+
+
+def test_policy_decides_frozen_copy_of_caller_arguments(tmp_path):
+    args = {"program": "python", "args": ["original"]}
+    digest = permission_modes.call_digest("workspace_run", args)
+    def decide(tool, **kwargs):
+        args["args"][0] = "changed"
+        assert kwargs["arguments"]["args"] == ["original"]
+        return permission_modes.decide(tool, interactive=False, mode="manual",
+            rule_lookup=lambda _: {"action": "allow", "pattern": tool}, **kwargs)
+    gate = ContinuationApprovalBridge(ledger=ApprovalLedger(tmp_path / "approvals.db"),
+        decide=decide, digest_call=permission_modes.call_digest)
+    result = gate.authorize("workspace_run", args, surface="agent", expires_at=time.time() + 60)
+    assert result.call_digest == digest
+    assert result.decision_id.startswith("policy:rule:")

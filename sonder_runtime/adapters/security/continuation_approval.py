@@ -1,6 +1,7 @@
 """Private bridge from the actual permission gate to continuation receipts."""
 
 import math
+import json
 import time
 import uuid
 
@@ -10,17 +11,28 @@ from sonder_runtime.application.ports.lane_continuation import (
 from .approval_ledger import Approval, PendingCall, PENDING_RETENTION_SECONDS
 
 
+class ApprovalOutcomeUnknown(PermissionError):
+    """A potentially consumed approval must not return to resumable pending."""
+
+
 class _ObservedLedger:
     def __init__(self, ledger):
         self.ledger = ledger
         self.consumed = None
         self.pending = None
+        self.consume_failed = False
 
     def consume(self, *args, **kwargs):
-        self.consumed = self.ledger.consume(*args, **kwargs)
+        try:
+            self.consumed = self.ledger.consume(*args, **kwargs)
+        except Exception:
+            self.consume_failed = True
+            raise
         return self.consumed
 
     def record_pending(self, *args, **kwargs):
+        if self.consume_failed:
+            raise ApprovalOutcomeUnknown("APPROVAL_OUTCOME_UNKNOWN")
         self.pending = self.ledger.record_pending(*args, **kwargs)
         return self.pending
 
@@ -36,13 +48,26 @@ class ContinuationApprovalBridge:
         if (type(expires_at) not in {int, float} or not math.isfinite(expires_at)
                 or expires_at <= time.time()):
             raise PermissionError("original approval authority has expired")
-        digest = self._digest(tool, arguments)
+        # Detached canonical bytes bind policy decisions to the same complete
+        # payload even if the original caller mutates its argument dictionary.
+        if not isinstance(arguments, dict):
+            raise ValueError("exact approval arguments must be a mapping")
+        encoded = json.dumps(arguments, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode()
+        if len(encoded) > 65536:
+            raise ValueError("exact approval arguments exceed bound")
+        frozen_arguments = json.loads(encoded)
+        digest = self._digest(tool, frozen_arguments)
         # Validate exact identity before a potentially consuming operation.
         PendingApprovalEvidence(tool, digest, surface, digest[:16], expires_at)
-        observer = _ObservedLedger(self._ledger)
-        decision = self._decide(tool, arguments=arguments, surface=surface,
+        pinned = self._ledger.pinned()
+        observer = _ObservedLedger(pinned)
+        decision = self._decide(tool, arguments=frozen_arguments, surface=surface,
                                 approval_ledger=observer)
+        if observer.consume_failed:
+            raise ApprovalOutcomeUnknown("APPROVAL_OUTCOME_UNKNOWN")
         if (decision.tool != tool or decision.call_id != digest[:16]
+                or self._digest(tool, frozen_arguments) != digest
                 or time.time() >= expires_at):
             raise PermissionError("permission decision identity or deadline changed")
         if decision.allowed is True:
@@ -53,7 +78,7 @@ class ContinuationApprovalBridge:
                         or not receipt.spent or receipt.revoked
                         or receipt.expires_ts <= time.time()):
                     raise PermissionError("exact consumed approval evidence unavailable")
-                confirmed = self._ledger.get(receipt.nonce)
+                confirmed = pinned.get(receipt.nonce)
                 if confirmed != receipt:
                     raise PermissionError("consumed approval receipt changed")
                 return GrantedApprovalEvidence(tool, digest, surface,
@@ -62,12 +87,12 @@ class ContinuationApprovalBridge:
             if decision.source not in {"rule", "mode"}:
                 raise PermissionError("unsupported continuation policy allowance")
             return GrantedApprovalEvidence(tool, digest, surface,
-                "policy:" + uuid.uuid4().hex, "", expires_at, "policy")
+                "policy:" + decision.source + ":" + uuid.uuid4().hex, "", expires_at, "policy")
         if decision.source == "unattended":
             pending = observer.pending
             if (isinstance(pending, PendingCall) and pending.tool == tool
                     and pending.digest == digest and pending.surface == surface):
-                confirmed = self._ledger.resolve_call(digest)
+                confirmed = pinned.resolve_call(digest)
                 if (confirmed.tool != tool or confirmed.digest != digest
                         or confirmed.surface != surface
                         or confirmed.first_ts != pending.first_ts):
