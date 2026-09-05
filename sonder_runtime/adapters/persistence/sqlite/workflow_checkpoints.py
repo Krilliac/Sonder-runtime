@@ -1,7 +1,9 @@
 """SQLite adapter for the typed SEAM-010 workflow checkpoint port."""
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from contextlib import contextmanager
+
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 
 import json
 from pathlib import Path
@@ -32,10 +34,11 @@ class SQLiteWorkflowCheckpointRepository(WorkflowRepository):
         with self._connect() as connection:
             connection.executescript(_DDL)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = owned_sqlite_connect(str(self._path), timeout=5.0)
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+    @contextmanager
+    def _connect(self):
+        with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            yield connection
 
     @staticmethod
     def _decode(row: tuple[object, ...] | None) -> WorkflowCheckpoint | None:
