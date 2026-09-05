@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import time
 from typing import Callable, Mapping, Protocol
+from threading import RLock
 
 
 class ExtensionMemoryLimitError(RuntimeError):
@@ -55,59 +56,65 @@ class PreparedProcessContainment:
 
 
 class _WindowsJobToken:
-
-    def __init__(
-        self, handle, close_handle, *, query_active, terminate, identity=""
-    ) -> None:
-        import threading
-
-        self._handle, self._close_handle = handle, close_handle
-        self._query_active, self._terminate = query_active, terminate
-        self.identity = identity
-        self._lock = threading.RLock()
+    def __init__(self, handle, close_handle) -> None:
+        self._handle = handle
+        self._close_handle = close_handle
+        self._lock = RLock()
 
     def quiesce(self, *, force: bool) -> ProcessContainmentResult:
-        import time
+        """Prove this retained job is empty; never infer membership from PIDs."""
+        import ctypes
+        from ctypes import wintypes
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
 
         with self._lock:
-            if not self._handle:
-                return ProcessContainmentResult(
-                    False, detail="job handle already closed"
-                )
-            forced = False
-            try:
-                active = self._query_active(self._handle)
-                if active and force:
-                    if not self._terminate(self._handle):
-                        return ProcessContainmentResult(
-                            False, detail="TerminateJobObject failed"
-                        )
-                    forced = True
-                end = time.monotonic() + 2
-                while active and force and time.monotonic() < end:
-                    time.sleep(0.01)
-                    active = self._query_active(self._handle)
-                return ProcessContainmentResult(
-                    active == 0,
-                    forced=forced,
-                    detail="" if active == 0 else "Windows job remains populated",
-                )
-            except OSError:
-                return ProcessContainmentResult(
-                    False, forced=forced, detail="Windows job accounting unavailable"
-                )
+            if self._handle is None:
+                return ProcessContainmentResult(False, detail="job handle is no longer held")
+            kernel32 = ctypes.windll.kernel32
+            query = kernel32.QueryInformationJobObject
+            query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+            query.restype = wintypes.BOOL
+
+            def active():
+                result = Accounting()
+                if not query(self._handle, 1, ctypes.byref(result), ctypes.sizeof(result), None):
+                    raise ExtensionMemoryLimitError("job accounting query failed")
+                return result.ActiveProcesses
+
+            if active() == 0:
+                return ProcessContainmentResult(True)
+            if not force:
+                return ProcessContainmentResult(False, detail="owned job still contains processes")
+            terminate = kernel32.TerminateJobObject
+            terminate.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            terminate.restype = wintypes.BOOL
+            if not terminate(self._handle, 1):
+                return ProcessContainmentResult(False, detail="owned job termination failed")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if active() == 0:
+                    return ProcessContainmentResult(True, forced=True)
+                time.sleep(0.02)
+            return ProcessContainmentResult(False, forced=True, detail="owned job cleanup deadline elapsed")
 
     def close(self) -> None:
         with self._lock:
-            if self._handle:
-                if not self.quiesce(force=True).complete:
-                    raise ExtensionMemoryLimitError(
-                        "Windows job is not proven quiescent"
-                    )
-                if not self._close_handle(self._handle):
-                    raise ExtensionMemoryLimitError(
-                        "CloseHandle failed for Windows job"
-                    )
+            handle = self._handle
+            if handle:
+                result = self._close_handle(handle)
+                if result is not None and not result:
+                    raise ExtensionMemoryLimitError("owned job handle close failed")
                 self._handle = None
 
 

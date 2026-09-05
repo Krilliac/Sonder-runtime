@@ -636,6 +636,11 @@ class SubprocessJobProvider:
     def poll(self, job_id: str):
         return self._registry.poll(job_id)
 
+    def snapshot_output_readers(self, job_id: str):
+        """Retain exact owned handles for a containing host's cleanup proof."""
+        with self._timer_lock:
+            return tuple(self._output_threads.get(job_id, ()))
+
     def stream(
         self,
         job_id: str,
