@@ -26,7 +26,7 @@ application = build_application(config=config)
 install_owned_application(application)
 from sonder_runtime.bootstrap.app_managed_work import AppManagedWorkDispatcher
 from sonder_runtime.bootstrap.managed_app_work import install_owned_app_work_slot, register_owned_app_work, require_owned_app_work, seal_owned_app_work
-from sonder_runtime.application.runtime_resources import ApplicationResourceOwners
+from sonder_runtime.application.runtime_resources import ApplicationResourceOwners, ComponentCloseProof
 from sonder_runtime.bootstrap.managed_configuration import COMPONENTS, CLOSE_ORDER
 from sonder_runtime.application.ports.runtime_owner import OwnerRefused, OwnerUnsupported
 def refused(kind, call):
@@ -59,7 +59,7 @@ try:
             native.shutdown()
             unowned._executor = original
         value = dispatcher(application)
-        register_owned_app_work(application, value)
+        register_owned_app_work(application, value).commit()
         assert require_owned_app_work(application) is value
         refused(OwnerRefused, lambda: register_owned_app_work(application, value))
         refused(OwnerRefused, lambda: require_owned_app_work(object()))
@@ -70,6 +70,56 @@ try:
         result = resources.close(timeout=2)
         assert next(row for row in result.components if row.component == 'app-work').state == 'CLOSED'
         refused(OwnerRefused, lambda: require_owned_app_work(application))
+    elif mode == 'rollback_pending':
+        value = dispatcher(application)
+        lease = register_owned_app_work(application, value)
+        entered, release = Event(), Event()
+        value._executor.submit(lambda: (entered.set(), release.wait(5)))
+        assert entered.wait(2)
+        began = time.monotonic()
+        refused(OwnerRefused, lambda: lease.rollback(timeout=.01))
+        assert time.monotonic() - began < .5
+        refused(OwnerRefused, lambda: register_owned_app_work(application, dispatcher(application)))
+        refused(OwnerRefused, lease.commit)
+        refused(OwnerRefused, lambda: seal_owned_app_work(application))
+        release.set()
+        lease.rollback(timeout=2)
+        refused(OwnerUnsupported, lambda: require_owned_app_work(application))
+    elif mode == 'constructor':
+        from types import SimpleNamespace
+        import sonder_runtime.bootstrap.app_managed_work_http as http
+        http.AppManagedAuthority = lambda *args: object()
+        http._AppWorkbench = lambda *args: object()
+        http.AppManagedWorkHttpBinding.inventory = lambda self: None
+        control = SimpleNamespace(_config=lambda: None)
+        engine = SimpleNamespace(approval_ledger=lambda: SimpleNamespace(pinned=lambda: object()))
+        def fail_after_registration(app):
+            assert require_owned_app_work(app).application is app
+            raise PermissionError('injected post-registration validation failure')
+        refused(PermissionError, lambda: http.AppManagedWorkHttpBinding(control,
+            application=application, runtime=object(), permission_engine=engine,
+            register_owned=register_owned_app_work, require_owned=fail_after_registration))
+        refused(OwnerUnsupported, lambda: require_owned_app_work(application))
+        service = http.AppManagedWorkHttpBinding(control,
+            application=application, runtime=object(), permission_engine=engine,
+            register_owned=register_owned_app_work, require_owned=require_owned_app_work)
+        assert require_owned_app_work(application) is service.dispatcher
+        seal_owned_app_work(application)
+        assert resources.close(timeout=2).clean
+    elif mode == 'rollback':
+        value = dispatcher(application)
+        lease = register_owned_app_work(application, value)
+        refused(OwnerRefused, lambda: seal_owned_app_work(application))
+        lease.rollback(timeout=2)
+        refused(OwnerUnsupported, lambda: require_owned_app_work(application))
+        replacement = dispatcher(application)
+        current = register_owned_app_work(application, replacement)
+        refused(OwnerRefused, lambda: lease.rollback(timeout=2))
+        current.commit()
+        refused(OwnerRefused, lambda: current.rollback(timeout=2))
+        seal_owned_app_work(application)
+        assert require_owned_app_work(application) is replacement
+        assert resources.close(timeout=2).clean
     elif mode == 'late':
         ended = dispatcher(application)
         ended.close()
@@ -81,16 +131,22 @@ try:
         assert resources.close(timeout=2).clean
     else:
         value = dispatcher(application)
-        register_owned_app_work(application, value)
+        register_owned_app_work(application, value).commit()
         entered, release = Event(), Event()
         future = value._executor.submit(lambda: (entered.set(), release.wait(5)))
         assert entered.wait(2)
+        queued = value._executor.submit(lambda: (_ for _ in ()).throw(AssertionError('queued effect ran')))
         results = []
+        later = []
+        resources.initialize('application', lambda: object(),
+            lambda resource, timeout: (later.append(True), ComponentCloseProof('application', True, 'test-later-cleanup'))[1])
         closer = Thread(target=lambda: results.append(resources.close(timeout=.01)))
         closer.start()
         time.sleep(.1)
-        assert closer.is_alive() and not results
+        assert not closer.is_alive() and len(results) == 1 and later == [True]
+        assert not results[0].clean
         refused(OwnerRefused, lambda: require_owned_app_work(application))
+        assert queued.cancelled()
         release.set()
         closer.join(2)
         assert not closer.is_alive()
@@ -105,7 +161,7 @@ finally:
 '''
 
 
-@pytest.mark.parametrize("mode", ["identity", "late", "inflight"])
+@pytest.mark.parametrize("mode", ["identity", "late", "inflight", "rollback", "constructor", "rollback_pending"])
 def test_real_owned_dispatcher_slot(tmp_path, mode):
     environment = dict(os.environ, SONDER_HOME=str(tmp_path / "state"), SONDER_OLLAMA_WORKERS="")
     result = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path / "state"), mode],

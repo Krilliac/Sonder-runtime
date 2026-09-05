@@ -1,5 +1,6 @@
 """Single child-owned dispatcher slot, installed before HTTP publication."""
 from threading import RLock
+from time import monotonic
 
 from ..application.ports.runtime_owner import OwnerRefused, OwnerUnsupported
 from ..application.runtime_resources import ApplicationResourceOwners, ComponentCloseProof
@@ -27,6 +28,9 @@ class _AppWorkSlot:
         self.dispatcher = None
         self.sealed = self.closed = False
         self.lock = RLock()
+        self._drain_thread = None
+        self._drain_succeeded = False
+        self._lease = None
 
     def register(self, dispatcher):
         from .app_managed_work import AppManagedWorkDispatcher
@@ -41,6 +45,8 @@ class _AppWorkSlot:
             if not self.workers.owns_pool(dispatcher._executor):
                 raise OwnerRefused("dispatcher executor is not owned by this runtime")
             self.dispatcher = dispatcher
+            self._lease = OwnedAppWorkRegistration(self, dispatcher)
+            return self._lease
 
     def require(self):
         with self.lock:
@@ -49,22 +55,73 @@ class _AppWorkSlot:
                 raise OwnerRefused("owned app work admission is closed")
             if self.dispatcher is None:
                 raise OwnerUnsupported("owned app work is not configured")
+            if self.dispatcher._closed:
+                raise OwnerRefused("dispatcher admission is closed")
             if self.dispatcher.application is not self.application:
                 raise OwnerRefused("dispatcher Application identity changed")
             return self.dispatcher
 
-    def close(self, timeout):
+    def _drain(self, timeout):
         from .app_managed_work import AppManagedWorkDispatcher
+        if type(timeout) not in (int, float) or not 0 <= timeout <= 30:
+            raise ValueError("bounded drain timeout required")
+        deadline = monotonic() + timeout
         with self.lock:
-            self.closed = True
             dispatcher = self.dispatcher
-        if dispatcher is not None:
+            if dispatcher is None:
+                return True
             if dispatcher.application is not self.application:
                 raise OwnerRefused("dispatcher cleanup Application identity changed")
-            # Known concrete local drain, not a callback supplied by a request.
-            # The subsequent worker/SQLite/process proofs remain mandatory.
-            AppManagedWorkDispatcher.close(dispatcher)
-        return ComponentCloseProof("app-work", True, "dispatcher-local-drain")
+            AppManagedWorkDispatcher.stop_admissions(dispatcher)
+            if self._drain_thread is None:
+                def drain():
+                    try:
+                        AppManagedWorkDispatcher.close(dispatcher, cancel_pending=True)
+                    except BaseException:
+                        return
+                    self._drain_succeeded = True
+                # Retained by both the slot and the concrete worker owner. A
+                # timed-out Python callback is never represented as terminated.
+                self._drain_thread = self.workers.thread(target=drain, name="app-work-drain")
+                self._drain_thread.start()
+            thread = self._drain_thread
+        thread.join(max(0, deadline - monotonic()))
+        return not thread.is_alive() and self._drain_succeeded and monotonic() <= deadline
+
+    def close(self, timeout):
+        with self.lock:
+            self.closed = True
+        done = self._drain(timeout)
+        return ComponentCloseProof("app-work", done,
+            "dispatcher-local-drain" if done else "dispatcher-drain-unresolved")
+
+
+class OwnedAppWorkRegistration:
+    """Issuer-bound startup lease; no request can manufacture slot ownership."""
+    def __init__(self, slot, dispatcher):
+        self._slot, self._dispatcher = slot, dispatcher
+        self._committed = False
+
+    def commit(self):
+        slot = self._slot
+        with slot.lock:
+            _current(slot.application)
+            if slot.closed or slot.sealed or slot._drain_thread is not None or slot._lease is not self or slot.dispatcher is not self._dispatcher:
+                raise OwnerRefused("registration lease is no longer current")
+            self._committed = True
+
+    def rollback(self, timeout=2):
+        slot = self._slot
+        with slot.lock:
+            if slot.closed or slot.sealed or self._committed or slot._lease is not self or slot.dispatcher is not self._dispatcher:
+                raise OwnerRefused("registration rollback is unavailable")
+        if not slot._drain(timeout):
+            raise OwnerRefused("registration cleanup remains unresolved")
+        with slot.lock:
+            if slot.closed or slot.sealed or self._committed or slot._lease is not self:
+                raise OwnerRefused("registration changed during cleanup")
+            slot.dispatcher = slot._lease = slot._drain_thread = None
+            slot._drain_succeeded = False
 
 
 def install_owned_app_work_slot(application, resources, workers):
@@ -96,7 +153,7 @@ def _slot(application):
 
 
 def register_owned_app_work(application, dispatcher):
-    _slot(application).register(dispatcher)
+    return _slot(application).register(dispatcher)
 
 
 def require_owned_app_work(application):
@@ -109,4 +166,6 @@ def seal_owned_app_work(application):
         _current(application)
         if slot.closed:
             raise OwnerRefused("owned app work slot is closed")
+        if slot._lease is not None and not slot._lease._committed:
+            raise OwnerRefused("app work registration remains incomplete")
         slot.sealed = True

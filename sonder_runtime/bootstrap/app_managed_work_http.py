@@ -181,11 +181,16 @@ class AppManagedWorkHttpBinding:
             authorize_dispatch=self._approve_work,
             terminal_eligibility=self._eligibility,
         )
+        registration = None
         try:
-            register_owned(application, self.dispatcher)
+            registration = register_owned(application, self.dispatcher)
             self.require_current()
+            registration.commit()
         except BaseException:
-            self.dispatcher.close()
+            if registration is not None:
+                registration.rollback(timeout=2)
+            else:
+                self.dispatcher.close()
             raise
 
     def require_current(self):
