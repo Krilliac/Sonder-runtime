@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'account_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -33,14 +35,14 @@ class PlatformCredentialStore implements CredentialStore {
 class Settings {
   static const _kServer = 'sonder_server_url';
   static const _kKey = 'sonder_api_key';
+  static const _kAccount = 'sonder_account_session';
   static const _kDark = 'sonder_dark_mode';
   static const _kThemeMode = 'sonder_theme_mode';
   static const _kModel = 'sonder_model';
   static const _kAllowHosted = 'sonder_allow_hosted';
   static const _kContextSize = 'sonder_context_size';
   static const _kKeepServerRunning = 'sonder_keep_server_running';
-  static const _kAllowApproximateLocation =
-      'sonder_allow_approximate_location';
+  static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
   static const _kLauncherToken = 'sonder_launcher_token';
   static const _credentials = PlatformCredentialStore();
@@ -54,6 +56,7 @@ class Settings {
 
   String serverUrl;
   String apiKey;
+  AccountSession? accountSession;
 
   /// `dark`, `light` or `system`. Dark is the primary theme; `system`
   /// follows the platform. [darkMode] is derived for older call sites.
@@ -70,6 +73,7 @@ class Settings {
   Settings({
     this.serverUrl = 'http://127.0.0.1:11435',
     this.apiKey = '',
+    this.accountSession,
     this.themeMode = 'dark',
     this.model = defaultModel,
     this.allowHosted = false,
@@ -127,7 +131,8 @@ class Settings {
   /// if the keychain is unavailable, do not fall back to that plaintext value.
   static Future<Settings> load({CredentialStore? credentialStore}) async {
     final p = await SharedPreferences.getInstance();
-    final credentials = credentialStore ?? testingCredentialStore ?? _credentials;
+    final credentials =
+        credentialStore ?? testingCredentialStore ?? _credentials;
     final apiKey = await _readCredential(
       credentials: credentials,
       preferences: p,
@@ -138,7 +143,22 @@ class Settings {
       preferences: p,
       key: _kLauncherToken,
     );
+    AccountSession? account;
+    try {
+      final raw = await credentials.read(_kAccount);
+      if (raw != null) {
+        final data = jsonDecode(raw) as Map<String, dynamic>;
+        account = AccountSession(
+            token: data['token'] as String, origin: data['origin'] as String);
+        if (!account.matches(p.getString(_kServer) ?? 'http://127.0.0.1:11435')) {
+          account = null;
+        }
+      }
+    } catch (_) {
+      account = null;
+    }
     return Settings(
+      accountSession: account,
       serverUrl: p.getString(_kServer) ?? 'http://127.0.0.1:11435',
       apiKey: apiKey,
       themeMode: _themeModeFrom(p),
@@ -164,7 +184,8 @@ class Settings {
   /// Writes bearer credentials only to the platform credential store.
   Future<void> save({CredentialStore? credentialStore}) async {
     final p = await SharedPreferences.getInstance();
-    final credentials = credentialStore ?? testingCredentialStore ?? _credentials;
+    final credentials =
+        credentialStore ?? testingCredentialStore ?? _credentials;
     // Empty fields are not enough evidence that an existing credential should
     // be erased: Settings is also constructed for first-run preferences and
     // platform/test environments that do not have a credential provider.
@@ -190,8 +211,17 @@ class Settings {
     } else {
       await p.remove(_kLauncherToken);
     }
+    final account = accountSession;
+    if (account != null && account.matches(serverUrl)) {
+      await credentials.write(_kAccount,
+          jsonEncode({'token': account.token, 'origin': account.origin}));
+    } else {
+      await credentials.delete(_kAccount);
+    }
+    await p.remove(_kAccount);
     await p.setString(_kServer, serverUrl.trim());
-    await p.setString(_kThemeMode, themeModes.contains(themeMode) ? themeMode : 'dark');
+    await p.setString(
+        _kThemeMode, themeModes.contains(themeMode) ? themeMode : 'dark');
     // Kept for builds that still read the boolean.
     await p.setBool(_kDark, darkMode);
     await p.setString(_kModel, model);
@@ -205,9 +235,11 @@ class Settings {
     await p.setString(_kLauncherUrl, launcherUrl.trim());
   }
 
-  /// Forgets the local account/API credential. This is a local sign-out: the
-  /// server has no logout route, so a separately copied bearer token remains
-  /// valid until its normal expiry or server-side revocation.
+  static Future<void> clearAccountSession({CredentialStore? credentialStore}) =>
+      _deleteCredential(
+          credentialStore ?? testingCredentialStore ?? _credentials, _kAccount);
+
+  /// Removes only the deployment API credential from this device.
   static Future<void> clearApiKey({CredentialStore? credentialStore}) =>
       _deleteCredential(
         credentialStore ?? testingCredentialStore ?? _credentials,

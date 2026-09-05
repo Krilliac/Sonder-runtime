@@ -1,3 +1,4 @@
+import 'package:sonder_runtime/account_session.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/settings.dart';
@@ -34,6 +35,26 @@ class _FailingCredentialStore implements CredentialStore {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('account record is secure, origin-bound and independent', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = _MemoryCredentialStore();
+    final settings = Settings(
+        serverUrl: 'https://host.test',
+        apiKey: 'deployment',
+        accountSession:
+            AccountSession(token: 'account', origin: 'https://host.test'));
+    await settings.save(credentialStore: store);
+    final restored = await Settings.load(credentialStore: store);
+    expect(restored.apiKey, 'deployment');
+    expect(restored.accountSession!.token, 'account');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.containsKey('sonder_account_session'), isFalse);
+    await prefs.setString('sonder_server_url', 'https://foreign.test');
+    expect(
+        (await Settings.load(credentialStore: store)).accountSession, isNull);
+    await Settings.clearAccountSession(credentialStore: store);
+    expect(store.values['sonder_api_key'], 'deployment');
+  });
   test('launcher URL is never derived from the configured chat host', () {
     final settings = Settings(serverUrl: 'https://sonder.example:11435/v1');
     expect(settings.effectiveLauncherUrl, '');
@@ -51,7 +72,8 @@ void main() {
       launcherToken: 'xxxxxxxxxxxxxxxxxxxxxxxx',
     );
     expect(embedded.usesHostLauncher, isFalse);
-    expect(embedded.launcherConfigurationError, contains('without credentials'));
+    expect(
+        embedded.launcherConfigurationError, contains('without credentials'));
 
     final weak = Settings(
       launcherUrl: 'https://host.test:11436',

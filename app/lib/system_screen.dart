@@ -72,6 +72,7 @@ class _SystemScreenState extends State<SystemScreen>
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
+        accountSession: widget.settings.accountSession,
       );
 
   SonderLauncherApi get _launcherApi => SonderLauncherApi(
