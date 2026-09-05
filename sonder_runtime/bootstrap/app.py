@@ -339,6 +339,7 @@ def build_application(
     update_activator=None,
     extension_provenance: ProvenanceInventory | None = None,
     control_plane_snapshot_service: ControlPlaneSnapshotService | None = None,
+    child_repository_factory=None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
 
@@ -898,7 +899,13 @@ def build_application(
                 raise ProviderLifecycleError('delegation service is closed')
             if delegation is None:
                 from .child_storage import compose_child_repository
-                continuation_repository = compose_child_repository(config or SonderConfig())
+                if child_repository_factory is None:
+                    continuation_repository = compose_child_repository(config or SonderConfig())
+                else:
+                    from .child_storage import HostChildRepositoryFactory
+                    if not isinstance(child_repository_factory, HostChildRepositoryFactory):
+                        raise TypeError("child repository factory requires trusted host composition")
+                    continuation_repository = child_repository_factory(config or SonderConfig())
                 continuation_service = DurableContinuationService(continuation_repository)
                 from ..adapters.conversational_subagents import conversational_runner_factory
                 subagent_provider = LocalSubagentProvider(

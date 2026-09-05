@@ -130,6 +130,16 @@ class PostgreSQLDurableContinuationRepository:
         ).fetchone()
         connection.commit()
         self._begin(connection)
+        if connection.execute(
+            "SELECT to_regclass('sonder_child.migration')"
+        ).fetchone()[0]:
+            migration = connection.execute(
+                "SELECT phase FROM sonder_child.migration WHERE id=1"
+            ).fetchone()
+            if migration is None or migration[0] != "ACTIVE":
+                raise ContinuationStorageFailure(
+                    "child migration has not activated this database"
+                )
         row = connection.execute(
             "SELECT owner_id,incarnation,clean FROM sonder_child.owner WHERE id=1 FOR UPDATE"
         ).fetchone()
