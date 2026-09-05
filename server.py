@@ -19644,6 +19644,24 @@ def _agent_turn(
                 activity_tracker.set_response_status("unverified", "delegated work or parent effects lack current validation")
                 activity_tracker.set_result_summary("delegated work or parent effects lack current validation")
             controller.terminal_projected = True
+        if controller is not None:
+            from sonder_runtime.application.ports.host_final import HostFinalFacts
+            final_class = 'ERROR' if failed else 'NORMAL'
+            for marker in (*autopilot_controller.FAILURE_PREFIXES, _AGENT_UNVERIFIED_PREFIX):
+                if final.lstrip().startswith(marker):
+                    final_class = marker.rstrip(':')
+                    break
+            final_sink = controller.capture_host_final if return_host_receipt else controller.stage_host_final
+            final_sink(final, HostFinalFacts(
+                tools=tuple(sorted(used_tool_names)), project_scope=project_scope,
+                mutation_observed=bool(mutated), validation_attempted=bool(validation_attempted),
+                validation_passed=bool(validated), terminal_class=final_class,
+                blockers=tuple(sorted(set(completion_blocking_failures) |
+                    (managed_plan.blockers if managed_plan is not None else set()))),
+                certificate_id=certificate_fields.get('verification_certificate_id', ''),
+                certificate_generation=certificate_fields.get('verification_generation', 0),
+                certificate_code=certificate_fields.get('verification_code', ''),
+            ))
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=final,
@@ -19665,7 +19683,8 @@ def _agent_turn(
         mismatch.
         """
         controller = _standalone_lanes.current()
-        if controller is not None and (controller.delegated_work or controller._escalation is not None):
+        if controller is not None and (controller._managed_factory is not None
+                or controller.delegated_work or controller._escalation is not None):
             return finish_final(text, failed=True)
         _teardown_speculation()
         text = str(text or "")

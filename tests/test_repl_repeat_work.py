@@ -38,6 +38,9 @@ def test_two_work_turns_reuse_same_persisted_conversation(
             controller.freeze_host_terminal(
                 json.dumps(result), terminal_class="NORMAL", blockers=()
             )
+            from sonder_runtime.application.ports.host_final import HostFinalFacts
+            controller.capture_host_final(json.dumps(result), HostFinalFacts(
+                (), str(project), False, False, False, 'NORMAL'))
             return result
 
     monkeypatch.setattr(server, "workbench_agent", work)
@@ -95,6 +98,13 @@ def test_actual_console_two_work_commands_share_owner_until_exit(
     monkeypatch.setattr(repl, "_startup_banner", lambda *_a: "")
     monkeypatch.setattr(repl, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(repl, "_named_command_gate", lambda *_a: (True, ""))
+    returned = []
+    original_work = repl._run_session_work
+    def captured_work(*args, **kwargs):
+        result = original_work(*args, **kwargs)
+        returned.append(result)
+        return result
+    monkeypatch.setattr(repl, '_run_session_work', captured_work)
     try:
         repl.main()
         assert models == ["m-code", "m-code"]
@@ -111,6 +121,14 @@ def test_actual_console_two_work_commands_share_owner_until_exit(
             )
             assert record["host_turn"]["ordinal"] == 2
             assert len(record["host_turn_history"]) == 1
+            from sonder_runtime.adapters.host_terminal_projection import TerminalProjectionCodec
+            codec = TerminalProjectionCodec()
+            finals = []
+            for turn in [*record['host_turn_history'], record['host_turn']]:
+                final = tx.terminal_projection(record['id'], record['principal_id'],
+                                               turn['final_receipt']['projection_id'])
+                finals.append(codec.decode(final.payload).output)
+            assert finals == returned
             assert store.owner_definitely_stopped(record["owner"])
     finally:
         application.close_providers(timeout=5)

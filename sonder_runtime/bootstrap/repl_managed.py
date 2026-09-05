@@ -179,7 +179,7 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
             with selector.scope(selection, context), control_plane_scope(additional_paths()), \
                     control_plane_scope(output_paths), managed_root_scope(lambda: current_context().workspace_roots), \
                     managed_controller_factory_scope(conversation.factory):
-                return current_run()
+                return conversation.finalize_result(current_run())
 
         def close():
             conversation.close()
