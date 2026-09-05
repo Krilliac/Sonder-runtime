@@ -1,6 +1,6 @@
 """Private, bounded composition of durable app work and managed host execution."""
 
-from concurrent.futures import ThreadPoolExecutor
+from ..platform.runtime_threads import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 import hashlib
 import threading

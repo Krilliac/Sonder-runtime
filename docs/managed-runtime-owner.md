@@ -44,7 +44,7 @@ is five seconds. This is not a bound on arbitrary model execution duration.
 
 Readiness evidence binds the actual process/job identity, namespace,
 incarnation, epoch, selected configuration and fixed component manifest. Clean
-evidence requires all six component entries to be closed: child runner/storage,
+evidence requires all seven component entries to be closed: app-work dispatcher, child runner/storage,
 specialized providers and compute, owned workers, exact HTTP sockets, SQLite
 handles, and the Application session repository. Provider closure uses the
 concrete registry's typed cleanup/unregister checks, not a generic
@@ -60,6 +60,19 @@ launch and public selected-store access; only the exact prepared operation may
 reconcile. The owner journal publishes the new configuration only after durable
 bundle COMPLETE. Losing a stop receipt response can be reconciled without
 retaining a stale live-process marker or authorizing a duplicate launch.
+
+The child installs one fixed app-work slot before listener construction.
+`register_owned_app_work(application, dispatcher)` accepts only the concrete
+dispatcher bound intrinsically to that exact owned Application, with its pool
+owned by the runtime's worker factory. Registration seals before listener
+publication. `require_owned_app_work(application)` returns only that existing
+registration; there is no lazy unowned fallback. The slot drains first during
+shutdown. The dispatcher's concrete close routine proves local submission and
+lifetime drain only; worker, SQLite and native process closure remain separate
+requirements. A late or failed close preserves an unresolved original receipt.
+The current fixed foreground configuration keeps app control disabled; an
+installed empty slot does not advertise managed work availability or construct
+an executor. Enabled app-work HTTP composition is a separate typed startup hook.
 
 ## Current limits and remaining work
 

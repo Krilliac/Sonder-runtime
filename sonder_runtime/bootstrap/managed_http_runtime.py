@@ -93,6 +93,8 @@ def _run(root, workspace, namespace, job_id, anchor):
     def close_application(application, timeout):
         return proof("application", application.session_repository().close(timeout=timeout), "session-connections-closed")
     application = resources.initialize("application", construct, close_application)
+    from .managed_app_work import install_owned_app_work_slot, seal_owned_app_work
+    install_owned_app_work_slot(application, resources, workers)
     application.session_repository()
     def close_children(application, timeout):
         application.close_delegation(timeout=timeout)
@@ -118,6 +120,7 @@ def _run(root, workspace, namespace, job_id, anchor):
     errors = []
     listener = []
     def factory(address, handler):
+        seal_owned_app_work(application)
         server = resources.initialize("http-sockets", lambda: ManagedHTTPServer(address, handler,
             workers=workers, request_timeout_seconds=descriptor["request_timeout_seconds"]),
             lambda resource, timeout: proof("http-sockets", resource.sockets_closed, "exact-listener-request-sockets"))
