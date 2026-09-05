@@ -1,0 +1,760 @@
+"""Durable app-control metadata on the existing private fleet database."""
+
+from dataclasses import asdict, replace
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import stat
+import time
+import uuid
+
+from ...application.ports.app_control import (
+    AppControlError,
+    AppControlLimits,
+    BindingPage,
+    BindingRecord,
+    CapacityExceeded,
+    CommandConflict,
+    CommandKey,
+    CommandReceipt,
+    CommandRecord,
+    ControlSessionRecord,
+    GrantSnapshot,
+    NotFound,
+    OutcomeUnknown,
+    SelectionRecord,
+    StoreUnavailable,
+    digest,
+    identifier,
+    principal,
+    positive,
+)
+
+_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS app_control_meta (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS app_control_sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL, runtime TEXT NOT NULL, record TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS app_control_sessions_principal ON app_control_sessions(principal)",
+    "CREATE TABLE IF NOT EXISTS app_host_bindings (position INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, host TEXT UNIQUE NOT NULL, principal TEXT NOT NULL, runtime TEXT NOT NULL, record TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS app_host_bindings_principal ON app_host_bindings(principal,position)",
+    "CREATE TABLE IF NOT EXISTS app_control_selections (principal TEXT NOT NULL, session TEXT NOT NULL REFERENCES app_control_sessions(id), record TEXT NOT NULL, PRIMARY KEY(principal,session))",
+    "CREATE TABLE IF NOT EXISTS app_control_commands (principal TEXT NOT NULL, scope TEXT NOT NULL, id TEXT NOT NULL, action TEXT NOT NULL, digest TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(principal,scope,id))",
+    "CREATE TABLE IF NOT EXISTS app_control_grant_revisions (runtime TEXT NOT NULL, grant_id TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source_digest TEXT NOT NULL, PRIMARY KEY(runtime,grant_id))",
+)
+
+
+def _encode(value, limit=131072):
+    raw = json.dumps(
+        asdict(value) if not isinstance(value, dict) else value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    if len(raw.encode("utf8")) > limit:
+        raise CapacityExceeded("control record exceeds byte bound")
+    return raw
+
+
+def _pairs(pairs):
+    data = {}
+    for k, v in pairs:
+        if k in data:
+            raise StoreUnavailable("duplicate stored key")
+        data[k] = v
+    return data
+
+
+def _decode(raw, cls):
+    try:
+        if type(raw) is not str or len(raw.encode("utf8")) > 131072:
+            raise ValueError()
+        data = json.loads(raw, object_pairs_hook=_pairs)
+        if cls in (BindingRecord, ControlSessionRecord):
+            grant = data["grant"]
+            for key in ("roots", "tools", "catalog_file_identity"):
+                grant[key] = tuple(grant[key])
+            data["grant"] = GrantSnapshot(**grant)
+        value = cls(**data)
+        if _encode(value) != raw:
+            raise ValueError()
+        return value
+    except Exception:
+        raise StoreUnavailable("invalid stored control record") from None
+
+
+def _authority_digest(grant):
+    data = asdict(grant)
+    data.pop("catalog_digest")
+    data.pop("catalog_file_identity")
+    return hashlib.sha256(_encode(data).encode()).hexdigest()
+
+
+def initialize_schema(conn):
+    """Caller owns an idle connection to an existing fleet database."""
+    if conn.in_transaction:
+        raise StoreUnavailable("schema initialization requires idle connection")
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fleet_agents'"
+    ).fetchone():
+        raise StoreUnavailable("existing fleet schema required")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in _SCHEMA:
+            conn.execute(statement)
+        conn.execute(
+            "INSERT OR IGNORE INTO app_control_meta VALUES (1,?)", (uuid.uuid4().hex,)
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+class SQLiteAppControlStore:
+    def __init__(self, path, *, limits=AppControlLimits(), clock=time.time):
+        raw = Path(path)
+        if not raw.is_absolute() or str(raw) != str(raw.resolve()):
+            raise StoreUnavailable("canonical fleet path required")
+        if type(limits) is not AppControlLimits or not callable(clock):
+            raise ValueError("typed limits and clock required")
+        self.path = str(raw)
+        self.limits = limits
+        self.clock = clock
+        self._file_identity = self._stat()
+        conn = self._connect()
+        try:
+            initialize_schema(conn)
+            self._identity = conn.execute(
+                "SELECT identity FROM app_control_meta WHERE id=1"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def _stat(self):
+        path = Path(self.path)
+        if str(path.parent) != str(path.parent.resolve()) or path.is_symlink():
+            raise StoreUnavailable("fleet source changed")
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or getattr(info, "st_file_attributes", 0) & 0x400
+        ):
+            raise StoreUnavailable("invalid fleet source")
+        for suffix in ("-wal", "-shm", "-journal"):
+            side = Path(self.path + suffix)
+            if side.exists() or side.is_symlink():
+                meta = side.lstat()
+                if (
+                    not stat.S_ISREG(meta.st_mode)
+                    or meta.st_nlink != 1
+                    or getattr(meta, "st_file_attributes", 0) & 0x400
+                    or side.is_symlink()
+                ):
+                    raise StoreUnavailable("invalid fleet sidecar")
+        return (info.st_dev, info.st_ino)
+
+    def _connect(self):
+        conn = sqlite3.connect(
+            Path(self.path).as_uri() + "?mode=rw", uri=True, timeout=5
+        )
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=FULL")
+        return conn
+
+    def _validate(self, conn):
+        # A borrowed connection must not redirect unqualified control queries
+        # through caller-owned temporary tables or views.
+        shadow = conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE name IN "
+            "('app_control_meta','app_control_sessions','app_host_bindings',"
+            "'app_control_selections','app_control_commands',"
+            "'app_control_grant_revisions') LIMIT 1"
+        ).fetchone()
+        if shadow:
+            raise StoreUnavailable("shadowed control schema refused")
+        databases = conn.execute("PRAGMA database_list").fetchall()
+        main = next((row[2] for row in databases if row[1] == "main"), None)
+        if (
+            main is None
+            or Path(main).resolve() != Path(self.path)
+            or self._stat() != self._file_identity
+        ):
+            raise StoreUnavailable("fleet connection identity mismatch")
+        row = conn.execute(
+            "SELECT identity FROM app_control_meta WHERE id=1"
+        ).fetchone()
+        if row is None or row[0] != self._identity:
+            raise StoreUnavailable("fleet schema identity mismatch")
+        if (
+            conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1
+            or conn.execute("PRAGMA synchronous").fetchone()[0] != 2
+        ):
+            raise StoreUnavailable("fleet connection durability required")
+
+    def _commit(self, conn):
+        conn.commit()
+
+    def atomic(self, callback, *, connection=None):
+        owned = connection is None
+        conn = self._connect() if owned else connection
+        tx = None
+        committing = False
+        try:
+            if owned:
+                conn.execute("BEGIN IMMEDIATE")
+            elif not conn.in_transaction:
+                raise StoreUnavailable("borrowed connection must own a transaction")
+            self._validate(conn)
+            tx = AppControlTransaction(conn, self)
+            result = callback(tx)
+            self._validate(conn)
+            if owned:
+                committing = True
+                self._commit(conn)
+                self._validate(conn)
+            return result
+        except BaseException as error:
+            if owned:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            if committing:
+                raise OutcomeUnknown("control commit outcome unknown") from None
+            if isinstance(error, (AppControlError, ValueError, TypeError)):
+                raise
+            raise StoreUnavailable("control store unavailable") from None
+        finally:
+            if tx is not None:
+                tx._active = False
+            if owned:
+                conn.close()
+
+
+class AppControlTransaction:
+    def __init__(self, conn, store):
+        self._conn = conn
+        self._store = store
+        self._active = True
+
+    def _check(self):
+        if not self._active or not self._conn.in_transaction:
+            raise StoreUnavailable("control transaction is no longer active")
+
+    def _now(self):
+        self._check()
+        return self._store.clock()
+
+    def command(self, key, *, action, argument_digest):
+        self._check()
+        if type(key) is not CommandKey:
+            raise ValueError("typed command key required")
+        digest(argument_digest)
+        row = self._conn.execute(
+            "SELECT action,digest,receipt FROM app_control_commands WHERE principal=? AND scope=? AND id=?",
+            (key.principal_id, key.session_scope, key.command_id),
+        ).fetchone()
+        if row is None:
+            return None
+        if row[0] != action or row[1] != argument_digest:
+            raise CommandConflict("immutable command mismatch")
+        receipt = _decode(row[2], CommandReceipt)
+        return CommandRecord(key, row[0], row[1], "committed", receipt)
+
+    def _start(self, key, action, argument_digest):
+        prior = self.command(key, action=action, argument_digest=argument_digest)
+        if prior:
+            return prior.public_receipt
+        if (
+            self._conn.execute("SELECT count(*) FROM app_control_commands").fetchone()[
+                0
+            ]
+            >= self._store.limits.command_cap
+        ):
+            raise CapacityExceeded("control command quota full")
+        return None
+
+    def _finish(self, key, argument_digest, receipt):
+        self._conn.execute(
+            "INSERT INTO app_control_commands VALUES (?,?,?,?,?,?)",
+            (
+                key.principal_id,
+                key.session_scope,
+                key.command_id,
+                receipt.action,
+                argument_digest,
+                _encode(receipt, 16384),
+            ),
+        )
+        return receipt
+
+    def _scope(self, key, session_id):
+        identifier(session_id)
+        if key.session_scope != "control:" + session_id:
+            raise CommandConflict("command session scope mismatch")
+
+    def _grant(self, runtime, grant, *, advance):
+        row = self._conn.execute(
+            "SELECT revision,digest,source_digest FROM app_control_grant_revisions WHERE runtime=? AND grant_id=?",
+            (runtime, grant.grant_id),
+        ).fetchone()
+        hashed = _authority_digest(grant)
+        source = hashlib.sha256(
+            _encode(
+                {
+                    "catalog": grant.catalog_digest,
+                    "identity": grant.catalog_file_identity,
+                }
+            ).encode()
+        ).hexdigest()
+        if row and (
+            grant.revision < row[0]
+            or grant.revision == row[0]
+            and (hashed != row[1] or source != row[2])
+        ):
+            raise CommandConflict("grant policy rollback or equivocation")
+        if advance:
+            self._conn.execute(
+                "INSERT INTO app_control_grant_revisions VALUES (?,?,?,?,?) ON CONFLICT(runtime,grant_id) DO UPDATE SET revision=excluded.revision,digest=excluded.digest,source_digest=excluded.source_digest",
+                (runtime, grant.grant_id, grant.revision, hashed, source),
+            )
+        elif (
+            row is None
+            or grant.revision != row[0]
+            or hashed != row[1]
+            or source != row[2]
+        ):
+            raise CommandConflict("grant revision is no longer current")
+
+    def _quota(self, table, owner, owner_limit, global_limit):
+        total = self._conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        count = self._conn.execute(
+            f"SELECT count(*) FROM {table} WHERE principal=?", (owner,)
+        ).fetchone()[0]
+        if total >= global_limit or count >= owner_limit:
+            raise CapacityExceeded("control record quota full")
+
+    def read_session(self, *, principal_id, control_session_id):
+        self._check()
+        principal(principal_id)
+        identifier(control_session_id)
+        row = self._conn.execute(
+            "SELECT principal,runtime,record FROM app_control_sessions WHERE id=?",
+            (control_session_id,),
+        ).fetchone()
+        if row is None or row[0] != principal_id:
+            return None
+        value = _decode(row[2], ControlSessionRecord)
+        if (
+            value.principal_id != row[0]
+            or value.runtime_id != row[1]
+            or value.control_session_id != control_session_id
+        ):
+            raise StoreUnavailable("session scope corruption")
+        return value
+
+    def _live_session(self, owner, session_id):
+        value = self.read_session(principal_id=owner, control_session_id=session_id)
+        if value is None:
+            raise NotFound("control session unavailable")
+        if (
+            value.revoked_at is not None
+            or not value.issued_at <= self._now() < value.expires_at
+        ):
+            raise CommandConflict("control session expired or revoked")
+        self._grant(value.runtime_id, value.grant, advance=False)
+        return value
+
+    def read_binding(self, *, principal_id, binding_id):
+        self._check()
+        principal(principal_id)
+        identifier(binding_id)
+        row = self._conn.execute(
+            "SELECT principal,runtime,host,record FROM app_host_bindings WHERE id=?",
+            (binding_id,),
+        ).fetchone()
+        if row is None or row[0] != principal_id:
+            return None
+        value = _decode(row[3], BindingRecord)
+        if (
+            value.principal_id != row[0]
+            or value.runtime_id != row[1]
+            or value.canonical_host_id != row[2]
+            or value.binding_id != binding_id
+        ):
+            raise StoreUnavailable("binding scope corruption")
+        return value
+
+    def _live_binding(self, session, binding_id):
+        value = self.read_binding(
+            principal_id=session.principal_id, binding_id=binding_id
+        )
+        if value is None:
+            raise NotFound("binding unavailable")
+        if (
+            value.runtime_id != session.runtime_id
+            or value.grant != session.grant
+            or value.revoked_at is not None
+            or not value.created_at <= self._now() < value.expires_at
+        ):
+            raise CommandConflict("binding authority changed")
+        self._grant(value.runtime_id, value.grant, advance=False)
+        return value
+
+    def read_selection(self, *, principal_id, control_session_id):
+        self._check()
+        principal(principal_id)
+        identifier(control_session_id)
+        row = self._conn.execute(
+            "SELECT record FROM app_control_selections WHERE principal=? AND session=?",
+            (principal_id, control_session_id),
+        ).fetchone()
+        if row is None:
+            return None
+        value = _decode(row[0], SelectionRecord)
+        if (
+            value.principal_id != principal_id
+            or value.control_session_id != control_session_id
+        ):
+            raise StoreUnavailable("selection scope corruption")
+        return value
+
+    def commit_enrollment(
+        self, key, *, argument_digest, session, replace_session_id=None
+    ):
+        if (
+            type(session) is not ControlSessionRecord
+            or session.principal_id != key.principal_id
+            or key.session_scope != "account:" + session.account_session_ref
+        ):
+            raise CommandConflict("enrollment scope mismatch")
+        prior = self._start(key, "enroll", argument_digest)
+        if prior:
+            return prior
+        if (
+            session.revoked_at is not None
+            or session.expires_at
+            > session.issued_at + self._store.limits.session_ttl_seconds
+            or not session.issued_at <= self._now() < session.expires_at
+        ):
+            raise CommandConflict("new session is not live")
+        if (
+            self.read_session(
+                principal_id=session.principal_id,
+                control_session_id=session.control_session_id,
+            )
+            is not None
+        ):
+            raise CommandConflict("session identity already exists")
+        old = None
+        if replace_session_id is not None:
+            old = self.read_session(
+                principal_id=session.principal_id, control_session_id=replace_session_id
+            )
+            if (
+                old is None
+                or old.account_session_ref != session.account_session_ref
+                or old.runtime_id != session.runtime_id
+            ):
+                raise NotFound("replacement session unavailable")
+        limits = self._store.limits
+        self._quota(
+            "app_control_sessions",
+            session.principal_id,
+            limits.account_session_cap,
+            limits.global_session_cap,
+        )
+        self._grant(session.runtime_id, session.grant, advance=True)
+        if old is not None:
+            self._revoke_session(old)
+        self._conn.execute(
+            "INSERT INTO app_control_sessions VALUES (?,?,?,?)",
+            (
+                session.control_session_id,
+                session.principal_id,
+                session.runtime_id,
+                _encode(session),
+            ),
+        )
+        return self._finish(
+            key,
+            argument_digest,
+            CommandReceipt(
+                key.command_id, "enroll", "COMMITTED", session.control_session_id
+            ),
+        )
+
+    def _revoke_session(self, session):
+        self._conn.execute(
+            "UPDATE app_control_sessions SET record=? WHERE id=?",
+            (
+                _encode(replace(session, revoked_at=self._now())),
+                session.control_session_id,
+            ),
+        )
+        selection = self.read_selection(
+            principal_id=session.principal_id,
+            control_session_id=session.control_session_id,
+        )
+        if selection:
+            self._put_selection(
+                replace(
+                    selection,
+                    epoch=selection.epoch + 1,
+                    binding_id=None,
+                    binding_revision=None,
+                )
+            )
+
+    def create_binding(self, key, *, argument_digest, control_session_id, binding):
+        self._scope(key, control_session_id)
+        prior = self._start(key, "create_binding", argument_digest)
+        if prior:
+            return prior
+        session = self._live_session(key.principal_id, control_session_id)
+        if (
+            type(binding) is not BindingRecord
+            or binding.principal_id != session.principal_id
+            or binding.runtime_id != session.runtime_id
+            or binding.grant != session.grant
+            or binding.expires_at
+            > min(
+                session.account_expires_at,
+                binding.created_at + self._store.limits.binding_ttl_seconds,
+            )
+            or binding.revision != 1
+            or binding.revoked_at is not None
+            or not binding.created_at <= self._now() < binding.expires_at
+        ):
+            raise CommandConflict("new binding exceeds original session")
+        if self._conn.execute(
+            "SELECT 1 FROM app_host_bindings WHERE id=? OR host=?",
+            (binding.binding_id, binding.canonical_host_id),
+        ).fetchone():
+            raise CommandConflict("binding identity already exists")
+        limits = self._store.limits
+        self._quota(
+            "app_host_bindings",
+            key.principal_id,
+            limits.account_binding_cap,
+            limits.global_binding_cap,
+        )
+        self._conn.execute(
+            "INSERT INTO app_host_bindings(id,host,principal,runtime,record) VALUES (?,?,?,?,?)",
+            (
+                binding.binding_id,
+                binding.canonical_host_id,
+                binding.principal_id,
+                binding.runtime_id,
+                _encode(binding),
+            ),
+        )
+        return self._finish(
+            key,
+            argument_digest,
+            CommandReceipt(
+                key.command_id,
+                "create_binding",
+                "COMMITTED",
+                binding.binding_id,
+                binding.revision,
+            ),
+        )
+
+    def _put_selection(self, value):
+        self._conn.execute(
+            "INSERT INTO app_control_selections VALUES (?,?,?) ON CONFLICT(principal,session) DO UPDATE SET record=excluded.record",
+            (value.principal_id, value.control_session_id, _encode(value)),
+        )
+
+    def select_binding(
+        self,
+        key,
+        *,
+        argument_digest,
+        control_session_id,
+        binding_id,
+        expected_binding_revision,
+        expected_epoch,
+    ):
+        self._scope(key, control_session_id)
+        prior = self._start(key, "select_binding", argument_digest)
+        if prior:
+            return prior
+        session = self._live_session(key.principal_id, control_session_id)
+        binding = self._live_binding(session, binding_id)
+        current = self.read_selection(
+            principal_id=key.principal_id, control_session_id=control_session_id
+        )
+        epoch = current.epoch if current else 0
+        if (
+            type(expected_epoch) is not int
+            or expected_epoch != epoch
+            or type(expected_binding_revision) is not int
+            or expected_binding_revision != binding.revision
+        ):
+            raise CommandConflict("stale selection or binding revision")
+        selection = SelectionRecord(
+            key.principal_id,
+            control_session_id,
+            uuid.uuid4().hex,
+            epoch + 1,
+            binding_id,
+            binding.revision,
+        )
+        self._put_selection(selection)
+        return self._finish(
+            key,
+            argument_digest,
+            CommandReceipt(
+                key.command_id,
+                "select_binding",
+                "COMMITTED",
+                selection.selection_id,
+                binding.revision,
+                selection.epoch,
+            ),
+        )
+
+    def clear_selection(
+        self, key, *, argument_digest, control_session_id, expected_epoch
+    ):
+        self._scope(key, control_session_id)
+        prior = self._start(key, "clear_selection", argument_digest)
+        if prior:
+            return prior
+        self._live_session(key.principal_id, control_session_id)
+        current = self.read_selection(
+            principal_id=key.principal_id, control_session_id=control_session_id
+        )
+        if (
+            current is None
+            or type(expected_epoch) is not int
+            or current.epoch != expected_epoch
+        ):
+            raise CommandConflict("stale selection epoch")
+        self._put_selection(
+            replace(
+                current, epoch=current.epoch + 1, binding_id=None, binding_revision=None
+            )
+        )
+        return self._finish(
+            key,
+            argument_digest,
+            CommandReceipt(
+                key.command_id,
+                "clear_selection",
+                "COMMITTED",
+                current.selection_id,
+                selection_epoch=current.epoch + 1,
+            ),
+        )
+
+    def revoke_binding(
+        self, key, *, argument_digest, control_session_id, binding_id, expected_revision
+    ):
+        self._scope(key, control_session_id)
+        prior = self._start(key, "revoke_binding", argument_digest)
+        if prior:
+            return prior
+        session = self._live_session(key.principal_id, control_session_id)
+        binding = self._live_binding(session, binding_id)
+        if type(expected_revision) is not int or expected_revision != binding.revision:
+            raise CommandConflict("stale binding revision")
+        binding = replace(
+            binding, revision=binding.revision + 1, revoked_at=self._now()
+        )
+        self._conn.execute(
+            "UPDATE app_host_bindings SET record=? WHERE id=?",
+            (_encode(binding), binding_id),
+        )
+        for row in self._conn.execute(
+            "SELECT record FROM app_control_selections WHERE principal=?",
+            (key.principal_id,),
+        ).fetchall():
+            selection = _decode(row[0], SelectionRecord)
+            if selection.binding_id == binding_id:
+                self._put_selection(
+                    replace(
+                        selection,
+                        epoch=selection.epoch + 1,
+                        binding_id=None,
+                        binding_revision=None,
+                    )
+                )
+        return self._finish(
+            key,
+            argument_digest,
+            CommandReceipt(
+                key.command_id,
+                "revoke_binding",
+                "COMMITTED",
+                binding_id,
+                binding.revision,
+            ),
+        )
+
+    def require_selection(
+        self,
+        *,
+        principal_id,
+        control_session_id,
+        binding_id,
+        binding_revision,
+        selection_id,
+        epoch,
+    ):
+        if type(epoch) is not int or type(binding_revision) is not int:
+            raise ValueError("integer selection revision required")
+        identifier(selection_id)
+        session = self._live_session(principal_id, control_session_id)
+        binding = self._live_binding(session, binding_id)
+        selection = self.read_selection(
+            principal_id=principal_id, control_session_id=control_session_id
+        )
+        if (
+            selection is None
+            or selection.binding_id != binding_id
+            or selection.binding_revision != binding_revision
+            or binding.revision != binding_revision
+            or selection.selection_id != selection_id
+            or selection.epoch != epoch
+        ):
+            raise CommandConflict("selection is no longer current")
+        return session, binding, selection
+
+    def list_bindings(
+        self, *, principal_id, after_position=0, limit=50, max_bytes=65536
+    ):
+        self._check()
+        principal(principal_id)
+        positive(limit, self._store.limits.page_cap)
+        positive(max_bytes, 65536)
+        if type(after_position) is not int or after_position < 0:
+            raise ValueError("invalid page cursor")
+        rows = self._conn.execute(
+            "SELECT position,id,length(record) FROM app_host_bindings WHERE principal=? AND position>? ORDER BY position LIMIT ?",
+            (principal_id, after_position, limit + 1),
+        ).fetchall()
+        values = []
+        used = 0
+        last = after_position
+        for position, bid, _size in rows:
+            if len(values) == limit:
+                break
+            value = self.read_binding(principal_id=principal_id, binding_id=bid)
+            size = len(_encode(value).encode("utf8"))
+            if used + size > max_bytes:
+                break
+            values.append(value)
+            used += size
+            last = position
+        if rows and not values:
+            raise CapacityExceeded("binding exceeds page byte bound")
+        return BindingPage(tuple(values), last if len(values) < len(rows) else None)
