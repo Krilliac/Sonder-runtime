@@ -1,6 +1,7 @@
 """Local delegated verification with durable steering generation and dispatch barrier."""
 
-from dataclasses import replace
+from dataclasses import replace, asdict
+from contextvars import copy_context
 import json
 from pathlib import Path
 import time
@@ -12,18 +13,26 @@ from ..ports.delegated_verification import (
     canonical,
     digest,
 )
+from ..ports.lane_continuation import (
+    GrantedApprovalEvidence,
+    VerificationApprovalPending,
+    PendingVerificationIdentity,
+)
 
 
 class _VerificationCancellation:
     def __init__(self, service, prepared, original):
         self.service, self.prepared, self.original = service, prepared, original
+        self._admission_context = copy_context()
 
     @property
     def cancelled(self):
         if self.original.cancellation.cancelled or self.original.expired:
             return True
         try:
-            self.service._require_current(self.prepared, self.original)
+            self._admission_context.copy().run(
+                self.service._require_current, self.prepared, self.original
+            )
         except (ValueError, PermissionError, OSError, KeyError):
             return True
         return False
@@ -63,6 +72,9 @@ class DelegatedVerificationService:
         )
 
     def _parent(self, tx, parent, context, revision):
+        from .lane_continuation import require_root_admission
+
+        require_root_admission(tx, self.store, parent, context)
         if context.expired or context.cancellation.cancelled:
             raise PermissionError("verification authority expired or cancelled")
         row = tx.conn.execute(
@@ -216,9 +228,12 @@ class DelegatedVerificationService:
         return prepared
 
     def _require_current(self, prepared, context, *, exact_context=True):
+        from .lane_continuation import permits_pending_context
+
         if (
             exact_context
             and self._context_fingerprint(context) != prepared.context_fingerprint
+            and not permits_pending_context(prepared)
         ):
             raise PermissionError("prepared verification context changed")
         self.gateway.require_current(prepared.checks)
@@ -251,25 +266,136 @@ class DelegatedVerificationService:
             raise PermissionError("prepared verification binding changed")
         return value
 
+    def _approval_snapshot(self, tx, prepared, context):
+        """Same-transaction steering snapshot at approval admission, before spend."""
+        self._parent(
+            tx, prepared.parent_session_id, context, prepared.parent_grant_revision
+        )
+        if (
+            tx.verification_generation(prepared.parent_session_id, context.principal_id)
+            != prepared.generation
+        ):
+            raise ValueError("verification steering generation changed")
+        signatures, roots, jobs = self._children(
+            tx, prepared.parent_session_id, context
+        )
+        if signatures != prepared.children or roots != prepared.roots:
+            raise ValueError("verification child snapshot changed")
+        for job, parent in jobs:
+            self._proof(job, parent, context.principal_id)
+
     def execute_prepared(self, prepared, *, context, approve):
+        from .lane_continuation import (
+            current_verification_binding,
+            permits_pending_context,
+        )
+
         value = self._record(prepared, context)
-        if value["state"] in {"certified", "failed", "stale", "incomplete"}:
+        if value["state"] in {
+            "certified",
+            "failed",
+            "stale",
+            "incomplete",
+            "approval_unknown",
+        }:
             return self._public(value)
         owner = "lane-owner-" + uuid.uuid4().hex
         owner_lease = self.store.acquire_owner(owner)
-        with self.store.transaction() as tx:
-            value = tx.verification_row(prepared.verification_id, context.principal_id)
-            if value["owner"]:
-                owner_lease.close()
-                return self._public(value)
-            value["owner"] = owner
-            tx.save_verification(value)
+        try:
+            with self.store.transaction() as tx:
+                value = tx.verification_row(
+                    prepared.verification_id, context.principal_id
+                )
+                if (
+                    value["owner"]
+                    or value["state"] not in {"admitted", "approval_pending"}
+                    or value["state"] == "approval_pending"
+                    and not permits_pending_context(prepared)
+                ):
+                    owner_lease.close()
+                    return self._public(value)
+                managed = current_verification_binding(
+                    tx, self.store, prepared, context
+                )
+                if value["state"] == "approval_pending":
+                    if (
+                        value["job_ids"]
+                        or not managed
+                        or not value.get("pending_approval")
+                    ):
+                        raise PermissionError(
+                            "pending approval state cannot be replayed"
+                        )
+                    if value["pending_approval"]["expires_at"] <= time.time():
+                        raise PermissionError("pending ledger evidence expired")
+                    self._approval_snapshot(tx, prepared, context)
+                    tx.require_verification_workspace_quiescence(
+                        prepared.parent_session_id, context.principal_id, prepared.roots
+                    )
+                    tx.acquire_verification_barrier(
+                        prepared.parent_session_id,
+                        context.principal_id,
+                        prepared.verification_id,
+                    )
+                value["owner"] = owner
+                value["attachment_epoch"] = managed["epoch"] if managed else None
+                tx.save_verification(value)
+        except BaseException:
+            owner_lease.close()
+            raise
         try:
             self._require_current(prepared, context)
-            approval_id = approve(prepared, context)
+            with self.store.transaction() as tx:
+                current_verification_binding(tx, self.store, prepared, context)
+                self._approval_snapshot(tx, prepared, context)
+                value = tx.verification_row(
+                    prepared.verification_id, context.principal_id
+                )
+                if value["owner"] != owner or value["job_ids"]:
+                    raise PermissionError("approval admission owner or effect changed")
+                value.update(
+                    state="approval_deciding", approval_attempt=uuid.uuid4().hex
+                )
+                tx.save_verification(value)
+            decision = approve(prepared, context)
+            if isinstance(decision, GrantedApprovalEvidence):
+                if decision.expires_at <= time.time():
+                    raise PermissionError("exact approval expired")
+                prior = value.get("pending_approval")
+                if prior and any(
+                    prior[k] != getattr(decision, k)
+                    for k in ("tool", "call_digest", "surface")
+                ):
+                    raise PermissionError(
+                        "approval differs from original pending ledger call"
+                    )
+                approval_id = decision.decision_id
+            elif managed is None:
+                approval_id = decision
+            else:
+                raise PermissionError(
+                    "managed verification requires typed host approval evidence"
+                )
             if not isinstance(approval_id, str) or not 1 <= len(approval_id) <= 256:
                 raise PermissionError("independent exact approval is required")
             self._require_current(prepared, context)
+            with self.store.transaction() as tx:
+                current_verification_binding(tx, self.store, prepared, context)
+                value = tx.verification_row(
+                    prepared.verification_id, context.principal_id
+                )
+                if value["owner"] != owner or value["state"] != "approval_deciding":
+                    raise PermissionError("approval decision claim changed")
+                value.update(
+                    state="approved",
+                    approval_id=approval_id,
+                    approval_evidence=(
+                        asdict(decision)
+                        if isinstance(decision, GrantedApprovalEvidence)
+                        else None
+                    ),
+                )
+                tx.save_verification(value)
             before = self.snapshotter.capture(tuple(Path(p) for p in prepared.roots))
             with self.store.transaction() as tx:
                 value = tx.verification_row(
@@ -364,6 +490,42 @@ class DelegatedVerificationService:
                     context.principal_id,
                     prepared.verification_id,
                 )
+        except VerificationApprovalPending as pending:
+            evidence = asdict(pending.evidence)
+            if managed is None or evidence["expires_at"] <= time.time():
+                raise PermissionError("resumable pending approval unavailable")
+            with self.store.transaction() as tx:
+                current = current_verification_binding(
+                    tx, self.store, prepared, context
+                )
+                value = tx.verification_row(
+                    prepared.verification_id, context.principal_id
+                )
+                if (
+                    value["owner"] != owner
+                    or value["state"] != "approval_deciding"
+                    or value["job_ids"]
+                    or current["epoch"] != value["attachment_epoch"]
+                ):
+                    raise PermissionError("pending approval claim changed")
+                prior = value.get("pending_approval")
+                if prior and any(
+                    prior[k] != evidence[k]
+                    for k in ("tool", "call_digest", "surface", "call_id")
+                ):
+                    raise PermissionError("pending ledger identity changed")
+                value.update(
+                    state="approval_pending",
+                    owner="",
+                    code="APPROVAL_PENDING",
+                    pending_approval=evidence,
+                )
+                tx.save_verification(value)
+                tx.release_verification_barrier(
+                    prepared.parent_session_id,
+                    context.principal_id,
+                    prepared.verification_id,
+                )
         except Exception as exc:
             with self.store.transaction() as tx:
                 value = tx.verification_row(
@@ -379,10 +541,21 @@ class DelegatedVerificationService:
                         )
                     except (ValueError, KeyError, OSError):
                         clean = False
+                unknown_approval = (
+                    managed is not None and value["state"] == "approval_deciding"
+                )
                 value.update(
-                    state="failed" if clean else "incomplete",
+                    state=(
+                        "approval_unknown"
+                        if unknown_approval
+                        else ("failed" if clean else "incomplete")
+                    ),
                     owner="",
-                    code="VERIFICATION_REFUSED" if clean else "CLEANUP_UNRESOLVED",
+                    code=(
+                        "APPROVAL_OUTCOME_UNKNOWN"
+                        if unknown_approval
+                        else ("VERIFICATION_REFUSED" if clean else "CLEANUP_UNRESOLVED")
+                    ),
                 )
                 tx.save_verification(value)
                 if clean:
@@ -399,7 +572,7 @@ class DelegatedVerificationService:
 
     @staticmethod
     def _public(value):
-        return {
+        result = {
             k: value[k]
             for k in (
                 "verification_id",
@@ -411,6 +584,75 @@ class DelegatedVerificationService:
                 "job_ids",
             )
         }
+        if value.get("pending_approval"):
+            result["pending_approval"] = dict(value["pending_approval"])
+        return result
+
+    def resume_pending_approval(self, bound, identity, *, approve):
+        from .lane_continuation import _PENDING_RESUME, current_verification_binding
+
+        bound._verifier(self)
+        if (
+            not isinstance(identity, PendingVerificationIdentity)
+            or bound.pending_verification() != identity
+        ):
+            raise PermissionError("exact original pending identity required")
+        bound.terminal_projection(
+            identity
+        )  # Trusted codec must restore original host evidence.
+        with bound._scope() as context:
+            with self.store.transaction() as tx:
+                value = tx.verification_row(
+                    identity.verification_id, context.principal_id
+                )
+                prepared = PreparedVerification.from_payload(value["prepared"])
+                current_verification_binding(tx, self.store, prepared, context)
+                if value["state"] != "approval_pending":
+                    return self._public(value)
+                if value["job_ids"]:
+                    raise PermissionError(
+                        "effect-admitted verification cannot resume approval"
+                    )
+            token = _PENDING_RESUME.set(
+                (bound, prepared.verification_id, prepared.bundle_digest)
+            )
+            try:
+                try:
+                    self._require_current(prepared, context)
+                except ValueError:
+                    with self.store.transaction() as tx:
+                        self._parent(
+                            tx,
+                            prepared.parent_session_id,
+                            context,
+                            prepared.parent_grant_revision,
+                        )
+                        value = tx.verification_row(
+                            prepared.verification_id, context.principal_id
+                        )
+                        if (
+                            value["state"] == "approval_pending"
+                            and not value["owner"]
+                            and not value["job_ids"]
+                        ):
+                            value.update(state="stale", code="PENDING_BUNDLE_CHANGED")
+                            tx.save_verification(value)
+                            if (
+                                tx.verification_barrier(
+                                    prepared.parent_session_id, context.principal_id
+                                )
+                                == prepared.verification_id
+                            ):
+                                tx.release_verification_barrier(
+                                    prepared.parent_session_id,
+                                    context.principal_id,
+                                    prepared.verification_id,
+                                )
+                            return self._public(value)
+                    raise
+                return self.execute_prepared(prepared, context=context, approve=approve)
+            finally:
+                _PENDING_RESUME.reset(token)
 
     def inspect(
         self, parent_session_id, verification_id, *, context, bound_parent_revision
@@ -464,8 +706,15 @@ class DelegatedVerificationService:
             bound_parent_revision=bound_parent_revision,
         )
         with self.store.transaction() as tx:
+            self._parent(tx, parent_session_id, context, bound_parent_revision)
             value = tx.verification_row(verification_id, context.principal_id)
-            if value["state"] in {"certified", "failed", "stale"}:
+            if value["state"] in {
+                "certified",
+                "failed",
+                "stale",
+                "approval_pending",
+                "approval_unknown",
+            }:
                 return self._public(value)
             # Kernel owner-lock evidence, never lease expiry, proves a controller stopped.
             if value["owner"]:
@@ -473,7 +722,21 @@ class DelegatedVerificationService:
                     return self._public(value)
             for job_id in value["job_ids"]:
                 self._proof(job_id, parent_session_id, context.principal_id)
-            value.update(state="failed", code="RECOVERED_INCOMPLETE", owner="")
+            code = (
+                "APPROVAL_OUTCOME_UNKNOWN"
+                if value["state"] in {"approval_deciding", "approved"}
+                and not value["job_ids"]
+                else "RECOVERED_INCOMPLETE"
+            )
+            value.update(
+                state=(
+                    "approval_unknown"
+                    if code == "APPROVAL_OUTCOME_UNKNOWN"
+                    else "failed"
+                ),
+                code=code,
+                owner="",
+            )
             tx.save_verification(value)
             tx.release_verification_barrier(
                 parent_session_id, context.principal_id, verification_id

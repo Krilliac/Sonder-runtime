@@ -19,6 +19,16 @@ from pathlib import Path
 from .fleet_store import _ensure_schema as _ensure_fleet_schema
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_lane_terminal_results (
+ continuation_id TEXT NOT NULL, verification_id TEXT NOT NULL, principal TEXT NOT NULL,
+ original_digest TEXT NOT NULL, binding TEXT NOT NULL, payload BLOB NOT NULL,
+ digest TEXT NOT NULL, certificate_digest TEXT NOT NULL, receipt TEXT NOT NULL,
+ PRIMARY KEY(continuation_id,verification_id));
+CREATE TABLE IF NOT EXISTS agent_lane_continuations (
+ position INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+ principal TEXT NOT NULL, parent_session TEXT UNIQUE NOT NULL,
+ host_conversation TEXT NOT NULL, data TEXT NOT NULL,
+ UNIQUE(principal,host_conversation));
 CREATE TABLE IF NOT EXISTS agent_lane_terminal_projections (
  continuation_id TEXT NOT NULL, principal TEXT NOT NULL,
  verification_id TEXT NOT NULL, binding TEXT NOT NULL,
@@ -76,7 +86,10 @@ class LaneTransaction:
         from dataclasses import asdict
 
         sealed.validate()
-        if sealed.binding.continuation_id != continuation_id or sealed.binding.principal_id != principal:
+        if (
+            sealed.binding.continuation_id != continuation_id
+            or sealed.binding.principal_id != principal
+        ):
             raise PermissionError("sealed projection scope mismatch")
         for value in (continuation_id, principal):
             if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
@@ -123,8 +136,11 @@ class LaneTransaction:
             ProjectionBinding(**binding), row["payload"], row["digest"]
         )
         sealed.validate()
-        if (sealed.binding.continuation_id != continuation_id or sealed.binding.principal_id != principal
-                or sealed.binding.verification_id != verification_id):
+        if (
+            sealed.binding.continuation_id != continuation_id
+            or sealed.binding.principal_id != principal
+            or sealed.binding.verification_id != verification_id
+        ):
             raise PermissionError("stored projection scope mismatch")
         return sealed
 
@@ -503,7 +519,9 @@ class LaneTransaction:
         page_sql += " ORDER BY m.sequence LIMIT ?"
         parameters.append(limit)
         rows = self.conn.execute(
-            "SELECT page.*,f.body,e.payload AS event_payload FROM (" + page_sql + ") page "
+            "SELECT page.*,f.body,e.payload AS event_payload FROM ("
+            + page_sql
+            + ") page "
             "JOIN fleet_messages f ON f.message_id=page.message_id "
             "JOIN agent_lane_events e ON e.sequence=page.sequence ORDER BY page.sequence",
             parameters,
@@ -511,13 +529,18 @@ class LaneTransaction:
         result = []
         for row in rows:
             event = json.loads(row["event_payload"])
-            result.append(dict(
-                id=row["message_id"], lane_id=row["lane_id"],
-                attempt_id=row["attempt_id"], source_sequence=event.get("source_sequence", 0),
-                sequence=row["sequence"], summary=row["body"],
-                artifacts=list(event.get("artifacts", [])),
-                acknowledged=bool(row["acknowledged"]),
-            ))
+            result.append(
+                dict(
+                    id=row["message_id"],
+                    lane_id=row["lane_id"],
+                    attempt_id=row["attempt_id"],
+                    source_sequence=event.get("source_sequence", 0),
+                    sequence=row["sequence"],
+                    summary=row["body"],
+                    artifacts=list(event.get("artifacts", [])),
+                    acknowledged=bool(row["acknowledged"]),
+                )
+            )
         return result
 
     def accepted(self, lane, ids):
@@ -683,6 +706,13 @@ class SQLiteAgentLaneStore:
 
     def parent_capability(self, session, token, principal, action="verify"):
         with self.transaction() as tx:
+            if tx.conn.execute(
+                "SELECT 1 FROM agent_lane_continuations WHERE parent_session=?",
+                (session,),
+            ).fetchone():
+                raise PermissionError(
+                    "host-managed root requires a current bound attachment"
+                )
             row = self._verify_parent(tx, session, token, principal)
             if action == "verify":
                 return None
@@ -739,11 +769,13 @@ class SQLiteAgentLaneStore:
 
         return LocalLaneOwner(self.path, owner)
 
-    def reconcile(self, lane_id, principal):
+    def reconcile(self, lane_id, principal, *, _admit=None):
         from .lane_owner import owner_definitely_stopped
 
         with self.transaction() as tx:
             lane = tx.lane(lane_id)
+            if _admit is not None:
+                _admit(tx, lane)
             if lane["principal_id"] != principal:
                 raise PermissionError("agent lane belongs to another principal")
             if lane["owner"] and owner_definitely_stopped(self.path, lane["owner"]):

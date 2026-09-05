@@ -3,18 +3,25 @@
 from dataclasses import dataclass
 import hashlib
 import json
-import math
 from typing import Protocol
+from dataclasses import field
+import math
 
 MAX_PROJECTION_BYTES = 65536
 
 
 def _approval_identity(tool, call_digest, surface, expires_at):
-    if (not isinstance(tool, str) or not 1 <= len(tool) <= 128
-            or not isinstance(surface, str) or not 1 <= len(surface) <= 128
-            or not isinstance(call_digest, str) or len(call_digest) != 64
-            or any(c not in "0123456789abcdef" for c in call_digest)
-            or type(expires_at) not in {int, float} or not math.isfinite(expires_at)):
+    if (
+        not isinstance(tool, str)
+        or not 1 <= len(tool) <= 128
+        or not isinstance(surface, str)
+        or not 1 <= len(surface) <= 128
+        or not isinstance(call_digest, str)
+        or len(call_digest) != 64
+        or any(c not in "0123456789abcdef" for c in call_digest)
+        or type(expires_at) not in {int, float}
+        or not math.isfinite(expires_at)
+    ):
         raise ValueError("invalid exact approval identity")
 
 
@@ -52,12 +59,96 @@ class GrantedApprovalEvidence:
 
     def __post_init__(self):
         _approval_identity(self.tool, self.call_digest, self.surface, self.expires_at)
-        if (self.source not in {"approval", "policy"}
-                or not isinstance(self.decision_id, str) or not 1 <= len(self.decision_id) <= 256
-                or not isinstance(self.approval_nonce, str) or len(self.approval_nonce) > 256
-                or (self.source == "approval") != bool(self.approval_nonce)):
+        if (
+            self.source not in {"approval", "policy"}
+            or not isinstance(self.decision_id, str)
+            or not 1 <= len(self.decision_id) <= 256
+            or not isinstance(self.approval_nonce, str)
+            or len(self.approval_nonce) > 256
+            or (self.source == "approval") != bool(self.approval_nonce)
+        ):
             raise ValueError("invalid approval spend or policy decision evidence")
 
+
+@dataclass(frozen=True)
+class HostContinuationGrant:
+    principal_id: str
+    host_conversation_id: str
+    grant_id: str
+    revision: int
+    expires_at: float
+    workspace_roots: tuple[str, ...]
+    allowed_tools: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HostAuthorityCeiling:
+    principal_id: str
+    auth_level: str
+    workspace_roots: tuple[str, ...]
+    cloud_allowed: bool
+    remote_ollama_allowed: bool
+    deadline_monotonic: float
+
+
+@dataclass(frozen=True)
+class ContinuationSelection:
+    continuation_id: str
+    principal_id: str
+    issuer: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class PreparedReattachment:
+    continuation_id: str
+    parent_session_id: str
+    parent_grant_revision: int
+    principal_id: str
+    host_conversation_id: str
+    grant_id: str
+    grant_revision: int
+    epoch: int
+    expires_at: float
+    workspace_roots: tuple[str, ...]
+    allowed_tools: tuple[str, ...]
+    command_id: str
+    issuer: object = field(repr=False, compare=False)
+
+    def approval_payload(self):
+        from dataclasses import asdict
+
+        value = {k: v for k, v in vars(self).items() if k != "issuer"}
+        return json.loads(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+@dataclass(frozen=True)
+class RecoveryItem:
+    continuation_id: str
+    parent_session_id: str
+    epoch: int
+    owner_state: str
+    expires_at: float
+    authority_state: str
+
+
+@dataclass(frozen=True)
+class RecoveryPage:
+    items: tuple[RecoveryItem, ...]
+    next_cursor: int
+    has_more: bool
+
+
+@dataclass(frozen=True)
+class PendingVerificationIdentity:
+    continuation_id: str
+    verification_id: str
+    parent_session_id: str
+    parent_grant_revision: int
+    generation: int
+    bundle_digest: str
+    command_id: str
+    projection_digest: str
+    projection_revision: int
 
 
 @dataclass(frozen=True)
@@ -121,6 +212,19 @@ class HostProjectionCodec(Protocol):
     def encode(self, projection: object) -> bytes: ...
     def decode(self, payload: bytes) -> object: ...
     def binding(self, projection: object) -> ProjectionBinding: ...
+
+
+class HostTerminalResultCodec(HostProjectionCodec, Protocol):
+    def certificate_digest(self, result: object) -> str: ...
+
+
+@dataclass(frozen=True)
+class TerminalProjectionReceipt:
+    receipt_id: str
+    projection_digest: str
+    original_projection_digest: str
+    certificate_digest: str
+    revision: int
 
 
 @dataclass(frozen=True)
