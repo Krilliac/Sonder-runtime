@@ -19465,10 +19465,28 @@ def _agent_turn(
         return validation_ok or verification_ok
 
     def finish_final(final, *, failed=False):
-        nonlocal validation_attempted
+        nonlocal validation_attempted, mutated, parent_effect_dirty, validation_ok, verification_ok
         _teardown_speculation()
         final = str(final or "")
         controller = _standalone_lanes.current()
+        managed_plan = getattr(controller, '_escalation', None)
+        if managed_plan is not None:
+            if not managed_plan.finalizing:
+                saved_final, saved_failed = final, failed
+                managed_plan.capture(lambda: finish_final(saved_final, failed=saved_failed))
+                controller.observe_host_tool(
+                    tool='host_rung', arguments={'tier': tier}, observation=final,
+                    dispatched=False,
+                    success=not failed and not final.lstrip().startswith(autopilot_controller.FAILURE_PREFIXES),
+                )
+            evidence = controller.parent_effect_evidence()
+            parent_effect_dirty = evidence.dirty
+            mutated = mutated or evidence.dirty
+            validation_attempted = evidence.validation_attempted
+            validation_ok, verification_ok = evidence.validation_ok, evidence.verification_ok
+            if managed_plan.finalizing and managed_plan.blockers:
+                failed = True
+                final = 'EVIDENCE_REQUIRED: earlier rung host evidence remains unresolved.\n\n' + final
         delegated = controller is not None and controller.delegated_work
         if final.lstrip().startswith(autopilot_controller.FAILURE_PREFIXES):
             final = final.lstrip()
@@ -19498,7 +19516,8 @@ def _agent_turn(
                     break
             captured = controller.freeze_host_terminal(
                 final, terminal_class=terminal_class,
-                blockers=tuple(sorted(completion_blocking_failures)),
+                blockers=tuple(sorted(set(completion_blocking_failures) |
+                    (managed_plan.blockers if managed_plan is not None else set()))),
             )
             if delegated and not captured:
                 final = "EVIDENCE_REQUIRED: original host observations could not be preserved.\n\n" + final
@@ -19614,7 +19633,7 @@ def _agent_turn(
         mismatch.
         """
         controller = _standalone_lanes.current()
-        if controller is not None and controller.delegated_work:
+        if controller is not None and (controller.delegated_work or controller._escalation is not None):
             return finish_final(text, failed=True)
         _teardown_speculation()
         text = str(text or "")
@@ -20535,6 +20554,32 @@ def _work_expects_effects(prompt):
 def _workbench_agent_escalating(
     prompt, tier, *, max_steps, allow_web, project, allow_location,
 ):
+    project_scope, _error = _agent_project_scope(project)
+    with _standalone_lanes.managed_escalation_scope(
+        _application, project=project_scope, max_rungs=tier_escalation.MAX_ESCALATIONS + 1,
+    ) as managed_plan:
+        if managed_plan is None:
+            return _workbench_agent_escalating_owned(
+                prompt, tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location, managed_plan=None,
+            )
+        with activity_tracker.response_span(
+            'managed-workbench', prompt, surface='agent', model=tier, project=project,
+        ) as response:
+            output, answered = _workbench_agent_escalating_owned(
+                prompt, tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location, managed_plan=managed_plan,
+            )
+        return '%s\n\n%s\n\n%s' % (
+            output.rstrip(),
+            activity_tracker.format_end_report(response, calibration_line=_agent_end_report_standing_line()),
+            activity_tracker.format_response(response),
+        ), answered
+
+
+def _workbench_agent_escalating_owned(
+    prompt, tier, *, max_steps, allow_web, project, allow_location, managed_plan,
+):
     """Run the workbench agent on ``tier``, stepping up when the model fails.
 
     A run whose model could not drive the loop (a transport failure, or no
@@ -20551,10 +20596,13 @@ def _workbench_agent_escalating(
     start = _local_tier_rung(tier)
     escalation_plan = _default_route_plan(prompt, start) if start is not None else None
     if escalation_plan is None or escalation_plan.escalations == 0:
-        return workbench_agent(
-            prompt=prompt, tier=tier, max_steps=max_steps, allow_web=allow_web,
-            project=project, allow_location=allow_location,
-        ), tier
+        with managed_plan.rung() if managed_plan is not None else contextlib.nullcontext():
+            output = workbench_agent(
+                prompt=prompt, tier=tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location,
+            )
+        finalized = managed_plan.finish() if managed_plan is not None else None
+        return finalized if finalized is not None else output, tier
     steps = []
     answered = escalation_plan.start
     output = ""
@@ -20563,10 +20611,11 @@ def _workbench_agent_escalating(
     for index, rung in enumerate(escalation_plan.rungs):
         answered = rung
         _take_agent_model_failure()
-        output = workbench_agent(
-            prompt=prompt, tier=rung.tier, max_steps=max_steps, allow_web=allow_web,
-            project=project, allow_location=allow_location,
-        )
+        with managed_plan.rung() if managed_plan is not None else contextlib.nullcontext():
+            output = workbench_agent(
+                prompt=prompt, tier=rung.tier, max_steps=max_steps, allow_web=allow_web,
+                project=project, allow_location=allow_location,
+            )
         failure = _take_agent_model_failure()
         owned = bool(failure) and failure.get("key") == _agent_escalation_key(rung.tier, prompt)
         if owned and failure.get("vacuous") and not expects_effects:
@@ -20583,6 +20632,10 @@ def _workbench_agent_escalating(
         )
         steps.append(step)
         _note_escalation(step, "agent")
+    if managed_plan is not None:
+        finalized = managed_plan.finish()
+        if finalized is not None:
+            output = finalized
     if steps:
         line = tier_escalation.describe(steps)
         output = (
