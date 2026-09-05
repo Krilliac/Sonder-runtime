@@ -5,6 +5,40 @@ import sys
 import pytest
 
 
+def test_zero_accounting_waits_for_exact_retained_handles(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+    token = _WindowsJobToken(123, lambda handle: True)
+    observations = iter([(0, (258,)), (0, (0,))])
+    monkeypatch.setattr(token, "_observe", lambda: next(observations), raising=False)
+    proof = token.quiesce(force=False)
+    assert proof.complete
+    assert token.cleanup_observation == (0, (0,))
+
+
+def test_invalid_retained_handle_never_proves_cleanup(monkeypatch):
+    from sonder_runtime.adapters.extensions.memory_limits import _WindowsJobToken
+    token = _WindowsJobToken(123, lambda handle: True)
+    monkeypatch.setattr(token, "_observe", lambda: (0, (0xFFFFFFFF,)), raising=False)
+    assert not token.quiesce(force=False).complete
+    monkeypatch.setattr(token, "_observe", lambda: (0, (0,)))
+    assert not token.quiesce(force=False).complete
+
+
+def test_handle_wait_uses_one_deadline(monkeypatch):
+    from types import SimpleNamespace
+    from sonder_runtime.adapters.extensions import memory_limits
+    token = memory_limits._WindowsJobToken(123, lambda handle: True)
+    clock = [0.0]
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(memory_limits, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(token, "_observe", lambda: (0, (258,)))
+    assert not token.quiesce(force=False).complete
+    assert clock[0] == 3
+    assert token.cleanup_observation == (0, (258,))
+
+
 def test_failed_job_handle_close_retains_the_owned_handle():
     from sonder_runtime.adapters.extensions.memory_limits import (
         _WindowsJobToken,
@@ -56,7 +90,8 @@ def test_native_job_proves_live_then_empty_without_pid_census():
 
 
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows descendants required")
-def test_job_cleanup_includes_actual_descendant(tmp_path):
+@pytest.mark.parametrize("attempt", range(5))
+def test_job_cleanup_includes_actual_descendant(tmp_path, attempt):
     import time
     from sonder_runtime.adapters.process_liveness import (
         process_identity,
@@ -87,7 +122,10 @@ def test_job_cleanup_includes_actual_descendant(tmp_path):
         child_pid = int(marker.read_text())
         child_identity = process_identity(child_pid)
         assert child_identity
-        assert token.quiesce(force=True).complete
+        proof = token.quiesce(force=True)
+        assert proof.complete, (proof, token.cleanup_observation)
+        active, states = token.cleanup_observation
+        assert active == 0 and len(states) >= 2 and all(state == 0 for state in states)
         process.wait(timeout=3)
         assert probe_process(child_pid, child_identity)[0] == PROCESS_DEAD
     finally:

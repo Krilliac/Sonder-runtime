@@ -56,6 +56,16 @@ containment proof. Forced termination remains `STOPPED_UNCLEAN` and cannot enabl
 another launch. Output readers are retained at creation and checked under one
 bounded join deadline; no global thread or process-name census supplies proof.
 
+Windows cleanup requires both zero Job accounting and a signaled state for every
+retained exact process handle. The suspended root is captured before resume;
+bounded Job membership queries capture observed descendants and verify each
+opened handle belongs to that Job. A single three-second cleanup deadline covers
+observation, termination and handle polling. At most 256 handles are retained per
+token; missing, invalid or excess evidence permanently refuses clean proof.
+This is bounded evidence for the owned Job and observed handles, not an audit of
+unknown writers or installed processes. The last accounting/handle-wait tuple is
+available for diagnostics. Closing a token discards its ability to certify cleanup.
+
 `execute(timeout=...)` accepts 1–30 seconds. Native termination/handle cleanup has
 its own finite cleanup windows and can finish after that observation deadline;
 late work cannot publish a new successful owner completion. Exact pending state
