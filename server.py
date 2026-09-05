@@ -5180,6 +5180,16 @@ def _guard_managed_agent_call(callback, *, inherit_context=False):
             return captured.copy().run(admitted, *args, **kwargs)
         return admitted(*args, **kwargs)
     class GuardedCall:
+        @property
+        def num_predict_override(self):
+            return callback.num_predict_override
+
+        @num_predict_override.setter
+        def num_predict_override(self, value):
+            # The budget adapter writes and resets the provider ceiling on the
+            # callable it receives. Keep both writes on the actual generator.
+            callback.num_predict_override = value
+
         def __call__(self, *args, **kwargs):
             return invoke(*args, **kwargs)
 

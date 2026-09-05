@@ -78,6 +78,37 @@ def test_managed_model_wrapper_preserves_live_response_metadata():
         lanes._CURRENT.reset(token)
 
 
+def test_managed_budget_reaches_provider_and_resets_override(monkeypatch):
+    limits = []
+
+    def post(path, payload, timeout=None):
+        limit = payload['options']['num_predict']
+        limits.append(limit)
+        return {'message': {'content': 'ok'}, 'eval_count': limit}
+
+    monkeypatch.setenv('SONDER_ALLOW_CLOUD', '1')
+    monkeypatch.setattr(server, '_post', post)
+    token = lanes._CURRENT.set(Controller())
+    try:
+        raw = server._make_generate(
+            'glm-5.2:cloud', '', 0.1, 1200, 8192, cloud=True,
+            compact_cloud_reasoning=True,
+        )
+        guarded = server._guard_managed_agent_call(raw)
+        generate = server._bounded_cloud_agent_generate(
+            guarded, per_call_limit=3, total_budget=5,
+        )
+        assert generate('first') == 'ok'
+        assert raw.num_predict_override is None
+        assert generate('second') == 'ok'
+        assert raw.num_predict_override is None
+        with pytest.raises(server.ModelCallError):
+            generate('exhausted')
+        assert limits == [3, 2]
+    finally:
+        lanes._CURRENT.reset(token)
+
+
 def test_actual_managed_loop_revocation_after_model_return_prevents_tool(lane_env, monkeypatch):
     from dataclasses import replace
     import json
