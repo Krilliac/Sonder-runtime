@@ -129,6 +129,11 @@ class RecoveryItem:
     owner_state: str
     expires_at: float
     authority_state: str
+    attachment_state: str = ""
+    verification_phase: str = ""
+    verification_code: str = ""
+    pending_identity: "PendingVerificationIdentity | None" = None
+    pending_approval: PendingApprovalEvidence | None = None
 
 
 @dataclass(frozen=True)

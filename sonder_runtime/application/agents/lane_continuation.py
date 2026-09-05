@@ -23,6 +23,7 @@ from ..ports.lane_continuation import (
     open_projection,
     TerminalProjectionReceipt,
     HostAuthorityCeiling,
+    PendingApprovalEvidence,
 )
 
 _CURRENT_BOUND = ContextVar("lane_host_attachment", default=None)
@@ -116,7 +117,7 @@ class BoundContinuation:
         self._closed = False
         self._lock = threading.RLock()
 
-    def _require_current_tx(self, tx, record):
+    def _require_current_tx(self, tx, record, *, observe=False):
         if (
             self._closed
             or self._issuer is not self._service._issuer
@@ -127,7 +128,7 @@ class BoundContinuation:
             or record.get("attachment_state") != "active"
         ):
             raise PermissionError("host attachment is fenced")
-        self._service._current(tx, record, self._live_context)
+        self._service._current(tx, record, self._live_context, observe=observe)
 
     def require_current(self, *, context=None):
         with self._lock, self._service.store.transaction() as tx:
@@ -308,6 +309,18 @@ class BoundContinuation:
                 self._require_current_tx(tx, record)
                 value = record.get("pending_verification")
                 return PendingVerificationIdentity(**value) if value else None
+
+    def prepared_verification(self, identity):
+        """Read the original immutable bundle; never prepare against a new context."""
+        with self._lock, self._service.store.transaction() as tx:
+            record = self._service._row(tx, self.continuation_id)
+            self._require_current_tx(tx, record, observe=True)
+            if not isinstance(identity, PendingVerificationIdentity) or record.get(
+                "pending_verification"
+            ) != asdict(identity):
+                raise PermissionError("exact original pending identity required")
+            prepared, _ = self._service._linked_verification(tx, record)
+            return prepared
 
     def terminal_projection(self, identity):
         with self._scope() as context:
@@ -499,6 +512,79 @@ class LaneContinuationService:
             "UPDATE agent_lane_continuations SET data=? WHERE id=?",
             (_json(record), record["id"]),
         )
+
+    @staticmethod
+    def _linked_verification(tx, record):
+        from ..ports.delegated_verification import PreparedVerification, digest
+
+        identity = PendingVerificationIdentity(**record["pending_verification"])
+        if (
+            identity.continuation_id != record["id"]
+            or identity.parent_session_id != record["parent_session_id"]
+            or identity.parent_grant_revision != record["parent_grant_revision"]
+        ):
+            raise PermissionError("pending recovery identity scope mismatch")
+        value = tx.verification_row(identity.verification_id, record["principal_id"])
+        prepared = PreparedVerification.from_payload(value["prepared"])
+        if (
+            prepared.principal_id != record["principal_id"]
+            or prepared.parent_session_id != identity.parent_session_id
+            or prepared.verification_id != identity.verification_id
+            or value["command_id"] != identity.command_id
+            or prepared.parent_grant_revision != identity.parent_grant_revision
+            or prepared.generation != identity.generation
+            or prepared.bundle_digest != identity.bundle_digest
+            or digest(replace(prepared, bundle_digest="").approval_payload())
+            != identity.bundle_digest
+        ):
+            raise ValueError("original prepared verification integrity mismatch")
+        sealed = tx.terminal_projection(
+            record["id"], record["principal_id"], identity.verification_id
+        )
+        if (
+            sealed.sha256 != identity.projection_digest
+            or sealed.binding.revision != identity.projection_revision
+            or sealed.binding.bundle_digest != identity.bundle_digest
+            or sealed.binding.project_roots != prepared.roots
+        ):
+            raise ValueError("original projection link integrity mismatch")
+        return prepared, value
+
+    def _recovery_verification(self, tx, record):
+        if not record.get("pending_verification"):
+            return "", "", None, None
+        try:
+            _, value = self._linked_verification(tx, record)
+            identity = PendingVerificationIdentity(**record["pending_verification"])
+            phase, code = value["state"], value["code"]
+            if phase not in {
+                "admitted",
+                "approval_deciding",
+                "approval_pending",
+                "approved",
+                "running",
+                "certified",
+                "failed",
+                "stale",
+                "incomplete",
+                "approval_unknown",
+            }:
+                raise ValueError("unknown recovery phase")
+            if code not in {
+                "",
+                "APPROVAL_PENDING",
+                "APPROVAL_OUTCOME_UNKNOWN",
+                "VERIFICATION_REFUSED",
+                "CLEANUP_UNRESOLVED",
+                "PENDING_BUNDLE_CHANGED",
+                "RECOVERED_INCOMPLETE",
+            }:
+                raise ValueError("unknown recovery code")
+            evidence = value.get("pending_approval")
+            pending = PendingApprovalEvidence(**evidence) if evidence else None
+            return phase, code, identity, pending
+        except (ValueError, TypeError, KeyError, PermissionError):
+            return "unavailable", "RECOVERY_METADATA_UNAVAILABLE", None, None
 
     def _grant(self, context, host_id):
         if (
@@ -886,6 +972,14 @@ class LaneContinuationService:
                     if self.store.owner_definitely_stopped(record["owner"])
                     else "live_or_unknown"
                 )
+                phase, code, identity, pending = self._recovery_verification(tx, record)
+                attachment = record.get("attachment_state", "unavailable")
+                if attachment not in {
+                    "active",
+                    "approval_deciding",
+                    "approval_pending",
+                }:
+                    attachment = "unavailable"
                 items.append(
                     RecoveryItem(
                         record["id"],
@@ -894,6 +988,11 @@ class LaneContinuationService:
                         state,
                         record["expires_at"],
                         authority,
+                        attachment,
+                        phase,
+                        code,
+                        identity,
+                        pending,
                     )
                 )
         return RecoveryPage(
