@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from .host_turn_links import ManagedHostTurnLink
 
 from .app_control import digest as require_digest
 from .app_control import (
@@ -166,6 +167,8 @@ class AppWorkRecord:
     revision: int = 1
     dispatch_id: str = ""
     process_incarnation: str = ""
+    run_id: str = ""
+    host_turn: ManagedHostTurnLink | None = None
 
     def __post_init__(self):
         if type(self.prepared) is not PreparedAppWork:
@@ -181,7 +184,29 @@ class AppWorkRecord:
             identifier(self.dispatch_id)
             identifier(self.process_incarnation)
         else:
-            raise ValueError("unsupported app work state")
+            if self.state not in ("run_binding", "running"):
+                raise ValueError("unsupported app work state")
+            if self.revision != (3 if self.state == "run_binding" else 4):
+                raise ValueError("invalid execution revision")
+            identifier(self.dispatch_id)
+            identifier(self.process_incarnation)
+            _text(self.run_id, 128)
+        if self.state in ("prepared", "admitted") and self.run_id:
+            raise ValueError("unbound work cannot claim a run")
+        if self.state != "running":
+            if self.host_turn is not None:
+                raise ValueError("unlinked work cannot claim a host turn")
+        else:
+            if type(self.host_turn) is not ManagedHostTurnLink:
+                raise ValueError("typed host turn required")
+            self.host_turn.__post_init__()
+            if (
+                self.host_turn.run_id != self.run_id
+                or self.host_turn.principal_id != self.prepared.binding.principal_id
+                or self.host_turn.host_conversation_id
+                != self.prepared.binding.canonical_host_id
+            ):
+                raise ValueError("host turn scope mismatch")
 
 
 @dataclass(frozen=True)

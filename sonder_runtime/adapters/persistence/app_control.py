@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import time
 import uuid
+from ...application.ports.host_turn_links import ManagedHostTurnLink
 from ...application.ports.app_managed_work import (
     AppWorkRecord,
     PreparedAppWork,
@@ -65,8 +66,15 @@ _CONTROL_TABLES = (
 
 
 def _encode(value, limit=131072):
+    data = asdict(value) if not isinstance(value, dict) else value
+    if type(value) is AppWorkRecord:
+        # Preserve exact canonical bytes for pre-execution records already stored.
+        if not value.run_id:
+            data.pop("run_id")
+        if value.host_turn is None:
+            data.pop("host_turn")
     raw = json.dumps(
-        asdict(value) if not isinstance(value, dict) else value,
+        data,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -92,6 +100,8 @@ def _decode(raw, cls):
             raise ValueError()
         data = json.loads(raw, object_pairs_hook=_pairs)
         if cls is AppWorkRecord:
+            if data.get("host_turn") is not None:
+                data["host_turn"] = ManagedHostTurnLink(**data["host_turn"])
             prepared = data["prepared"]
             grant = prepared["binding"]["grant"]
             for key in ("roots", "tools", "catalog_file_identity"):
@@ -439,7 +449,7 @@ class AppControlTransaction:
         )
         if preparation is None or preparation.public_receipt != expected_receipt:
             raise StoreUnavailable("prepared work receipt mismatch")
-        if record.state == "admitted":
+        if record.state != "prepared":
             if (
                 expected_revision != 1
                 or record.dispatch_id != dispatch_id
@@ -479,6 +489,77 @@ class AppControlTransaction:
         ):
             raise StoreUnavailable("work admission readback mismatch")
         return WorkAdmission(admitted, True)
+
+    def _link_work(
+        self,
+        *,
+        principal_id,
+        control_session_id,
+        work_id,
+        expected_revision,
+        dispatch_id,
+        process_incarnation,
+        run_id=None,
+        host_turn=None,
+    ):
+        positive(expected_revision)
+        current = self.read_work(
+            principal_id=principal_id,
+            control_session_id=control_session_id,
+            work_id=work_id,
+        )
+        if current is None or current.state == "prepared":
+            raise CommandConflict("work is not admitted")
+        record = self.admit_work(
+            principal_id=principal_id,
+            control_session_id=control_session_id,
+            work_id=work_id,
+            expected_revision=1,
+            dispatch_id=dispatch_id,
+            process_incarnation=process_incarnation,
+        ).record
+        if record.state == "prepared":
+            raise CommandConflict("work is not admitted")
+        expected_state = "admitted" if host_turn is None else "run_binding"
+        if record.state != expected_state or record.revision != expected_revision:
+            raise CommandConflict("work execution state changed")
+        updated = (
+            replace(record, state="run_binding", revision=3, run_id=run_id)
+            if host_turn is None
+            else replace(record, state="running", revision=4, host_turn=host_turn)
+        )
+        self._write_one(
+            "UPDATE app_managed_work SET state=?,revision=?,record=? "
+            "WHERE id=? AND principal=? AND session=? AND revision=? AND state=?",
+            (
+                updated.state,
+                updated.revision,
+                _encode(updated),
+                work_id,
+                principal_id,
+                control_session_id,
+                expected_revision,
+                expected_state,
+            ),
+        )
+        if (
+            self.read_work(
+                principal_id=principal_id,
+                control_session_id=control_session_id,
+                work_id=work_id,
+            )
+            != updated
+        ):
+            raise StoreUnavailable("work execution readback mismatch")
+        return updated
+
+    def bind_work_run(self, *, run_id, **scope):
+        return self._link_work(run_id=run_id, **scope)
+
+    def bind_work_host(self, *, host_turn, **scope):
+        if type(host_turn) is not ManagedHostTurnLink:
+            raise CommandConflict("typed host turn required")
+        return self._link_work(host_turn=host_turn, **scope)
 
     def _now(self):
         self._check()
