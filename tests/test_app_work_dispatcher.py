@@ -544,3 +544,130 @@ def test_selection_revocation_before_queued_callback_prevents_host_and_model(
     assert (
         row.state == "admitted"
     )  # Revocation also refuses a new uncertainty mutation.
+
+
+@pytest.mark.parametrize(
+    ("phase", "lose_pending_response"),
+    [("unknown", False), ("approval_pending", False), ("approval_pending", True)],
+)
+def test_actual_false_terminal_eligibility_is_durable_and_never_redispatched(
+    dispatch, managed, monkeypatch, tmp_path, phase, lose_pending_response
+):
+    """Scripted model, real host evidence/verifier/approval ledger and app DB."""
+    from dataclasses import replace
+    from sonder_runtime.bootstrap.managed_conversation import _ManagedTurn
+    from sonder_runtime.adapters.security.approval_ledger import ApprovalLedger
+    from tests.test_continuation_approval_bridge import bridge
+    from tests.test_delegated_verification import _verifier
+
+    dispatcher, selection, models, lifetimes, approvals, fresh = dispatch
+    lanes = managed[2]
+    ledger = ApprovalLedger(tmp_path / "pending-dispatch-approvals.db")
+    gate = bridge(ledger)
+    original_stage = _ManagedTurn.stage_final
+    observed, prepared_verifiers, failures = [], [], []
+
+    def stage(view, facts):
+        if phase == "unknown":
+            # Historical evidence has no positive declaration of delegation.
+            return original_stage(view, replace(facts, delegated_work=None))
+        bound = view._session._bound
+        with bound._scope() as current:
+            child = lanes.spawn(
+                command_id="pending-child",
+                parent_session_id=view._session.parent_session_id,
+                task="Inspect disposable repository",
+                workspace_root=str(current.workspace_roots[0]),
+                context=current,
+            )["lane"]
+        lanes.run_pending(child["id"], current)
+        assert lanes.store.read_lane(child["id"])["status"] == "completed"
+        verifier, gateway, _ = _verifier(
+            (lanes, lanes.store, managed[3], current.workspace_roots[0], current, {})
+        )
+        prepared_verifiers.append((verifier, gateway))
+        view._session._approve = lambda prepared, context: gate.authorize(
+            "workspace_run",
+            prepared.approval_payload(),
+            surface="app-control",
+            expires_at=min(time.time() + 60, time.time() + context.remaining_seconds),
+        )
+        verdict = view.verify_delegated(
+            view._draft, verifier_factory=lambda *args: verifier
+        )
+        assert not verdict.valid and gateway.calls == 0
+        assert bound.pending_verification() is not None
+        original_stage(
+            view, replace(facts, delegated_work=True, terminal_class="UNVERIFIED")
+        )
+
+    def eligibility(lifetime, expected, finalized):
+        def verifier_factory(*args):
+            assert phase == "approval_pending"
+            return prepared_verifiers[0][0]
+
+        actual = lifetime.terminal_eligibility(
+            expected, verifier_factory=verifier_factory
+        )
+        assert actual.evidence.result == finalized
+        assert not actual.eligible and actual.phase == phase
+        observed.append(actual)
+        return actual
+
+    def checked_stage(*args):
+        try:
+            return stage(*args)
+        except BaseException as exc:
+            failures.append(exc)
+            raise
+
+    monkeypatch.setattr(_ManagedTurn, "stage_final", checked_stage)
+    dispatcher._eligibility = eligibility
+    atomic = dispatcher.authority.work_atomic
+    lost = []
+
+    def ambiguous_pending(*args, **kwargs):
+        result = atomic(*args, **kwargs)
+        if (
+            lose_pending_response
+            and not lost
+            and getattr(result, "state", None) == "verification_pending"
+        ):
+            lost.append(result)
+            raise OSError("injected lost pending commit response")
+        return result
+
+    monkeypatch.setattr(dispatcher.authority, "work_atomic", ambiguous_pending)
+    work = prepare(dispatch)
+    dispatcher.execute(selection, work_id=work.prepared.work_id)
+    dispatcher._executor.shutdown(wait=True)
+    observer = fresh()
+    try:
+        row = dispatcher.status(observer, work_id=work.prepared.work_id)
+        assert not failures, repr(failures)
+        assert len(observed) == 1
+        assert row.state == (
+            "verification_pending"
+            if phase == "approval_pending" and not lose_pending_response
+            else "unknown"
+        )
+        assert len(models) == 1
+        if phase == "approval_pending":
+            retained = row.verification_pending
+            assert retained.identity == observed[0].pending_identity
+            assert retained.approval == observed[0].pending_approval
+            assert retained.original_terminal == observed[0].evidence.result.receipt
+            assert ledger.resolve_call(retained.approval.call_digest) is not None
+            assert prepared_verifiers[0][1].calls == 0
+            if lose_pending_response:
+                assert len(lost) == 1
+                assert row.verification_pending == lost[0].verification_pending
+                assert row.interruption.prior_state == "verification_pending"
+                assert row.interruption.code == "FINAL_PUBLICATION_UNKNOWN"
+        else:
+            assert row.interruption.code == "FINAL_PUBLICATION_UNKNOWN"
+        assert dispatcher.execute(observer, work_id=work.prepared.work_id) == row
+        assert len(models) == 1 and len(approvals) == 1
+        assert not dispatcher._runs
+    finally:
+        dispatcher.authority.release_selection(observer)
