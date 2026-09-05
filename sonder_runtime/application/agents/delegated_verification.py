@@ -98,7 +98,7 @@ class DelegatedVerificationService:
             raise ValueError("delegated verification needs children")
         signatures, jobs = [], []
         for lane in children:
-            self.lanes._authorize(lane, context, execute=True)
+            self.lanes._authorize(lane, context, execute=True, tx=tx)
             if (
                 lane["status"]
                 not in {"completed", "cancelled", "failed", "interrupted"}

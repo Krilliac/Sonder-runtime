@@ -262,6 +262,23 @@ def _prepared(lanes, verifier):
     )
 
 
+def test_child_authority_receives_existing_verification_transaction(lanes, monkeypatch):
+    service, store, *_ = lanes
+    service.run_pending(spawn(lanes), lanes[4])
+    verifier, _, _ = _verifier(lanes)
+    original = service._authorize
+    observed = []
+
+    def require_transaction(lane, context, *, execute=False, tx=None):
+        assert tx is not None and tx.conn.in_transaction
+        observed.append(tx)
+        return original(lane, context, execute=execute, tx=tx)
+
+    monkeypatch.setattr(service, "_authorize", require_transaction)
+    prepared = _prepared(lanes, verifier)
+    assert prepared.children and observed
+
+
 @pytest.mark.parametrize(
     "condition",
     ["owner", "pending_effect", "pending_response", "queued", "unproven_process"],
