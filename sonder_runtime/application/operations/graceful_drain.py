@@ -238,9 +238,12 @@ class GracefulDrainCoordinator:
                     errors.append(f"process tree {intent.record_id}: {type(exc).__name__}")
             cleanup_completed = call("cleanup", lambda: self._cleanup(_remaining(deadline, self._clock)))
             timed_out = _remaining(deadline, self._clock) <= 0
+            if plan.truncated:
+                errors.append("drain plan truncated: additional records remain unobserved")
             all_barriers = all((admission_stopped, deadline_announced,
                                 descendants_cancelled, descendants_settled,
-                                flush_completed, cleanup_completed, process_ok))
+                                flush_completed, cleanup_completed, process_ok,
+                                not plan.truncated))
             stage = DrainStage.COMPLETE if all_barriers and not timed_out else DrainStage.INCOMPLETE
             if stage is DrainStage.COMPLETE:
                 stage = DrainStage.COMPLETE
