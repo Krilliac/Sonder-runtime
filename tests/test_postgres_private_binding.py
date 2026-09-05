@@ -50,6 +50,23 @@ def test_fixed_scram_binding_disables_ambient_client_cert_auth(tmp_path):
         binding.close()
 
 
+@pytest.mark.parametrize("variable", ["pgservice", "PgPaSsFiLe", "pGoPtIoNs"])
+def test_binding_rejects_case_preserved_windows_libpq_aliases(
+    tmp_path, monkeypatch, variable
+):
+    import os
+
+    binding = PostgresPrivateBinding(bundle(tmp_path), writable_roots=lambda: ())
+    try:
+        # Preserve the spelling as a native Windows environment enumeration may.
+        # os._Environ uppercases keys itself, so setenv alone misses this case.
+        monkeypatch.setattr(os, "environ", {variable: "fixture-untrusted"})
+        with pytest.raises(ContinuationStorageFailure):
+            binding.validate()
+    finally:
+        binding.close()
+
+
 @pytest.mark.parametrize(
     "changes",
     [

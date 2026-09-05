@@ -182,7 +182,7 @@ class PostgresPrivateBinding:
                 or writable.is_relative_to(root)
             ):
                 raise ValueError("PostgreSQL binding overlaps writable roots")
-        if any(key.startswith("PG") for key in os.environ):
+        if any(key.upper().startswith("PG") for key in os.environ):
             raise ValueError("ambient libpq configuration is not accepted")
 
     def _read(self, path, maximum):
@@ -223,6 +223,7 @@ class PostgresPrivateBinding:
         self.validate()
         value = self._value
         result = dict(
+            autocommit=True,  # Repository owns explicit BEGIN/COMMIT boundaries.
             host=value["host"],
             port=value["port"],
             dbname=value["database"],
