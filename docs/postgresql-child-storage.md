@@ -32,6 +32,14 @@ by the uppercase field name. An explicit PostgreSQL selection conflicts with
 configuration or unavailable storage prevents application startup. Existing
 SQLite installations need no PostgreSQL driver or binding.
 
+REPL and legacy MCP bind the same explicitly configured Application into their
+legacy runtime. They do not forward the private binding path through environment
+variables or silently create a second SQLite graph. Exact loaded TOML/secrets
+source paths and the configured child binding path are retained as immutable
+private config provenance, exposed read-only on Application and omitted as a
+field from redacted configuration output. Caller-owned runtime graphs are never
+silently replaced; owned replacement requires bounded successful cleanup.
+
 The external binding is strict JSON, at most 16 KiB, with only `host`, `port`,
 `database`, `user`, `passfile`, `sslmode` and optional `sslrootcert`. It contains
 no arbitrary DSN, options, service selection or inline password. `passfile` and

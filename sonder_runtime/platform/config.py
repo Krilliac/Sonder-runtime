@@ -254,6 +254,7 @@ class SonderConfig:
     secrets: Secrets = field(default_factory=Secrets)
     # Provenance for diagnostics: which layers actually contributed.
     sources: tuple[str, ...] = ()
+    private_source_paths: tuple[str, ...] = field(default=(), repr=False)
     artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
     child_storage: ChildStorageConfig = field(default_factory=ChildStorageConfig)
 
@@ -1246,10 +1247,12 @@ def load_config(
     """
     errors: list[str] = []
     sources: list[str] = ["defaults"]
+    private_source_paths: list[str] = []
     config = SonderConfig()
 
     if toml_path is not None:
         path = Path(toml_path)
+        private_source_paths.append(str(path.resolve()))
         try:
             with path.open("rb") as fh:
                 raw = tomllib.load(fh)
@@ -1296,6 +1299,7 @@ def load_config(
     merged_env: dict[str, str] = {}
     if secrets_path is not None:
         spath = Path(secrets_path)
+        private_source_paths.append(str(spath.resolve()))
         if not spath.exists():
             errors.append(f"secrets file not found: {spath}")
         else:
@@ -1337,7 +1341,9 @@ def load_config(
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
-    return replace(config, sources=tuple(sources))
+    if config.child_storage.binding_file:
+        private_source_paths.append(str(Path(config.child_storage.binding_file).resolve()))
+    return replace(config, sources=tuple(sources), private_source_paths=tuple(dict.fromkeys(private_source_paths)))
 
 
 _OVERRIDE_PATTERN = re.compile(r"^[a-z_]+\.[a-z_]+$")
