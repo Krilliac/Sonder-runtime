@@ -149,7 +149,8 @@ class StandaloneLaneController:
             return
         # The composition root owns the adapter; interfaces only consume its
         # host-only observe/seal seam.
-        self._host_ledger = ledger
+        inherit = getattr(self._managed_session, "inherit_host_ledger", None)
+        self._host_ledger = inherit(ledger) if inherit is not None else ledger
         self._host_terminal = None
         self._host_evidence_error = False
 
@@ -184,6 +185,9 @@ class StandaloneLaneController:
             self._host_evidence_error = True
             return False
         self._host_terminal = candidate
+        capture = getattr(self._managed_session, "capture_terminal", None)
+        if capture is not None:
+            capture(candidate)
         return True
 
     def parent_effect_evidence(self):

@@ -1994,6 +1994,11 @@ def _run_session_work(session_id, *, host_project, **arguments):
 
 
 def main(*, machine_output=False):
+    with server._managed_repl_conversation_scope():
+        return _main(machine_output=machine_output)
+
+
+def _main(*, machine_output=False):
     global CURRENT_TOKEN
     trace = False
     strict = None  # None = env default
@@ -2062,6 +2067,7 @@ def main(*, machine_output=False):
             print("workspace: %s" % (workspace_root or "(not selected)"))
             return
         if text.lower() in ("none", "clear", "off"):
+            server._clear_managed_repl_conversation()
             workspace_root = ""
             print("workspace cleared; the next work request will ask for a directory")
             return
@@ -2069,6 +2075,7 @@ def main(*, machine_output=False):
         if error:
             print(error + "\nuse /workspace-create <path> to create a new guarded directory")
             return
+        server._clear_managed_repl_conversation()
         workspace_root = path
         print("workspace: %s" % workspace_root)
         _queue_pending_workspace_work()
@@ -2087,6 +2094,7 @@ def main(*, machine_output=False):
         if error:
             print(error)
             return
+        server._clear_managed_repl_conversation()
         workspace_root = path
         print("workspace: %s" % workspace_root)
         _queue_pending_workspace_work()
@@ -2960,6 +2968,7 @@ def main(*, machine_output=False):
                 if n is not None:
                     _run_train(n)
             elif cmd == "/new":
+                server._clear_managed_repl_conversation()
                 session_id = memory_store.new_id()
                 last_iid = None
                 last_response = None
@@ -2981,6 +2990,7 @@ def main(*, machine_output=False):
                     finally:
                         conn.close()
                     if found:
+                        server._clear_managed_repl_conversation()
                         session_id = found
                         last_iid = None
                         last_response = None
