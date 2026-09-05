@@ -25,6 +25,10 @@ Use `with adapter.scope(selection, context)` around the root host call and injec
 `adapter.authorize` into the continuation service. Authorization requires that
 private context scope and the current exact issuer-owned selection object; an ID
 or copied dataclass alone is insufficient. Each authorization re-reads the exact
+session and retains the original scope context as its authority ceiling. The
+original context must remain live; supplied contexts must preserve cancellation,
+source, principal and auth level, and cannot expand deadline, roots or cloud/remote
+flags. Narrowed contexts are accepted. Each authorization re-reads the exact
 session and live policy. A live grant may attenuate the original tool/root ceiling
 and shorten expiry; increased policy expiry is clipped to the original expiry.
 Changed grant ID/revision fences the selection. Roots must be existing canonical

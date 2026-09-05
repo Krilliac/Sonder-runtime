@@ -189,3 +189,42 @@ def test_exact_resolver_wrong_row_and_missing_creation_are_rejected(setup):
     adapter._get_session = lambda identity: {"session_id": "b" * 16}
     with pytest.raises(PermissionError):
         adapter.select_exact("a" * 16, context)
+
+
+@pytest.mark.parametrize(
+    "change", ["cancellation", "deadline", "cloud", "remote", "roots"]
+)
+def test_scope_context_cannot_be_replaced_with_broader_authority(setup, change):
+    adapter, context, state, conn = setup
+    selection = adapter.create("a" * 16, context)
+    changes = {
+        "cancellation": {
+            "cancellation": local_owner_context(correlation_id="new").cancellation
+        },
+        "deadline": {"deadline_monotonic": context.deadline_monotonic + 10},
+        "cloud": {"cloud_allowed": True},
+        "remote": {"remote_ollama_allowed": True},
+        "roots": {"workspace_roots": (context.workspace_roots[0].parent,)},
+    }
+    with adapter.scope(selection, context):
+        with pytest.raises(PermissionError):
+            adapter.authorize(
+                replace(context, **changes[change]), selection.host_conversation_id
+            )
+
+
+def test_scope_accepts_attenuation_but_original_cancellation_remains_live(setup):
+    adapter, context, state, conn = setup
+
+    class Token:
+        cancelled = False
+
+    token = Token()
+    context = replace(context, cancellation=token)
+    selection = adapter.create("a" * 16, context)
+    with adapter.scope(selection, context):
+        narrowed = replace(context, deadline_monotonic=context.deadline_monotonic - 1)
+        assert adapter.authorize(narrowed, selection.host_conversation_id)
+        token.cancelled = True
+        with pytest.raises(PermissionError):
+            adapter.authorize(narrowed, selection.host_conversation_id)
