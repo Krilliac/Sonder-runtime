@@ -196,3 +196,37 @@ def test_terminal_link_reconciliation_is_exact_and_non_dispatchable(state, inter
             )
         )
     assert admit(store).record == completed and not admit(store).newly_admitted
+    next_work = replace(
+        work, work_id="work2", command=replace(work.command, command_id="prepare2")
+    )
+    assert store.atomic(lambda tx: tx.prepare_work(next_work)).state == "prepared"
+    assert store.atomic(lambda tx: tx.prepare_work(work)) == completed
+    with pytest.raises(CommandConflict):
+        store.atomic(
+            lambda tx: tx.prepare_work(
+                replace(
+                    next_work,
+                    work_id="work3",
+                    command=replace(work.command, command_id="prepare3"),
+                )
+            )
+        )
+
+
+def test_terminal_scalar_cannot_hide_unfinished_binding_work(state):
+    from sonder_runtime.application.ports.app_control import StoreUnavailable
+
+    store, work = preparation(state)
+    store.atomic(lambda tx: tx.prepare_work(work))
+    admit(store)
+    conn = store._connect()
+    try:
+        conn.execute("UPDATE app_managed_work SET state='terminal' WHERE id='work1'")
+        conn.commit()
+    finally:
+        conn.close()
+    next_work = replace(
+        work, work_id="work2", command=replace(work.command, command_id="prepare2")
+    )
+    with pytest.raises(StoreUnavailable):
+        store.atomic(lambda tx: tx.prepare_work(next_work))
