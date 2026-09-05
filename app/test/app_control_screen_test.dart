@@ -273,8 +273,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(selected, isTrue);
     expect(find.text('Selected conversation'), findsOneWidget);
-    expect(
-        find.textContaining('Running tasks is not available'), findsOneWidget);
+    expect(find.textContaining('Managed work requires separate server support'),
+        findsOneWidget);
     expect(find.textContaining(fixture.controlToken), findsNothing);
     await tester.tap(find.text('Clear selection'));
     await tester.pumpAndSettle();

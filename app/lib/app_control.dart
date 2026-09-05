@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'account_session.dart';
 import 'agent_command_id.dart';
+part 'app_work.dart';
 
 /// Private composition snapshot. Never persisted or passed to the chat API.
 class AppControlContext {
@@ -30,7 +31,8 @@ class AppControlContext {
 class AppControlFailure implements Exception {
   final String code;
   final bool unknown;
-  const AppControlFailure(this.code, {this.unknown = false});
+  final AppWorkApproval? approval;
+  const AppControlFailure(this.code, {this.unknown = false, this.approval});
   @override
   String toString() => 'AppControlFailure($code)';
 }
@@ -146,6 +148,12 @@ class AppControlClient extends ChangeNotifier {
   Completer<void>? _abort;
   _Enrollment? _enrollment;
   _Command? _pending;
+  _Command? _workCommand;
+  AppManagedWork? _work;
+  AppControlSelection? _workScope;
+  String _workPrompt = '';
+  AppWorkApproval? _workApproval;
+  bool _workExecutionUnknown = false;
   int _generation = 0;
   bool _disposed = false, _busy = false;
   String? _project;
@@ -219,6 +227,7 @@ class AppControlClient extends ChangeNotifier {
     _expiresAt = null;
     _enrollment = null;
     _pending = null;
+    _clearWork();
     _bindings = const [];
     _selection = null;
     selectionKnown = false;
@@ -345,10 +354,18 @@ class AppControlClient extends ChangeNotifier {
           'APP_CONTROL_UNAVAILABLE',
           'APP_CONTROL_OUTCOME_UNKNOWN',
           'APP_RECOVERY_UNAVAILABLE',
+          'APP_WORK_UNAVAILABLE',
+          'APP_WORK_BUSY',
+          'APP_WORK_APPROVAL_PENDING',
+          'APP_WORK_APPROVAL_UNKNOWN',
           'INVALID_APP_CONTROL_REQUEST'
         };
         final code =
             codes.contains(rawCode) ? rawCode as String : 'INVALID_RESPONSE';
+        if (code == 'APP_WORK_APPROVAL_PENDING' && response.$1 == 409) {
+          throw AppControlFailure(code,
+              approval: AppWorkApproval.decode(value['pending']));
+        }
         throw AppControlFailure(code,
             unknown: method == 'POST' &&
                 (response.$1 >= 500 ||
@@ -378,7 +395,7 @@ class AppControlClient extends ChangeNotifier {
       {required String project,
       required String password,
       bool replace = false}) {
-    if (_pending != null || _enrollment != null) {
+    if (_pending != null || _enrollment != null || _workCommand != null) {
       throw const AppControlFailure('REQUEST_PENDING');
     }
     if (hasSession && !replace) throw const AppControlFailure('SESSION_EXISTS');
@@ -551,6 +568,9 @@ class AppControlClient extends ChangeNotifier {
 
   Future<void> _mutate(_Command command, {bool retry = false}) =>
       _run((generation) async {
+        if (_workCommand != null) {
+          throw const AppControlFailure('REQUEST_PENDING');
+        }
         if (_pending != null && (!retry || !identical(command, _pending))) {
           throw const AppControlFailure('REQUEST_PENDING');
         }

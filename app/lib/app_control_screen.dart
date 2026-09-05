@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'app_control.dart';
+import 'app_work_screen.dart';
 import 'theme.dart';
 import 'workspace_ui.dart';
 
@@ -223,7 +224,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                   const SizedBox(height: 20),
                   const WorkspaceNotice(
                       message:
-                          'Running tasks is not available on this server yet. You can create and select conversations.'),
+                          'Create and select a server conversation. Managed work requires separate server support and explicit approval.'),
                   if (_notice != null) ...[
                     const SizedBox(height: 12),
                     WorkspaceNotice(
@@ -247,6 +248,18 @@ class _AppControlScreenState extends State<AppControlScreen> {
                     _enrollmentForm()
                   else ...[
                     _selectionPanel(tokens),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                        onPressed: _canChange &&
+                                client.selectionKnown &&
+                                client.selection?.bindingId != null
+                            ? () => Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                    builder: (_) =>
+                                        AppWorkScreen(client: client)))
+                            : null,
+                        icon: const Icon(Icons.playlist_add_check),
+                        label: const Text('Open managed work')),
                     const SizedBox(height: 16),
                     Wrap(spacing: 8, runSpacing: 8, children: [
                       OutlinedButton.icon(
