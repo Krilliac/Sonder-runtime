@@ -75,7 +75,8 @@ class AppManagedWorkDispatcher:
         authorize_dispatch,
         terminal_eligibility,
         max_workers=1,
-        max_retained=32
+        max_retained=32,
+        application=None,
     ):
         if any(
             not callable(value)
@@ -92,6 +93,7 @@ class AppManagedWorkDispatcher:
         if authority is None or workbench is None:
             raise TypeError("private authority and prepared workbench required")
         self.authority, self.workbench = authority, workbench
+        self._application = application
         self._factory, self._authorize, self._eligibility = (
             lifetime_factory,
             authorize_dispatch,
@@ -108,6 +110,11 @@ class AppManagedWorkDispatcher:
         self._submitting = 0
         self._closed = False
         self._incarnation = uuid.uuid4().hex
+
+    @property
+    def application(self):
+        """Exact host-owned Application; None is legacy unowned compatibility."""
+        return self._application
 
     def _scope(self, selection, work_id):
         return dict(
@@ -246,7 +253,7 @@ class AppManagedWorkDispatcher:
                         **self._scope(selection, work_id),
                         expected_revision=1,
                         dispatch_id=dispatch_id,
-                        process_incarnation=self._incarnation
+                        process_incarnation=self._incarnation,
                     )
 
                 admission = self.authority.work_atomic(
@@ -311,7 +318,7 @@ class AppManagedWorkDispatcher:
                 expected_revision=record.revision,
                 dispatch_id=record.dispatch_id,
                 process_incarnation=record.process_incarnation,
-                **fields
+                **fields,
             ),
         )
         entry.record = updated
@@ -347,7 +354,7 @@ class AppManagedWorkDispatcher:
                     expected_revision=current.revision,
                     dispatch_id=current.dispatch_id,
                     process_incarnation=current.process_incarnation,
-                    interruption=interruption
+                    interruption=interruption,
                 ),
             )
         except BaseException:
@@ -368,6 +375,8 @@ class AppManagedWorkDispatcher:
             def factory(controller, application):
                 nonlocal stage
                 stage = "HOST_LINK_OUTCOME_UNKNOWN"
+                if self.application is not None and application is not self.application:
+                    raise PermissionError("owned work Application identity changed")
                 self._transition(entry, "bind_work_run", run_id=controller.run_id)
                 view = lifetime.factory(controller, application)
                 turn = view.turn_link()

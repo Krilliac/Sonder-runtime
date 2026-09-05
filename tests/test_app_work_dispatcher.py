@@ -19,6 +19,24 @@ def test_dispatcher_requires_real_host_composition():
     raise AssertionError("missing private callbacks must refuse")
 
 
+def test_owned_dispatcher_application_identity_is_read_only():
+    app = object()
+    dispatcher = AppManagedWorkDispatcher(
+        object(),
+        object(),
+        application=app,
+        lifetime_factory=lambda *args: None,
+        authorize_dispatch=lambda *args: None,
+        terminal_eligibility=lambda *args: None,
+    )
+    try:
+        assert dispatcher.application is app
+        with pytest.raises(AttributeError):
+            dispatcher.application = object()
+    finally:
+        dispatcher.close()
+
+
 import threading
 import time
 import pytest
@@ -121,6 +139,31 @@ def prepare(dispatch):
             prompt="inspect repository", tier="code", allow_web=False, max_steps=1
         ),
     )
+
+
+def test_owned_dispatcher_refuses_changed_application_before_run_binding(dispatch):
+    base, selection, models, lifetimes, _, fresh = dispatch
+    dispatcher = AppManagedWorkDispatcher(
+        base.authority,
+        base.workbench,
+        application=object(),
+        lifetime_factory=base._factory,
+        authorize_dispatch=base._authorize,
+        terminal_eligibility=base._eligibility,
+    )
+    try:
+        work = prepare((dispatcher, selection))
+        dispatcher.execute(selection, work_id=work.prepared.work_id)
+        dispatcher._executor.shutdown(wait=True)
+        observer = fresh()
+        try:
+            row = dispatcher.status(observer, work_id=work.prepared.work_id)
+            assert row.state == "unknown" and row.run_id == ""
+            assert row.host_turn is None and not models
+        finally:
+            dispatcher.authority.release_selection(observer)
+    finally:
+        dispatcher.close()
 
 
 def test_preparation_is_immutable_retry_without_provider_or_expiry_renewal(dispatch):
