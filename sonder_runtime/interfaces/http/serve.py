@@ -32,6 +32,11 @@ from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
+
+_ARTIFACT_TRANSFER_BINDING = None
+_ARTIFACT_TRANSFER_CONFIG = None
+
 import logging as _logging_module
 _serve_logger = _logging_module.getLogger(__name__)
 
@@ -780,6 +785,17 @@ def configure_typed_config(config) -> None:
     global STREAM_IDLE_TIMEOUT_SECONDS, HTTP_SESSION_STATE_LIMIT
     global HTTP_SESSION_STATE_OWNER_LIMIT, TRAIN_MAX_N
 
+    global _ARTIFACT_TRANSFER_CONFIG, _ARTIFACT_TRANSFER_BINDING
+    from sonder_runtime.bootstrap.artifact_transfer import ArtifactTransferBinding
+    # Validate before applying. Existing in-flight calls consult this live source.
+    candidate = ArtifactTransferBinding(lambda: config)
+    candidate.start()
+    previous = _ARTIFACT_TRANSFER_BINDING
+    _ARTIFACT_TRANSFER_CONFIG = config
+    candidate._config_provider = lambda: _ARTIFACT_TRANSFER_CONFIG
+    _ARTIFACT_TRANSFER_BINDING = candidate
+    if previous is not None:
+        previous.close()
     server_config = config.server
     from sonder_runtime.adapters.web import listener_probe
     listener_probe.configure_typed_config(config)
@@ -3542,6 +3558,8 @@ class Handler(BaseHTTPRequestHandler):
         bytes do not turn the close into a reset that erases the error the
         caller needs to see.
         """
+        if getattr(self, "_artifact_transfer_request", False):
+            return
         if not self.close_connection:
             return
         if getattr(self, "_request_body_consumed", True):
@@ -3576,7 +3594,8 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         origin = self.headers.get("Origin")
         if origin is not None and origin in CORS_ORIGINS:
-            _serve_logger.debug(f"_cors: allowing origin={origin!r}")
+            if not getattr(self, "_artifact_transfer_request", False):
+                _serve_logger.debug(f"_cors: allowing origin={origin!r}")
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -3591,6 +3610,9 @@ class Handler(BaseHTTPRequestHandler):
             )
 
     def log_message(self, fmt, *args):
+        if is_artifact_route(getattr(self, "path", "")):
+            sys.stderr.write("[sonder_serve] artifact transfer response\n")
+            return
         sys.stderr.write("[sonder_serve] %s\n" % (fmt % args))
 
     def do_OPTIONS(self):
@@ -3601,6 +3623,8 @@ class Handler(BaseHTTPRequestHandler):
         self._operation_context = None
         self._request_started = time.monotonic()
         self._request_body_consumed = False
+        if handle_artifact_transfer(self, "OPTIONS", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
         if self._reject_disallowed_origin():
             return
         must_close = self._close_for_unread_body()
@@ -3837,6 +3861,8 @@ class Handler(BaseHTTPRequestHandler):
         is closed instead. See MAX_DISCARDED_BODY_BYTES.
         """
         pending = self._unread_request_body_bytes()
+        if getattr(self, "_artifact_transfer_request", False) and pending != 0:
+            return True
         if pending == 0:
             self._request_body_consumed = True
             return False
@@ -3910,7 +3936,7 @@ class Handler(BaseHTTPRequestHandler):
             # This is a delivery failure, not a server traceback.
             return False
 
-    def _send_binary_payload(self, body, *, content_type, digest, status=200):
+    def _send_binary_payload(self, body, *, content_type, digest, status=200, headers=None):
         if not isinstance(body, bytes):
             raise TypeError("binary response body must be bytes")
         must_close = self._close_for_unread_body()
@@ -3923,6 +3949,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("X-Sonder-Artifact-Sha256", digest)
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
             return True
@@ -3958,7 +3986,7 @@ class Handler(BaseHTTPRequestHandler):
             # must not become dependent on its optional inspection surface.
             pass
 
-    def _read_json(self):
+    def _read_json(self, *, max_bytes=None):
         # HTTP framing must be unambiguous before this handler reads a body.
         self._validate_request_framing()
         content_lengths = self.headers.get_all("Content-Length") or ()
@@ -3968,7 +3996,7 @@ class Handler(BaseHTTPRequestHandler):
         if not raw_length.strip().isdigit():
             raise HTTPRequestError(400, "Content-Length must be a nonnegative integer")
         length = int(raw_length)
-        if length > MAX_REQUEST_BYTES:
+        if length > (MAX_REQUEST_BYTES if max_bytes is None else min(MAX_REQUEST_BYTES, max_bytes)):
             raise HTTPRequestError(413, "request body is too large")
         media_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if media_type != "application/json":
@@ -4105,12 +4133,21 @@ class Handler(BaseHTTPRequestHandler):
             lane_policy.forget_spent_approval()
         return True
 
+    def do_PUT(self):
+        self._correlation_id = ""
+        self._request_started = time.monotonic()
+        self._request_body_consumed = False
+        if not handle_artifact_transfer(self, "PUT", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            self._send_not_found()
+
     def do_GET(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
         self._correlation_id = ""
         self._request_started = time.monotonic()
         self._request_body_consumed = False
+        if handle_artifact_transfer(self, "GET", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
         if self._reject_disallowed_origin():
             return
         path = _request_route(self.path)
@@ -4978,6 +5015,8 @@ class Handler(BaseHTTPRequestHandler):
         # and so is the record of whether this request's body was read.
         self._chat_completion_metrics_recorded = False
         self._request_body_consumed = False
+        if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
+            return
         is_chat_completion = _request_route(self.path) == "/v1/chat/completions"
         _serve_logger.debug(f"do_POST: path={_request_route(self.path)!r}, peer={self._peer()!r}, is_chat_completion={is_chat_completion}")
         model_operation = ""
@@ -6214,6 +6253,8 @@ def main(config=None):
         if not lifecycle.coordinator.draining:
             lifecycle.drain("server stopping")
         httpd.server_close()
+        if _ARTIFACT_TRANSFER_BINDING is not None:
+            _ARTIFACT_TRANSFER_BINDING.close()
         _serve_logger.info("HTTP server stopped")
 
 

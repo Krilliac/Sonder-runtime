@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.secret_presence import redact_presence
+from sonder_runtime.platform.artifact_transfer_config import ArtifactTransferConfig, artifact_transfer_errors
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -54,12 +55,13 @@ _COMPUTE_CAPABILITIES = frozenset({
 # process environment.  Their presence in TOML fails validation.
 SECRET_ENV_KEYS = (
     "SONDER_API_KEY",
+    "SONDER_ARTIFACT_TRANSFER_KEY",
     "SONDER_AUTH_SECRET",
     "SONDER_BACKUP_KEY_FILE",
     "SONDER_LAUNCHER_HEALTH_TOKEN",
 )
 _SECRET_TOML_KEYS = frozenset(
-    {"api_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
+    {"api_key", "artifact_transfer_key", "auth_secret", "backup_key", "backup_key_file", "secret", "token"}
 )
 
 MIN_API_KEY_LENGTH = 24
@@ -222,10 +224,12 @@ class Secrets:
     api_key: str = ""
     auth_secret: str = ""
     backup_key_file: str = ""
+    artifact_transfer_key: str = field(default="", repr=False)
 
     def as_redacted_dict(self) -> dict:
         return {
             "api_key": redact_presence(self.api_key),
+            "artifact_transfer_key": redact_presence(self.artifact_transfer_key),
             "auth_secret": redact_presence(self.auth_secret),
             "backup_key_file": self.backup_key_file or "[unset]",
         }
@@ -247,6 +251,7 @@ class SonderConfig:
     secrets: Secrets = field(default_factory=Secrets)
     # Provenance for diagnostics: which layers actually contributed.
     sources: tuple[str, ...] = ()
+    artifact_transfer: ArtifactTransferConfig = field(default_factory=ArtifactTransferConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -257,6 +262,7 @@ class SonderConfig:
         for section in (
             "server",
             "deployment",
+            "artifact_transfer",
             "state",
             "ollama",
             "features",
@@ -377,6 +383,7 @@ def _walk_toml_for_secrets(data, path: str, errors: list[str]) -> None:
 _SECTION_TYPES = {
     "server": ServerConfig,
     "deployment": DeploymentConfig,
+    "artifact_transfer": ArtifactTransferConfig,
     "state": StateConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
@@ -776,6 +783,8 @@ def _apply_environment(
         )
     if env.get("SONDER_API_KEY", "").strip():
         secrets = replace(secrets, api_key=env["SONDER_API_KEY"].strip())
+    if env.get("SONDER_ARTIFACT_TRANSFER_KEY", "").strip():
+        secrets = replace(secrets, artifact_transfer_key=env["SONDER_ARTIFACT_TRANSFER_KEY"].strip())
     if env.get("SONDER_AUTH_SECRET", "").strip():
         secrets = replace(secrets, auth_secret=env["SONDER_AUTH_SECRET"].strip())
     if env.get("SONDER_BACKUP_KEY_FILE", "").strip():
@@ -830,6 +839,7 @@ def validate_deployment(config: SonderConfig) -> None:
 
 
 def _validate(config: SonderConfig, errors: list[str]) -> None:
+    errors.extend(artifact_transfer_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(
