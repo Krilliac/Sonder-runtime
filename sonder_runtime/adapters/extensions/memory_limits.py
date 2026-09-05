@@ -445,30 +445,33 @@ class NativeExtensionMemoryLimiter:
         )
 
     def isolated_process_environment(self, prepared, argv, environment):
-        """Give only the native wrapper a host-derived user bus address.
+        """Support only the audited catalog environment before scope admission.
 
-        env -i reconstructs the exact caller-selected child environment after
-        systemd has admitted the process into its resource scope.
+        Values never enter argv. Arbitrary secret or loader environments require
+        a separate contained transport and are refused by this wrapper profile.
         """
         if self._platform_name != "posix":
             return prepared
         if type(prepared.token) is not _SystemdScopeToken or not argv or prepared.argv[-len(argv):] != tuple(argv):
             raise ExtensionMemoryLimitError("exact prepared systemd command required")
+        allowed = {"PATH", "LANG", "PYTHONIOENCODING", "PYTHONNOUSERSITE", "TEMP", "TMP"}
+        if any(key not in allowed for key in environment):
+            raise ExtensionMemoryLimitUnsupported("isolated systemd environment contains unsupported keys")
+        if not prepared.token._user_scope:
+            return prepared
         prefix = prepared.argv[:-len(argv)]
         if not prefix or prefix[-1] != "--":
             raise ExtensionMemoryLimitError("prepared command boundary is missing")
         env_program = self._which("env")
         if not env_program or not env_program.startswith("/"):
             raise ExtensionMemoryLimitUnsupported("isolated systemd launch requires an absolute env executable")
-        child_environment = dict(environment)
-        wrapper_environment = dict(child_environment)
-        if prepared.token._user_scope:
-            uid = self._os.geteuid()
-            if type(uid) is not int or uid < 0:
-                raise ExtensionMemoryLimitError("current effective user identity is unavailable")
-            wrapper_environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+        uid = self._os.geteuid()
+        if type(uid) is not int or uid < 0:
+            raise ExtensionMemoryLimitError("current effective user identity is unavailable")
+        wrapper_environment = dict(environment)
+        wrapper_environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
         return replace(prepared,
-            argv=(*prefix, env_program, "-i", "--", *(f"{key}={value}" for key, value in sorted(child_environment.items())), *argv),
+            argv=(*prefix, env_program, "-u", "DBUS_SESSION_BUS_ADDRESS", "--", *argv),
             launch_options={**prepared.launch_options, "env": wrapper_environment})
 
     def restore_process_job(
