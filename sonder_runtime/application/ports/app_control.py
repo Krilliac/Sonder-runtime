@@ -1,5 +1,6 @@
 """Immutable private control records. Data alone is never authentication."""
 
+from typing import Protocol
 from dataclasses import dataclass, field
 import math
 from pathlib import Path
@@ -330,3 +331,14 @@ class BindingPage:
             raise ValueError("bounded immutable binding page required")
         if self.next_position is not None:
             positive(self.next_position)
+
+
+class AppControlSessionReader(Protocol):
+    """Private observation and current durable grant admission are distinct."""
+
+    def read_session(
+        self, *, principal_id: str, control_session_id: str
+    ) -> ControlSessionRecord | None: ...
+    def require_session(
+        self, *, principal_id: str, control_session_id: str
+    ) -> ControlSessionRecord: ...

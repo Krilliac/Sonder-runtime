@@ -730,3 +730,34 @@ def test_ignored_update_column_cannot_acknowledge_revocation(state):
     finally:
         conn.rollback()
         conn.close()
+
+
+def test_require_session_fences_read_admission_after_grant_advancement(state):
+    store, session = state
+    enroll(store, session)
+    assert (
+        store.atomic(
+            lambda tx: tx.require_session(
+                principal_id=OWNER, control_session_id=session.control_session_id
+            )
+        )
+        == session
+    )
+    newer = replace(
+        session, control_session_id="newer", grant=replace(session.grant, revision=2)
+    )
+    enroll(store, newer, command="enroll2")
+    assert (
+        store.atomic(
+            lambda tx: tx.read_session(
+                principal_id=OWNER, control_session_id=session.control_session_id
+            )
+        )
+        == session
+    )
+    with pytest.raises(CommandConflict):
+        store.atomic(
+            lambda tx: tx.require_session(
+                principal_id=OWNER, control_session_id=session.control_session_id
+            )
+        )

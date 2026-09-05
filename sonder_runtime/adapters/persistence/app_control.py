@@ -389,6 +389,10 @@ class AppControlTransaction:
             raise StoreUnavailable("session scope corruption")
         return value
 
+    def require_session(self, *, principal_id, control_session_id):
+        """Require scoped live session and persisted grant high-water match."""
+        return self._live_session(principal_id, control_session_id)
+
     def _live_session(self, owner, session_id):
         value = self.read_session(principal_id=owner, control_session_id=session_id)
         if value is None:
