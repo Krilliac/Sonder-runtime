@@ -610,15 +610,28 @@ class SQLiteAgentLaneStore:
         self.sessions = sessions
         self._projection_lock = threading.RLock()
         _ensure_fleet_schema(self.path)
-        with self.connect() as conn:
+        with self._connection_scope() as conn:
             conn.executescript(_SCHEMA)
 
     def connect(self):
         conn = owned_sqlite_connect(self.path, timeout=5)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except BaseException:
+            conn.close()
+            raise
         return conn
+
+    @contextmanager
+    def _connection_scope(self):
+        conn = self.connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     @contextmanager
     def transaction(self):
@@ -641,7 +654,7 @@ class SQLiteAgentLaneStore:
         """
         with self._projection_lock:
             while True:
-                with self.connect() as conn:
+                with self._connection_scope() as conn:
                     row = conn.execute(
                         "SELECT * FROM agent_lane_events WHERE projected=0 ORDER BY sequence LIMIT 1"
                     ).fetchone()
@@ -655,7 +668,7 @@ class SQLiteAgentLaneStore:
                     event_id=row["event_id"],
                     occurred_at_utc=row["occurred_at"],
                 )
-                with self.connect() as conn:
+                with self._connection_scope() as conn:
                     conn.execute(
                         "UPDATE agent_lane_events SET projected=1 WHERE sequence=?",
                         (row["sequence"],),
@@ -740,7 +753,7 @@ class SQLiteAgentLaneStore:
             )
 
     def validate_parent_grant(self, session, principal):
-        with self.connect() as conn:
+        with self._connection_scope() as conn:
             row = conn.execute(
                 "SELECT principal,expires,revoked FROM agent_lane_parent_grants WHERE session_id=?",
                 (session,),
@@ -753,7 +766,7 @@ class SQLiteAgentLaneStore:
             raise PermissionError("parent capability grant was revoked or expired")
 
     def read_lane(self, lane_id):
-        with self.connect() as conn:
+        with self._connection_scope() as conn:
             row = conn.execute(
                 "SELECT data FROM agent_lanes WHERE id=?", (lane_id,)
             ).fetchone()
@@ -798,7 +811,7 @@ class SQLiteAgentLaneStore:
                 tx.save(lane)
 
     def events(self, lane_id, cursor, limit):
-        with self.connect() as conn:
+        with self._connection_scope() as conn:
             rows = conn.execute(
                 """SELECT * FROM agent_lane_events WHERE lane_id=? AND sequence>?
               ORDER BY sequence LIMIT ?""",

@@ -6,7 +6,7 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize("case", ["repeated", "checkpoint-file", "checkpoint-memory"])
+@pytest.mark.parametrize("case", ["repeated", "checkpoint-file", "checkpoint-memory", "spill", "terminal", "workflow", "lanes"])
 def test_managed_real_store_scopes_converge(tmp_path, case):
     script = r"""
 import sys, threading
@@ -52,6 +52,75 @@ if case == 'repeated':
   else:
    raise AssertionError('expected conflict')
   assert owner.snapshot().clean, owner.snapshot()
+elif case == 'spill':
+ from sonder_runtime.adapters.execution.durable_output import SQLiteSpillStore
+ from sonder_runtime.application.ports.artifact_store import SpillSpec
+ store = SQLiteSpillStore(root / 'spill.db')
+ for index in range(12):
+  handle = store.begin(SpillSpec(16))
+  assert handle.write(b'hello') == 5
+  try:
+   handle.write(b'x' * 17)
+  except ValueError:
+   pass
+  else:
+   raise AssertionError('write bound')
+  assert handle.snapshot().size_bytes == 5
+  artifact = handle.commit()
+  try:
+   handle.commit()
+  except ValueError:
+   pass
+  else:
+   raise AssertionError('spill commit is one-shot')
+  assert handle.snapshot().size_bytes == 5
+  assert store.read(artifact, max_bytes=16) == b'hello'
+  assert SQLiteSpillStore(root / 'spill.db').read(artifact, max_bytes=16) == b'hello'
+  handle.close()
+  assert owner.snapshot().clean, owner.snapshot()
+elif case == 'terminal':
+ import sqlite3
+ from sonder_runtime.adapters.execution.persistent_terminal import _SQLiteTerminalJournal
+ store = _SQLiteTerminalJournal(root / 'terminal.db', max_events=32, max_bytes=4096)
+ store.create('term', 'world', 80, 24, 1)
+ for index in range(12):
+  assert store.append('term', 'stdout', 'hello') == index+1
+  assert store.session('term')[0] == 'term'
+  assert store.page('term', None, max_events=32, max_bytes=4096).events
+  try:
+   store.create('term', 'world', 80, 24, 1)
+  except sqlite3.IntegrityError:
+   pass
+  else:
+   raise AssertionError('duplicate session')
+  assert owner.snapshot().clean, owner.snapshot()
+ store.mark_stopped('term')
+ assert _SQLiteTerminalJournal(root / 'terminal.db', max_events=32, max_bytes=4096).session('term')[2] == 'stopped'
+elif case == 'workflow':
+ from sonder_runtime.adapters.persistence.sqlite.workflow_checkpoints import SQLiteWorkflowCheckpointRepository
+ from sonder_runtime.application.ports.jobs import WorkflowCheckpoint
+ store = SQLiteWorkflowCheckpointRepository(root / 'workflow.db')
+ for index in range(12):
+  checkpoint = WorkflowCheckpoint('job', index, index, {'step': index})
+  assert store.save_checkpoint(checkpoint, expected_sequence=index-1) == checkpoint
+  assert store.save_checkpoint(checkpoint, expected_sequence=index-1) is None
+  assert store.get_checkpoint('job') == checkpoint
+  assert SQLiteWorkflowCheckpointRepository(root / 'workflow.db').get_checkpoint('job') == checkpoint
+  assert owner.snapshot().clean, owner.snapshot()
+elif case == 'lanes':
+ from sonder_runtime.adapters.persistence.agent_lanes import SQLiteAgentLaneStore
+ store = SQLiteAgentLaneStore(root / 'fleet.db', None)
+ for index in range(12):
+  store.validate_parent_grant('absent', 'principal')
+  store.events('absent', 0, 2)
+  store.flush()
+  try:
+   store.read_lane('absent')
+  except KeyError:
+   pass
+  else:
+   raise AssertionError('missing lane')
+  assert owner.snapshot().clean, owner.snapshot()
 else:
  from sonder_runtime.adapters.persistence.checkpoint_store import CheckpointStore
  from sonder_runtime.domain.automation.checkpoint import Checkpoint
@@ -69,6 +138,39 @@ else:
  assert errors == [], errors
  assert store.latest('one').step_index == 3
  store.close()
+ assert owner.snapshot().clean, owner.snapshot()
+if case in {'spill', 'terminal', 'workflow', 'lanes'}:
+ scope = store._connection_scope if case == 'lanes' else store._connect
+ with scope() as connection:
+  connection.execute('CREATE TABLE scope_rollback_probe(value INTEGER)')
+  connection.execute('INSERT INTO scope_rollback_probe VALUES(1)')
+ for index in range(12):
+  try:
+   with scope() as connection:
+    connection.execute('INSERT INTO scope_rollback_probe VALUES(2)')
+    raise RuntimeError('failure after actual write')
+  except RuntimeError:
+   pass
+  with scope() as connection:
+   assert [row[0] for row in connection.execute('SELECT value FROM scope_rollback_probe')] == [1]
+  assert owner.snapshot().clean, owner.snapshot()
+if case == 'lanes':
+ import sqlite3
+ import sonder_runtime.adapters.persistence.agent_lanes as lanes
+ original = lanes.owned_sqlite_connect
+ def deny_pragma(*args, **kwargs):
+  connection = original(*args, **kwargs)
+  connection.set_authorizer(lambda action, *rest: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA else sqlite3.SQLITE_OK)
+  return connection
+ lanes.owned_sqlite_connect = deny_pragma
+ try:
+  store.connect()
+ except sqlite3.DatabaseError:
+  pass
+ else:
+  raise AssertionError('expected initialization refusal')
+ finally:
+  lanes.owned_sqlite_connect = original
  assert owner.snapshot().clean, owner.snapshot()
 print('closed')
 """
