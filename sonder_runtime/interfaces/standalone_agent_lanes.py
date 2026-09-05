@@ -263,10 +263,10 @@ class StandaloneLaneController:
     def report_outcome(self, output):
         text = str(output or "")
         # Preserve failure markers consumed by existing callers.
-        first = text.splitlines()[0] if text else ""
+        first = text.lstrip().splitlines()[0] if text.strip() else ""
         failure = (
             first
-            if first.startswith(("ERROR", "EVIDENCE_REQUIRED", "VALIDATION_FAILED"))
+            if first.startswith(("ERROR", "EVIDENCE_REQUIRED", "VALIDATION_FAILED", "CANCELLED"))
             else ""
         )
         return ((failure + "\n") if failure else "") + (

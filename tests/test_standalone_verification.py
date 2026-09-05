@@ -145,3 +145,15 @@ def test_standalone_composed_catalog_certifies_real_repair_and_diff(coding, monk
     diff = subprocess.run(["git", "diff", "--", "calc.py"], cwd=repo, capture_output=True,
                           text=True, check=True, timeout=10).stdout
     assert "+    return sum(values)" in diff
+
+
+@pytest.mark.parametrize("kind", ["inspect", "research", "report", "implement", "validate"])
+def test_cancelled_delegated_receipt_never_passes_task(consumer, kind):
+    from autopilot_controller import HostTaskResult, _task_passed
+    controller = consumer[0]
+    output = controller.report_outcome("CANCELLED: operator stopped this task")
+    result = HostTaskResult(output, tools=("file_read",), mutation_observed=True,
+                            validation_attempted=True, validation_passed=True)
+    passed, reason = _task_passed(result, {"kind": kind})
+    assert passed is False
+    assert reason.startswith("CANCELLED:")
