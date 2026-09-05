@@ -43,6 +43,15 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_control_grant_revisions (runtime TEXT NOT NULL, grant_id TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL, source_digest TEXT NOT NULL, PRIMARY KEY(runtime,grant_id))",
 )
 
+_CONTROL_TABLES = (
+    "app_control_meta",
+    "app_control_sessions",
+    "app_host_bindings",
+    "app_control_selections",
+    "app_control_commands",
+    "app_control_grant_revisions",
+)
+
 
 def _encode(value, limit=131072):
     raw = json.dumps(
@@ -170,14 +179,20 @@ class SQLiteAppControlStore:
     def _validate(self, conn):
         # A borrowed connection must not redirect unqualified control queries
         # through caller-owned temporary tables or views.
+        placeholders = ",".join("?" for _ in _CONTROL_TABLES)
         shadow = conn.execute(
-            "SELECT 1 FROM sqlite_temp_master WHERE name IN "
-            "('app_control_meta','app_control_sessions','app_host_bindings',"
-            "'app_control_selections','app_control_commands',"
-            "'app_control_grant_revisions') LIMIT 1"
+            f"SELECT 1 FROM sqlite_temp_master WHERE lower(name) IN ({placeholders}) "
+            f"OR (type='trigger' AND lower(tbl_name) IN ({placeholders})) LIMIT 1",
+            _CONTROL_TABLES + _CONTROL_TABLES,
         ).fetchone()
         if shadow:
             raise StoreUnavailable("shadowed control schema refused")
+        if conn.execute(
+            f"SELECT 1 FROM main.sqlite_master WHERE type='trigger' "
+            f"AND lower(tbl_name) IN ({placeholders}) LIMIT 1",
+            _CONTROL_TABLES,
+        ).fetchone():
+            raise StoreUnavailable("unexpected control schema trigger refused")
         databases = conn.execute("PRAGMA database_list").fetchall()
         main = next((row[2] for row in databases if row[1] == "main"), None)
         if (
@@ -251,6 +266,15 @@ class AppControlTransaction:
         self._check()
         return self._store.clock()
 
+    def _write_one(self, statement, parameters):
+        self._check()
+        self._store._validate(self._conn)
+        before = self._conn.total_changes
+        cursor = self._conn.execute(statement, parameters)
+        if cursor.rowcount != 1 or self._conn.total_changes - before != 1:
+            raise StoreUnavailable("control mutation did not affect exactly one row")
+        self._store._validate(self._conn)
+
     def command(self, key, *, action, argument_digest):
         self._check()
         if type(key) is not CommandKey:
@@ -281,7 +305,7 @@ class AppControlTransaction:
         return None
 
     def _finish(self, key, argument_digest, receipt):
-        self._conn.execute(
+        self._write_one(
             "INSERT INTO app_control_commands VALUES (?,?,?,?,?,?)",
             (
                 key.principal_id,
@@ -292,6 +316,11 @@ class AppControlTransaction:
                 _encode(receipt, 16384),
             ),
         )
+        retained = self.command(
+            key, action=receipt.action, argument_digest=argument_digest
+        )
+        if retained is None or retained.public_receipt != receipt:
+            raise StoreUnavailable("control receipt readback mismatch")
         return receipt
 
     def _scope(self, key, session_id):
@@ -320,10 +349,11 @@ class AppControlTransaction:
         ):
             raise CommandConflict("grant policy rollback or equivocation")
         if advance:
-            self._conn.execute(
+            self._write_one(
                 "INSERT INTO app_control_grant_revisions VALUES (?,?,?,?,?) ON CONFLICT(runtime,grant_id) DO UPDATE SET revision=excluded.revision,digest=excluded.digest,source_digest=excluded.source_digest",
                 (runtime, grant.grant_id, grant.revision, hashed, source),
             )
+            self._grant(runtime, grant, advance=False)
         elif (
             row is None
             or grant.revision != row[0]
@@ -473,7 +503,7 @@ class AppControlTransaction:
         self._grant(session.runtime_id, session.grant, advance=True)
         if old is not None:
             self._revoke_session(old)
-        self._conn.execute(
+        self._write_one(
             "INSERT INTO app_control_sessions VALUES (?,?,?,?)",
             (
                 session.control_session_id,
@@ -482,6 +512,14 @@ class AppControlTransaction:
                 _encode(session),
             ),
         )
+        if (
+            self.read_session(
+                principal_id=session.principal_id,
+                control_session_id=session.control_session_id,
+            )
+            != session
+        ):
+            raise StoreUnavailable("control session readback mismatch")
         return self._finish(
             key,
             argument_digest,
@@ -491,13 +529,22 @@ class AppControlTransaction:
         )
 
     def _revoke_session(self, session):
-        self._conn.execute(
+        revoked = replace(session, revoked_at=self._now())
+        self._write_one(
             "UPDATE app_control_sessions SET record=? WHERE id=?",
             (
-                _encode(replace(session, revoked_at=self._now())),
+                _encode(revoked),
                 session.control_session_id,
             ),
         )
+        if (
+            self.read_session(
+                principal_id=session.principal_id,
+                control_session_id=session.control_session_id,
+            )
+            != revoked
+        ):
+            raise StoreUnavailable("session revocation readback mismatch")
         selection = self.read_selection(
             principal_id=session.principal_id,
             control_session_id=session.control_session_id,
@@ -545,7 +592,7 @@ class AppControlTransaction:
             limits.account_binding_cap,
             limits.global_binding_cap,
         )
-        self._conn.execute(
+        self._write_one(
             "INSERT INTO app_host_bindings(id,host,principal,runtime,record) VALUES (?,?,?,?,?)",
             (
                 binding.binding_id,
@@ -555,6 +602,13 @@ class AppControlTransaction:
                 _encode(binding),
             ),
         )
+        if (
+            self.read_binding(
+                principal_id=binding.principal_id, binding_id=binding.binding_id
+            )
+            != binding
+        ):
+            raise StoreUnavailable("binding readback mismatch")
         return self._finish(
             key,
             argument_digest,
@@ -568,10 +622,18 @@ class AppControlTransaction:
         )
 
     def _put_selection(self, value):
-        self._conn.execute(
+        self._write_one(
             "INSERT INTO app_control_selections VALUES (?,?,?) ON CONFLICT(principal,session) DO UPDATE SET record=excluded.record",
             (value.principal_id, value.control_session_id, _encode(value)),
         )
+        if (
+            self.read_selection(
+                principal_id=value.principal_id,
+                control_session_id=value.control_session_id,
+            )
+            != value
+        ):
+            raise StoreUnavailable("selection readback mismatch")
 
     def select_binding(
         self,
@@ -670,15 +732,31 @@ class AppControlTransaction:
         binding = replace(
             binding, revision=binding.revision + 1, revoked_at=self._now()
         )
-        self._conn.execute(
+        selections = []
+        for row in self._conn.execute(
+            "SELECT principal,session,record FROM app_control_selections WHERE principal=?",
+            (key.principal_id,),
+        ).fetchall():
+            selection = _decode(row[2], SelectionRecord)
+            if (
+                selection.principal_id != row[0]
+                or row[0] != key.principal_id
+                or selection.control_session_id != row[1]
+            ):
+                raise StoreUnavailable("selection row scope mismatch")
+            selections.append(selection)
+        self._write_one(
             "UPDATE app_host_bindings SET record=? WHERE id=?",
             (_encode(binding), binding_id),
         )
-        for row in self._conn.execute(
-            "SELECT record FROM app_control_selections WHERE principal=?",
-            (key.principal_id,),
-        ).fetchall():
-            selection = _decode(row[0], SelectionRecord)
+        if (
+            self.read_binding(
+                principal_id=binding.principal_id, binding_id=binding.binding_id
+            )
+            != binding
+        ):
+            raise StoreUnavailable("binding revocation readback mismatch")
+        for selection in selections:
             if selection.binding_id == binding_id:
                 self._put_selection(
                     replace(

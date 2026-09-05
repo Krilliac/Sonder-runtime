@@ -578,3 +578,155 @@ def test_borrowed_connection_cannot_shadow_control_tables(state):
     finally:
         conn.rollback()
         conn.close()
+
+
+@pytest.mark.parametrize("temporary", [False, True])
+@pytest.mark.parametrize(
+    "table",
+    [
+        "app_control_sessions",
+        "app_host_bindings",
+        "app_control_selections",
+        "app_control_commands",
+        "app_control_grant_revisions",
+        "app_control_meta",
+    ],
+)
+def test_unexpected_control_triggers_refused_before_borrowed_callback(
+    state, temporary, table
+):
+    store, _ = state
+    conn = store._connect()
+    try:
+        # A harmless trigger is enough: no trigger on these tables is part of
+        # the store contract, whatever its name or SQL body happens to be.
+        conn.execute(
+            f"CREATE {'TEMP ' if temporary else ''}TRIGGER unrelated_name BEFORE INSERT ON main.{table} BEGIN SELECT 1; END"
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(StoreUnavailable):
+            store.atomic(lambda tx: None, connection=conn)
+        assert conn.in_transaction
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "field,replacement",
+    [("principal_id", OTHER), ("control_session_id", "other-session")],
+)
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_revoke_refuses_selection_scope_corruption_without_partial_write(
+    state, field, replacement, borrowed
+):
+    store, session = state
+    enroll(store, session)
+    create(store, session)
+    select(store, session)
+    with sqlite3.connect(store.path) as conn:
+        raw = conn.execute("SELECT record FROM app_control_selections").fetchone()[0]
+        value = json.loads(raw)
+        value[field] = replacement
+        conn.execute(
+            "UPDATE app_control_selections SET record=?",
+            (json.dumps(value, sort_keys=True, separators=(",", ":")),),
+        )
+    with sqlite3.connect(store.path) as conn:
+        before = list(conn.iterdump())
+    conn = store._connect() if borrowed else None
+    try:
+        if conn is not None:
+            conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(StoreUnavailable):
+            store.atomic(
+                lambda tx: tx.revoke_binding(
+                    CommandKey(OWNER, "control:session1", "revoke1"),
+                    argument_digest=HASH,
+                    control_session_id="session1",
+                    binding_id="binding1",
+                    expected_revision=1,
+                ),
+                connection=conn,
+            )
+        if conn is not None:
+            assert conn.in_transaction
+            assert list(conn.iterdump()) == before
+    finally:
+        if conn is not None:
+            conn.rollback()
+            conn.close()
+    with sqlite3.connect(store.path) as conn:
+        assert list(conn.iterdump()) == before
+
+
+def test_suppressed_insert_cannot_return_a_committed_receipt(state):
+    store, session = state
+    conn = store._connect()
+    try:
+        conn.set_authorizer(
+            lambda action, name, *rest: (
+                sqlite3.SQLITE_IGNORE
+                if action == sqlite3.SQLITE_INSERT and name == "app_control_sessions"
+                else sqlite3.SQLITE_OK
+            )
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(StoreUnavailable, match="exactly one row"):
+            store.atomic(
+                lambda tx: tx.commit_enrollment(
+                    CommandKey(OWNER, "account:" + REF, "enroll"),
+                    argument_digest=HASH,
+                    session=session,
+                ),
+                connection=conn,
+            )
+        assert conn.in_transaction
+        assert (
+            conn.execute("SELECT count(*) FROM app_control_commands").fetchone()[0] == 0
+        )
+        assert (
+            conn.execute("SELECT count(*) FROM app_control_sessions").fetchone()[0] == 0
+        )
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_ignored_update_column_cannot_acknowledge_revocation(state):
+    store, session = state
+    enroll(store, session)
+    create(store, session)
+    conn = store._connect()
+    try:
+        conn.set_authorizer(
+            lambda action, table, column, *rest: (
+                sqlite3.SQLITE_IGNORE
+                if action == sqlite3.SQLITE_UPDATE
+                and table == "app_host_bindings"
+                and column == "record"
+                else sqlite3.SQLITE_OK
+            )
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(StoreUnavailable, match="readback mismatch"):
+            store.atomic(
+                lambda tx: tx.revoke_binding(
+                    CommandKey(OWNER, "control:session1", "revoke"),
+                    argument_digest=HASH,
+                    control_session_id="session1",
+                    binding_id="binding1",
+                    expected_revision=1,
+                ),
+                connection=conn,
+            )
+        assert conn.in_transaction
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM app_control_commands WHERE action='revoke_binding'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        conn.rollback()
+        conn.close()
