@@ -227,6 +227,7 @@ def live_control_plane_inventory(*, additional=None):
     ]
     owned, lock_dirs = [
         home / "secrets",
+        home / "terminal-output",
         home / "locks",
         state("npu-manifests", "SONDER_NPU_MANIFEST_DIR"),
     ], [fleet.parent]

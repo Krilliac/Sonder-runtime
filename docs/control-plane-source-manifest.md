@@ -22,6 +22,7 @@ through the trusted supplemental snapshot before host admission.
 | adapters/runtime_policy.py + filesystem/atomic_json.py | SONDER_RUNTIME_POLICY or state runtime_policy.json; .lock, .tmp-*, .transition.json and its lock/temp family |
 | adapters/secrets.py | SONDER_ROTATION_STATE or home/secrets/rotation.json; atomic .tmp-PID family; home/secrets directory |
 | adapters/persistence/migrations.py | home/locks owned migration-lock directory |
+| bootstrap/repl_managed.py | home/terminal-output owned directory, protected even outside the originating managed scope |
 | platform/speculation.py | state branch_predictor.json |
 | adapters/accelerators/npu/service.py and manifest.py | npu-shadow-ledger.json / SONDER_NPU_SHADOW_LEDGER; npu-manifests / SONDER_NPU_MANIFEST_DIR owned directory |
 | __main__.py `_configured_path` | conventional home sonder.toml/sonder.env or SONDER_CONFIG/SONDER_SECRETS; explicit CLI paths must be supplied separately |
@@ -33,7 +34,7 @@ Every database gets WAL, SHM and rollback-journal siblings. Atomic files get the
 lock and bounded-name temp family, and audits get their actual rotation filename
 family. These are filename families, not blanket ordinary-sibling protection.
 
-Constructor-only state includes terminal output, explicitly supplied configuration
+Constructor-only state includes alternate terminal output roots, explicitly supplied configuration
 or secrets files, private model/artifact/configuration providers, and any alternate
 policy or observation store supplied by host composition. Use `databases`,
 `files`, `atomic_files`, `owned_directories`, `owner_lock_directories`, and

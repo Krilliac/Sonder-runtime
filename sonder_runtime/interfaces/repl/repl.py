@@ -1920,9 +1920,13 @@ def _run_session_work(session_id, *, host_project, **arguments):
         row = memory_store.get_session(conn, session_id)
         if row is None or row['session_id'] != session_id:
             raise PermissionError('selected host conversation unavailable')
+        databases = conn.execute('PRAGMA database_list').fetchall()
+        memory_database = next((entry[2] for entry in databases if entry[1] == 'main'), '')
+        if not memory_database:
+            raise PermissionError('durable memory database identity unavailable')
     finally:
         conn.close()
-    return server.workbench_agent(**arguments)
+    return server._run_managed_repl_work(session_id, memory_database=memory_database, **arguments)
 
 
 def main(*, machine_output=False):

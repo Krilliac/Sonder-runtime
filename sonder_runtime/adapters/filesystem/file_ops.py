@@ -197,6 +197,48 @@ def _roots_from_file() -> list[Path]:
 _CALL_REACH: contextvars.ContextVar[tuple] = contextvars.ContextVar(
     "sonder_call_reach", default=(),
 )
+_MANAGED_ROOTS: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "sonder_managed_file_roots", default=(),
+)
+
+
+@contextlib.contextmanager
+def managed_root_scope(provider):
+    """Private host attenuation, checked live even for bypass file requests.
+
+    Providers return the currently admitted project roots. Nested scopes only
+    intersect authority; failures are never treated as missing restrictions.
+    """
+    if not callable(provider) or len(_MANAGED_ROOTS.get()) >= 16:
+        raise PermissionError("bounded private managed root provider required")
+    token = _MANAGED_ROOTS.set(_MANAGED_ROOTS.get() + (provider,))
+    try:
+        yield
+    finally:
+        _MANAGED_ROOTS.reset(token)
+
+
+def _attenuate_managed_roots(roots):
+    for provider in _MANAGED_ROOTS.get():
+        values = provider()
+        if not isinstance(values, tuple) or not 1 <= len(values) <= 16:
+            raise PermissionError("current managed project roots unavailable")
+        ceiling = []
+        for value in values:
+            if not isinstance(value, (str, Path)):
+                raise PermissionError("invalid managed project root")
+            path = Path(value)
+            if not path.is_absolute() or not path.is_dir():
+                raise PermissionError("managed project root unavailable")
+            ceiling.append(path.resolve())
+        roots = list(dict.fromkeys(
+            child if child.is_relative_to(parent) else parent
+            for parent in roots for child in ceiling
+            if child.is_relative_to(parent) or parent.is_relative_to(child)
+        ))
+        if not roots:
+            raise PermissionError("managed project has no current file grant")
+    return roots
 
 
 @contextlib.contextmanager
@@ -241,7 +283,7 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
             resolved = _normalized_absolute(root)
         if resolved not in out:
             out.append(resolved)
-    return out
+    return _attenuate_managed_roots(out)
 
 
 def bypass_enabled() -> bool:
@@ -689,7 +731,7 @@ def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> P
     except OSError:
         resolved = _normalized_absolute(candidate)
     roots = allowed_roots(extra_roots if bypass else "")
-    if bypass:
+    if bypass and not _MANAGED_ROOTS.get():
         return resolved
     if any(_is_inside(resolved, root) for root in roots):
         return resolved

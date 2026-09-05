@@ -27,5 +27,10 @@ def test_work_persists_exact_host_selected_session_before_execution(monkeypatch,
         calls.append(kwargs)
         return 'inspected'
     monkeypatch.setattr(server, 'workbench_agent', run)
+    def managed(exact_session, *, memory_database, **arguments):
+        assert exact_session == expected
+        assert memory_database
+        return run(**arguments)
+    monkeypatch.setattr(server, '_run_managed_repl_work', managed)
     repl.main()
     assert len(calls) == 1

@@ -5209,6 +5209,39 @@ def _standalone_verifier_factory(application, service):
     return compose_delegated_verification(service, application.process_job_provider(), catalog)
 
 
+def _run_managed_repl_work(session_id, *, memory_database, **arguments):
+    """Private REPL entry: persisted history alone never authorizes a host."""
+    from sonder_runtime.bootstrap.repl_managed import run_managed_repl_work
+    from sonder_runtime.adapters.security.control_plane_paths import ControlPlanePaths
+    application = _application()
+    sources = getattr(application, 'private_source_paths', None)
+    if not isinstance(sources, tuple):
+        raise PermissionError('managed REPL requires configured private source provenance')
+    ledger = permission_modes.approval_ledger().pinned()
+
+    def selected_row(exact_id):
+        connection = _open_db()
+        try:
+            return memory_store.get_session(connection, exact_id)
+        finally:
+            connection.close()
+
+    def supplemental_paths():
+        current = application.private_source_paths
+        if not isinstance(current, tuple):
+            raise PermissionError('private source provenance unavailable')
+        return ControlPlanePaths(
+            databases=(Path(memory_database).resolve(), Path(ledger.path).resolve()),
+            files=tuple(Path(value).resolve() for value in current),
+        )
+
+    return run_managed_repl_work(
+        application=application, session_id=session_id, project=arguments.get('project', ''),
+        get_session=selected_row, run=lambda: workbench_agent(**arguments),
+        permission_engine=permission_modes, additional_paths=supplemental_paths, ledger=ledger,
+    )
+
+
 def _approve_standalone_verification(prepared, context):
     # Independent host check: never reuse the child lane's approval.
     refusal = _agent_permission_gate_error("workspace_run", prepared.approval_payload())
