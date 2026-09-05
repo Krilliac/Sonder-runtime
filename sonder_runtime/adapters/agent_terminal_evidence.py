@@ -7,6 +7,7 @@ projection. Neither this ledger nor its resolver is a model tool.
 
 from dataclasses import dataclass
 import json
+import hashlib
 
 from .agent_work_coverage import validation_covers, verification_covers
 
@@ -64,7 +65,11 @@ class HostObservationLedger:
                    or any(not isinstance(v, str) for v in m.values())
                    for m in mutations):
                 raise ValueError("invalid mutation record")
-            record = dict(tool=tool, arguments=arguments, observation=observation,
+            record = dict(tool=tool,
+                          arguments=arguments if (verifier or validator) else {},
+                          observation=observation if validator else "",
+                          argument_digest=hashlib.sha256(_canonical(arguments)).hexdigest(),
+                          observation_digest=hashlib.sha256(observation.encode()).hexdigest(),
                           dispatched=dispatched, success=success, dirty=dirty,
                           mutations=mutations, verifier=verifier, validator=validator)
             frozen = json.loads(_canonical(record))
@@ -77,7 +82,7 @@ class HostObservationLedger:
             raise ValueError("host evidence unavailable") from None
 
     def _encode(self, records):
-        return _canonical(dict(policy=1, project_scope=self._scope, records=records))
+        return _canonical(dict(policy=2, project_scope=self._scope, records=records))
 
     def seal(self):
         if self._poisoned:
@@ -92,7 +97,7 @@ class HostObservationLedger:
             value = json.loads(payload)
             if (not isinstance(value, dict)
                     or set(value) != {"policy", "project_scope", "records"}
-                    or type(value["policy"]) is not int or value["policy"] != 1
+                    or type(value["policy"]) is not int or value["policy"] != 2
                     or not isinstance(value["records"], list)
                     or _canonical(value) != payload):
                 raise ValueError("unsupported host evidence")
@@ -101,10 +106,34 @@ class HostObservationLedger:
                 if not isinstance(record, dict) or set(record) != {
                     "tool", "arguments", "observation", "dispatched", "success",
                     "dirty", "mutations", "verifier", "validator",
+                    "argument_digest", "observation_digest",
                 }:
                     raise ValueError("invalid host evidence record")
-                ledger.observe(**{k: v for k, v in record.items() if k != "mutations"},
+                if not isinstance(record["observation"], str) or not isinstance(record["arguments"], dict):
+                    raise ValueError("invalid retained observation inputs")
+                for field in ("argument_digest", "observation_digest"):
+                    stamp = record[field]
+                    if (not isinstance(stamp, str) or len(stamp) != 64
+                            or any(c not in "0123456789abcdef" for c in stamp)):
+                        raise ValueError("invalid host observation digest")
+                retained_arguments = record["verifier"] or record["validator"]
+                if retained_arguments:
+                    if hashlib.sha256(_canonical(record["arguments"])).hexdigest() != record["argument_digest"]:
+                        raise ValueError("retained arguments digest mismatch")
+                elif record["arguments"] != {}:
+                    raise ValueError("unexpected unneeded arguments")
+                if record["validator"]:
+                    if hashlib.sha256(record["observation"].encode()).hexdigest() != record["observation_digest"]:
+                        raise ValueError("retained observation digest mismatch")
+                elif record["observation"] != "":
+                    raise ValueError("unexpected unneeded observation")
+                ledger.observe(**{k: v for k, v in record.items()
+                                  if k not in {"mutations", "argument_digest", "observation_digest"}},
                                mutation_records=record["mutations"])
+                # Omitted bodies are intentionally not recoverable; preserve
+                # their host-recorded hashes inside the authenticated envelope.
+                ledger._records[-1]["argument_digest"] = record["argument_digest"]
+                ledger._records[-1]["observation_digest"] = record["observation_digest"]
             if ledger.seal() != payload:
                 raise ValueError("host evidence roundtrip mismatch")
             return ledger

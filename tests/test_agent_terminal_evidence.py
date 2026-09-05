@@ -1,6 +1,8 @@
 """Restart evidence must retain order and independently recompute coverage."""
 
 import pytest
+import hashlib
+import json
 
 from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
 
@@ -65,8 +67,8 @@ def test_observations_snapshot_arguments(tmp_path):
 def test_overflow_poisoned_instead_of_silently_truncated(tmp_path):
     ledger = HostObservationLedger(project_scope=str(tmp_path))
     with pytest.raises(ValueError):
-        ledger.observe(tool="test_run", arguments={}, observation="x" * 65536,
-                       dispatched=True, success=True, verifier=True)
+        ledger.observe(tool="workspace_run", arguments={}, observation="x" * 65536,
+                       dispatched=True, success=True, validator=True)
     with pytest.raises(ValueError):
         ledger.seal()
 
@@ -77,4 +79,31 @@ def test_noncanonical_or_unknown_policy_cannot_restore(tmp_path):
     with pytest.raises(ValueError):
         HostObservationLedger.restore(b" " + sealed)
     with pytest.raises(ValueError):
-        HostObservationLedger.restore(sealed.replace(b'"policy":1', b'"policy":2'))
+        HostObservationLedger.restore(sealed.replace(b'"policy":2', b'"policy":999'))
+
+
+def test_large_write_and_read_keep_digests_not_duplicate_contents(tmp_path):
+    ledger = HostObservationLedger(project_scope=str(tmp_path))
+    content = "private file contents " * 10000
+    ledger.observe(tool="write_file", arguments={"path": str(tmp_path / "app.py"), "content": content},
+                   observation=content, dispatched=True, success=True, dirty=True,
+                   mutation_records=({"tool": "write_file", "path": str(tmp_path / "app.py")},))
+    ledger.observe(tool="read_file", arguments={"path": str(tmp_path / "app.py")},
+                   observation=content, dispatched=True, success=True)
+    sealed = ledger.seal()
+    assert len(sealed) < 3000
+    assert b"private file contents" not in sealed
+    records = json.loads(sealed)["records"]
+    assert all(row["observation_digest"] == hashlib.sha256(content.encode()).hexdigest() for row in records)
+    assert records[0]["arguments"] == {}
+    assert HostObservationLedger.restore(sealed).resolve().dirty is True
+
+
+def test_retained_validation_arguments_require_matching_digest(tmp_path):
+    ledger = HostObservationLedger(project_scope=str(tmp_path))
+    check(ledger, tmp_path, path="tests")
+    data = json.loads(ledger.seal())
+    data["records"][0]["arguments"]["path"] = ""
+    payload = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    with pytest.raises(ValueError):
+        HostObservationLedger.restore(payload)
