@@ -6,6 +6,7 @@ import json
 
 from ..ports.delegated_verification import digest
 from ..ports.host_final import HostFinalFacts
+from ..ports.host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink
 from ..ports.lane_continuation import (
     ProjectionBinding,
     open_projection,
@@ -315,6 +316,51 @@ def capture_host_final(bound, admission, output, facts, ledger):
             bound._service._save(tx, record)
 
 
+def _turn_link(record, turn):
+    return ManagedHostTurnLink(record['id'], record['parent_session_id'],
+        record['host_conversation_id'], record['principal_id'], turn['run_id'], turn['ordinal'])
+
+
+def host_turn_link(bound, admission):
+    if type(admission) is not HostTurnAdmission or admission.owner is not bound:
+        raise PermissionError("private host turn admission required")
+    with bound._scope(), bound._service.store.transaction() as tx:
+        record = bound._service._row(tx, bound.continuation_id)
+        bound._require_current_tx(tx, record)
+        turn = record.get('host_turn')
+        if (not turn or turn['run_id'] != admission.run_id
+                or turn['ordinal'] != admission.ordinal or turn['state'] != 'active'):
+            raise PermissionError("exact active host turn required")
+        return _turn_link(record, turn)
+
+
+def _terminal_link(bound, tx, record, turn):
+    final = _stored_final(bound, tx, record, turn)
+    receipt = turn['final_receipt']
+    return ManagedHostTerminalLink(_turn_link(record, turn), turn['projection_id'],
+        turn['projection_digest'], receipt['projection_id'], receipt['projection_digest'],
+        receipt['digest'], hashlib.sha256(final.output.encode('utf-8')).hexdigest())
+
+
+def read_host_terminal_link(bound, run_id, ordinal):
+    """Reconcile one exact closed turn under current attached host authority."""
+    if type(run_id) is not str or not 1 <= len(run_id.encode('utf-8')) <= 128:
+        raise ValueError('bounded host run identity required')
+    if type(ordinal) is not int or not 1 <= ordinal <= 32:
+        raise ValueError('bounded host turn ordinal required')
+    with bound._scope(), bound._service.store.transaction() as tx:
+        record = bound._service._row(tx, bound.continuation_id)
+        bound._require_current_tx(tx, record)
+        turns = list(record.get('host_turn_history', []))
+        current = record.get('host_turn')
+        if current:
+            turns.append(current)
+        matches = [turn for turn in turns if turn['run_id'] == run_id and turn['ordinal'] == ordinal]
+        if len(matches) != 1 or matches[0]['state'] != 'closed':
+            raise PermissionError('exact closed host turn unavailable')
+        return _terminal_link(bound, tx, record, matches[0])
+
+
 def close_host_turn(bound, admission):
     if type(admission) is not HostTurnAdmission or admission.owner is not bound:
         raise PermissionError("private host turn admission required")
@@ -332,6 +378,7 @@ def close_host_turn(bound, admission):
         if not turn.get("projection_digest"):
             raise PermissionError("host terminal evidence unavailable")
         _stored_projection(bound, tx, record, turn)
-        _stored_final(bound, tx, record, turn)
+        link = _terminal_link(bound, tx, record, turn)
         turn["state"] = "closed"
         bound._service._save(tx, record)
+        return link
