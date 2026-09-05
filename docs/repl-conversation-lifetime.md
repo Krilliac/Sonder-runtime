@@ -1,0 +1,47 @@
+# Private REPL conversation lifetime
+
+An actual REPL invocation owns one private selected-conversation slot. Repeated
+`/work` commands in that selection reuse the original authenticated context,
+selector and durable parent attachment. They do not register another parent,
+change the canonical memory ID, renew expiry or increase tool/root ceilings.
+The slot is not a public model argument or a process-global lookup by chat ID.
+
+Each work turn has a new controller, private command issuer, run ID and bounded
+durable ordinal. Closing that controller fences the turn's commands, callbacks
+and approvals; the conversation owner remains held. Automatic model escalation
+stays inside that one turn. `/new`, `/resume`, workspace selection/creation/clear,
+and REPL exit close the selected lifetime. Concurrent or nested controllers
+cannot borrow a turn by copying its run ID or operation context.
+
+The final host observation ledger and exact output are captured through the
+existing trusted projection codec even when no child was delegated. The next
+turn inherits ordered parent observations; an earlier failed or unvalidated
+effect cannot disappear into a new clean ledger. Missing terminal capture or
+corrupt projection refuses a new turn. Required evidence and existing bounds
+remain conservative.
+
+A delegated turn may advance only after its exact certificate and terminal
+receipt are durable and current. Admission checks the original parent/grant,
+generation, exact child set, workspace exclusion, certificate/receipt digests,
+and current provider cleanup proofs. Terminal status alone is insufficient.
+The old pending identity and receipt remain in immutable retained history before
+the new generation is admitted. A new turn cannot replace an approval-pending,
+approval-unknown or effect-ambiguous result. All transitions stay under the
+original root attachment and original authority expiry.
+
+There are at most 32 retained turns per conversation lifetime, in addition to
+the existing bounded observation ledger, projection and output-store quotas.
+No retained terminal data is evicted or deleted. Reaching a bound refuses new
+work; it does not silently drop evidence.
+
+`/recover resume <continuation-id> <command-id>` remains a separate explicit
+fresh-attachment flow. It refuses a currently owned root. To release the current
+live selection first, explicitly reselect its persisted conversation with
+`/resume <session-id>`; this closes the old lifetime. This slice does not resume
+model execution after process restart or reconstruct missing native cleanup
+proof. Original pending verification recovery remains supported.
+
+Acceptance covers two actual `/work` commands through the console and a loaded
+Application, plus two independently certified turns over real contained test
+processes in a disposable Git repository. Model responses are deterministic
+scripts; no live-model or remote-execution success is claimed.

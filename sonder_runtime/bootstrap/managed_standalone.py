@@ -221,6 +221,12 @@ class ManagedStandaloneSession:
         self._recovered = False
         self._verifier = self._publisher = None
         self.published_terminal = None
+        if host.recovery_page(
+            context, limit=1, host_conversation_id=host_conversation_id
+        ).items:
+            raise PermissionError(
+                "registered conversation requires explicit reattachment"
+            )
         parent = host.lanes.open_model_parent(context)
         self._bound = host.register_parent(
             parent["parent_session_id"],
@@ -363,6 +369,9 @@ class ManagedStandaloneSession:
     def require_current(self):
         if self._closed:
             raise PermissionError("managed host session is closed")
+        guard = getattr(self, "_turn_guard", None)
+        if guard is not None:
+            guard()
         self._admission.require_current()
 
     def decode_command(self, prepared):

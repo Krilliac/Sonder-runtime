@@ -22,6 +22,7 @@ from ..platform import paths
 from .managed_standalone import ManagedStandaloneSession, ManagedStandaloneRecovery
 from ..application.ports.lane_continuation import VerificationApprovalPending
 from .repl_host_selection import ReplHostPolicy, ReplHostSelectionAdapter
+from .managed_conversation import ManagedConversationLifetime, ReplConversationSlot
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,8 @@ class ReplRecoveryResult:
 
 def run_managed_repl_work(*, application, session_id, project, get_session,
                           run, permission_engine, additional_paths, ledger=None,
-                          recovery_cursor=None, recovery_request=None, verifier_factory=None):
+                          recovery_cursor=None, recovery_request=None, verifier_factory=None,
+                          conversation_slot=None, conversation_source=None):
     """Compose only from trusted host callbacks, never public tool arguments.
 
     ``additional_paths`` must enumerate constructor-owned private state before
@@ -53,6 +55,13 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
     """
     if not callable(additional_paths) or not callable(run):
         raise PermissionError('trusted REPL composition callbacks required')
+    if conversation_slot is not None and recovery_cursor is None and recovery_request is None:
+        if type(conversation_slot) is not ReplConversationSlot or not isinstance(conversation_source, str):
+            raise PermissionError('private launcher conversation slot required')
+        identity = (id(application), session_id, str(Path(project).resolve()),
+                    conversation_source, str(getattr(ledger, 'path', '')))
+        if conversation_slot.select(identity):
+            return conversation_slot.run(run)
     if recovery_cursor is not None and (
             type(recovery_cursor) is not int or not 0 <= recovery_cursor < 2**63):
         raise ValueError('bounded recovery cursor required')
@@ -159,6 +168,27 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
         )
         active.append(session)
         return session
+
+    if conversation_slot is not None and recovery_cursor is None and recovery_request is None:
+        bridge = ContinuationApprovalBridge(ledger=ledger or permission_engine.approval_ledger().pinned(),
+                                            decide=decide, digest_call=permission_engine.call_digest)
+        conversation = ManagedConversationLifetime(application=application,
+            session_factory=factory, require_current=current_context)
+
+        def invoke(current_run):
+            with selector.scope(selection, context), control_plane_scope(additional_paths()), \
+                    control_plane_scope(output_paths), managed_root_scope(lambda: current_context().workspace_roots), \
+                    managed_controller_factory_scope(conversation.factory):
+                return current_run()
+
+        def close():
+            try:
+                conversation.close()
+            finally:
+                selector.clear()
+
+        conversation_slot.install(invoke, close)
+        return conversation_slot.run(run)
 
     with selector.scope(selection, context), control_plane_scope(additional_paths()), \
             control_plane_scope(output_paths), managed_root_scope(lambda: current_context().workspace_roots):

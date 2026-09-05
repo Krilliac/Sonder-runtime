@@ -5209,6 +5209,29 @@ def _standalone_verifier_factory(application, service):
     return compose_delegated_verification(service, application.process_job_provider(), catalog)
 
 
+_REPL_CONVERSATION_SLOT = contextvars.ContextVar('private_repl_conversation_slot', default=None)
+
+
+@contextlib.contextmanager
+def _managed_repl_conversation_scope():
+    from sonder_runtime.bootstrap.managed_conversation import ReplConversationSlot
+    slot = ReplConversationSlot()
+    token = _REPL_CONVERSATION_SLOT.set(slot)
+    try:
+        yield
+    finally:
+        try:
+            slot.clear()
+        finally:
+            _REPL_CONVERSATION_SLOT.reset(token)
+
+
+def _clear_managed_repl_conversation():
+    slot = _REPL_CONVERSATION_SLOT.get()
+    if slot is not None:
+        slot.clear()
+
+
 def _run_managed_repl_work(session_id, *, memory_database, _recovery_cursor=None,
                            _recovery_request=None, **arguments):
     """Private REPL entry: persisted history alone never authorizes a host."""
@@ -5247,6 +5270,8 @@ def _run_managed_repl_work(session_id, *, memory_database, _recovery_cursor=None
         permission_engine=permission_modes, additional_paths=supplemental_paths, ledger=ledger,
         recovery_cursor=_recovery_cursor,
         recovery_request=request, verifier_factory=_standalone_verifier_factory,
+        conversation_slot=_REPL_CONVERSATION_SLOT.get(),
+        conversation_source=str(Path(memory_database).resolve()),
     )
 
 
