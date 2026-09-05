@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from .app_control import digest as require_digest
@@ -90,10 +91,10 @@ class PreparedWorkbenchRun:
         root = Path(self.project_root)
         if (
             not root.is_absolute()
-            or str(root.resolve()) != self.project_root
-            or not root.is_dir()
+            or str(root) != self.project_root
+            or os.path.normpath(self.project_root) != self.project_root
         ):
-            raise ValueError("canonical existing work root required")
+            raise ValueError("canonical absolute work root required")
         if type(self.model_ladder) is not tuple or not 1 <= len(self.model_ladder) <= 8:
             raise ValueError("bounded prepared model ladder required")
         for model in self.model_ladder:

@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import pytest
 
@@ -168,3 +169,82 @@ def test_work_table_triggers_are_refused_before_callback(state):
     with pytest.raises(StoreUnavailable, match="trigger"):
         store.atomic(lambda tx: calls.append("called"))
     assert not calls
+
+
+def test_missing_workspace_keeps_admitted_history_readable_but_fences_admission(state):
+    store, work = preparation(state)
+    store.atomic(lambda tx: tx.prepare_work(work))
+    original = admit(store).record
+    Path(work.plan.project_root).rmdir()
+    retained = store.atomic(
+        lambda tx: tx.read_work(
+            principal_id=OWNER, control_session_id="session1", work_id="work1"
+        )
+    )
+    assert retained == original
+    with pytest.raises((CommandConflict, StoreUnavailable)):
+        admit(store)
+
+
+@pytest.mark.parametrize("already_admitted", [False, True])
+def test_missing_preparation_receipt_cannot_admit_or_replay_work(
+    state, already_admitted
+):
+    store, work = preparation(state)
+    store.atomic(lambda tx: tx.prepare_work(work))
+    if already_admitted:
+        admit(store)
+    conn = store._connect()
+    try:
+        conn.execute("DELETE FROM app_control_commands WHERE action='prepare_work'")
+        conn.commit()
+    finally:
+        conn.close()
+    with pytest.raises(StoreUnavailable, match="receipt"):
+        admit(store)
+    retained = store.atomic(
+        lambda tx: tx.read_work(
+            principal_id=OWNER, control_session_id="session1", work_id="work1"
+        )
+    )
+    assert retained.state == ("admitted" if already_admitted else "prepared")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("entity_id", "other-work"), ("entity_revision", 2), ("selection_epoch", 2)],
+)
+def test_mismatched_preparation_receipt_refuses_admission(state, field, value):
+    import json
+
+    store, work = preparation(state)
+    store.atomic(lambda tx: tx.prepare_work(work))
+    conn = store._connect()
+    try:
+        receipt = json.loads(
+            conn.execute(
+                "SELECT receipt FROM app_control_commands WHERE action='prepare_work'"
+            ).fetchone()[0]
+        )
+        receipt[field] = value
+        encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        conn.execute(
+            "UPDATE app_control_commands SET receipt=? WHERE action='prepare_work'",
+            (encoded,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    with pytest.raises(StoreUnavailable, match="receipt"):
+        admit(store)
+
+
+def test_prepared_scope_validation_does_not_resolve_live_filesystem(state, monkeypatch):
+    _, work = preparation(state)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("historical validation accessed the filesystem")
+
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setattr(Path, "is_dir", forbidden)
+    work.__post_init__()

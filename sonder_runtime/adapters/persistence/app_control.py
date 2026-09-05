@@ -415,6 +415,20 @@ class AppControlTransaction:
         if record is None:
             raise NotFound("work unavailable")
         self._require_work(record.prepared)
+        work = record.prepared
+        preparation = self.command(
+            work.command, action="prepare_work", argument_digest=work.digest
+        )
+        expected_receipt = CommandReceipt(
+            work.command.command_id,
+            "prepare_work",
+            "COMMITTED",
+            work.work_id,
+            1,
+            work.selection.epoch,
+        )
+        if preparation is None or preparation.public_receipt != expected_receipt:
+            raise StoreUnavailable("prepared work receipt mismatch")
         if record.state == "admitted":
             if (
                 expected_revision != 1
@@ -523,6 +537,12 @@ class AppControlTransaction:
             raise CommandConflict("command session scope mismatch")
 
     def _grant(self, runtime, grant, *, advance):
+        # Historical records are decoded without filesystem I/O. Authority
+        # admission, including live-session reads, checks every root here.
+        for root in grant.roots:
+            path = Path(root)
+            if str(path.resolve()) != root or not path.is_dir():
+                raise CommandConflict("live grant root unavailable or changed")
         row = self._conn.execute(
             "SELECT revision,digest,source_digest FROM app_control_grant_revisions WHERE runtime=? AND grant_id=?",
             (runtime, grant.grant_id),
