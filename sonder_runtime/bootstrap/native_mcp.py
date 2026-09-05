@@ -861,9 +861,14 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
         return transport.serve()
     finally:
         if close_compute_on_exit:
-            close_compute = getattr(application, "close_compute", None)
-            if callable(close_compute):
-                close_compute()
+            try:
+                close_delegation = getattr(application, "close_delegation", None)
+                if callable(close_delegation):
+                    close_delegation(timeout=5)
+            finally:
+                close_compute = getattr(application, "close_compute", None)
+                if callable(close_compute):
+                    close_compute()
 
 
 __all__ = ["native_tool_registry", "run_native_mcp"]

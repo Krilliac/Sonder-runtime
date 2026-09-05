@@ -173,7 +173,7 @@ class ContinuationMutationOutcome:
     result_bytes: bytes
     resulting_revision: int | None
     replayed: bool = False
-    storage_acknowledgement: Literal["local_committed"] = "local_committed"
+    storage_acknowledgement: Literal["local_committed", "pair_committed"] = "local_committed"
 
     def __post_init__(self):
         if self.disposition not in {
@@ -193,7 +193,7 @@ class ContinuationMutationOutcome:
         ):
             raise ValueError("invalid continuation result revision")
         if (
-            self.storage_acknowledgement != "local_committed"
+            self.storage_acknowledgement not in ("local_committed", "pair_committed")
             or type(self.replayed) is not bool
         ):
             raise ValueError("invalid continuation acknowledgement")
