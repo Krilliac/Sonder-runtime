@@ -6,6 +6,8 @@ Inventory callbacks belong to application composition, never model arguments.
 """
 
 from dataclasses import dataclass, replace
+import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -165,6 +167,25 @@ class HostTerminalPublisher:
                 or not math.isfinite(certificate['created_at'])
                 or certificate['created_at'] <= 0):
             raise PermissionError('invalid verifier certificate structure')
+        prepared = self._prepared(binding)
+        for index, proof in enumerate(certificate['cleanup_proofs']):
+            if (not isinstance(proof, dict)
+                    or proof.get('job_id') != 'lane-test-' + prepared.verification_id + '-' + str(index)
+                    or proof.get('parent_session_id') != prepared.parent_session_id
+                    or proof.get('principal_id') != prepared.principal_id
+                    or any(proof.get(key) is not True for key in
+                           ('process_exited', 'containment_empty', 'resources_released'))
+                    or proof.get('status') != 'succeeded'
+                    or type(proof.get('exit_code')) is not int or proof['exit_code'] != 0):
+                raise PermissionError('invalid stored process cleanup proof')
+            # Match the production process provider's complete proof encoding.
+            # The digest is integrity evidence, not a substitute for the fresh
+            # verifier's independent live process cleanup checks above.
+            contents = {key: value for key, value in proof.items() if key != 'digest'}
+            actual = hashlib.sha256(json.dumps(contents, sort_keys=True,
+                separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+            if proof.get('digest') != actual:
+                raise PermissionError('stored process cleanup proof digest mismatch')
         return certificate
 
     def publish(self):

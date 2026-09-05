@@ -1,6 +1,8 @@
 """Only proven no-effect pending approval can continue across host attachment."""
 
 from dataclasses import replace
+import hashlib
+import json
 import time
 import pytest
 from tests.test_delegated_verification import lanes
@@ -59,6 +61,10 @@ def setup_pending(lanes, *, original_factory=None):
                 status="succeeded",
                 exit_code=0,
             )
+            proof = proofs[job]
+            del proof['digest']
+            proof['digest'] = hashlib.sha256(json.dumps(
+                proof, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     gateway = Gateway()
     verifier = DelegatedVerificationService(

@@ -1,4 +1,6 @@
 from dataclasses import replace
+import hashlib
+import json
 import time
 
 import pytest
@@ -117,4 +119,29 @@ def test_lost_result_commit_response_replays_same_receipt_without_execution(lane
     result = publisher.publish()
     assert result.receipt == receipts[0]
     assert gateway.calls == 1
+    bound.close()
+
+
+@pytest.mark.parametrize('field,value', [
+    ('job_id', 'other-job'), ('parent_session_id', 'other-parent'),
+    ('principal_id', 'other-principal'), ('process_exited', False),
+    ('containment_empty', 1), ('resources_released', False),
+    ('status', 'failed'), ('exit_code', True), ('digest', 'broken'),
+])
+def test_malformed_stored_cleanup_proof_never_publishes(lanes, field, value):
+    publisher, host, bound, verifier, prepared, identity, gateway = setup(lanes)
+    bound.execute_verification(verifier, prepared, approve=granted)
+    with lanes[1].transaction() as tx:
+        row = tx.verification_row(prepared.verification_id, prepared.principal_id)
+        row['certificate']['cleanup_proofs'][0][field] = value
+        if field != 'digest':
+            proof = row['certificate']['cleanup_proofs'][0]
+            proof['digest'] = hashlib.sha256(json.dumps(
+                {key: item for key, item in proof.items() if key != 'digest'},
+                sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        tx.save_verification(row)
+    with pytest.raises(PermissionError):
+        publisher.publish()
+    with lanes[1].transaction() as tx:
+        assert tx.conn.execute('SELECT COUNT(*) FROM agent_lane_terminal_results').fetchone()[0] == 0
     bound.close()
