@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from .host_turn_links import ManagedHostTurnLink, ManagedHostTerminalLink
+from .lane_continuation import PendingVerificationIdentity, TerminalProjectionReceipt
 
 from .app_control import digest as require_digest
 from .app_control import (
@@ -182,6 +183,58 @@ class WorkInterruption:
 
 
 @dataclass(frozen=True)
+class WorkCompletionEvidence:
+    """Original return classification and a separate later publication link."""
+
+    phase: str
+    pending_identity: PendingVerificationIdentity | None = None
+    publication_receipt: TerminalProjectionReceipt | None = None
+
+    def __post_init__(self):
+        if self.phase in ("not_required", "refused"):
+            if (
+                self.pending_identity is not None
+                or self.publication_receipt is not None
+            ):
+                raise ValueError("non-certified completion cannot claim publication")
+            return
+        if self.phase not in ("certified", "certified_after_return"):
+            raise ValueError("known completion phase required")
+        identity, receipt = self.pending_identity, self.publication_receipt
+        if (
+            type(identity) is not PendingVerificationIdentity
+            or type(receipt) is not TerminalProjectionReceipt
+        ):
+            raise ValueError("exact typed publication identity and receipt required")
+        for value in (
+            identity.continuation_id,
+            identity.verification_id,
+            identity.parent_session_id,
+            identity.command_id,
+            receipt.receipt_id,
+        ):
+            _text(value, 256)
+        for value in (
+            identity.bundle_digest,
+            identity.projection_digest,
+            receipt.projection_digest,
+            receipt.original_projection_digest,
+            receipt.certificate_digest,
+        ):
+            require_digest(value)
+        positive(identity.parent_grant_revision)
+        positive(identity.projection_revision)
+        positive(receipt.revision)
+        if type(identity.generation) is not int or not 0 <= identity.generation < 2**63:
+            raise ValueError("bounded verification generation required")
+        if (
+            receipt.original_projection_digest != identity.projection_digest
+            or receipt.revision != identity.projection_revision + 1
+        ):
+            raise ValueError("publication receipt differs from original verification")
+
+
+@dataclass(frozen=True)
 class AppWorkRecord:
     prepared: PreparedAppWork = field(repr=False)
     state: str = "prepared"
@@ -192,6 +245,7 @@ class AppWorkRecord:
     host_turn: ManagedHostTurnLink | None = None
     interruption: WorkInterruption | None = None
     terminal: ManagedHostTerminalLink | None = None
+    completion: WorkCompletionEvidence | None = None
 
     def __post_init__(self):
         if type(self.prepared) is not PreparedAppWork:
@@ -199,6 +253,17 @@ class AppWorkRecord:
         self.prepared.__post_init__()
         positive(self.revision)
         if self.state == "terminal":
+            if self.completion is not None:
+                if type(self.completion) is not WorkCompletionEvidence:
+                    raise ValueError("typed completion evidence required")
+                self.completion.__post_init__()
+                identity = self.completion.pending_identity
+                if identity is not None and (
+                    self.host_turn is None
+                    or identity.continuation_id != self.host_turn.continuation_id
+                    or identity.parent_session_id != self.host_turn.parent_session_id
+                ):
+                    raise ValueError("completion publication belongs to another host")
             if type(self.terminal) is not ManagedHostTerminalLink:
                 raise ValueError("typed terminal link required")
             self.terminal.__post_init__()
@@ -216,10 +281,13 @@ class AppWorkRecord:
                 state="unknown" if self.interruption is not None else "running",
                 revision=self.revision - 1,
                 terminal=None,
+                completion=None,
             )
             return
         if self.terminal is not None:
             raise ValueError("only terminal work retains a terminal link")
+        if self.completion is not None:
+            raise ValueError("only terminal work retains completion evidence")
         if self.state == "unknown":
             if type(self.interruption) is not WorkInterruption:
                 raise ValueError("typed interruption required")

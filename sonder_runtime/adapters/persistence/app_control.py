@@ -11,6 +11,10 @@ import sqlite3
 import stat
 import time
 import uuid
+from ...application.ports.lane_continuation import (
+    PendingVerificationIdentity,
+    TerminalProjectionReceipt,
+)
 from ...application.ports.host_turn_links import (
     ManagedHostTurnLink,
     ManagedHostTerminalLink,
@@ -22,6 +26,7 @@ from ...application.ports.app_managed_work import (
     WorkSpec,
     WorkAdmission,
     WorkInterruption,
+    WorkCompletionEvidence,
 )
 
 from ...application.ports.app_control import (
@@ -84,6 +89,8 @@ def _encode(value, limit=131072):
             data.pop("interruption")
         if value.terminal is None:
             data.pop("terminal")
+        if value.completion is None:
+            data.pop("completion")
     raw = json.dumps(
         data,
         sort_keys=True,
@@ -111,6 +118,17 @@ def _decode(raw, cls):
             raise ValueError()
         data = json.loads(raw, object_pairs_hook=_pairs)
         if cls is AppWorkRecord:
+            if data.get("completion") is not None:
+                completion = data["completion"]
+                if completion.get("pending_identity") is not None:
+                    completion["pending_identity"] = PendingVerificationIdentity(
+                        **completion["pending_identity"]
+                    )
+                if completion.get("publication_receipt") is not None:
+                    completion["publication_receipt"] = TerminalProjectionReceipt(
+                        **completion["publication_receipt"]
+                    )
+                data["completion"] = WorkCompletionEvidence(**completion)
             if data.get("terminal") is not None:
                 data["terminal"]["turn"] = ManagedHostTurnLink(
                     **data["terminal"]["turn"]
@@ -535,6 +553,7 @@ class AppControlTransaction:
         host_turn=None,
         interruption=None,
         terminal=None,
+        completion=None,
     ):
         positive(expected_revision)
         current = self.read_work(
@@ -555,7 +574,11 @@ class AppControlTransaction:
         if record.state == "prepared":
             raise CommandConflict("work is not admitted")
         if terminal is not None and record.state == "terminal":
-            if record.terminal == terminal and record.revision == expected_revision + 1:
+            if (
+                record.terminal == terminal
+                and record.completion == completion
+                and record.revision == expected_revision + 1
+            ):
                 return record
             raise CommandConflict("terminal link is immutable")
         expected_state = (
@@ -575,6 +598,7 @@ class AppControlTransaction:
                 state="terminal",
                 revision=record.revision + 1,
                 terminal=terminal,
+                completion=completion,
             )
         elif interruption is not None:
             updated = replace(
@@ -626,11 +650,11 @@ class AppControlTransaction:
         interruption.__post_init__()
         return self._link_work(interruption=interruption, **scope)
 
-    def record_work_terminal(self, *, terminal, **scope):
+    def record_work_terminal(self, *, terminal, completion=None, **scope):
         """Record a link validated by private host composition; no authority is minted."""
         if type(terminal) is not ManagedHostTerminalLink:
             raise CommandConflict("typed terminal link required")
-        return self._link_work(terminal=terminal, **scope)
+        return self._link_work(terminal=terminal, completion=completion, **scope)
 
     def _now(self):
         self._check()
