@@ -214,7 +214,8 @@ def test_missing_preparation_receipt_cannot_admit_or_replay_work(
     "field,value",
     [("entity_id", "other-work"), ("entity_revision", 2), ("selection_epoch", 2)],
 )
-def test_mismatched_preparation_receipt_refuses_admission(state, field, value):
+@pytest.mark.parametrize("replay", [False, True])
+def test_mismatched_preparation_receipt_refuses_admission(state, field, value, replay):
     import json
 
     store, work = preparation(state)
@@ -236,7 +237,10 @@ def test_mismatched_preparation_receipt_refuses_admission(state, field, value):
     finally:
         conn.close()
     with pytest.raises(StoreUnavailable, match="receipt"):
-        admit(store)
+        if replay:
+            store.atomic(lambda tx: tx.prepare_work(work))
+        else:
+            admit(store)
 
 
 def test_prepared_scope_validation_does_not_resolve_live_filesystem(state, monkeypatch):
