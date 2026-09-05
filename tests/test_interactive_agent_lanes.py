@@ -307,6 +307,126 @@ def test_steering_not_duplicated_or_admitted_via_history_before_safe_boundary(en
     assert request.history == ()
 
 
+def test_lane_wires_model_steps_and_steering_through_durable_loop(env):
+    from sonder_runtime.application.loop import LoopSessionLifecycleFacade
+
+    service, store, sessions, model, context, root = env
+    loop = LoopSessionLifecycleFacade(sessions)
+    service = AgentLaneService(
+        store,
+        sessions,
+        model,
+        auto_start=False,
+        loop=loop,
+    )
+    lane = service.spawn(
+        command_id="loop-spawn",
+        parent_session_id="parent",
+        task="implement parser",
+        workspace_root=str(root / "child"),
+        context=context,
+    )["lane"]["id"]
+
+    def steer_once():
+        model.callback = None
+        service.send_message(
+            lane,
+            command_id="loop-steer",
+            content="Keep the change bounded",
+            author="user",
+            context=context,
+        )
+
+    model.callback = steer_once
+    service.run_pending(lane, context)
+    state = service.inspect(lane, context)["lane"]
+    snapshot = loop.snapshot(state["attempt_id"])
+
+    assert snapshot.turn.state.value == "completed"
+    assert snapshot.turn.accepted_steering == 1
+    assert len(snapshot.steps) == 2
+    assert all(step.state.value == "completed" for step in snapshot.steps)
+    events = sessions.read_range(state["session_id"])
+    event_types = [event.event_type for event in events]
+    assert "session.started" in event_types
+    assert event_types.count("model.started") == 2
+    assert event_types.count("model.completed") == 2
+
+
+def test_lane_cancellation_updates_loop_without_replaying_model_effect(env):
+    from sonder_runtime.application.loop import LoopSessionLifecycleFacade
+
+    service, store, sessions, model, context, root = env
+    loop = LoopSessionLifecycleFacade(sessions)
+    service = AgentLaneService(
+        store,
+        sessions,
+        model,
+        auto_start=False,
+        loop=loop,
+    )
+    lane = service.spawn(
+        command_id="loop-cancel-spawn",
+        parent_session_id="parent",
+        task="cancel after admission",
+        workspace_root=str(root / "child"),
+        context=context,
+    )["lane"]["id"]
+    model.callback = lambda: service.control(
+        lane,
+        "cancel",
+        command_id="loop-cancel",
+        reason="operator stopped the run",
+        context=context,
+    )
+
+    service.run_pending(lane, context)
+    state = service.inspect(lane, context)["lane"]
+    snapshot = loop.snapshot(state["attempt_id"])
+
+    assert state["status"] == "cancelled"
+    assert snapshot.turn.state.value == "cancelled"
+    assert snapshot.steps[0].state.value == "completed"
+    events = sessions.read_range(state["session_id"])
+    assert any(event.event_type == "cancellation.requested" for event in events)
+
+
+def test_lane_unknown_model_outcome_keeps_loop_step_unresolved(env):
+    from sonder_runtime.application.loop import LoopSessionLifecycleFacade
+
+    service, store, sessions, model, context, root = env
+    loop = LoopSessionLifecycleFacade(sessions)
+    service = AgentLaneService(
+        store,
+        sessions,
+        model,
+        auto_start=False,
+        loop=loop,
+    )
+    lane = service.spawn(
+        command_id="loop-unknown-spawn",
+        parent_session_id="parent",
+        task="preserve an uncertain provider call",
+        workspace_root=str(root / "child"),
+        context=context,
+    )["lane"]["id"]
+
+    def unknown_provider_outcome():
+        raise OSError("connection lost after dispatch")
+
+    model.callback = unknown_provider_outcome
+    service.run_pending(lane, context)
+    state = service.inspect(lane, context)["lane"]
+    snapshot = loop.snapshot(state["attempt_id"])
+
+    assert state["status"] == "awaiting_input"
+    assert snapshot.turn.state.value == "running"
+    assert snapshot.steps[0].state.value == "model_requested"
+    events = sessions.read_range(state["session_id"])
+    assert not any(event.event_type == "model.failed" for event in events)
+
+
+
 def test_http_spawn_is_attributed_to_user(env):
     from sonder_runtime.interfaces.http.facades.agent_lanes import (
         dispatch_agent_lane_route,

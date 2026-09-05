@@ -169,6 +169,7 @@ class _LifecycleAdapter:
             workspace_roots=context.workspace_roots,
             cloud_allowed=context.cloud_allowed,
             remote_ollama_allowed=context.remote_ollama_allowed,
+            session_id=context.session_id,
         )
 
     @staticmethod

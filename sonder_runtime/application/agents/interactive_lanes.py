@@ -20,6 +20,10 @@ import uuid
 from pathlib import Path
 from ..context import OperationContext, LOCAL_OWNER
 from ..errors import CapacityExceeded
+from ..loop import LoopSessionLifecycleFacade
+from ..loop_contract import StepState
+from ..loop_event_classification import DurableSessionFact
+from ..loop_steering import SteeringCommand
 from ..ports.model_gateway import ModelRequest, require_model_text
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..tools.gateway_contract import ToolGatewayRequest, ToolScope, ToolPermission
@@ -171,6 +175,8 @@ class AgentLaneService:
         auto_start=True,
         authorize_grant=None,
         allowed_tools=None,
+        loop=None,
+        loop_factory=None,
     ):
         self.store, self.sessions, self.gateway, self.tools = (
             store,
@@ -196,6 +202,228 @@ class AgentLaneService:
         self._deferred_verification = {}
         self._condition = threading.Condition()
         self._capture = SessionCaptureService(sessions)
+        if loop is not None and loop_factory is not None:
+            raise ValueError("loop and loop_factory are mutually exclusive")
+        if loop is not None and not callable(getattr(loop, "admit_turn", None)):
+            raise TypeError("loop must provide the loop lifecycle facade")
+        if loop_factory is not None and not callable(loop_factory):
+            raise TypeError("loop_factory must be callable")
+        self._loop = loop
+        self._loop_factory = loop_factory or (
+            lambda: LoopSessionLifecycleFacade(sessions)
+        )
+        # A shared injected facade is useful to hosts that want to inspect the
+        # live loop. The default creates one facade per attempt so terminal
+        # turns do not consume the facade's bounded active-turn capacity.
+        self._loop_bindings = {}
+        self._loop_lock = threading.RLock()
+        self._loop_steering_sequence = {}
+
+    @property
+    def loop(self):
+        """The optional host-owned lifecycle facade, when one was injected."""
+        return self._loop
+
+    def _loop_binding(self, lane, *, create=False):
+        """Return ``(facade, turn_id)`` for the lane's current attempt."""
+        attempt_id = str(lane["attempt_id"])
+        with self._loop_lock:
+            current = self._loop_bindings.get(lane["id"])
+            if current is not None and current[1] == attempt_id:
+                return current
+            if not create:
+                return None
+            facade = self._loop if self._loop is not None else self._loop_factory()
+            if not callable(getattr(facade, "admit_turn", None)):
+                raise TypeError("loop_factory returned an invalid lifecycle facade")
+            facade.admit_turn(attempt_id, session_id=lane["session_id"])
+            facade.start_turn(attempt_id)
+            self._loop_bindings[lane["id"]] = (facade, attempt_id)
+            self._loop_fact(
+                facade,
+                lane["session_id"],
+                "session.started",
+                {"status": "running", "reason": "coding_run"},
+            )
+            return facade, attempt_id
+
+    @staticmethod
+    def _loop_fact(facade, session_id, event_type, payload):
+        if facade is None:
+            return None
+        return facade.record_fact(
+            DurableSessionFact(event_type, str(session_id), dict(payload))
+        )
+
+    def _loop_model_step(self, lane, request_id, request):
+        binding = self._loop_binding(lane, create=True)
+        if binding is None:
+            return None
+        facade, turn_id = binding
+        step_id = "model:" + str(request_id)
+        facade.open_step(turn_id, step_id)
+        self._loop_fact(
+            facade,
+            lane["session_id"],
+            "model.started",
+            {
+                "request_id": str(request_id),
+                "model": str(request.tier),
+                "provider": "model-gateway",
+            },
+        )
+        return facade, turn_id, step_id
+
+    def _loop_model_completed(self, lane, request_id, step, response):
+        if step is None:
+            return
+        facade, turn_id, step_id = step
+        facade.complete_step(turn_id, step_id)
+        payload = {
+            "request_id": str(request_id),
+            "model": str(getattr(response, "model", "") or "unknown"),
+        }
+        tokens = getattr(response, "tokens_out", None)
+        if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+            payload["output_tokens"] = tokens
+        self._loop_fact(facade, lane["session_id"], "model.completed", payload)
+
+    def _loop_model_failed(self, lane, step, error):
+        if step is None:
+            return
+        facade, turn_id, step_id = step
+        code = getattr(error, "code", None)
+        if not isinstance(code, str) or not code.strip():
+            # Transport exceptions without a durable classification retain the
+            # model-requested step as unresolved; callers must reconcile it.
+            return
+        self._loop_fact(
+            facade,
+            lane["session_id"],
+            "model.failed",
+            {"request_id": step_id.removeprefix("model:"), "error_code": code},
+        )
+        facade.transition_step(turn_id, step_id, StepState.FAILED)
+
+    def _loop_tool_step(self, lane, call_id, name):
+        binding = self._loop_binding(lane, create=True)
+        if binding is None:
+            return None
+        facade, turn_id = binding
+        step_id = "tool:" + str(call_id)
+        facade.open_step(turn_id, step_id)
+        facade.transition_step(turn_id, step_id, StepState.EXECUTING)
+        self._loop_fact(
+            facade,
+            lane["session_id"],
+            "tool.started",
+            {"call_id": str(call_id), "tool": str(name)},
+        )
+        return facade, turn_id, step_id
+
+    def _loop_tool_completed(self, lane, step, call_id, name, receipt):
+        if step is None:
+            return
+        facade, turn_id, step_id = step
+        if getattr(receipt, "success", False):
+            self._loop_fact(
+                facade,
+                lane["session_id"],
+                "tool.completed",
+                {"call_id": str(call_id), "tool": str(name)},
+            )
+        else:
+            self._loop_fact(
+                facade,
+                lane["session_id"],
+                "tool.failed",
+                {
+                    "call_id": str(call_id),
+                    "error_code": str(getattr(receipt, "error_code", "") or "TOOL_FAILED"),
+                    "retryable": False,
+                },
+            )
+        # The tool invocation reached a terminal receipt even when its
+        # requested effect failed. The next model step can inspect the result.
+        facade.complete_step(turn_id, step_id)
+
+    def _loop_finish(self, lane, status, *, reason=""):
+        binding = self._loop_binding(lane)
+        if binding is None:
+            return
+        facade, turn_id = binding
+        try:
+            if status == "cancelled":
+                facade.cancel_turn(turn_id, reason=reason or "lane cancelled")
+            elif status == "failed":
+                facade.fail_turn(turn_id)
+            elif status == "awaiting_input":
+                # The provider outcome is unknown. Keep the admitted step and
+                # running turn open for explicit reconciliation.
+                return
+            else:
+                facade.stop_turn(turn_id)
+                facade.complete_turn(turn_id)
+        except (ValueError, RuntimeError):
+            # A concurrent control command may have already terminalized the
+            # facade. The lane store remains the authoritative lifecycle.
+            pass
+        if status in {"completed", "failed", "cancelled", "interrupted"}:
+            with self._loop_lock:
+                if self._loop is None:
+                    self._loop_bindings.pop(lane["id"], None)
+
+    def _loop_steer(self, lane, *, command_id, content, author, message_id):
+        """Project a committed mailbox instruction into the active loop.
+
+        The mailbox remains the durable source of the instruction. A loop
+        steering admission is a live projection and therefore may race with a
+        terminal boundary; a missed projection is safe because the next model
+        request reads the same queued mailbox message.
+        """
+        binding = self._loop_binding(lane)
+        if binding is None:
+            return
+        facade, turn_id = binding
+        with self._loop_lock:
+            sequence = self._loop_steering_sequence.get(turn_id, 0) + 1
+            self._loop_steering_sequence[turn_id] = sequence
+        try:
+            command = SteeringCommand.follow_up(command_id, sequence, content)
+            facade.steer(command, turn_id=turn_id)
+            self._loop_fact(
+                facade,
+                lane["session_id"],
+                "message.received",
+                {"message_id": str(message_id), "role": str(author)},
+            )
+        except (ValueError, RuntimeError):
+            # The durable mailbox commit is already authoritative. A terminal
+            # loop race must not make a valid send fail or duplicate the text.
+            return
+
+    def _loop_control(self, lane, action, reason):
+        """Mirror an admitted lane control into its live loop state."""
+        binding = self._loop_binding(lane)
+        if binding is None:
+            return
+        facade, turn_id = binding
+        try:
+            if action == "cancel":
+                self._loop_fact(
+                    facade,
+                    lane["session_id"],
+                    "cancellation.requested",
+                    {"target_id": turn_id, "reason": reason or "lane cancelled"},
+                )
+                facade.cancel_turn(turn_id, reason=reason or "lane cancelled")
+            elif action == "interrupt":
+                facade.stop_turn(turn_id)
+        except (ValueError, RuntimeError):
+            # A concurrent worker may have reached the same terminal boundary.
+            # The lane store's compare-and-set control record remains the source
+            # of truth for the externally visible outcome.
+            return
 
     @contextmanager
     def _transaction(self, context, *, lane_id=None):
@@ -636,6 +864,13 @@ class AgentLaneService:
             receipt = self._receipt(tx, lane, command_id, message_id=message_id)
             tx.record_receipt(context.principal_id, command_id, digest, receipt)
         self._done()
+        self._loop_steer(
+            lane,
+            command_id=command_id,
+            content=content,
+            author=author,
+            message_id=receipt.get("message_id", ""),
+        )
         if schedule:
             self._schedule(lane_id, context)
         return receipt
@@ -747,6 +982,7 @@ class AgentLaneService:
             receipt = self._receipt(tx, lane, command_id)
             tx.record_receipt(context.principal_id, command_id, digest, receipt)
         self._done()
+        self._loop_control(lane, action, reason)
         if action == "resume":
             self._schedule(lane_id, context)
         return receipt
@@ -985,6 +1221,7 @@ class AgentLaneService:
             auth_level=lane["auth_level"],
             cloud_allowed=lane["cloud_allowed"],
             remote_ollama_allowed=lane["remote_ollama_allowed"],
+            session_id=lane["session_id"],
             cancellation=control,
             deadline_monotonic=started
             + min(
@@ -1007,7 +1244,9 @@ class AgentLaneService:
             else:
                 control.authority_context = replace(context, deadline_monotonic=None)
             self._done()
+            self._loop_binding(lane, create=True)
             while True:
+                stopped_status = None
                 with self._transaction(run_context, lane_id=lane_id) as tx:
                     lane = tx.lane(lane_id)
                     if lane["owner"] != self.owner:
@@ -1029,16 +1268,25 @@ class AgentLaneService:
                             },
                         )
                         tx.save(lane)
-                        break
-                    self._authorize(lane, run_context, execute=True, tx=tx)
-                    self._remaining(lane)
-                    if run_context.expired:
-                        raise TimeoutError("lane wall budget exhausted")
-                    messages = [
-                        m
-                        for m in tx.messages(lane_id)
-                        if m["delivery_state"] == "queued"
-                    ]
+                        stopped_status = lane["status"]
+                    else:
+                        self._authorize(lane, run_context, execute=True, tx=tx)
+                        self._remaining(lane)
+                        if run_context.expired:
+                            raise TimeoutError("lane wall budget exhausted")
+                        messages = [
+                            m
+                            for m in tx.messages(lane_id)
+                            if m["delivery_state"] == "queued"
+                        ]
+                if stopped_status is not None:
+                    self._done()
+                    self._loop_finish(
+                        lane,
+                        stopped_status,
+                        reason="lane control requested",
+                    )
+                    break
                 if lane.get("pending_response"):
                     if self._consume_response(lane_id, run_context, started):
                         break
@@ -1069,48 +1317,60 @@ class AgentLaneService:
                     lane = fresh
                 self._done()  # Admission must be canonical before provider dispatch.
                 pending = CapturedRequest(lane["session_id"], turn_id, request_id, ())
+                loop_step = self._loop_model_step(lane, request_id, request)
                 try:
                     from ..session.provider_attempts import provider_attempt_scope
 
                     scope = provider_attempt_scope(self._capture, pending)
                 except ImportError:
                     scope = nullcontext()
-                self._fresh_execution(lane_id, run_context)
-                with scope:
-                    response = self.gateway.generate(request, run_context)
-                text = require_model_text(response.text)
-                if len(text.encode("utf-8")) > 65536:
-                    raise ValueError("provider output exceeds lane payload ceiling")
-                measured = response.tokens_out
-                # Unknown provider usage receives a conservative character ceiling.
-                charged = (
-                    measured
-                    if isinstance(measured, int)
-                    and not isinstance(measured, bool)
-                    and measured >= 0
-                    else len(text)
-                )
-                with self.store.transaction() as tx:
-                    lane = tx.lane(lane_id)
-                    if lane["owner"] != self.owner:
-                        return
-                    lane["pending_effect"] = False
-                    lane["used_tokens"] += charged
-                    if lane["used_tokens"] > lane["max_output_tokens"]:
-                        raise TimeoutError("lane output budget exhausted")
-                    sequence = tx.emit(
-                        lane,
-                        "model.response",
-                        {"content": text, "turn_id": turn_id, "request_id": request_id},
+                try:
+                    self._fresh_execution(lane_id, run_context)
+                    with scope:
+                        response = self.gateway.generate(request, run_context)
+                except Exception as exc:
+                    self._loop_model_failed(lane, loop_step, exc)
+                    raise
+                try:
+                    text = require_model_text(response.text)
+                    if len(text.encode("utf-8")) > 65536:
+                        raise ValueError("provider output exceeds lane payload ceiling")
+                    measured = response.tokens_out
+                    # Unknown provider usage receives a conservative character ceiling.
+                    charged = (
+                        measured
+                        if isinstance(measured, int)
+                        and not isinstance(measured, bool)
+                        and measured >= 0
+                        else len(text)
                     )
-                    lane["pending_response"] = dict(
-                        text=text,
-                        source_sequence=sequence,
-                        attempt_id=lane["attempt_id"],
-                    )
-                    tx.handled(lane, [m["id"] for m in messages])
-                    tx.save(lane)
-                self._done()
+                    with self.store.transaction() as tx:
+                        lane = tx.lane(lane_id)
+                        if lane["owner"] != self.owner:
+                            return
+                        lane["pending_effect"] = False
+                        lane["used_tokens"] += charged
+                        if lane["used_tokens"] > lane["max_output_tokens"]:
+                            raise TimeoutError("lane output budget exhausted")
+                        sequence = tx.emit(
+                            lane,
+                            "model.response",
+                            {"content": text, "turn_id": turn_id, "request_id": request_id},
+                        )
+                        lane["pending_response"] = dict(
+                            text=text,
+                            source_sequence=sequence,
+                            attempt_id=lane["attempt_id"],
+                        )
+                        tx.handled(lane, [m["id"] for m in messages])
+                        tx.save(lane)
+                    self._done()
+                    self._loop_model_completed(lane, request_id, loop_step, response)
+                except Exception:
+                    # The provider already returned. A malformed response or
+                    # failed durable projection is left unresolved rather than
+                    # relabeled as a transport failure.
+                    raise
         except Exception as exc:
             with self.store.transaction() as tx:
                 lane = tx.lane(lane_id)
@@ -1140,6 +1400,7 @@ class AgentLaneService:
                         },
                     )
                     tx.save(lane)
+            self._loop_finish(lane, lane["status"], reason=str(exc))
         finally:
             if managed:
                 self.managed_authority.release_worker(
@@ -1199,6 +1460,7 @@ class AgentLaneService:
             tx.emit(lane, "lane.completed", {"attempt_id": lane["attempt_id"]})
             tx.save(lane)
         self._done()
+        self._loop_finish(lane, "completed")
         return True
 
     def _execute_tool(self, lane, tool, context):
@@ -1220,6 +1482,7 @@ class AgentLaneService:
             )
             tx.save(fresh)
         self._done()
+        loop_step = self._loop_tool_step(lane, call_id, name)
         self._fresh_execution(lane["id"], context)
         receipt = self.tools.execute(
             ToolGatewayRequest(
@@ -1277,6 +1540,7 @@ class AgentLaneService:
             )
             tx.save(fresh)
         self._done()
+        self._loop_tool_completed(lane, loop_step, call_id, name, receipt)
 
     def close(self):
         if self._pool:
