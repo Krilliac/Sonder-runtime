@@ -10,8 +10,8 @@ from ..application.runtime_resources import ApplicationResourceOwners
 from ..platform.child_storage_config import ChildStorageConfig, child_storage_errors
 
 
-COMPONENTS = ("application", "child-storage", "http-sockets", "providers", "sqlite", "workers")
-CLOSE_ORDER = ("child-storage", "providers", "workers", "http-sockets", "sqlite", "application")
+COMPONENTS = ("app-work", "application", "child-storage", "http-sockets", "providers", "sqlite", "workers")
+CLOSE_ORDER = ("app-work", "child-storage", "providers", "workers", "http-sockets", "sqlite", "application")
 MANIFEST_DIGEST = ApplicationResourceOwners(COMPONENTS, close_order=CLOSE_ORDER).manifest_digest
 
 

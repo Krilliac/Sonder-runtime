@@ -216,6 +216,11 @@ class OwnedRuntimeThreads:
         with self._lock:
             self._stopped = True
 
+    def owns_pool(self, pool):
+        """Exact current factory ownership, never inferred from a thread name."""
+        with self._lock:
+            return type(pool) is _ManagedPool and pool._owner is self and any(item is pool for item in self._pools)
+
     def snapshot(self):
         with self._lock:
             direct = sum(thread.is_alive() or (thread._owner_started and not thread._owner_finished) for thread in self._threads)
