@@ -626,7 +626,7 @@
       ]
     },
     {
-      "file_count": 46,
+      "file_count": 48,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -638,6 +638,8 @@
         "sonder_runtime/bootstrap/app_managed_work_http.py",
         "sonder_runtime/bootstrap/app_recovery_coordinator.py",
         "sonder_runtime/bootstrap/app_work_recovery.py",
+        "sonder_runtime/bootstrap/app_work_recovery_http.py",
+        "sonder_runtime/bootstrap/app_work_recovery_registry.py",
         "sonder_runtime/bootstrap/artifact_transfer.py",
         "sonder_runtime/bootstrap/capabilities.py",
         "sonder_runtime/bootstrap/child_migration.py",
