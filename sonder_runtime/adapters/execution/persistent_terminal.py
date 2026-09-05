@@ -8,6 +8,8 @@ process, and it fails closed if durable metadata outlives that process.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 from contextlib import contextmanager
 
 from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
@@ -436,7 +438,7 @@ class SQLitePersistentTerminalService(TerminalService):
                 # Process teardown closes pipes; no output is fabricated.
                 return
 
-        threading.Thread(target=read_loop, name=f"sonder-terminal-{terminal_id}-{stream}", daemon=True).start()
+        owned_runtime_thread(target=read_loop, name=f"sonder-terminal-{terminal_id}-{stream}", daemon=True).start()
 
     def _send(self, terminal_id: str, process: _ProcessLike, data: str) -> None:
         if not isinstance(data, str):

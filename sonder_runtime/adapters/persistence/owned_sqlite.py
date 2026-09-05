@@ -127,6 +127,10 @@ class OwnedSQLiteConnections:
                     self._unresolved = True
         return self.snapshot()
 
+    def current_thread_closed(self):
+        with self._lock:
+            return not self._unresolved and not any(record[1] is current_thread() for record in self._records.values())
+
 
 _PROCESS_OWNER = None
 

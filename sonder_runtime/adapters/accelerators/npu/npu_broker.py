@@ -16,6 +16,8 @@ existing local behavior. Nothing in this module can route work to cloud tiers.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import collections
 import itertools
 import math
@@ -465,11 +467,11 @@ class _Worker:
         self.stderr_ring = collections.deque(maxlen=_STDERR_RING)
         self.dead = False
         self._destroy_lock = threading.Lock()
-        self._reader = threading.Thread(
+        self._reader = owned_runtime_thread(
             target=self._pump_stdout, daemon=True,
             name="npu-reader-%d" % generation,
         )
-        self._drainer = threading.Thread(
+        self._drainer = owned_runtime_thread(
             target=self._pump_stderr, daemon=True,
             name="npu-stderr-%d" % generation,
         )
@@ -1125,7 +1127,7 @@ class NpuBroker:
             self._ready_ts = time.monotonic()
             self._last_used = time.monotonic()
             ttl = self._idle_ttl_s()
-        threading.Thread(
+        owned_runtime_thread(
             target=self._reap_idle, args=(generation, ttl), daemon=True,
             name="npu-idle-%d" % generation,
         ).start()
@@ -1196,7 +1198,7 @@ class NpuBroker:
             self._generation += 1
             generation = self._generation
             targets = dict(self._target_manifests)
-            thread = threading.Thread(
+            thread = owned_runtime_thread(
                 target=self._warmup, args=(generation, targets), daemon=True,
                 name="npu-warmup-%d" % generation,
             )

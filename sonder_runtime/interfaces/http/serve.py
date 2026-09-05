@@ -11,6 +11,8 @@ Run:
 
 Point your chat UI's OpenAI API base at http://127.0.0.1:<port>/v1 (any api key).
 """
+
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 import json
 import functools
 import inspect
@@ -3833,7 +3835,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def start_drain():
             _serve_logger.info("Admin drain requested, initiating graceful shutdown")
-            threading.Thread(
+            owned_runtime_thread(
                 target=lifecycle.drain,
                 kwargs={"reason": "admin drain request"},
                 daemon=True,
@@ -6423,7 +6425,7 @@ def main(config=None):
         raise
     # After a drain completes (signal or /v1/admin/drain), stop accepting.
     lifecycle.coordinator.add_flush_hook(
-        lambda: threading.Thread(
+        lambda: owned_runtime_thread(
             target=httpd.shutdown, daemon=True, name="sonder-httpd-shutdown"
         ).start()
     )
