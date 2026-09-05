@@ -55,9 +55,9 @@ def advance_host_turn(bound, run_id, *, verifier=None):
             raise PermissionError(
                 "original verification is pending, unknown or no longer valid"
             )
-    with bound._scope() as context, bound._service.store.transaction() as tx:
+    with bound._scope() as context, bound._service._transaction(context) as tx:
         record = bound._service._row(tx, bound.continuation_id)
-        bound._require_current_tx(tx, record)
+        bound._require_current_tx(tx, record, context=context)
         if record.get("pending_verification") != (asdict(pending) if pending else None):
             raise PermissionError("host pending identity changed")
         prior = record.get("host_turn")
@@ -182,9 +182,9 @@ def capture_host_turn(bound, admission, draft, ledger):
         raise PermissionError("private host turn admission required")
     codec = bound._service.projection_codec
     with bound._scope() as context:
-        with bound._service.store.transaction() as tx:
+        with bound._service._transaction(context) as tx:
             record = bound._service._row(tx, bound.continuation_id)
-            bound._require_current_tx(tx, record)
+            bound._require_current_tx(tx, record, context=context)
             turn = record.get("host_turn")
             if (
                 not turn
@@ -220,9 +220,9 @@ def capture_host_turn(bound, admission, draft, ledger):
             terminal_receipt_id=admission.run_id + "-host-terminal",
         )
         sealed = seal_projection(codec, original, binding)
-        with bound._service.store.transaction() as tx:
+        with bound._service._transaction(context) as tx:
             record = bound._service._row(tx, bound.continuation_id)
-            bound._require_current_tx(tx, record)
+            bound._require_current_tx(tx, record, context=context)
             turn = record.get("host_turn")
             if (
                 not turn
@@ -281,9 +281,9 @@ def capture_host_final(bound, admission, output, facts, ledger):
     encoded_facts = json.loads(json.dumps(asdict(facts)))
     codec = bound._service.projection_codec
     with bound._scope() as context:
-        with bound._service.store.transaction() as tx:
+        with bound._service._transaction(context) as tx:
             record = bound._service._row(tx, bound.continuation_id)
-            bound._require_current_tx(tx, record)
+            bound._require_current_tx(tx, record, context=context)
             turn = record.get('host_turn')
             if (not turn or turn['run_id'] != admission.run_id
                     or turn['ordinal'] != admission.ordinal or turn['state'] != 'active'):
@@ -302,9 +302,9 @@ def capture_host_final(bound, admission, output, facts, ledger):
         value = dict(facts=encoded_facts, original_digest=original_digest,
                      projection_id=binding.verification_id, projection_digest=sealed.sha256)
         receipt = dict(value, digest=digest(value))
-        with bound._service.store.transaction() as tx:
+        with bound._service._transaction(context) as tx:
             record = bound._service._row(tx, bound.continuation_id)
-            bound._require_current_tx(tx, record)
+            bound._require_current_tx(tx, record, context=context)
             turn = record.get('host_turn')
             if (not turn or turn['run_id'] != admission.run_id or turn['ordinal'] != admission.ordinal
                     or turn['state'] != 'active' or turn.get('projection_digest') != original_digest):
@@ -324,9 +324,9 @@ def _turn_link(record, turn):
 def host_turn_link(bound, admission):
     if type(admission) is not HostTurnAdmission or admission.owner is not bound:
         raise PermissionError("private host turn admission required")
-    with bound._scope(), bound._service.store.transaction() as tx:
+    with bound._scope() as context, bound._service._transaction(context) as tx:
         record = bound._service._row(tx, bound.continuation_id)
-        bound._require_current_tx(tx, record)
+        bound._require_current_tx(tx, record, context=context)
         turn = record.get('host_turn')
         if (not turn or turn['run_id'] != admission.run_id
                 or turn['ordinal'] != admission.ordinal or turn['state'] != 'active'):
@@ -348,9 +348,9 @@ def read_host_terminal_link(bound, run_id, ordinal):
         raise ValueError('bounded host run identity required')
     if type(ordinal) is not int or not 1 <= ordinal <= 32:
         raise ValueError('bounded host turn ordinal required')
-    with bound._scope(), bound._service.store.transaction() as tx:
+    with bound._scope() as context, bound._service._transaction(context) as tx:
         record = bound._service._row(tx, bound.continuation_id)
-        bound._require_current_tx(tx, record)
+        bound._require_current_tx(tx, record, context=context)
         turns = list(record.get('host_turn_history', []))
         current = record.get('host_turn')
         if current:
@@ -364,9 +364,9 @@ def read_host_terminal_link(bound, run_id, ordinal):
 def close_host_turn(bound, admission):
     if type(admission) is not HostTurnAdmission or admission.owner is not bound:
         raise PermissionError("private host turn admission required")
-    with bound._scope(), bound._service.store.transaction() as tx:
+    with bound._scope() as context, bound._service._transaction(context) as tx:
         record = bound._service._row(tx, bound.continuation_id)
-        bound._require_current_tx(tx, record)
+        bound._require_current_tx(tx, record, context=context)
         turn = record.get("host_turn")
         if (
             not turn
