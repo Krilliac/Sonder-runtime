@@ -9,10 +9,10 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 | Layer | Python files |
 |---|---:|
 | `__pycache__` | 0 |
-| `adapters` | 271 |
+| `adapters` | 272 |
 | `application` | 299 |
 | `bootstrap` | 46 |
-| `domain` | 168 |
+| `domain` | 169 |
 | `interfaces` | 47 |
 | `platform` | 37 |
 
