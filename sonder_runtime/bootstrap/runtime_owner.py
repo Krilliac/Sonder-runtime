@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import RLock
 import time
 import uuid
+from dataclasses import replace
 
 from ..application.ports.runtime_owner import (
     OwnerRefused,
@@ -40,6 +41,10 @@ class _LaunchPermit:
 
 
 class DisposableRuntimeOwner:
+    journal_type = None
+    process_type = None
+    command_type = PreparedOwnerOperation
+
     def __init__(self, path, *, writable_roots):
         self.path = Path(path).absolute()
         self.workspace = self.path.parent / (self.path.name + "-workspace")
@@ -57,6 +62,7 @@ class DisposableRuntimeOwner:
         self._process = None
         self._launch_id = None
         self._stopped = None
+        self._stopped_operation = None
         self.namespace = uuid.uuid4().hex
         self._private_source_paths = (str(self.path),)
         self._validate()
@@ -70,10 +76,10 @@ class DisposableRuntimeOwner:
             self._gate_entered = True
             for name in ("state", "temp", "profile"):
                 (self.path / name).mkdir()
-            self.journal = SQLiteRuntimeOwnerJournal(
+            self.journal = (self.journal_type or SQLiteRuntimeOwnerJournal)(
                 self.path / "owner.sqlite", namespace=self.namespace, create=True
             )
-            self._process = WindowsOwnedRuntimeProcess(self.path)
+            self._process = (self.process_type or WindowsOwnedRuntimeProcess)(self.path)
         except BaseException:
             self._live = False
             if self._gate_entered:
@@ -165,22 +171,19 @@ class DisposableRuntimeOwner:
 
     def execute(self, command, *, timeout=30):
         if (
-            type(command) is not PreparedOwnerOperation
+            type(command) is not self.command_type
             or type(timeout) not in (int, float)
             or not 1 <= timeout <= 30
         ):
             raise OwnerRefused("bounded exact owner command required")
         with self._lock:
             deadline = time.monotonic() + timeout
-            command = PreparedOwnerOperation(
-                command.operation_id,
-                command.action,
-                command.expected_revision,
-                command.payload,
-            )
+            command = replace(command)
             self._validate()
             replay = self.journal.prepare(command)
             if replay is not None:
+                if command.action == "stop" and self._stopped_operation == command.operation_id:
+                    self._launch_id = self._stopped = self._stopped_operation = None
                 return replay
             permit = _LaunchPermit(_ISSUER, self, command)
             permit.require()
@@ -195,7 +198,7 @@ class DisposableRuntimeOwner:
                     # Retained before calling a provider that may have started a
                     # suspended child before raising. Never launch it twice.
                     self._launch_id = command.operation_id
-                    self._process.launch(self.namespace, command)
+                    self._launch_prepared(command)
                 elif self._launch_id != command.operation_id:
                     raise OwnerRefused("another owned launch needs reconciliation")
                 while time.monotonic() < deadline:
@@ -250,11 +253,16 @@ class DisposableRuntimeOwner:
                         "STOPPED_CLEAN" if clean else "STOPPED_UNCLEAN",
                         {"containment_empty": True, "application_closed": clean},
                     )
+                self._stopped_operation = command.operation_id
             state, result = self._stopped
             receipt = self._complete(command, result, state, deadline)
             self._launch_id = None
             self._stopped = None
+            self._stopped_operation = None
             return receipt
+
+    def _launch_prepared(self, command):
+        self._process.launch(self.namespace, command)
 
     def _complete(self, command, result, state, deadline):
         if time.monotonic() >= deadline:
