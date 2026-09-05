@@ -7,7 +7,7 @@ Distributed takeover is deliberately absent from this local coordinator.
 
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 from dataclasses import replace
 from functools import wraps
 import hashlib
@@ -97,6 +97,19 @@ class _LaneCancellation:
     @property
     def cancelled(self):
         lane = self.service.store.read_lane(self.lane_id)
+        if (
+            self.service.managed_authority is not None
+            and getattr(self, "authority_context", None) is not None
+            and self.authority_context.source == "worker"
+        ):
+            try:
+                self.service._fresh_execution(self.lane_id, self.authority_context)
+                return lane["attempt_id"] != self.attempt_id or lane["status"] in {
+                    "cancel_requested",
+                    "cancelled",
+                }
+            except Exception:
+                return True
         if getattr(self, "authority_context", None) is not None:
             try:
                 self.service.store.validate_parent_grant(
@@ -138,7 +151,7 @@ def _recover_committed_command(method):
             lane = self.store.read_lane(replay.receipt["lane"]["id"])
             context = kwargs["context"]
             if lane["status"] == "queued" and not lane["owner"]:
-                self._authorize(lane, context, execute=True)
+                self._fresh_execution(lane["id"], context)
                 self._schedule(lane["id"], context)
             return replay.receipt
 
@@ -164,6 +177,9 @@ class AgentLaneService:
             tools,
         )
         self.authorize_grant = authorize_grant
+        self.managed_authority = None
+        self._worker_issuer = object()
+        self._app_dispatch = {}
         self.allowed_tools = frozenset(
             _LANE_TOOLS if allowed_tools is None else allowed_tools
         ) & (_LANE_TOOLS | {"run_tests"})
@@ -178,6 +194,42 @@ class AgentLaneService:
         self._deferred_verification = {}
         self._condition = threading.Condition()
         self._capture = SessionCaptureService(sessions)
+
+    @contextmanager
+    def _transaction(self, context, *, lane_id=None):
+        from .lane_continuation import _CURRENT_BOUND, root_transaction
+
+        bound = _CURRENT_BOUND.get()
+        if (
+            bound is not None
+            or self.managed_authority is None
+            or context.principal_id == LOCAL_OWNER
+        ):
+            with root_transaction(self.store, context) as tx:
+                yield tx
+            return
+        if lane_id is None:
+            # Metadata reads confer no execution authority. Mutators still require
+            # an attached root in the same transaction.
+            with self.store.transaction() as tx:
+                yield tx
+            return
+        lane = self.store.read_lane(lane_id)  # Routing hint, re-read by caller.
+        with self.managed_authority.admit(
+            lane["parent_session_id"], context
+        ) as admission:
+            with self.store.transaction() as tx:
+                tx.managed_admission = admission
+                try:
+                    yield tx
+                finally:
+                    tx.managed_admission = None
+
+    def _fresh_execution(self, lane_id, context):
+        with self._transaction(context, lane_id=lane_id) as tx:
+            lane = tx.lane(lane_id)
+            self._authorize(lane, context, execute=True, tx=tx)
+            return lane
 
     def resume_after_verification(self, parent_session_id):
         """Resume only contexts retained from actual dispatch, never minted authority."""
@@ -214,11 +266,23 @@ class AgentLaneService:
             parent_session_id, parent_token, context.principal_id, "rotate"
         )
 
-    def _authorize(self, lane, context, *, execute=False):
+    def _authorize(self, lane, context, *, execute=False, tx=None):
         if lane["principal_id"] != context.principal_id:
             raise PermissionError("agent lane belongs to another principal")
         if execute:
-            if self.authorize_grant is not None:
+            if (
+                self.managed_authority is not None
+                and context.principal_id != LOCAL_OWNER
+            ):
+                if tx is None:
+                    raise PermissionError("explicit managed lane transaction required")
+                self.managed_authority.authorize_lane(
+                    getattr(tx, "managed_admission", None),
+                    lane,
+                    context,
+                    connection=tx.conn,
+                )
+            elif self.authorize_grant is not None:
                 self.authorize_grant(lane, context)
             elif context.principal_id != LOCAL_OWNER:
                 raise PermissionError(
@@ -238,7 +302,16 @@ class AgentLaneService:
                 )
             if not root.is_dir() or time.time() >= lane["grant_expires"]:
                 raise PermissionError("lane workspace grant expired or unavailable")
-            if context.cancellation.cancelled or context.expired:
+            cancelled = (
+                (
+                    lane["attempt_id"] != context.cancellation.attempt_id
+                    or lane["status"] in {"cancel_requested", "cancelled"}
+                )
+                if isinstance(context.cancellation, _LaneCancellation)
+                and context.cancellation.service is self
+                else context.cancellation.cancelled
+            )
+            if cancelled or context.expired:
                 raise PermissionError("request authority expired or cancelled")
             if lane["cloud_allowed"] and not context.cloud_allowed:
                 raise PermissionError("cloud authority was revoked")
@@ -264,9 +337,20 @@ class AgentLaneService:
             self._condition.notify_all()
 
     def _schedule(self, lane_id, context):
+        managed = (
+            self.managed_authority is not None and context.principal_id != LOCAL_OWNER
+        )
+        if managed:
+            lane = self._fresh_execution(lane_id, context)
+            with self._condition:
+                if len(self._app_dispatch) >= 256 and lane_id not in self._app_dispatch:
+                    raise CapacityExceeded("managed dispatch capacity unavailable")
+                self._app_dispatch[lane_id] = (context, lane["attempt_id"])
         if self._pool:
             self._pool.submit(
-                self.run_pending, lane_id, replace(context, deadline_monotonic=None)
+                self.run_pending,
+                lane_id,
+                context if managed else replace(context, deadline_monotonic=None),
             )
 
     @_recover_committed_command
@@ -330,7 +414,7 @@ class AgentLaneService:
             author=author,
         )
         digest = _digest(args)
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             from .lane_continuation import require_root_admission
 
             host_grant = require_root_admission(
@@ -418,7 +502,7 @@ class AgentLaneService:
                 error="",
                 artifacts=[],
             )
-            self._authorize(lane, context, execute=True)
+            self._authorize(lane, context, execute=True, tx=tx)
             tx.insert(lane)
             tx.emit(
                 lane,
@@ -439,7 +523,11 @@ class AgentLaneService:
     def list(self, context, *, parent_session_id=None, cursor=0, limit=50):
         _bounds(cursor, limit)
         self.store.flush()
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
+            if parent_session_id is not None:
+                from .lane_continuation import require_root_admission
+
+                require_root_admission(tx, self.store, parent_session_id, context)
             rows = tx.lanes(context.principal_id, parent_session_id, cursor, limit + 1)
             lanes = [self._public(l, tx) for _, l in rows[:limit]]
         return dict(
@@ -460,7 +548,7 @@ class AgentLaneService:
             raise ValueError("transcript requires a lane id")
         self.store.flush()
         if lane_id is None:
-            with self.store.transaction() as tx:
+            with self._transaction(context) as tx:
                 rows = tx.lanes(context.principal_id, None, cursor, limit + 1)
                 lanes = []
                 for _, lane in rows[:limit]:
@@ -476,7 +564,7 @@ class AgentLaneService:
                 has_more=len(rows) > limit,
             )
         self.store.reconcile(lane_id, context.principal_id)
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             lane = tx.lane(lane_id)
             self._authorize(lane, context)
             result = dict(lane=self._public(lane, tx))
@@ -497,7 +585,7 @@ class AgentLaneService:
             context.principal_id,
             _admit=lambda tx, lane: self._root_control(tx, lane, context),
         )
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             lane = tx.lane(lane_id)
             self._authorize(lane, context)
             public = self._public(lane, tx)
@@ -522,7 +610,7 @@ class AgentLaneService:
             dict(action="message", lane_id=lane_id, content=content, author=author)
         )
         schedule = False
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             lane = tx.lane(lane_id)
             self._root_control(tx, lane, context)
             self._authorize(lane, context)
@@ -532,7 +620,7 @@ class AgentLaneService:
             if lane["status"] in {"cancelled", "cancel_requested"}:
                 raise ValueError("cancelled lane cannot accept instructions")
             if lane["status"] == "completed":
-                self._authorize(lane, context, execute=True)
+                self._authorize(lane, context, execute=True, tx=tx)
                 self._remaining(lane)
                 lane.update(
                     status="queued",
@@ -595,7 +683,7 @@ class AgentLaneService:
             context.principal_id,
             _admit=lambda tx, lane: self._root_control(tx, lane, context),
         )
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             lane = tx.lane(lane_id)
             self._root_control(tx, lane, context)
             self._authorize(lane, context)
@@ -603,7 +691,7 @@ class AgentLaneService:
             if prior:
                 raise _ReplayReceipt(prior)
             if action == "resume":
-                self._authorize(lane, context, execute=True)
+                self._authorize(lane, context, execute=True, tx=tx)
                 self._remaining(lane)
                 if lane["status"] not in {
                     "completed",
@@ -663,7 +751,10 @@ class AgentLaneService:
 
     def reports(self, parent_session_id, context, *, cursor=0, limit=50):
         _bounds(cursor, limit)
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
+            from .lane_continuation import require_root_admission
+
+            require_root_admission(tx, self.store, parent_session_id, context)
             reports = tx.report_page(
                 context.principal_id, parent_session_id, cursor, limit + 1
             )
@@ -680,7 +771,7 @@ class AgentLaneService:
         digest = _digest(
             dict(action="ack", report_id=report_id, parent_session_id=parent_session_id)
         )
-        with self.store.transaction() as tx:
+        with self._transaction(context) as tx:
             row = tx.conn.execute(
                 "SELECT lane_id FROM agent_lane_messages WHERE message_id=? AND report=1",
                 (report_id,),
@@ -856,9 +947,19 @@ class AgentLaneService:
 
     def run_pending(self, lane_id, context):
         """Claim queued work atomically; safe for duplicate local dispatch calls."""
-        with self.store.transaction() as tx:
+        managed = (
+            self.managed_authority is not None and context.principal_id != LOCAL_OWNER
+        )
+        if managed:
+            with self._condition:
+                proof = self._app_dispatch.get(lane_id)
+            if proof is None or proof[0] is not context:
+                raise PermissionError("private admitted dispatch required")
+        with self._transaction(context, lane_id=lane_id) as tx:
             lane = tx.lane(lane_id)
-            self._authorize(lane, context, execute=True)
+            self._authorize(lane, context, execute=True, tx=tx)
+            if managed and proof[1] != lane["attempt_id"]:
+                raise PermissionError("managed dispatch attempt changed")
             if tx.verification_dispatch_blocked(lane):
                 self._deferred_verification[lane_id] = context
                 return
@@ -889,11 +990,23 @@ class AgentLaneService:
                 max(0, lane["grant_expires"] - time.time()),
             ),
         )
-        control.authority_context = replace(context, deadline_monotonic=None)
         try:
+            if managed:
+                run_context = replace(
+                    run_context,
+                    deadline_monotonic=min(
+                        run_context.deadline_monotonic, context.deadline_monotonic
+                    ),
+                )
+                self.managed_authority.bind_worker(
+                    lane, context, run_context, issuer=self._worker_issuer
+                )
+                control.authority_context = run_context
+            else:
+                control.authority_context = replace(context, deadline_monotonic=None)
             self._done()
             while True:
-                with self.store.transaction() as tx:
+                with self._transaction(run_context, lane_id=lane_id) as tx:
                     lane = tx.lane(lane_id)
                     if lane["owner"] != self.owner:
                         return
@@ -915,7 +1028,7 @@ class AgentLaneService:
                         )
                         tx.save(lane)
                         break
-                    self._authorize(lane, run_context, execute=True)
+                    self._authorize(lane, run_context, execute=True, tx=tx)
                     self._remaining(lane)
                     if run_context.expired:
                         raise TimeoutError("lane wall budget exhausted")
@@ -931,8 +1044,9 @@ class AgentLaneService:
                 request = self._request(lane, messages)
                 request_id = "request-" + uuid.uuid4().hex
                 turn_id = lane["attempt_id"] + "-" + str(lane["used_steps"] + 1)
-                with self.store.transaction() as tx:
+                with self._transaction(run_context, lane_id=lane_id) as tx:
                     fresh = tx.lane(lane_id)
+                    self._authorize(fresh, run_context, execute=True, tx=tx)
                     if fresh["owner"] != self.owner or fresh["status"] != "running":
                         continue
                     fresh["pending_effect"] = True
@@ -959,6 +1073,7 @@ class AgentLaneService:
                     scope = provider_attempt_scope(self._capture, pending)
                 except ImportError:
                     scope = nullcontext()
+                self._fresh_execution(lane_id, run_context)
                 with scope:
                     response = self.gateway.generate(request, run_context)
                 text = require_model_text(response.text)
@@ -1024,6 +1139,13 @@ class AgentLaneService:
                     )
                     tx.save(lane)
         finally:
+            if managed:
+                self.managed_authority.release_worker(
+                    run_context, issuer=self._worker_issuer
+                )
+                with self._condition:
+                    if self._app_dispatch.get(lane_id) == (context, lane["attempt_id"]):
+                        self._app_dispatch.pop(lane_id, None)
             self._done()
 
     def _consume_response(self, lane_id, context, started):
@@ -1080,13 +1202,13 @@ class AgentLaneService:
     def _execute_tool(self, lane, tool, context):
         name, args, effects = tool
         call_id = "call-" + uuid.uuid4().hex
-        with self.store.transaction() as tx:
+        with self._transaction(context, lane_id=lane["id"]) as tx:
             fresh = tx.lane(lane["id"])
             if fresh["owner"] != self.owner or fresh["status"] != "running":
                 return
             if tx.verification_dispatch_blocked(fresh):
                 return
-            self._authorize(fresh, context, execute=True)
+            self._authorize(fresh, context, execute=True, tx=tx)
             fresh["pending_effect"] = True
             fresh["pending_response"] = None
             tx.emit(
@@ -1096,6 +1218,7 @@ class AgentLaneService:
             )
             tx.save(fresh)
         self._done()
+        self._fresh_execution(lane["id"], context)
         receipt = self.tools.execute(
             ToolGatewayRequest(
                 call_id,
