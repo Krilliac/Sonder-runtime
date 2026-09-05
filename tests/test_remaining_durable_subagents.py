@@ -94,17 +94,18 @@ def test_durable_cancellation_survives_service_boundary_and_first_reason_wins(tm
     service.close(1)
 
 
-def test_restart_recovery_marks_orphaned_running_child_retryable(tmp_path):
+def test_restart_recovery_requires_cleanup_and_storage_reconciliation(tmp_path):
     repository = SQLiteDurableContinuationRepository(tmp_path / "orphan.sqlite")
     repository.create(DurableChildSession(_request("child-orphan"), ChildSessionLineage("session-parent")))
     running = repository.update("child-orphan", status=SubagentStatus.RUNNING)
     assert running is not None
     service = DurableContinuationService(SQLiteDurableContinuationRepository(tmp_path / "orphan.sqlite"))
-    assert service.recover_after_restart() == ("child-orphan",)
+    from sonder_runtime.application.ports.continuation_mutations import ContinuationCleanupRequired
+    with pytest.raises(ContinuationCleanupRequired):
+        service.recover_after_restart()
     recovered = repository.get("child-orphan")
-    assert recovered and recovered.status is SubagentStatus.FAILED
-    assert recovered.recovery_required
-    assert recovered.result and recovered.result.error and recovered.result.error.code == "interrupted"
+    assert recovered and recovered.status is SubagentStatus.RUNNING
+    assert not recovered.recovery_required and recovered.result is None
 
 
 def test_lineage_rejects_cycles():

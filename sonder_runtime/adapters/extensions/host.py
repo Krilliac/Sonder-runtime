@@ -13,6 +13,8 @@ code in-process.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 from dataclasses import dataclass
 import json
 import os
@@ -275,7 +277,7 @@ class ExtensionHost:
             except OSError as exc:
                 result_queue.put(("error", ExtensionHostCrashed("extension stdout read failed")))
 
-        thread = threading.Thread(target=reader, name="sonder-extension-reader", daemon=True)
+        thread = owned_runtime_thread(target=reader, name="sonder-extension-reader", daemon=True)
         thread.start()
         try:
             kind, value = result_queue.get(timeout=timeout)

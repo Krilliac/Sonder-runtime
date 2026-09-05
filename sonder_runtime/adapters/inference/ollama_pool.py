@@ -12,6 +12,8 @@ that policy.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
+
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import http.client
@@ -718,7 +720,7 @@ class OllamaWorkerPool:
             logger.debug(f"probing {len(candidates)} candidate workers: {[s.endpoint.worker_id for s in candidates]}")
             logger.info(f"probing capabilities on {len(candidates)} worker(s)")
             workers = min(4, len(candidates))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
+            with owned_runtime_pool(max_workers=workers) as executor:
                 futures = [executor.submit(run, state) for state in candidates]
                 outcomes = [future.result() for future in futures]
 

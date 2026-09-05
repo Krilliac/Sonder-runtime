@@ -754,10 +754,19 @@ def cmd_repl(args) -> int:
     from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_interfaces
 
     configure_legacy_interfaces()
-    if args.json:
-        sonder_repl.run_jsonl()
-    else:
-        sonder_repl.main()
+    from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.bootstrap.legacy_interfaces import configure_legacy_application
+    owned_application = None
+    try:
+        owned_application = default_app(config=config)
+        configure_legacy_application(owned_application)
+        if args.json:
+            sonder_repl.run_jsonl()
+        else:
+            sonder_repl.main()
+    finally:
+        if owned_application is not None:
+            owned_application.close_providers(timeout=5)
     return 0
 
 
@@ -794,8 +803,10 @@ def cmd_mcp(args) -> int:
         except sonder_migrations.MigrationError as exc:
             print(f"migration failed: {exc}", file=sys.stderr)
             return 1
-        return run_native_mcp(build_application(config=config))
+        return run_native_mcp(build_application(config=config), close_compute_on_exit=True)
+    owned_application = None
     def _configure_mcp_legacy() -> None:
+        nonlocal owned_application
         config = _load_config(args)
         _configure_typed_home(config)
         from sonder_runtime.platform.logging import configure_logging, Redactor
@@ -805,6 +816,10 @@ def cmd_mcp(args) -> int:
             redactor=Redactor(env=os.environ),
         )
         _export_runtime_environment(config)
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
+        owned_application = default_app(config=config)
+        configure_legacy_application(owned_application)
         from sonder_runtime.adapters.inference import ollama_endpoint
         ollama_endpoint.configure_typed_endpoint(config.ollama.url)
         from sonder_runtime.adapters.inference import ollama_pool
@@ -824,6 +839,9 @@ def cmd_mcp(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    finally:
+        if owned_application is not None:
+            owned_application.close_providers(timeout=5)
     return 0
 
 

@@ -1,6 +1,8 @@
 """Bounded, read-only queries over guarded SQLite and structured text files."""
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import csv
 import json
 import math
@@ -290,7 +292,7 @@ def _query_sqlite(target, sql, *, max_rows, max_columns, max_output, timeout):
     deadline = time.monotonic() + timeout
     uri = target.as_uri() + "?mode=ro"
     try:
-        conn = sqlite3.connect(uri, uri=True, timeout=0, isolation_level=None)
+        conn = owned_sqlite_connect(uri, uri=True, timeout=0, isolation_level=None)
     except sqlite3.Error as exc:
         raise DataQueryError("SQLite open failed: %s" % exc) from exc
     try:

@@ -1,0 +1,57 @@
+# Deployment topology and capability status
+
+Sonder defaults to local SQLite control state. A second configured PC can run
+private compute jobs. Pooling does not merge session, task, or memory databases
+and does not elect a replacement controller. No witness is required for either
+supported profile.
+
+| Profile | Configuration | Behavior |
+| --- | --- | --- |
+| `single-host` | Default | Local control state; existing optional remote compute configurations continue working. |
+| `pooled-pair` | Exactly one distinct `compute.nodes` peer | Explicit two-PC pool; each instance retains its own control state and workers execute legitimate dispatched jobs. |
+
+`single-host` names the control-state deployment, not a prohibition on remote
+workers. Existing configurations with remote workers need no profile change.
+Profile membership is configured membership; it does not imply that a peer is
+currently reachable. Existing placement freshness and worker admission checks
+still determine whether a job can execute.
+
+For an explicit pair, use the existing private compute authentication, network,
+and catalog configuration from [the compute runbook](compute-fabric.md), plus:
+
+```toml
+[deployment]
+profile = "pooled-pair"
+preferred_primary = "workstation"
+automatic_takeover = false
+automatic_failback = false
+```
+
+The preferred primary must name the local compute node or its configured peer.
+It is an operator preference displayed in status. It grants no exclusive control
+authority, reroutes no requests, and does not block a secondary worker.
+
+Authenticated `/health` includes `deployment`, containing the configured members,
+preference, local-instance control-state scope, and capability reasons. These are
+integrated capability/configuration facts, not live peer-health measurements.
+Takeover, failback, explicit promotion, acknowledged state replication,
+cluster-wide worker-epoch fencing, and quorum are reported unavailable.
+
+Startup rejects `automatic_takeover=true`, `automatic_failback=true`, and an HA
+or quorum profile. The same validation runs for TOML, direct typed application
+construction, and lifecycle configuration. There is no force-promotion override.
+A timeout, disconnected link, preferred-primary label, or explicit operator
+request does not prove the former owner's processes are fenced or the surviving
+node has all acknowledged data. Existing per-job claim tokens and effect fences
+are not cluster ownership epochs.
+
+If one PC disappears, keep using each available instance's own local state and
+let existing compute placement report unreachable workers. Do not relabel a
+survivor as an authoritative copy of the missing instance's data. Reconnection
+restores connectivity, not merged or replicated control state. Automatic
+1-to-2-to-1 operation and resuming one durable conversation after controller loss
+remain unimplemented until the authority, acknowledged-data, process-fencing,
+and client-reconnection infrastructure passes conformance tests.
+
+Rollback removes the deployment configuration section and reverts this slice;
+there is no database migration or live node action in this prerequisite change.

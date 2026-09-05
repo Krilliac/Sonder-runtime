@@ -21,6 +21,8 @@ Rules enforced here:
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import hashlib
 import os
 import sqlite3
@@ -263,7 +265,7 @@ def discover_migrations(store: str) -> tuple[Migration, ...]:
 
 def open_connection(db_path: str, *, busy_timeout_ms: int = 5000) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn = owned_sqlite_connect(db_path, isolation_level=None)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
     return conn
@@ -327,7 +329,7 @@ def status_read_only(
     uri = path.resolve(strict=True).as_uri() + "?mode=ro"
     if immutable:
         uri += "&immutable=1"
-    conn = sqlite3.connect(uri, uri=True)
+    conn = owned_sqlite_connect(uri, uri=True)
     try:
         has_ledger = conn.execute(
             "SELECT 1 FROM sqlite_master "

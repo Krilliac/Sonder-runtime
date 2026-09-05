@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import 'api.dart';
+import 'agent_screen.dart';
+import 'app_control.dart';
+import 'app_control_screen.dart';
+import 'workspace_ui.dart';
 import 'chat_store.dart';
 import 'models.dart';
 import 'safety_colors.dart';
@@ -52,6 +55,17 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
+  late final AppControlClient _appControl;
+  late AppControlContext _controlScope;
+  AppControlContext _contextFor(Settings settings) => AppControlContext(
+        serverUrl: settings.serverUrl,
+        deploymentKey: settings.apiKey,
+        account: settings.accountSession,
+      );
+  void _controlChanged() {
+    if (mounted) setState(() {});
+  }
+
   final _messages = <ChatMessage>[];
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -195,11 +209,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   SonderApi get _api => SonderApi(
         baseUrl: widget.settings.serverUrl,
         apiKey: widget.settings.apiKey,
+        accountSession: widget.settings.accountSession,
       );
 
   @override
   void initState() {
     super.initState();
+    _controlScope = _contextFor(widget.settings);
+    _appControl = AppControlClient(context: () => _contextFor(widget.settings));
+    _appControl.addListener(_controlChanged);
     _model = widget.settings.model;
     _loadThreads();
     _refreshModels();
@@ -568,7 +586,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   @override
+  void didUpdateWidget(covariant ChatScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _controlScope = _contextFor(widget.settings);
+    _appControl.synchronize();
+  }
+
+  @override
   void dispose() {
+    _appControl.removeListener(_controlChanged);
+    _appControl.dispose();
     _statusTimer?.cancel();
     _permissionModeTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
@@ -805,7 +832,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         reverseTransitionDuration: Duration.zero,
         pageBuilder: (_, __, ___) => SettingsScreen(
           settings: widget.settings,
-          onChanged: widget.onSettingsChanged,
+          onChanged: (next) {
+            final scope = _contextFor(next);
+            if (!_controlScope.same(scope)) _appControl.forget();
+            _controlScope = scope;
+            widget.onSettingsChanged(next);
+          },
+          onNavigate: _navigateWorkspace,
         ),
         transitionsBuilder: (_, __, ___, child) => child,
       ),
@@ -822,10 +855,44 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _openSystem() async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => SystemScreen(settings: widget.settings),
+        builder: (_) => SystemScreen(
+            settings: widget.settings, onNavigate: _navigateWorkspace),
       ),
     );
   }
+
+  void _navigateWorkspace(WorkspaceDestination destination) {
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    switch (destination) {
+      case WorkspaceDestination.chat:
+        return;
+      case WorkspaceDestination.agents:
+        unawaited(_openAgents());
+      case WorkspaceDestination.runtime:
+        unawaited(_openSystem());
+      case WorkspaceDestination.settings:
+        unawaited(_openSettings());
+    }
+  }
+
+  Future<void> _openAgents() => Navigator.of(context).push<void>(
+        MaterialPageRoute(
+            builder: (_) =>
+                AgentScreen(api: _api, onNavigate: _navigateWorkspace)),
+      );
+
+  Future<void> _openAppControl() => Navigator.of(context).push<void>(
+        MaterialPageRoute(
+            builder: (_) => AppControlScreen(
+                  client: _appControl,
+                  initialProject: _project,
+                  localHistoryAlias: _currentThreadId,
+                  onSettings: () {
+                    Navigator.of(context).pop();
+                    _openSettings();
+                  },
+                )),
+      );
 
   Future<void> _openThreadSwitcher(bool desktop) async {
     if (!desktop) {
@@ -875,6 +942,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         // persistent chat rail.  The same widget and callbacks are used in
         // both modes, so thread selection has one source of truth.
         final desktop = constraints.maxWidth >= 1000;
+        final compact = constraints.maxWidth < 600;
         final drawer = _ChatDrawer(
           threads: _threads,
           currentThreadId: _currentThreadId,
@@ -882,6 +950,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           onSelect: _switchThread,
           onDelete: _deleteThread,
           embedded: desktop,
+          onNavigate: _navigateWorkspace,
           serverUrl: widget.settings.serverUrl,
           connected: _systemInfo != null,
           onOpenCommands: desktop ? _openCommandBrowser : null,
@@ -956,15 +1025,46 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   onEditProject: _editProject,
                 ),
                 actions: [
+                  IconButton(
+                      tooltip: 'Server conversations',
+                      icon: const Icon(Icons.link_outlined),
+                      onPressed: _openAppControl),
                   // Model picker: switch which LLM answers, per conversation.
-                  _ModelPill(
-                    label: _modelLabel(_model),
-                    models: _models,
-                    current: _model,
-                    labelFor: _modelLabel,
-                    onSelected: _selectModel,
-                  ),
-                  if (!desktop) ...[
+                  ConstrainedBox(
+                      constraints:
+                          BoxConstraints(maxWidth: compact ? 100 : 260),
+                      child: _ModelPill(
+                        label: _modelLabel(_model),
+                        models: _models,
+                        current: _model,
+                        labelFor: _modelLabel,
+                        onSelected: _selectModel,
+                      )),
+                  if (compact)
+                    PopupMenuButton<String>(
+                      tooltip: 'Chat actions',
+                      onSelected: (action) {
+                        switch (action) {
+                          case 'commands':
+                            _openCommandBrowser();
+                          case 'new':
+                            _newChat();
+                          case 'system':
+                            _openSystem();
+                          case 'settings':
+                            _openSettings();
+                        }
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(
+                            value: 'commands', child: Text('Commands')),
+                        PopupMenuItem(value: 'new', child: Text('New chat')),
+                        PopupMenuItem(value: 'system', child: Text('System')),
+                        PopupMenuItem(
+                            value: 'settings', child: Text('Settings')),
+                      ],
+                    ),
+                  if (!desktop && !compact) ...[
                     const SizedBox(width: 4),
                     IconButton(
                       tooltip: 'Commands',
@@ -996,6 +1096,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   Expanded(
                     child: Column(
                       children: [
+                        if (_appControl.hasSession &&
+                            _appControl.selectionKnown &&
+                            _appControl.selection?.bindingId != null)
+                          Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                              child: WorkspaceNotice(
+                                message:
+                                    'A server conversation is selected. Running tasks is not available yet.',
+                                action: TextButton(
+                                    onPressed: _openAppControl,
+                                    child: const Text('Manage selection')),
+                              )),
                         Expanded(
                           child: _messages.isEmpty
                               ? _EmptyState(
@@ -1014,7 +1126,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   itemBuilder: (_, i) => Center(
                                     child: ConstrainedBox(
                                       constraints: const BoxConstraints(
-                                        maxWidth: 760,
+                                        maxWidth: conversationWidth,
                                       ),
                                       child: _Turn(
                                         message: _messages[i],
@@ -1141,7 +1253,6 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-
 /// The product mark: the signal tile with a stroked hexagon, sized by role.
 class _Mark extends StatelessWidget {
   final double size;
@@ -1165,7 +1276,6 @@ class _Mark extends StatelessWidget {
     );
   }
 }
-
 
 /// The model picker as a quiet pill: the route name in the transcript face,
 /// a chevron, and the menu of everything the server offers.
@@ -1253,61 +1363,78 @@ class _ChatHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    return Row(
-      children: [
-        Flexible(
-          child: Text(
-            title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: text.titleSmall,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Tooltip(
-          message: 'Project: tap to change',
-          child: InkWell(
-            onTap: onEditProject,
-            borderRadius: BorderRadius.circular(6),
-            child: Container(
-              height: 24,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: tokens.hairline),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: tokens.accent,
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 160),
-                    child: Text(
-                      project.trim().isEmpty ? 'default' : project,
+    return LayoutBuilder(builder: (context, constraints) {
+      if (constraints.maxWidth < 320) {
+        return Row(children: [
+          Expanded(
+              child: Tooltip(
+                  message: '$title / $messageCount messages',
+                  child: Text(title,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: tokens.mono(11, color: tokens.text2),
+                      style: text.titleSmall))),
+          IconButton(
+              tooltip: 'Project: $project - tap to change',
+              onPressed: onEditProject,
+              icon: const Icon(Icons.folder_outlined)),
+        ]);
+      }
+      return Row(
+        children: [
+          Flexible(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: text.titleSmall,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Tooltip(
+            message: 'Project: tap to change',
+            child: InkWell(
+              onTap: onEditProject,
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                height: 24,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: tokens.hairline),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: tokens.accent,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 160),
+                      child: Text(
+                        project.trim().isEmpty ? 'default' : project,
+                        overflow: TextOverflow.ellipsis,
+                        style: tokens.mono(11, color: tokens.text2),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
-        const SizedBox(width: 10),
-        Text(
-          '$messageCount messages',
-          style: tokens.mono(11, color: tokens.muted),
-        ),
-      ],
-    );
+          const SizedBox(width: 10),
+          Text(
+            '$messageCount messages',
+            style: tokens.mono(11, color: tokens.muted),
+          ),
+        ],
+      );
+    });
   }
 }
 
@@ -1320,6 +1447,7 @@ class _ChatDrawer extends StatelessWidget {
   final bool embedded;
   final String serverUrl;
   final bool connected;
+  final ValueChanged<WorkspaceDestination>? onNavigate;
   final VoidCallback? onOpenCommands;
   final VoidCallback? onOpenSystem;
   final VoidCallback? onOpenSettings;
@@ -1333,6 +1461,7 @@ class _ChatDrawer extends StatelessWidget {
     this.embedded = false,
     this.serverUrl = '',
     this.connected = false,
+    this.onNavigate,
     this.onOpenCommands,
     this.onOpenSystem,
     this.onOpenSettings,
@@ -1347,9 +1476,8 @@ class _ChatDrawer extends StatelessWidget {
         .replaceFirst(RegExp(r'^https?://'), '')
         .replaceAll(RegExp(r'/+$'), '');
     return Drawer(
-      shape: embedded
-          ? Border(right: BorderSide(color: tokens.hairline))
-          : null,
+      shape:
+          embedded ? Border(right: BorderSide(color: tokens.hairline)) : null,
       child: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1431,12 +1559,20 @@ class _ChatDrawer extends StatelessWidget {
                           thread: thread,
                           selected: selected,
                           onTap: () => onSelect(thread),
-                          onDelete:
-                              threads.length <= 1 ? null : () => onDelete(thread),
+                          onDelete: threads.length <= 1
+                              ? null
+                              : () => onDelete(thread),
                         );
                       },
                     ),
             ),
+            if (onNavigate != null)
+              WorkspaceNavigation(
+                  current: WorkspaceDestination.chat,
+                  onSelected: (destination) {
+                    if (!embedded) Navigator.of(context).pop();
+                    onNavigate!(destination);
+                  }),
             if (projects.isNotEmpty) ...[
               Divider(height: 1, color: tokens.hairline),
               Padding(
@@ -1486,21 +1622,23 @@ class _ChatDrawer extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(8, 6, 12, 8),
                 child: Row(
                   children: [
-                    IconButton(
-                      tooltip: 'System',
-                      onPressed: onOpenSystem,
-                      icon: const Icon(Icons.dashboard_customize_outlined),
-                    ),
+                    if (onNavigate == null)
+                      IconButton(
+                        tooltip: 'System',
+                        onPressed: onOpenSystem,
+                        icon: const Icon(Icons.dashboard_customize_outlined),
+                      ),
                     IconButton(
                       tooltip: 'Commands',
                       onPressed: onOpenCommands,
                       icon: const Icon(Icons.bolt_outlined),
                     ),
-                    IconButton(
-                      tooltip: 'Settings',
-                      onPressed: onOpenSettings,
-                      icon: const Icon(Icons.settings_outlined),
-                    ),
+                    if (onNavigate == null)
+                      IconButton(
+                        tooltip: 'Settings',
+                        onPressed: onOpenSettings,
+                        icon: const Icon(Icons.settings_outlined),
+                      ),
                     const Spacer(),
                     Flexible(
                       child: Text(
@@ -1528,7 +1666,6 @@ class _ChatDrawer extends StatelessWidget {
     );
   }
 }
-
 
 /// One conversation in the rail: its title, and its turn count set in the
 /// transcript face. Delete stays behind a real button with a label.
@@ -1946,51 +2083,16 @@ class _AssistantContent extends StatelessWidget {
         (markerIndex < 0 ? content : content.substring(0, markerIndex))
             .trimRight();
     final endReportIndex = beforeActivity.indexOf(_endReportMarker);
-    final answer =
-        (endReportIndex < 0 ? beforeActivity : beforeActivity.substring(0, endReportIndex))
-            .trimRight();
+    final answer = (endReportIndex < 0
+            ? beforeActivity
+            : beforeActivity.substring(0, endReportIndex))
+        .trimRight();
     final activityRaw =
         markerIndex < 0 ? '' : content.substring(markerIndex).trim();
     final parsed = _parseActivityBlock(activityRaw);
-    final body = Theme.of(context).textTheme.bodyMedium?.copyWith(
-          color: error ? tokens.text : color,
-        );
-    final markdownStyle =
-        MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-      p: body,
-      strong: body?.copyWith(fontWeight: FontWeight.w600),
-      h1: Theme.of(context).textTheme.titleLarge,
-      h2: Theme.of(context).textTheme.titleMedium,
-      h3: Theme.of(context).textTheme.titleSmall,
-      a: body?.copyWith(
-        color: tokens.accent,
-        decoration: TextDecoration.underline,
-        decorationColor: tokens.accent.withValues(alpha: 0.5),
-      ),
-      code: tokens.mono(13, color: tokens.text).copyWith(
-        backgroundColor: tokens.raised,
-      ),
-      codeblockPadding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-      codeblockDecoration: BoxDecoration(
-        color: tokens.panel,
-        borderRadius: BorderRadius.circular(SonderRadius.row),
-        border: Border.all(color: tokens.hairline),
-      ),
-      blockquoteDecoration: BoxDecoration(
-        border: Border(left: BorderSide(color: tokens.hairlineStrong, width: 2)),
-      ),
-      blockquotePadding: const EdgeInsets.fromLTRB(14, 2, 0, 2),
-      horizontalRuleDecoration: BoxDecoration(
-        border: Border(top: BorderSide(color: tokens.hairline)),
-      ),
-      blockSpacing: 10,
-      listIndent: 22,
-    );
-
     final hasToolCalls = parsed.toolCalls.isNotEmpty;
-    final effectiveStats = parsed.stats.isNotEmpty
-        ? parsed.stats
-        : _metadataToStats(metadata);
+    final effectiveStats =
+        parsed.stats.isNotEmpty ? parsed.stats : _metadataToStats(metadata);
     final showToolSection =
         (hasToolCalls || effectiveStats.isNotEmpty) && !error;
 
@@ -2001,12 +2103,8 @@ class _AssistantContent extends StatelessWidget {
           _ToolCallSection(calls: parsed.toolCalls, stats: effectiveStats),
           const SizedBox(height: 10),
         ],
-        MarkdownBody(
-          data: answer,
-          selectable: true,
-          softLineBreak: true,
-          styleSheet: markdownStyle,
-        ),
+        ConversationContent(
+            content: answer, color: error ? tokens.text : color),
         if (reasoning.trim().isNotEmpty) ...[
           const SizedBox(height: 8),
           _CollapsedDetail(
@@ -2079,8 +2177,7 @@ class _AssistantContent extends StatelessWidget {
         if (parts.length >= 4) {
           stats['file_creates'] =
               int.tryParse(parts[1].replaceAll('+', '')) ?? 0;
-          stats['file_edits'] =
-              int.tryParse(parts[2].replaceAll('~', '')) ?? 0;
+          stats['file_edits'] = int.tryParse(parts[2].replaceAll('~', '')) ?? 0;
           stats['file_deletes'] =
               int.tryParse(parts[3].replaceAll('-', '')) ?? 0;
         }
@@ -2105,9 +2202,8 @@ class _AssistantContent extends StatelessWidget {
       final merged = <_ToolCall>[];
       var ti = 0;
       for (final action in actions) {
-        final elapsed = ti < timedEvents.length
-            ? timedEvents[ti].elapsedMs
-            : null;
+        final elapsed =
+            ti < timedEvents.length ? timedEvents[ti].elapsedMs : null;
         merged.add(_ToolCall(
           title: action.title,
           ok: action.ok,
@@ -2174,9 +2270,7 @@ class _ToolCallSection extends StatelessWidget {
               child: Row(
                 children: [
                   Icon(
-                    call.ok
-                        ? Icons.play_arrow_rounded
-                        : Icons.block_rounded,
+                    call.ok ? Icons.play_arrow_rounded : Icons.block_rounded,
                     size: 14,
                     color: call.ok ? tokens.ok : tokens.danger,
                   ),
@@ -2816,7 +2910,7 @@ class _InputBar extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 760),
+            constraints: const BoxConstraints(maxWidth: conversationWidth),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -3092,11 +3186,13 @@ class _ElevatedBadge extends StatelessWidget {
               const SizedBox(width: 4),
               Text(
                 'ADMIN',
-                style: tokens.mono(
-                  11,
-                  color: tokens.danger,
-                  weight: FontWeight.w600,
-                ).copyWith(letterSpacing: 1.0),
+                style: tokens
+                    .mono(
+                      11,
+                      color: tokens.danger,
+                      weight: FontWeight.w600,
+                    )
+                    .copyWith(letterSpacing: 1.0),
               ),
             ],
           ),

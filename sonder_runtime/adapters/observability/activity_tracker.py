@@ -131,7 +131,7 @@ def _block(value, limit=MAX_EVENT_BLOCK):
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b([a-z0-9_]*(?:password|passwd|pwd|token|secret|api[-_]?key|"
     r"access[-_]?key|authorization|credential)[a-z0-9_]*)"
-    r"(?:[ \t]*[:=][ \t]*|[ \t]+)"
+    r"(?:[\"']?[ \t]*[:=][ \t]*|[ \t]+)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")

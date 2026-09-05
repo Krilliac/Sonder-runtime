@@ -453,6 +453,10 @@ _READ_ONLY = frozenset({
 # for. The literal is asserted by a test, because it is the only thing that
 # makes ``safe`` true.
 _UNREGISTERED_BRANCH_WORK = {
+    # The scoped console facade gates the immutable prepared command itself.
+    # Declare its work here even though static discovery cannot follow it.
+    "/lanes": "agent_lane",
+    "/recover": "workspace_run",
     "/selfmod": "selfmod",
     "/selfmodify": "selfmod",
     "/mcp": "mcp",

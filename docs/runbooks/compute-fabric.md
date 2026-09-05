@@ -4,6 +4,9 @@ Sonder can place one bounded, cataloged job on the local host or an explicitly
 configured private compute node. It is an orchestration plane, not a remote
 shell, shared-memory layer, hypervisor, storage server, or inference gateway.
 
+For deployment profiles and control-state ownership capabilities, see
+[deployment topology](deployment-topology.md).
+
 ## Consent boundaries
 
 The three networked execution lanes are independent:
@@ -18,6 +21,39 @@ Remote compute consent never enables cloud models. Cloud consent never admits a
 compute node. Remote Ollama has a third, inference-only consent gate under
 `[ollama].allow_remote`; inference remains owned by the model gateway and is
 never sent through the generic compute-job API.
+
+## Worker capacity admission
+
+Catalog process jobs reserve capacity in the worker's existing jobs.db before
+launch. The default samples local available RAM immediately before admission and
+runs one catalog job at a time. Missing or older-than-five-second RAM observations
+reject admission with an availability reason. This measurement is an observation,
+not a guarantee against unrelated processes allocating RAM afterward.
+
+For a fixed operator budget set `[compute].worker_memory_budget_bytes` to a positive
+byte count and `worker_max_jobs` to a slot limit. Explicit zero disables dispatch;
+omitting the budget selects measured, exclusive admission regardless of the slot
+setting. `worker_host_id` defaults to `local` and identifies this authority.
+A configured budget represents accounting capacity, not measured free RAM.
+Each catalog entry may set `memory_reservation_bytes`; omitted demand consumes
+the whole budget. `memory_limit_bytes` remains the separate OS process cap and
+is never silently treated as demand. Set both when the workload needs both.
+
+Admission leases default to 30 seconds (`worker_reservation_seconds`, 1..300).
+An unconsumed lease may expire; a dispatched reservation remains occupied until
+the process owner proves cleanup. Restart, timeout, interrupted state, and an
+ambiguous launch exception do not free that reservation. Active legacy catalog
+jobs without admission records block new admissions until resolved. Terminal
+legacy jobs predate this accounting and are not retroactively reserved.
+
+The authority covers catalog job RAM accounting and concurrent job slots only.
+It does not reserve inference VRAM, CPU cores, disk bandwidth, or RAM used by
+unrelated applications. Use the same durable database and physical host identity
+for participating processes on one host. Independently configured Windows/WSL
+workers or different PCs do not share a safe budget merely because their labels
+match. No common cross-OS authority or inference resource service is provided here.
+Preserve jobs.db on rollback; unresolved dispatched rows require verified process
+cleanup, not deletion of rows to make capacity appear free.
 
 ## Network and identity
 

@@ -20,6 +20,8 @@ verified backup.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import hashlib
 import json
 import os
@@ -113,11 +115,11 @@ def _online_backup_sqlite(source: str, destination: Path) -> None:
         ) from exc
     # Opening read-only prevents a source-disappearance race from silently
     # creating and then backing up a new empty database.
-    src = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
+    src = owned_sqlite_connect(source_path.as_uri() + "?mode=ro", uri=True)
     try:
         src.execute("PRAGMA query_only=ON")
         src.execute("PRAGMA busy_timeout=5000")
-        dst = sqlite3.connect(str(destination))
+        dst = owned_sqlite_connect(str(destination))
         try:
             src.backup(dst)
             dst.commit()
@@ -461,7 +463,7 @@ def _sqlite_backup_problems(path: Path, label: str) -> list[str]:
     problems: list[str] = []
     try:
         uri = path.resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
-        conn = sqlite3.connect(uri, uri=True)
+        conn = owned_sqlite_connect(uri, uri=True)
         try:
             conn.execute("PRAGMA query_only=ON")
             rows = conn.execute("PRAGMA quick_check").fetchall()
@@ -643,7 +645,7 @@ def restore_smoke(backup_dir: str | os.PathLike) -> list[str]:
         except BackupError as exc:
             return [f"restore: {exc}"]
         for db_file in sorted(dest.glob("*.db")):
-            conn = sqlite3.connect(str(db_file))
+            conn = owned_sqlite_connect(str(db_file))
             try:
                 row = conn.execute("PRAGMA integrity_check").fetchone()
                 if row is None or row[0] != "ok":

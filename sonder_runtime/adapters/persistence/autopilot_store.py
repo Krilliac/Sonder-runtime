@@ -11,6 +11,8 @@ Ownership and lifecycle contract:
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import contextlib
 import json
 import os
@@ -153,7 +155,7 @@ def _ensure_schema(path: str) -> None:
         if identity is not None and _INITIALIZED_PATHS.get(resolved) == identity:
             return
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(resolved, timeout=5)
+        conn = owned_sqlite_connect(resolved, timeout=5)
         try:
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA journal_mode=WAL")
@@ -183,7 +185,7 @@ def _ensure_schema(path: str) -> None:
 def _connect() -> sqlite3.Connection:
     path = database_path()
     _ensure_schema(path)
-    conn = sqlite3.connect(path, timeout=5, check_same_thread=False)
+    conn = owned_sqlite_connect(path, timeout=5, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")

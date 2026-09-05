@@ -8,7 +8,7 @@ The adapter deliberately exposes only enforcement, not RSS sampling.  A
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import os
 import re
@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import time
 from typing import Callable, Mapping, Protocol
+from threading import RLock
 
 
 class ExtensionMemoryLimitError(RuntimeError):
@@ -55,14 +56,174 @@ class PreparedProcessContainment:
 
 
 class _WindowsJobToken:
-    def __init__(self, handle, close_handle) -> None:
+    def __init__(self, handle, close_handle, *, identity="", terminate=None) -> None:
         self._handle = handle
         self._close_handle = close_handle
+        self.identity = identity
+        self._terminate = terminate
+        self._quiescent_proved = False
+        self._published = False
+        self._lock = RLock()
+        self._process_handles = []
+        self._last_observation = None
+        self._proof_failed = False
+
+    @property
+    def cleanup_observation(self):
+        """Last bounded accounting/handle wait results, without PID inference."""
+        return self._last_observation
+
+    def _observe(self):
+        import ctypes
+        from ctypes import wintypes
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [("times", ctypes.c_longlong * 4),
+                        ("faults", wintypes.DWORD), ("total", wintypes.DWORD),
+                        ("active", wintypes.DWORD), ("terminated", wintypes.DWORD)]
+
+        class Members(ctypes.Structure):
+            _fields_ = [("assigned", wintypes.DWORD), ("listed", wintypes.DWORD),
+                        ("pids", ctypes.c_size_t * 256)]
+
+        kernel = ctypes.windll.kernel32
+        query = kernel.QueryInformationJobObject
+        query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                          wintypes.DWORD, ctypes.c_void_p]
+        query.restype = wintypes.BOOL
+        wait = kernel.WaitForSingleObject
+        wait.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait.restype = wintypes.DWORD
+        opened = kernel.OpenProcess
+        opened.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        opened.restype = wintypes.HANDLE
+        belongs = kernel.IsProcessInJob
+        belongs.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        belongs.restype = wintypes.BOOL
+        members = Members()
+        if not query(self._handle, 3, ctypes.byref(members), ctypes.sizeof(members), None):
+            raise ExtensionMemoryLimitError("owned job membership query failed")
+        if members.assigned > 256 or members.listed != members.assigned:
+            raise ExtensionMemoryLimitError("owned job membership exceeds proof bound")
+        for pid in members.pids[:members.listed]:
+            if any(saved_pid == pid and wait(handle, 0) == 258
+                   for saved_pid, handle in self._process_handles):
+                continue
+            if len(self._process_handles) >= 256:
+                raise ExtensionMemoryLimitError("owned process handle proof capacity exhausted")
+            handle = opened(0x100000 | 0x1000, False, pid)
+            if not handle:
+                raise ExtensionMemoryLimitError("owned process handle unavailable")
+            member = wintypes.BOOL()
+            if not belongs(handle, self._handle, ctypes.byref(member)) or not member.value:
+                self._close_handle(handle)
+                raise ExtensionMemoryLimitError("observed process membership cannot be proved")
+            self._process_handles.append((pid, handle))
+        accounting = Accounting()
+        if not query(self._handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None):
+            raise ExtensionMemoryLimitError("job accounting query failed")
+        if not self._process_handles:
+            raise ExtensionMemoryLimitError("owned root process handle missing")
+        return accounting.active, tuple(int(wait(handle, 0)) for _, handle in self._process_handles)
+
+    def quiesce(self, *, force: bool) -> ProcessContainmentResult:
+        """Require empty accounting AND signaled retained exact process handles."""
+        import ctypes
+        from ctypes import wintypes
+        deadline = time.monotonic() + 3
+        forced = False
+        with self._lock:
+            if self._handle is None:
+                return ProcessContainmentResult(False, detail="job handle is no longer held")
+            while time.monotonic() < deadline:
+                try:
+                    active, states = self._observe()
+                    self._last_observation = (active, states)
+                except ExtensionMemoryLimitError:
+                    self._proof_failed = True
+                    active, states = -1, ()
+                if (not self._proof_failed and active == 0 and states
+                        and all(state == 0 for state in states)):
+                    self._quiescent_proved = True
+                    return ProcessContainmentResult(True, forced=forced)
+                if any(state not in (0, 258) for state in states):
+                    self._proof_failed = True
+                # Accounting and process signaling can settle in either order.
+                # Permission to force cleanup is not evidence it is necessary.
+                needs_termination = self._proof_failed or (active > 0 and 258 in states)
+                if force and not forced and needs_termination:
+                    if not self._terminate_job():
+                        return ProcessContainmentResult(False, detail="owned job termination failed")
+                    forced = True
+                if self._proof_failed:
+                    return ProcessContainmentResult(False, forced=forced,
+                                                    detail="owned process handle proof unavailable")
+                if needs_termination and not force:
+                    return ProcessContainmentResult(False, detail="owned job still contains processes")
+                time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+            return ProcessContainmentResult(False, forced=forced,
+                                            detail="owned job cleanup deadline elapsed")
+
+    def _terminate_job(self):
+        if self._terminate is not None:
+            return self._terminate(self._handle)
+        import ctypes
+        from ctypes import wintypes
+        terminate = ctypes.windll.kernel32.TerminateJobObject
+        terminate.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        terminate.restype = wintypes.BOOL
+        return terminate(self._handle, 1)
+
+    def _release_handles(self):
+        while self._process_handles:
+            _, process_handle = self._process_handles[-1]
+            if not self._close_handle(process_handle):
+                raise ExtensionMemoryLimitError("owned process handle close failed")
+            self._process_handles.pop()
+        if self._handle:
+            result = self._close_handle(self._handle)
+            if result is not None and not result:
+                raise ExtensionMemoryLimitError("owned job handle close failed")
+            self._handle = None
+
+    def _abort_unregistered(self):
+        """Release a failed attachment; this never certifies quiescence."""
+        with self._lock:
+            if self._published:
+                raise ExtensionMemoryLimitError("published job requires proven cleanup")
+            errors = []
+            try:
+                if self._handle:
+                    if not self._terminate_job():
+                        errors.append("termination failed")
+            except Exception:
+                errors.append("termination unavailable")
+            # No published owner can retry this token. Attempt every release,
+            # including the kill-on-close Job, even if another handle fails.
+            for member in tuple(self._process_handles):
+                try:
+                    if not self._close_handle(member[1]):
+                        raise ExtensionMemoryLimitError("process close failed")
+                    self._process_handles.remove(member)
+                except Exception:
+                    errors.append("process handle release failed")
+            if self._handle:
+                try:
+                    result = self._close_handle(self._handle)
+                    if result is not None and not result:
+                        raise ExtensionMemoryLimitError("job close failed")
+                    self._handle = None
+                except Exception:
+                    errors.append("job handle release failed")
+            if errors:
+                raise ExtensionMemoryLimitError("unregistered job cleanup incomplete: " + "; ".join(errors))
 
     def close(self) -> None:
-        handle, self._handle = self._handle, None
-        if handle:
-            self._close_handle(handle)
+        with self._lock:
+            if self._handle and not self._quiescent_proved:
+                if not self.quiesce(force=True).complete:
+                    raise ExtensionMemoryLimitError("Windows job is not proven quiescent")
+            self._release_handles()
 
 
 class _PosixLimitToken:
@@ -283,6 +444,37 @@ class NativeExtensionMemoryLimiter:
             ),
         )
 
+    def isolated_process_environment(self, prepared, argv, environment):
+        """Support only the audited catalog environment before scope admission.
+
+        Values never enter argv. Arbitrary secret or loader environments require
+        a separate contained transport and are refused by this wrapper profile.
+        """
+        if self._platform_name != "posix":
+            return prepared
+        if type(prepared.token) is not _SystemdScopeToken or not argv or prepared.argv[-len(argv):] != tuple(argv):
+            raise ExtensionMemoryLimitError("exact prepared systemd command required")
+        allowed = {"PATH", "LANG", "PYTHONIOENCODING", "PYTHONNOUSERSITE", "TEMP", "TMP"}
+        if any(key not in allowed for key in environment):
+            raise ExtensionMemoryLimitUnsupported("isolated systemd environment contains unsupported keys")
+        prefix = prepared.argv[:-len(argv)]
+        if not prefix or prefix[-1] != "--":
+            raise ExtensionMemoryLimitError("prepared command boundary is missing")
+        env_program = self._which("env")
+        if not env_program or not env_program.startswith("/"):
+            raise ExtensionMemoryLimitUnsupported("isolated systemd launch requires an absolute env executable")
+        wrapper_environment = dict(environment)
+        removed = ("-u", "INVOCATION_ID")
+        if prepared.token._user_scope:
+            uid = self._os.geteuid()
+            if type(uid) is not int or uid < 0:
+                raise ExtensionMemoryLimitError("current effective user identity is unavailable")
+            wrapper_environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+            removed = ("-u", "DBUS_SESSION_BUS_ADDRESS", *removed)
+        return replace(prepared,
+            argv=(*prefix, env_program, *removed, "--", *argv),
+            launch_options={**prepared.launch_options, "env": wrapper_environment})
+
     def restore_process_job(
         self,
         job_id: str,
@@ -497,7 +689,42 @@ class NativeExtensionMemoryLimiter:
         kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
-        job = kernel32.CreateJobObjectW(None, None)
+        class BasicAccountingInformation(ctypes.Structure):
+            # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (JobObjectInformationClass=1).
+            _fields_ = [
+                (name, ctypes.c_longlong)
+                for name in (
+                    "TotalUserTime",
+                    "TotalKernelTime",
+                    "ThisPeriodTotalUserTime",
+                    "ThisPeriodTotalKernelTime",
+                )
+            ]
+            _fields_ += [
+                (name, wintypes.DWORD)
+                for name in (
+                    "TotalPageFaultCount",
+                    "TotalProcesses",
+                    "ActiveProcesses",
+                    "TotalTerminatedProcesses",
+                )
+            ]
+
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        import uuid
+
+        job_name = "Local\\SonderProcess-" + uuid.uuid4().hex
+        job = kernel32.CreateJobObjectW(None, job_name)
         if not job:
             raise ExtensionMemoryLimitError("CreateJobObjectW failed")
         info = ExtendedLimitInformation()
@@ -514,7 +741,15 @@ class NativeExtensionMemoryLimiter:
         if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(int(handle))):
             kernel32.CloseHandle(job)
             raise ExtensionMemoryLimitError("AssignProcessToJobObject failed")
-        return _WindowsJobToken(job, kernel32.CloseHandle)
+        token = _WindowsJobToken(job, kernel32.CloseHandle, identity=job_name)
+        # Retain the suspended root before any user code or descendant can run.
+        try:
+            token._observe()
+        except BaseException:
+            token._abort_unregistered()
+            raise
+        token._published = True
+        return token
 
 
 __all__ = [

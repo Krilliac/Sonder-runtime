@@ -13,6 +13,8 @@ that was duplicated across 16+ stores with inconsistent settings.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import logging
 import os
 import sqlite3
@@ -42,7 +44,7 @@ def connect(
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(path, timeout=timeout, check_same_thread=check_same_thread)
+    conn = owned_sqlite_connect(path, timeout=timeout, check_same_thread=check_same_thread)
 
     if row_factory:
         conn.row_factory = sqlite3.Row
@@ -103,6 +105,15 @@ def close_cached(cache_key: str) -> None:
             pass
         setattr(_thread_local, conn_attr, None)
         setattr(_thread_local, path_attr, None)
+
+
+def close_current_thread() -> None:
+    """Close actual cached handles without suppressing missing cleanup proof."""
+    for name, connection in tuple(vars(_thread_local).items()):
+        if name.startswith("_sqlite_factory_") and name.endswith("_conn") and connection is not None:
+            connection.close()
+            setattr(_thread_local, name, None)
+            setattr(_thread_local, name[:-5] + "_path", None)
 
 
 __all__ = [

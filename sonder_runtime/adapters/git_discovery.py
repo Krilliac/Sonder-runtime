@@ -6,6 +6,8 @@ while this adapter owns process and repository-boundary safety.
 """
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import os
 import shutil
 import stat
@@ -99,8 +101,8 @@ def _run_bounded(argv: list[str], *, timeout_seconds: float, output_limit: int) 
             stream.close()
 
     threads = [
-        threading.Thread(target=drain, args=("stdout", process.stdout, output_limit), daemon=True),
-        threading.Thread(target=drain, args=("stderr", process.stderr, MAX_ERROR_BYTES), daemon=True),
+        owned_runtime_thread(target=drain, args=("stdout", process.stdout, output_limit), daemon=True),
+        owned_runtime_thread(target=drain, args=("stderr", process.stderr, MAX_ERROR_BYTES), daemon=True),
     ]
     for thread in threads:
         thread.start()

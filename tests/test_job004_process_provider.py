@@ -35,6 +35,162 @@ def _request(job_id: str = "job-process") -> ProcessJobRequest:
     )
 
 
+@pytest.mark.parametrize("failure", ["prepare", "registry", "launch", "identity", "attach", "limits", "readers", "already_released"])
+def test_failed_start_returns_single_capacity_slot(failure, monkeypatch):
+    from dataclasses import replace
+    registry = DurableJobRegistry()
+    process = _Process()
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: process, memory_limiter=_MemoryLimiter(),
+        max_concurrent_processes=1, process_identity_resolver=lambda pid: "stable",
+        platform_name="posix",
+    )
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected failed start")
+    bad = _request("failed-start")
+    with monkeypatch.context() as patch:
+        if failure == "prepare":
+            bad = replace(bad, require_job_scope=True)
+        elif failure == "registry":
+            patch.setattr(registry, "start", fail)
+        elif failure == "launch":
+            patch.setattr(provider, "_launcher", fail)
+        elif failure == "identity":
+            patch.setattr(provider, "_process_identity_resolver", fail)
+        elif failure == "attach":
+            patch.setattr(registry, "attach_process", fail)
+        elif failure == "limits":
+            bad = replace(bad, memory_limit_bytes=1024)
+            patch.setattr(provider._memory_limiter, "apply", fail)
+        elif failure == "readers":
+            patch.setattr(provider, "_start_output_readers", fail)
+        elif failure == "already_released":
+            def release_then_fail(job_id, process):
+                provider._forget_local_job(job_id)
+                fail()
+            patch.setattr(provider, "_start_output_readers", release_then_fail)
+        with pytest.raises(RuntimeError):
+            provider.start(bad)
+    provider.start(_request("valid-after-failure"))
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("cannot-overbook"))
+    provider.wait("valid-after-failure")
+    provider.start(_request("valid-after-completion"))
+    provider.cancel("valid-after-completion")
+    provider.start(_request("valid-after-cancellation"))
+    provider.wait("valid-after-cancellation")
+
+
+def test_process_publication_already_has_releasable_capacity_lease():
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: _Process(), memory_limiter=_MemoryLimiter(),
+        max_concurrent_processes=1, process_identity_resolver=lambda pid: "stable",
+        platform_name="posix",
+    )
+    completed = []
+
+    class FinishAtPublication(dict):
+        def __setitem__(self, job_id, process):
+            super().__setitem__(job_id, process)
+            if job_id == "finish-at-publication":
+                # Deterministically yield to a consumer at first visibility,
+                # before the publishing assignment returns to start().
+                completed.append(provider.wait(job_id).record.status)
+
+    provider._processes = FinishAtPublication()
+    provider.start(_request("finish-at-publication"))
+    assert completed == [JobStatus.SUCCEEDED]
+    assert "finish-at-publication" not in provider._process_slot_owners
+    provider.start(_request("after-publication-race"))
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("no-overbooking"))
+    provider.wait("after-publication-race")
+
+
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+def test_failed_launch_retains_capacity_until_exit_and_containment_proven(cleanup_raises, monkeypatch):
+    from dataclasses import replace
+
+    class LiveProcess(_Process):
+        exited = False
+
+        def wait(self, timeout=None):
+            if not self.exited:
+                raise subprocess.TimeoutExpired("fixture", timeout)
+            return 0
+
+    process = LiveProcess()
+    token = _ScopedToken(ProcessContainmentResult(False), ProcessContainmentResult(True))
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: process,
+        memory_limiter=_ScopedLimiter(token), max_concurrent_processes=1,
+        process_identity_resolver=lambda pid: "identity", platform_name="posix",
+    )
+    retries = []
+    monkeypatch.setattr(provider, "_schedule_deadline", lambda *args: retries.append(args))
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected identity/cleanup failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, "_process_identity_resolver", fail)
+        if cleanup_raises:
+            patch.setattr(provider, "_quiesce_containment", fail)
+        with pytest.raises(RuntimeError):
+            provider.start(replace(_request("unresolved-launch"), require_job_scope=True))
+    assert provider._processes["unresolved-launch"] is process
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("blocked-until-clean"))
+    # Containment becoming empty alone cannot prove the root process exited.
+    assert not provider.cancel("unresolved-launch").cleanup_completed
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        provider.start(_request("still-blocked"))
+    process.exited = True
+    assert provider.cancel("unresolved-launch").cleanup_completed
+    assert "unresolved-launch" not in provider._process_slot_owners
+    provider.start(_request("after-proven-cleanup"))
+    provider.wait("after-proven-cleanup")
+
+
+def test_failed_launch_retains_worker_reservation_until_root_exit(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from sonder_runtime.application.compute_fabric.capacity import WorkerBudget
+    from sonder_runtime.application.errors import CapacityExceeded
+
+    class LiveProcess(_Process):
+        exited = False
+
+        def wait(self, timeout=None):
+            if not self.exited:
+                raise subprocess.TimeoutExpired("fixture", timeout)
+            return 0
+
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    budget = WorkerBudget("host", 100, 1)
+    reservation = registry.reserve_capacity(budget, "failed-worker-launch", "a" * 64, 100)
+    process = LiveProcess()
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: process,
+        memory_limiter=_ScopedLimiter(_ScopedToken(ProcessContainmentResult(True))),
+        process_identity_resolver=lambda pid: "identity", platform_name="posix",
+    )
+    monkeypatch.setattr(provider, "_schedule_deadline", lambda *args: None)
+    def fail(*args):
+        raise RuntimeError("identity lookup failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, "_process_identity_resolver", fail)
+        with pytest.raises(RuntimeError, match="identity lookup failed"):
+            provider.start(replace(_request("failed-worker-launch"),
+                                   require_job_scope=True, capacity_token=reservation.token))
+    with pytest.raises(CapacityExceeded):
+        registry.reserve_capacity(budget, "second", "b" * 64, 100)
+    process.exited = True
+    assert provider.cancel("failed-worker-launch").cleanup_completed
+    assert registry.reserve_capacity(budget, "second", "b" * 64, 100)
+
+
 class _Process:
     pid = 77
 
@@ -1105,3 +1261,211 @@ def test_a_live_process_without_a_durable_identity_is_still_refused():
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_explicit_cleanup_proof_survives_only_actual_scope_release(tmp_path, durable):
+    from dataclasses import replace
+
+    registry = (
+        SQLiteDurableJobRegistry(tmp_path / "proof.db")
+        if durable
+        else DurableJobRegistry()
+    )
+    token = _ScopedToken(ProcessContainmentResult(True))
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        process_identity_resolver=lambda pid: "proof-instance",
+    )
+    request = replace(_request("proof"), require_job_scope=True)
+    provider.start(request)
+    assert provider.cleanup_proof("proof") is None
+    provider.wait("proof")
+    proof = provider.cleanup_proof("proof")
+    assert token.closed and proof["process_exited"] and proof["containment_empty"]
+    assert proof["resources_released"] and proof["exit_code"] == 0
+    assert proof["process_identity"] == "proof-instance"
+    if durable:
+        assert (
+            SQLiteDurableJobRegistry(tmp_path / "proof.db").process_cleanup_proof(
+                "proof"
+            )
+            == proof
+        )
+
+
+def test_cleanup_proof_write_failure_cannot_be_inferred_from_terminal(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    registry = SQLiteDurableJobRegistry(tmp_path / "proof.db")
+    token = _ScopedToken(ProcessContainmentResult(True))
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        process_identity_resolver=lambda pid: "proof-instance",
+    )
+    provider.start(replace(_request("proof"), require_job_scope=True))
+
+    def fail(*args):
+        raise OSError("injected durable proof failure")
+
+    monkeypatch.setattr(registry, "_record_process_cleanup", fail)
+    with pytest.raises(OSError):
+        provider.wait("proof")
+    assert registry.poll("proof").is_terminal
+    assert provider.cleanup_proof("proof") is None
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="real Windows Job Object descendant accounting"
+)
+def test_real_windows_descendant_is_removed_before_cleanup_certificate(tmp_path):
+    registry = SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+    provider = SubprocessJobProvider(
+        registry, process_cleanup=ProcessTreeSupervisor(), max_concurrent_processes=1
+    )
+    script = (
+        'import subprocess,sys; p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"],'
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); print(p.pid,flush=True)"
+    )
+    request = ProcessJobRequest(
+        JobIdentity("descendant-proof", "test", "test", "once"),
+        (sys.executable, "-c", script),
+        cwd=tmp_path,
+        require_job_scope=True,
+        max_descendants=3,
+        memory_limit_bytes=256 * 1024 * 1024,
+        deadline_seconds=10,
+    )
+    provider.start(request)
+    waited = provider.wait("descendant-proof", timeout=5)
+    assert waited.record.status is JobStatus.CANCELLED
+    proof = provider.cleanup_proof("descendant-proof")
+    assert (
+        proof["process_exited"]
+        and proof["containment_empty"]
+        and proof["resources_released"]
+    )
+    assert proof["status"] == "cancelled"
+    assert proof["scope_identity"]["containment_identity"].startswith(
+        "Local\\SonderProcess-"
+    )
+    from dataclasses import replace
+
+    second = replace(
+        request,
+        identity=JobIdentity("after-cleanup", "test", "test2", "twice"),
+        argv=(sys.executable, "-c", "pass"),
+    )
+    provider.start(second)
+    assert (
+        provider.wait("after-cleanup", timeout=5).record.status is JobStatus.SUCCEEDED
+    )
+
+
+@pytest.mark.parametrize("ending", ["cancel", "forced_wait"])
+@pytest.mark.parametrize("failure_stage", ["close", "capacity"])
+def test_terminal_cancelled_job_retries_failed_close_before_releasing_slot(
+    monkeypatch, ending, failure_stage
+):
+    from dataclasses import replace
+
+    registry = DurableJobRegistry()
+    token = _ScopedToken(ProcessContainmentResult(True, forced=True))
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        max_concurrent_processes=1,
+        process_identity_resolver=lambda pid: "stable",
+    )
+    retries = []
+    monkeypatch.setattr(
+        provider, "_schedule_deadline", lambda job_id, delay: retries.append(job_id)
+    )
+    provider.start(replace(_request("close-retry"), require_job_scope=True))
+    close = token.close
+    failures = [True]
+
+    def fail_once():
+        if failures:
+            failures.pop()
+            raise OSError("native close unavailable")
+        close()
+
+    if failure_stage == "close":
+        monkeypatch.setattr(token, "close", fail_once)
+    else:
+        monkeypatch.setattr(provider, "_release_capacity", lambda job_id: fail_once())
+    with pytest.raises(OSError):
+        if ending == "cancel":
+            provider.cancel("close-retry")
+        else:
+            provider.wait("close-retry")
+    assert "close-retry" in retries
+    assert registry.poll("close-retry").is_terminal
+    assert provider.cleanup_proof("close-retry") is None
+    with pytest.raises(RuntimeError, match="capacity"):
+        provider.start(_request("too-soon"))
+    provider._expire_deadline_owned("close-retry")
+    assert token.closed
+    assert provider.cleanup_proof("close-retry")["resources_released"]
+    provider.start(replace(_request("after-close"), require_job_scope=True))
+    provider.wait("after-close")
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_prepared_scope_memory_limit_preserves_exact_cleanup_owner(cancel):
+    from dataclasses import replace
+    token = _ScopedToken(ProcessContainmentResult(True))
+    class Limiter(_ScopedLimiter):
+        def apply(self, process, memory_limit_bytes):
+            pytest.fail("prepared scope must not be replaced by a per-process token")
+    provider = SubprocessJobProvider(
+        DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: _Process(), platform_name="posix",
+        memory_limiter=Limiter(token), process_identity_resolver=lambda pid: "exact-scope-instance")
+    request = replace(_request("scope-memory"), require_job_scope=True, memory_limit_bytes=512 * 1024 * 1024)
+    try:
+        provider.start(request)
+        assert provider._memory_tokens["scope-memory"] is token
+        if cancel:
+            assert provider.cancel("scope-memory").cleanup_completed
+        else:
+            provider.wait("scope-memory")
+        proof = provider.cleanup_proof("scope-memory")
+        assert token.closed and proof["containment_empty"] and proof["resources_released"]
+    finally:
+        if "scope-memory" in provider._processes:
+            provider.cancel("scope-memory", reason="test fixture cleanup")
+
+
+@pytest.mark.parametrize("key", ["SECRET_TOKEN", "LD_PRELOAD", "DBUS_SESSION_BUS_ADDRESS"])
+def test_unsupported_isolated_systemd_environment_refuses_before_launch(key):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from sonder_runtime.adapters.extensions.memory_limits import NativeExtensionMemoryLimiter, ExtensionMemoryLimitUnsupported
+    commands = []
+    launches = []
+    limiter = NativeExtensionMemoryLimiter(
+        os_module=SimpleNamespace(name="posix", environ={}, geteuid=lambda: 1000),
+        platform_name="posix", which=lambda name: f"/usr/bin/{name}",
+        command_runner=lambda *args, **kwargs: commands.append(args))
+    provider = SubprocessJobProvider(DurableJobRegistry(), process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *args, **kwargs: launches.append(args), platform_name="posix", memory_limiter=limiter)
+    request = replace(_request("unsupported-env"), require_job_scope=True, inherit_environment=False,
+        environment=((key, "secret-value"),))
+    with pytest.raises(ExtensionMemoryLimitUnsupported, match="unsupported keys"):
+        provider.start(request)
+    assert not launches and not commands and not provider._processes and not provider._memory_tokens

@@ -802,6 +802,11 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 continue
             if rel.as_posix() == REPL_PATH and top in REPL_ROOT_MODULES:
                 continue
+            if (
+                rel.as_posix() == 'sonder_runtime/adapters/persistence/postgres_continuation_transport.py'
+                and top in {'psycopg', 'psycopg_pool'}
+            ):
+                continue  # Optional PostgreSQL driver stays behind its adapter.
             if top not in ALLOWED_ROOT_IMPORTS[layer]:
                 if (
                     rel.as_posix() == "sonder_runtime/adapters/learning_health.py"

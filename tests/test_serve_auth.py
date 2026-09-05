@@ -13,6 +13,107 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_health
 
 
+@pytest.mark.parametrize('mode', ['account', 'both', 'either', 'api-key', 'local-open'])
+def test_logout_revokes_only_explicit_session_with_safe_retry(monkeypatch, tmp_path, mode):
+    import admin_auth
+    import memory_store
+    path = str(tmp_path / 'logout.sqlite')
+    conn = memory_store.connect(path)
+    admin_auth.register(conn, 'owner', 'password123')
+    first, _ = admin_auth.login(conn, 'owner', 'password123')
+    second, _ = admin_auth.login(conn, 'owner', 'password123')
+    conn.close()
+    monkeypatch.setattr(ts.server, '_open_db', lambda: memory_store.connect(path))
+    monkeypatch.setattr(ts, 'AUTH_MODE', mode)
+    monkeypatch.setattr(ts, 'API_KEY', '' if mode == 'local-open' else 'deployment-key')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: False)
+    headers = {'Content-Type': 'application/json',
+               'Authorization': 'Bearer deployment-key',
+               'X-Sonder-Account-Token': first}
+    with _http_server(monkeypatch) as port:
+        for _ in range(2):
+            status, response_headers, body = _request(
+                port, 'POST', '/v1/sonder/logout', body='{}', headers=headers)
+            assert status == 200, body
+            assert json.loads(body) == {'ok': True}
+            assert response_headers['Cache-Control'] == 'no-store'
+        status, _, _ = _request(port, 'POST', '/v1/sonder/logout', body='{}',
+                                headers={'Authorization': 'Bearer ' + second})
+        assert status == 401  # No fallback from deployment bearer to session.
+    conn = memory_store.connect(path)
+    try:
+        assert admin_auth.authenticate(conn, first) is None
+        assert admin_auth.authenticate(conn, second) is not None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize('body,headers,expected', [
+    ('{}', {'X-Sonder-Account-Token': 'session'}, 401),
+    ('{"token":"another-session"}', {'X-Sonder-Account-Token': 'session',
+                                    'Authorization': 'Bearer deployment-key'}, 400),
+    (' ' * 1025, {'X-Sonder-Account-Token': 'session',
+                 'Authorization': 'Bearer deployment-key'}, 413),
+])
+def test_logout_refuses_missing_deployment_key_or_body_target(monkeypatch, body, headers, expected):
+    monkeypatch.setattr(ts, 'AUTH_MODE', 'both')
+    monkeypatch.setattr(ts, 'API_KEY', 'deployment-key')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    monkeypatch.setattr(ts, '_auth_account', lambda header: None)
+    monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: False)
+    monkeypatch.setattr(ts.server, '_open_db', lambda: pytest.fail('must not open revocation store'))
+    with _http_server(monkeypatch) as port:
+        status, response_headers, _ = _request(port, 'POST', '/v1/sonder/logout',
+                                              body=body, headers={
+                                                  'Content-Type': 'application/json', **headers})
+        assert status == expected
+        assert response_headers['Cache-Control'] == 'no-store'
+
+
+def test_logout_store_unavailable_is_controlled_and_does_not_authenticate_target(monkeypatch):
+    monkeypatch.setattr(ts, 'AUTH_MODE', 'account')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    monkeypatch.setattr(ts, '_auth_account', lambda header: pytest.fail('no target lookup'))
+    monkeypatch.setattr(ts.Handler, '_auth_rate_limited', lambda self: pytest.fail('no failed-auth bucket'))
+    def unavailable():
+        raise OSError('private database failure details')
+    monkeypatch.setattr(ts.server, '_open_db', unavailable)
+    with _http_server(monkeypatch) as port:
+        status, headers, body = _request(port, 'POST', '/v1/sonder/logout', body='{}',
+                                        headers={'Content-Type': 'application/json',
+                                                 'X-Sonder-Account-Token': 'private-session'})
+        assert status == 503
+        assert headers['Cache-Control'] == 'no-store'
+        assert json.loads(body) == {'ok': False, 'message': 'session revocation unavailable'}
+
+
+def test_logout_admission_is_bounded_and_released_after_failure(monkeypatch):
+    gate = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(ts, '_ACCOUNT_LOGOUT_ADMISSION', gate)
+    monkeypatch.setattr(ts, 'AUTH_MODE', 'local-open')
+    monkeypatch.setattr(ts, 'API_KEY', '')
+    monkeypatch.setattr(ts, 'REQUIRE_ACCOUNT', False)
+    def unavailable():
+        raise OSError('unavailable')
+    monkeypatch.setattr(ts.server, '_open_db', unavailable)
+    headers = {'Content-Type': 'application/json', 'X-Sonder-Account-Token': 'session'}
+    with _http_server(monkeypatch) as port:
+        assert gate.acquire(blocking=False)
+        try:
+            status, response_headers, _ = _request(
+                port, 'POST', '/v1/sonder/logout', body='{}', headers=headers)
+            assert status == 429
+            assert response_headers['Cache-Control'] == 'no-store'
+        finally:
+            gate.release()
+        for _ in range(2):
+            status, _, _ = _request(port, 'POST', '/v1/sonder/logout', body='{}', headers=headers)
+            assert status == 503
+            assert gate.acquire(timeout=5)
+            gate.release()
+
+
 def test_local_log_dashboard_requires_direct_loopback_and_no_tls_proxy(monkeypatch):
     monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", False)
     assert ts._local_log_dashboard_allowed("127.0.0.1") is True

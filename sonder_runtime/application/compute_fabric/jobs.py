@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 import hashlib
 
@@ -16,12 +16,13 @@ import shutil
 import stat as stat_module
 import tempfile
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..execution.process_jobs import ProcessJobProvider, ProcessJobRequest
 from ..ports.jobs import JobIdentity
 from ...domain.common.errors import Conflict, DependencyUnavailable, InvalidInput, NotFound
 from ...domain.compute_fabric import WorkloadKind
+from .capacity import WorkerBudget, WorkerCapacity, bounded_positive
 from .artifact_spool import (
     ArtifactSpoolConflict,
     ArtifactSpoolError,
@@ -113,8 +114,11 @@ class JobCatalogEntry:
     allowed_relative_path_options: frozenset[str] = frozenset()
     memory_limit_bytes: int | None = None
     artifact_paths: tuple[str, ...] = ()
+    memory_reservation_bytes: int | None = None
 
     def __post_init__(self) -> None:
+        if self.memory_reservation_bytes is not None:
+            bounded_positive(self.memory_reservation_bytes, "catalog memory reservation")
         _identity(self.entry_id, "catalog entry id")
         if self.workload is WorkloadKind.INFERENCE:
             raise ValueError("inference remains owned by the model gateway")
@@ -506,6 +510,9 @@ class ComputeJobWorker:
         catalog: Mapping[str, JobCatalogEntry],
         workspace_mappings: Mapping[str, Path],
         provider: ProcessJobProvider,
+        capacity: WorkerCapacity | None = None,
+        budget: WorkerBudget | Callable[[], WorkerBudget] | None = None,
+        reservation_seconds: int = 30,
     ) -> None:
         _identity(worker_id, "worker_id")
         if set(catalog) != {entry.entry_id for entry in catalog.values()}:
@@ -517,6 +524,12 @@ class ComputeJobWorker:
             if not resolved.is_absolute():
                 raise ValueError("workspace mapping roots must be absolute")
             roots[name] = resolved
+        if (capacity is None) != (budget is None):
+            raise ValueError("worker capacity and budget must be configured together")
+        bounded_positive(reservation_seconds, "reservation_seconds", 300)
+        self._capacity = capacity
+        self._budget = budget
+        self._reservation_seconds = reservation_seconds
         self.worker_id = worker_id
         self._catalog = dict(catalog)
         self._workspaces = roots
@@ -674,6 +687,19 @@ class ComputeJobWorker:
             # worker critical section. The provider durably reserves the stable
             # job identity before it creates the process, so concurrent callers
             # cannot execute the same idempotency key twice.
+            if self._capacity is not None:
+                try:
+                    reservation = self._capacity.reserve_capacity(
+                        self._budget() if callable(self._budget) else self._budget,
+                        remote_job_id, envelope.request_sha256,
+                        entry.memory_reservation_bytes,
+                        lease_seconds=self._reservation_seconds,
+                    )
+                except Exception:
+                    if input_stage is not None:
+                        self._remove_input_stage(input_stage)
+                    raise
+                request = replace(request, capacity_token=reservation.token)
             try:
                 started = self._provider.start(request)
             except Exception:

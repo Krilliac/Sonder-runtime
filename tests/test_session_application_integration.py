@@ -56,14 +56,35 @@ def test_application_chat_persists_and_reopens_durable_session_stream(
         ]
 
         gateway.fail = True
+        failed_input = "inspect the unavailable provider"
         with pytest.raises(RuntimeError, match="deterministic provider failure"):
             application.chat.complete(
-                ChatCommand(content="do not persist", session_id=session_id),
+                ChatCommand(content=failed_input, session_id=session_id),
                 context,
             )
-        assert application.session_repository().read_range(
+        all_events = application.session_repository().read_range(
             session_id.serialize(), limit=100,
-        ) == first_events
+        )
+        assert all_events[:3] == first_events
+        failed_events = all_events[3:]
+        assert [event.event_type for event in failed_events] == [
+            "model.requested", "user.message", "model.failed",
+        ]
+        requested, user_message, failure = failed_events
+        request_id = requested.payload["request_id"]
+        turn_id = requested.payload["turn_id"]
+        assert request_id != first_events[0].payload["request_id"]
+        assert turn_id != first_events[0].payload["turn_id"]
+        assert requested.payload["prompt"] == failed_input
+        assert user_message.payload == {
+            "request_id": request_id, "turn_id": turn_id, "content": failed_input,
+        }
+        assert failure.payload == {
+            "request_id": request_id, "turn_id": turn_id,
+            "error_code": "INTERNAL_FAILURE",
+        }
+        assert all("deterministic provider failure" not in str(event.payload)
+                   for event in all_events)
 
         bootstrap_app.reset_for_tests()
         reopened = bootstrap_app.build_application()
@@ -72,8 +93,15 @@ def test_application_chat_persists_and_reopens_durable_session_stream(
 
         assert replay.crash_safe
         assert replay.integrity.valid
-        assert replay.replay.transcript[-1].content == "reply:persist this turn"
-        assert replay.recovered_sequence == 3
-        assert repository.read_range(session_id.serialize(), limit=100) == first_events
+        assert replay.recovered_sequence == 6
+        assert replay.replay.projection.event_count == 6
+        assert replay.replay.projection.assistant_message_count == 1
+        assert replay.replay.projection.error_count == 1
+        assert [(message.role, message.content) for message in replay.replay.transcript] == [
+            ("user", "persist this turn"),
+            ("assistant", "reply:persist this turn"),
+            ("user", failed_input),
+        ]
+        assert repository.read_range(session_id.serialize(), limit=100) == all_events
     finally:
         bootstrap_app.reset_for_tests()

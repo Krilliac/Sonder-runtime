@@ -255,6 +255,41 @@
       "tool": "admin_whoami"
     },
     {
+      "aliases": [],
+      "category": "system",
+      "name": "/agent_lane",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "action",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "payload",
+          "required": true,
+          "type": "obj"
+        },
+        {
+          "default": "",
+          "name": "parent_session_id",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "parent_token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "execution",
+      "summary": "Control independent agent conversations with scoped parent authority.",
+      "tool": "agent_lane"
+    },
+    {
       "aliases": [
         "/cancelagents"
       ],
@@ -4271,6 +4306,18 @@
       "risk": "mutation",
       "summary": "Preview or atomically apply a bounded RFC 6902 subset to one JSON file.",
       "tool": "json_patch"
+    },
+    {
+      "aliases": [
+        "/recover"
+      ],
+      "category": "system",
+      "name": "/lanes",
+      "native": true,
+      "params": [],
+      "risk": "execution",
+      "summary": "inspect and control durable agent conversations",
+      "tool": ""
     },
     {
       "aliases": [],
@@ -8925,6 +8972,12 @@
     },
     {
       "default": null,
+      "field": "deployment",
+      "section": "root",
+      "type": "DeploymentConfig"
+    },
+    {
+      "default": null,
       "field": "features",
       "section": "root",
       "type": "FeaturesConfig"
@@ -8960,6 +9013,30 @@
       "type": "tuple[str, ...]"
     },
     {
+      "default": [],
+      "field": "private_source_paths",
+      "section": "root",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": null,
+      "field": "artifact_transfer",
+      "section": "root",
+      "type": "ArtifactTransferConfig"
+    },
+    {
+      "default": null,
+      "field": "child_storage",
+      "section": "root",
+      "type": "ChildStorageConfig"
+    },
+    {
+      "default": null,
+      "field": "app_control",
+      "section": "root",
+      "type": "AppControlConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -8976,6 +9053,186 @@
       "field": "backup_key_file",
       "section": "secrets",
       "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "artifact_transfer_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "runtime_id",
+      "section": "app_control",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "catalog_file",
+      "section": "app_control",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": false,
+      "field": "allow_numeric_loopback_native",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": [],
+      "field": "app_origins",
+      "section": "app_control",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "field": "proxy_cidrs",
+      "section": "app_control",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": false,
+      "field": "proxy_only_backend",
+      "section": "app_control",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 900,
+      "field": "session_ttl_seconds",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 3600,
+      "field": "binding_ttl_seconds",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 4,
+      "field": "account_session_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64,
+      "field": "global_session_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 16,
+      "field": "account_binding_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 256,
+      "field": "global_binding_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 4096,
+      "field": "command_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 100,
+      "field": "page_cap",
+      "section": "app_control",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "enabled",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "store_dir",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "principal_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "project_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "peer_node_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "grant_id",
+      "section": "artifact_transfer",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 1,
+      "field": "grant_revision",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 0,
+      "field": "expires_at",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": false,
+      "field": "can_read",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": false,
+      "field": "can_write",
+      "section": "artifact_transfer",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 268435456,
+      "field": "max_object_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 1073741824,
+      "field": "quota_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 2147483648,
+      "field": "total_bytes",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 3600,
+      "field": "ttl_seconds",
+      "section": "artifact_transfer",
+      "type": "<class 'int'>"
     },
     {
       "default": true,
@@ -9048,6 +9305,78 @@
       "field": "queue_depth",
       "section": "capacity",
       "type": "int"
+    },
+    {
+      "default": "sqlite",
+      "field": "backend",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "binding_file",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "owner_id",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "primary",
+      "field": "durability",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "required_standby",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 2,
+      "field": "pool_size",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 5,
+      "field": "operation_timeout_seconds",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 1,
+      "field": "cancel_timeout_seconds",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": "single-host",
+      "field": "profile",
+      "section": "deployment",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "preferred_primary",
+      "section": "deployment",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "automatic_takeover",
+      "section": "deployment",
+      "type": "bool"
+    },
+    {
+      "default": false,
+      "field": "automatic_failback",
+      "section": "deployment",
+      "type": "bool"
     },
     {
       "default": false,
@@ -9349,12 +9678,12 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
-    "commands": 314,
-    "configuration": 76,
+    "commands": 316,
+    "configuration": 123,
     "events": 43,
-    "tools": 211
+    "tools": 212
   },
-  "digest": "fbf5ece369d8efdfceb74ed5cacdf6841a8a8d30ce94b891f5230fdbc004d685",
+  "digest": "bd6a04eaedc839366069e8d0ad980a795119d748b7b197df74be0efe87d536c6",
   "events": [
     {
       "name": "session.started",
@@ -9825,10 +10154,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "04be65a053012ceb53a80d7528f0b1c44fd8e3c84f5c4749296e6baf92ae8c3f",
+    "server.py": "4dd0970caf3d5abb853e0b2fab031b7499a35875e6009f1ff5a28c732b1b744a",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "66eab0b6a4ccb7981242d73ed7eba2198f5cb4f8fbd0d621935e6a73c678ef50"
+    "sonder_runtime/platform/config.py": "e274ff9e0668680d2be026da3283eb7870886b8ca2f46621533ee3a959a3714e"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
@@ -10064,6 +10393,39 @@
           "prompt"
         ],
         "title": "agentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Control independent agent conversations with scoped parent authority.\n\n    Call open_parent with an empty payload first; retain its parent_session_id\n    and parent_token for subsequent commands. Never place the token in tasks,\n    messages or files. Actions also include rotate_parent and revoke_parent.\n    Other actions: spawn, list, inspect, send_message, wait, interrupt, resume,\n    cancel, reports and ack. Existing sessions cannot be claimed by name.\n    ",
+      "name": "agent_lane",
+      "parameters": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "default": "",
+            "title": "Parent Session Id",
+            "type": "string"
+          },
+          "parent_token": {
+            "default": "",
+            "title": "Parent Token",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "payload"
+        ],
+        "title": "agent_laneArguments",
         "type": "object"
       }
     },

@@ -6,6 +6,11 @@ observable without exposing a mutable session projection.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
+from contextlib import contextmanager
+from time import monotonic
+import math
 import hashlib
 import json
 import sqlite3
@@ -66,15 +71,53 @@ class SQLiteSessionRepository:
         self._db_path = Path(db_path)
         self._max_read_limit = max_read_limit
         self._lock = threading.Lock()
+        self._connections = threading.Condition()
+        self._live_connections = 0
+        self._admissions_stopped = False
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_DDL)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+    @contextmanager
+    def _connect(self):
+        # Reserve before construction; close occurs on the exact thread that
+        # created the SQLite handle. A different owner thread only waits.
+        with self._connections:
+            if self._admissions_stopped:
+                raise RuntimeError("session repository is closed")
+            self._live_connections += 1
+        connection = None
+        try:
+            connection = owned_sqlite_connect(str(self._db_path), timeout=5.0)
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
+            with connection:
+                yield connection
+        finally:
+            # Failed close retains occupancy forever rather than publishing
+            # clean from a missing proof. No global handle census or adoption.
+            if connection is not None:
+                connection.close()
+            with self._connections:
+                self._live_connections -= 1
+                self._connections.notify_all()
+
+    def stop_admissions(self):
+        with self._connections:
+            self._admissions_stopped = True
+
+    def close(self, *, timeout=5):
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 <= timeout <= 30:
+            raise ValueError("bounded session close timeout required")
+        deadline = monotonic() + timeout
+        with self._connections:
+            self._admissions_stopped = True
+            while self._live_connections:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return False
+                self._connections.wait(remaining)
+            return True
 
     @staticmethod
     def _canonical_payload(payload: Mapping[str, object]) -> str:
@@ -121,6 +164,27 @@ class SQLiteSessionRepository:
                 (session_id, sequence, event_id, event_type, occurred_at_utc, payload_json, previous_hash, event_hash),
             )
         return SessionEvent(session_id, sequence, event_id, event_type, occurred_at_utc, json.loads(payload_json), previous_hash, event_hash)
+
+    def append_once(self, session_id: str, event_type: str, payload: Mapping[str, object], *,
+                    event_id: str, occurred_at_utc: str) -> SessionEvent:
+        """Project an outbox event idempotently; reject conflicting identity reuse."""
+        try:
+            return self.append(session_id, event_type, payload, event_id=event_id,
+                               occurred_at_utc=occurred_at_utc)
+        except sqlite3.IntegrityError:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT session_id,sequence,event_id,event_type,occurred_at_utc,payload_json,previous_hash,event_hash "
+                    "FROM session_event WHERE event_id=?", (event_id,),
+                ).fetchone()
+            if row is None:
+                raise
+            existing = self._row_to_event(row)
+            if (existing.session_id != session_id or existing.event_type != event_type
+                    or existing.occurred_at_utc != occurred_at_utc
+                    or self._canonical_payload(existing.payload) != self._canonical_payload(payload)):
+                raise ValueError("session outbox event identity has conflicting content")
+            return existing
 
     def read_range(self, session_id: str, *, start_sequence: int = 1,
                    end_sequence: int | None = None, limit: int = 1_000) -> tuple[SessionEvent, ...]:

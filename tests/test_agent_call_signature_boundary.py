@@ -1,5 +1,6 @@
 """Agent call signatures live in the adapters layer; the root name is a delegate."""
 import json
+import os
 
 import server
 from sonder_runtime.adapters import agent_call_signature
@@ -25,7 +26,7 @@ def test_equivalent_paths_collapse_to_one_signature(tmp_path):
     second = _signature("file_read", {"path": str(project)})
     assert first == second
     assert first[0] == "file_read"
-    assert json.loads(first[1])["path"] == str(project.resolve())
+    assert json.loads(first[1])["path"] == os.path.normcase(str(project.resolve()))
     assert first != _signature("file_read", {"path": str(project / "src")})
 
 
@@ -33,7 +34,7 @@ def test_tool_specific_keys_and_non_dict_args_are_handled(tmp_path):
     convert = _signature("data_convert", {
         "input_path": str(tmp_path / "a.csv"), "output_path": str(tmp_path / "sub" / ".." / "b.json"),
     })
-    assert json.loads(convert[1])["output_path"] == str((tmp_path / "b.json").resolve())
+    assert json.loads(convert[1])["output_path"] == os.path.normcase(str((tmp_path / "b.json").resolve()))
     run_a = _signature("workspace_run", {"cwd": str(tmp_path / "."), "program": "x"})
     run_b = _signature("workspace_run", {"cwd": str(tmp_path), "program": "x"})
     assert run_a == run_b
@@ -48,7 +49,7 @@ def test_archive_create_inputs_are_resolved_against_the_root(tmp_path):
     })
     decoded = json.loads(payload)
     assert name == "archive_create"
-    assert decoded["root"] == str(tmp_path.resolve())
-    assert decoded["destination"] == str((tmp_path / "out" / "x.zip").resolve())
-    assert decoded["inputs_json"] == [str((tmp_path / "a.txt").resolve()), str((tmp_path / "b.txt").resolve())]
+    assert decoded["root"] == os.path.normcase(str(tmp_path.resolve()))
+    assert decoded["destination"] == os.path.normcase(str((tmp_path / "out" / "x.zip").resolve()))
+    assert decoded["inputs_json"] == [os.path.normcase(str((tmp_path / "a.txt").resolve())), os.path.normcase(str((tmp_path / "b.txt").resolve()))]
     assert "inputs" not in decoded

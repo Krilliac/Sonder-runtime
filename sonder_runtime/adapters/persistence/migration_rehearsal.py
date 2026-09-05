@@ -11,6 +11,8 @@ complete and is checked by the application-owned epoch gate.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import hashlib
 import shutil
 import sqlite3
@@ -87,7 +89,7 @@ def _epoch_row_count(db_path: Path) -> int:
     """Count ledger rows for ``EPOCH``; a resumed migration must add at most one."""
     if not db_path.is_file():
         return 0
-    conn = sqlite3.connect(str(db_path))
+    conn = owned_sqlite_connect(str(db_path))
     try:
         tables = {
             row[0] for row in conn.execute(

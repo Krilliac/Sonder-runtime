@@ -1,6 +1,8 @@
 """Bounded lifecycle ownership for one-shot stdio MCP providers."""
 from __future__ import annotations
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 import subprocess
 import threading
 import time
@@ -118,7 +120,7 @@ class McpSubprocessProvider:
             except BaseException as exc:
                 result.append(exc)
 
-        worker = threading.Thread(target=communicate, name="sonder-mcp-provider", daemon=True)
+        worker = owned_runtime_thread(target=communicate, name="sonder-mcp-provider", daemon=True)
         worker.start()
         termination_requested = False
         call_deadline = time.monotonic() + self._timeout

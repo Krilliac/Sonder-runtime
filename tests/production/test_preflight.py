@@ -8,6 +8,8 @@ import pytest
 
 import sonder_config
 from sonder_runtime.adapters import preflight as sonder_preflight
+from sonder_runtime.adapters.persistence import migrations
+from sonder_runtime.platform import paths as runtime_paths
 
 pytestmark = pytest.mark.unit
 
@@ -24,11 +26,26 @@ def _config(tmp_path, **env):
     )
 
 
-def test_preflight_passes_without_ollama_probe(tmp_path, monkeypatch):
+@pytest.mark.parametrize("prior_schema_applied", [False, True])
+def test_preflight_passes_without_ollama_probe(
+    tmp_path, monkeypatch, prior_schema_applied
+):
+    # A previous application may have migrated its own home in this process.
+    previous_home = tmp_path / "previous-home"
+    runtime_paths.configure_home(previous_home)
+    monkeypatch.setenv("SONDER_DB", str(previous_home / "memory.db"))
+    if prior_schema_applied:
+        migrations.migrate_all()
     monkeypatch.setenv(
         "SONDER_RUNTIME_POLICY", str(tmp_path / "home" / "runtime_policy.json")
     )
     config = _config(tmp_path)
+    # Match application startup: schema adapters use the selected runtime home.
+    runtime_paths.configure_home(config.state.home)
+    monkeypatch.setenv("SONDER_DB", str(tmp_path / "home" / "memory.db"))
+    assert migrations.store_db_paths()["operations"] == str(
+        tmp_path / "home" / "operations.db"
+    )
     report = sonder_preflight.run_preflight(config, check_ollama=False)
     assert report.ok, [c.as_dict() for c in report.checks if not c.ok]
     # operations baseline is pending on a fresh home: degraded, not failed.

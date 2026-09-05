@@ -1,7 +1,7 @@
 """Whole-job placement and ambiguity-safe compute dispatch."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 import hashlib
 from threading import RLock
@@ -21,6 +21,8 @@ from ...domain.compute_fabric import (
     CandidateDecision,
     ComputePlacementScheduler,
     PlacementDecision,
+    PlacementInventoryScope,
+    PlacementPolicy,
     WorkloadRequest,
     NodeHealth,
 )
@@ -59,6 +61,7 @@ class ComputeFabricService:
         refresh: Callable[[], None] | None = None,
         placement_registry=None,
         metrics=None,
+        refresh_candidates: Callable[[WorkloadRequest], None] | None = None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
@@ -66,6 +69,7 @@ class ComputeFabricService:
         self._local_worker = local_worker
         self._now = now
         self._refresh = refresh
+        self._refresh_candidates = refresh_candidates
         self._placement_registry = placement_registry
         self._metrics = metrics
         self._placements: dict[str, _PlacementRecord] = {}
@@ -89,6 +93,7 @@ class ComputeFabricService:
             ],
             "ranked_node_ids": list(record.placement.ranked_node_ids),
             "snapshot_digests": [list(item) for item in record.placement.snapshot_digests],
+            "inventory_scope": (asdict(record.placement.inventory_scope) if record.placement.inventory_scope else None),
         }
 
     def _rehydrate_placements(self) -> None:
@@ -118,6 +123,7 @@ class ComputeFabricService:
             try:
                 placement = PlacementDecision(
                     request_digest=str(payload["request_digest"]),
+                    inventory_scope=(PlacementInventoryScope(**payload["inventory_scope"]) if payload.get("inventory_scope") else None),
                     selected_node_id=str(payload["node_id"]),
                     candidates=tuple(
                         CandidateDecision(
@@ -243,53 +249,32 @@ class ComputeFabricService:
         )
 
     def _place(self, request: WorkloadRequest) -> PlacementDecision:
-        if self._refresh is not None:
+        if self._refresh_candidates is not None:
+            self._refresh_candidates(request)
+        elif self._refresh is not None:
             self._refresh()
         now = self._now()
-        snapshots = self._registry.list_snapshots(now=now)
-        self._observe_inventory(snapshots, now=now)
-        if request.local_only or not request.allow_remote:
-            candidates = tuple(item for item in snapshots if item.node.local)
-            decision = self._scheduler.place(request, candidates, now=now)
-            if decision.selected_node_id is None:
-                self._observe_rejection(decision)
-            return decision
-
-        remote = tuple(item for item in snapshots if not item.node.local)
-        decision = self._scheduler.place(request, remote, now=now)
-        if decision.selected_node_id is not None or not request.allow_local_fallback:
-            if decision.selected_node_id is None:
-                self._observe_rejection(decision)
-            return decision
-        local = tuple(item for item in snapshots if item.node.local)
-        local_decision = self._scheduler.place(request, local, now=now)
-        if local_decision.selected_node_id is None:
-            self._observe_rejection(local_decision)
-        return local_decision
-
-    def _observe_inventory(self, snapshots, *, now: datetime) -> None:
         observe = getattr(self._metrics, "set_compute_inventory", None)
-        if not callable(observe):
-            return
-        stale_ids = {
-            snapshot.node.node_id
-            for snapshot in snapshots
-            if self._registry.is_stale(snapshot.node.node_id, now=now)
-        }
-        observe(
-            configured=len(self._registry.configured_nodes()),
-            live=sum(1 for item in snapshots if item.node.node_id not in stale_ids),
-            healthy=sum(
-                1 for item in snapshots
-                if item.node.node_id not in stale_ids and item.health is NodeHealth.HEALTHY
-            ),
-            unhealthy=sum(
-                1 for item in snapshots
-                if item.node.node_id not in stale_ids and item.health is NodeHealth.UNHEALTHY
-            ),
-            stale=len(stale_ids),
-            active_jobs=sum(item.active_jobs for item in snapshots),
-        )
+        if callable(observe):
+            observe(**self._registry.inventory_summary(now=now))
+
+        def assess(local=None):
+            window = self._registry.candidates(request, now=now, local=local)
+            decision = self._scheduler.place(request, window.snapshots, now=now,
+                snapshot_digest=lambda snapshot: window.digests[snapshot.node.node_id])
+            return replace(decision, inventory_scope=window.scope)
+
+        if request.local_only or not request.allow_remote or request.placement_policy is PlacementPolicy.LOCAL_ONLY:
+            decision = assess(local=True)
+        elif request.placement_policy is PlacementPolicy.RANK_ALL:
+            decision = assess()
+        else:
+            decision = assess(local=False)
+            if decision.selected_node_id is None and request.allow_local_fallback:
+                decision = assess(local=True)
+        if decision.selected_node_id is None:
+            self._observe_rejection(decision)
+        return decision
 
     def _observe_rejection(self, decision: PlacementDecision) -> None:
         observe = getattr(self._metrics, "observe_compute_placement_rejection", None)
@@ -316,6 +301,7 @@ class ComputeFabricService:
             raise ValueError(
                 f"{request.kind.value} workloads require digest-bound input artifacts"
             )
+        profiled = self._profiled(request)
         with self._lock:
             existing = self._placements.get(request.request_id)
         if existing is not None:
@@ -326,8 +312,9 @@ class ComputeFabricService:
                 raise Conflict(
                     "controller identity is already bound to another compute request"
                 )
+            if existing.placement.request_digest != profiled.digest():
+                raise Conflict("controller identity is already bound to another placement policy")
             return self.status(request.request_id)
-        profiled = self._profiled(request)
         placement = self._place(profiled)
         node_id = placement.selected_node_id
         if node_id is None:

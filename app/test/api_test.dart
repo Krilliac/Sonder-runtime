@@ -377,7 +377,7 @@ void main() {
     });
 
     final result = await http.runWithClient(
-      () => SonderApi(baseUrl: 'http://sonder.test')
+      () => SonderApi(baseUrl: 'https://sonder.test')
           .register('person', 'password123'),
       () => client,
     );

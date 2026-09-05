@@ -1,19 +1,23 @@
+import 'account_session.dart';
 import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'settings.dart';
 import 'theme.dart';
+import 'workspace_ui.dart';
 
 /// Connection settings: server URL, API key, theme, plus a "Test connection"
 /// button that hits /v1/models so the user gets immediate feedback.
 class SettingsScreen extends StatefulWidget {
   final Settings settings;
   final ValueChanged<Settings> onChanged;
+  final ValueChanged<WorkspaceDestination>? onNavigate;
 
   const SettingsScreen({
     super.key,
     required this.settings,
     required this.onChanged,
+    this.onNavigate,
   });
 
   @override
@@ -33,6 +37,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _allowHosted;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
+  AccountSession? _account;
   bool _obscureKey = true;
   bool _obscureLauncherToken = true;
   String? _status;
@@ -44,6 +49,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    _account = widget.settings.accountSession;
     _server = TextEditingController(text: widget.settings.serverUrl);
     _key = TextEditingController(text: widget.settings.apiKey);
     _model = TextEditingController(text: widget.settings.model);
@@ -88,7 +94,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _markDirty() {
-    if (mounted && !_dirty) setState(() => _dirty = true);
+    if (mounted) setState(() => _dirty = true);
   }
 
   Future<bool> _confirmDiscard() async {
@@ -121,6 +127,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Navigator.of(context).pop();
   }
 
+  Future<void> _navigate(WorkspaceDestination destination) async {
+    if (!await _confirmDiscard() || !mounted) return;
+    widget.onNavigate?.call(destination);
+  }
+
   void _changeBool(ValueChanged<bool> change, bool value) {
     setState(() {
       change(value);
@@ -131,6 +142,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Settings _current() => Settings(
         serverUrl: _server.text,
         apiKey: _key.text,
+        accountSession:
+            _account?.matches(_server.text) == true ? _account : null,
         themeMode: _themeMode,
         allowHosted: _allowHosted,
         contextSize: _contextSize.text.trim().isEmpty
@@ -153,14 +166,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final api = SonderApi(
       baseUrl: _server.text,
       apiKey: _key.text,
+      accountSession: _account?.matches(_server.text) == true ? _account : null,
     );
     try {
       final models = await api.listModels();
+      if (!mounted) return;
       setState(() {
         _statusOk = true;
         _status = 'Connected. Models: ${models.join(", ")}';
       });
     } on SonderException catch (e) {
+      if (!mounted) return;
       setState(() {
         _statusOk = false;
         _status = e.message;
@@ -230,20 +246,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _status = null;
     });
     try {
-      await Settings.clearApiKey();
-      _key.clear();
+      await Settings.clearAccountSession();
+      if (!mounted) return;
+      _account = null;
       _password.clear();
       if (!mounted) return;
       widget.onChanged(_current());
       setState(() {
         _statusOk = true;
-        _status = 'Local API/session token removed from this device.';
+        _status =
+            'Account session forgotten locally. Server revocation was not requested.';
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _statusOk = false;
-        _status = 'Could not remove the local API/session token securely.';
+        _status = 'Could not remove the account session securely.';
+      });
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  Future<void> _signOut() async {
+    final account = _account;
+    if (account == null || !account.matches(_server.text)) return;
+    setState(() {
+      _testing = true;
+      _status = null;
+    });
+    try {
+      await SonderApi(
+              baseUrl: account.origin,
+              apiKey: _key.text,
+              accountSession: account)
+          .logout();
+      await Settings.clearAccountSession();
+      if (!mounted) return;
+      _account = null;
+      _password.clear();
+      widget.onChanged(_current());
+      setState(() {
+        _statusOk = true;
+        _status = 'Signed out. This account session was revoked.';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _statusOk = false;
+        _status =
+            'Revocation not confirmed. Retry Sign out, or explicitly Forget local session. The session is retained for retry.';
       });
     } finally {
       if (mounted) setState(() => _testing = false);
@@ -251,31 +303,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _accountAction({required bool register}) async {
+    if (_account != null) {
+      setState(() {
+        _statusOk = false;
+        _status =
+            'Sign out or explicitly forget the current session before switching accounts.';
+      });
+      return;
+    }
     setState(() {
       _testing = true;
       _status = null;
     });
     final api = SonderApi(baseUrl: _server.text, apiKey: _key.text);
     try {
+      final loginOrigin = serverOrigin(_server.text);
       if (register) {
         final msg = await api.register(_username.text, _password.text);
+        if (!mounted) return;
         setState(() {
           _statusOk = true;
           _status = msg;
         });
       } else {
         final token = await api.login(_username.text, _password.text);
+        if (!mounted) return;
         setState(() {
-          _key.text = token;
+          _account = AccountSession(token: token, origin: loginOrigin);
           _password.clear();
           _statusOk = true;
           _status = 'Logged in. Save settings to store the token securely.';
         });
       }
     } on SonderException catch (e) {
+      if (!mounted) return;
       setState(() {
         _statusOk = false;
         _status = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _statusOk = false;
+        _status = 'Account request could not be completed.';
       });
     } finally {
       if (mounted) setState(() => _testing = false);
@@ -283,6 +353,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _save() async {
+    if (_account != null && !_account!.matches(_server.text)) {
+      setState(() {
+        _statusOk = false;
+        _status =
+            'Return to the account server to sign out, or explicitly forget the local session before switching servers.';
+      });
+      return;
+    }
     final s = _current();
     final launcherError = s.launcherConfigurationError;
     if (launcherError != null) {
@@ -294,8 +372,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // A blank field explicitly replaces a credential that was present when
     // this screen opened. Do not leave an old keychain value usable.
     try {
-      if (widget.settings.apiKey.trim().isNotEmpty &&
-          s.apiKey.trim().isEmpty) {
+      if (widget.settings.apiKey.trim().isNotEmpty && s.apiKey.trim().isEmpty) {
         await Settings.clearApiKey();
       }
       if (widget.settings.launcherToken.trim().isNotEmpty &&
@@ -324,7 +401,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -351,6 +427,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ],
         ),
         actions: [
+          if (widget.onNavigate != null)
+            WorkspaceMenu(current: WorkspaceDestination.settings, onSelected: _navigate),
           Tooltip(
             message: 'Return to main chat',
             child: TextButton.icon(
@@ -367,26 +445,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: ListView(
               padding: const EdgeInsets.all(20),
               children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Runtime architecture',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Sonder Runtime is an orchestration system, not a '
-                'standalone foundation model. Ollama loads and serves the '
-                'selected local model weights for inference. Sonder Runtime '
-                'adds prompts, memory, tools, routing, and policy; adapter '
-                'training uses PEFT/Hugging Face before validated results '
-                'are deployed to Ollama.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
           const _GroupLabel('Connection'),
           const SizedBox(height: 4),
           TextField(
@@ -461,10 +519,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             controller: _model,
             autocorrect: false,
             decoration: const InputDecoration(
-              labelText: 'Default inference route / model',
+              labelText: 'Default model or route',
               hintText: 'sonder, code, fast...',
               helperText:
-                  'Sonder Runtime routes it; Ollama serves local weights',
+                  'Used for new conversations.',
               prefixIcon: Icon(Icons.memory_outlined),
               border: OutlineInputBorder(),
             ),
@@ -477,7 +535,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               labelText: 'Context size',
               hintText: '8192, 32k, 256k, 1m',
               helperText:
-                  'Requested virtual context. Ollama native num_ctx is clamped safely.',
+                  'Requested conversation capacity; server limits still apply.',
               prefixIcon: Icon(Icons.view_week_outlined),
               border: OutlineInputBorder(),
             ),
@@ -543,6 +601,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 12),
+          Text(_account == null
+              ? 'No account session. Login preserves your deployment API key.'
+              : 'Signed-in server: ${_account!.origin}'),
+          const SizedBox(height: 6),
+          Text(
+            'Sign out revokes this session on the server. Forget local session '
+            'removes it from this device only; it does not revoke it on the server.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 12),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -556,6 +624,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onPressed: _testing ? null : _login,
                 icon: const Icon(Icons.login),
                 label: const Text('Login'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _testing || _account?.matches(_server.text) != true
+                    ? null : _signOut,
+                icon: const Icon(Icons.logout),
+                label: const Text('Sign out'),
               ),
               OutlinedButton.icon(
                 onPressed: _testing ? null : _forgetApiSession,
@@ -589,34 +663,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           if (_status != null) ...[
             const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: (_statusOk ? cs.primaryContainer : cs.errorContainer),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    _statusOk ? Icons.check_circle : Icons.error_outline,
-                    color:
-                        _statusOk ? cs.onPrimaryContainer : cs.onErrorContainer,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _status!,
-                      style: TextStyle(
-                        color: _statusOk
-                            ? cs.onPrimaryContainer
-                            : cs.onErrorContainer,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            WorkspaceNotice(message: _status!, tone: _statusOk ? NoticeTone.success : NoticeTone.warning),
           ],
           const _GroupLabel('Appearance'),
           Padding(
@@ -649,14 +696,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'Sonder Runtime is local-first orchestration. It is not the foundation '
-            'model and does not make Ollama a trainer. Hosted tiers, explicit '
-            'web tools, and approximate location contact external services '
-            'only when you enable or invoke them.',
-            style: Theme.of(context).textTheme.bodySmall,
           ),
               ],
             ),

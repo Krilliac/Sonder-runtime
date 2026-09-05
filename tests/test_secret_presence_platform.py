@@ -19,4 +19,11 @@ def test_config_secret_redaction_uses_platform_policy():
         "api_key": "[set]",
         "auth_secret": "[set]",
         "backup_key_file": "[unset]",
+        "artifact_transfer_key": "[unset]",
     }
+
+
+def test_artifact_transfer_secret_redacts_to_presence_only():
+    redacted = Secrets(artifact_transfer_key="private-artifact-test-key").as_redacted_dict()
+    assert redacted["artifact_transfer_key"] == "[set]"
+    assert "private-artifact-test-key" not in str(redacted)

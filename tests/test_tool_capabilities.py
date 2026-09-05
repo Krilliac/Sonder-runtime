@@ -30,6 +30,9 @@ def test_local_only_tools_are_absent_from_hosted_help_and_policy_surface():
         name for name, descriptor in capabilities.CAPABILITIES.items()
         if descriptor.cloud is capabilities.CloudRequirement.LOCAL_ONLY
     }
+    # CAPABILITIES intentionally describes only the initial inspection slice.
+    # Lane control is separately described and must remain explicitly local.
+    local_only |= {"agent_lane"}
     assert local_only == server._CLOUD_AGENT_LOCAL_ONLY_TOOLS
     assert local_only.isdisjoint(surface.hosted_agent_tools)
     for name in local_only:
@@ -53,7 +56,7 @@ def _hosted_generate(responses, prompts):
     return generate
 
 
-@pytest.mark.parametrize("tool", sorted(capabilities.CAPABILITIES))
+@pytest.mark.parametrize("tool", sorted(set(capabilities.CAPABILITIES) | {"agent_lane"}))
 def test_hosted_agent_loop_denies_every_local_only_tool(monkeypatch, tool):
     responses = [
         server.json.dumps({"tool": tool, "args": {}}),

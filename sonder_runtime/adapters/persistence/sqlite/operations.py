@@ -7,6 +7,8 @@ and recovery records.
 """
 from __future__ import annotations
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+
 import logging
 import sqlite3
 from pathlib import Path
@@ -55,7 +57,7 @@ CREATE TABLE IF NOT EXISTS schema_epoch (
 def init_operations_db(db_path: Path) -> sqlite3.Connection:
     """Open or create operations.db with the SPEC-5 schema."""
     logger.debug(f"initializing operations.db at {db_path!r}")
-    conn = sqlite3.connect(str(db_path))
+    conn = owned_sqlite_connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(OPERATIONS_DDL)
