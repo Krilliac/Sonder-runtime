@@ -44,7 +44,7 @@ class WindowsOwnedRuntimeProcess:
 
     def launch(self, namespace, command):
         self._cancelled = self._waited = None
-        source = Path(__file__).resolve().parents[3]
+        source, arguments, python_path, search_path, metadata = self._launch_layout(command)
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -52,9 +52,8 @@ class WindowsOwnedRuntimeProcess:
         }
         environment.update(
             {
-                "PYTHONPATH": os.pathsep.join(
-                    (str(source), str(Path(sys.prefix) / "Lib" / "site-packages"))
-                ),
+                "PYTHONPATH": python_path,
+                "PATH": search_path,
                 "PYTHONUNBUFFERED": "1",
                 "SONDER_HOME": str(self.root / "state"),
                 "SONDER_FILE_ROOTS": str(
@@ -89,9 +88,7 @@ class WindowsOwnedRuntimeProcess:
                 command.digest,
             ),
             (
-                sys._base_executable,
-                "-m",
-                self.child_module,
+                *arguments,
                 str(self.root),
                 namespace,
                 command.operation_id,
@@ -101,12 +98,18 @@ class WindowsOwnedRuntimeProcess:
             inherit_environment=False,
             max_descendants=8,
             require_job_scope=True,
-            metadata=(("owner_namespace", namespace),),
+            metadata=(("owner_namespace", namespace), *metadata),
         )
         try:
             return self.provider.start(request)
         finally:
             self._readers = self.provider.snapshot_output_readers(command.operation_id)
+
+    def _launch_layout(self, command):
+        source = Path(__file__).resolve().parents[3]
+        return (source, (sys._base_executable, "-m", self.child_module),
+            os.pathsep.join((str(source), str(Path(sys.prefix) / "Lib" / "site-packages"))),
+            os.environ.get("PATH", ""), ())
 
     def wait(self, job_id, timeout):
         if self._cancelled is not None and self._cancelled[0] == job_id:
@@ -147,3 +150,21 @@ class WindowsOwnedRuntimeProcess:
 
 class WindowsManagedRuntimeProcess(WindowsOwnedRuntimeProcess):
     child_module = "sonder_runtime.bootstrap.managed_http_runtime"
+
+    def bind_payload(self, payload, writable_roots):
+        from .runtime_payload import RuntimePayload
+        if type(payload) is not RuntimePayload or hasattr(self, "_payload"):
+            raise OwnerRefused("exact single runtime payload binding required")
+        self._payload, self._payload_roots = payload, writable_roots
+
+    def _launch_layout(self, command):
+        import json
+        if not hasattr(self, "_payload") or json.loads(command.payload) != {"artifact_digest": self._payload.digest}:
+            raise OwnerRefused("prepared launch artifact binding is missing")
+        self._payload.validate(self._payload_roots())
+        value = self._payload.manifest
+        code = "import sys,json; sys.path[:]=json.loads(sys.argv.pop(1)); import runpy; runpy.run_module('sonder_runtime.bootstrap.managed_http_runtime',run_name='__main__')"
+        arguments = (value["executable"], "-E", "-S", "-B", "-X", "pycache_prefix=" + str(self.root / "python-cache"),
+            "-c", code, json.dumps(value["paths"]))
+        return (Path(value["payload"]), arguments, str(value["payload"]),
+            os.pathsep.join(value["dll_paths"]), (("runtime_artifact_digest", self._payload.digest),))

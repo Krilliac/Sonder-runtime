@@ -194,6 +194,7 @@ class DisposableRuntimeOwner:
                 )
             if command.action == "launch":
                 self._config(self.journal.selected_config())
+                self._before_launch(command)
                 if self._launch_id is None:
                     # Retained before calling a provider that may have started a
                     # suspended child before raising. Never launch it twice.
@@ -263,6 +264,9 @@ class DisposableRuntimeOwner:
 
     def _launch_prepared(self, command):
         self._process.launch(self.namespace, command)
+
+    def _before_launch(self, command):
+        """Protected host-only admission hook, before retaining a launch effect."""
 
     def _complete(self, command, result, state, deadline):
         if time.monotonic() >= deadline:
