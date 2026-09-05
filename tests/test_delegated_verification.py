@@ -566,3 +566,74 @@ def test_prepared_bundle_tampering_cannot_spend_approval(lanes):
             altered, context=context, approve=lambda *a: "approval"
         )
     assert gateway.calls == 0
+
+
+@pytest.mark.parametrize("foreign_principal", [False, True])
+def test_foreign_queued_or_owned_overlap_refuses_verifier_admission(
+    lanes, foreign_principal
+):
+    service, store, model, root, context, parent = lanes
+    original = spawn(lanes)
+    service.run_pending(original, context)
+    service.control(original, "cancel", command_id="old-cancel", context=context)
+    foreign_context = (
+        replace(context, principal_id="account:foreign", auth_level="admin")
+        if foreign_principal
+        else context
+    )
+    service.authorize_grant = lambda lane, context: None
+    other_parent = service.open_model_parent(foreign_context)
+    other = service.spawn(
+        command_id="other-child",
+        parent_session_id=other_parent["parent_session_id"],
+        task="Other work",
+        workspace_root=str(root),
+        context=foreign_context,
+    )["lane"]["id"]
+    verifier, gateway, _ = _verifier(lanes)
+    with pytest.raises(ValueError, match="overlap"):
+        _prepared(lanes, verifier)
+    with store.transaction() as tx:
+        lane = tx.lane(other)
+        lane.update(status="completed", owner="live-owner", pending_effect=True)
+        tx.save(lane)
+    with pytest.raises(ValueError, match="overlap"):
+        _prepared(lanes, verifier)
+    assert gateway.calls == 0
+
+
+def test_two_parent_verifier_admission_race_has_one_workspace_owner(lanes):
+    from concurrent.futures import ThreadPoolExecutor
+
+    service, store, model, root, context, parent = lanes
+    first_lane = spawn(lanes)
+    service.run_pending(first_lane, context)
+    service.control(first_lane, "cancel", command_id="cancel-first", context=context)
+    second_parent = service.open_model_parent(context)
+    second_lane = service.spawn(
+        command_id="second",
+        parent_session_id=second_parent["parent_session_id"],
+        task="Other work",
+        workspace_root=str(root),
+        context=context,
+    )["lane"]["id"]
+    service.run_pending(second_lane, context)
+    service.control(second_lane, "cancel", command_id="cancel-second", context=context)
+    left, _, _ = _verifier(lanes)
+    right, _, _ = _verifier(lanes)
+
+    def prepare(verifier, parent_id, command):
+        try:
+            return verifier.prepare(
+                parent_id, command_id=command, context=context, bound_parent_revision=1
+            )
+        except ValueError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [
+            pool.submit(prepare, left, parent["parent_session_id"], "left"),
+            pool.submit(prepare, right, second_parent["parent_session_id"], "right"),
+        ]
+        winners = [call.result() for call in calls]
+    assert sum(winner is not None for winner in winners) == 1

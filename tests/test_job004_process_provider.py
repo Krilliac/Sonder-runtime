@@ -1370,3 +1370,56 @@ def test_real_windows_descendant_is_removed_before_cleanup_certificate(tmp_path)
     assert (
         provider.wait("after-cleanup", timeout=5).record.status is JobStatus.SUCCEEDED
     )
+
+
+@pytest.mark.parametrize("ending", ["cancel", "forced_wait"])
+@pytest.mark.parametrize("failure_stage", ["close", "capacity"])
+def test_terminal_cancelled_job_retries_failed_close_before_releasing_slot(
+    monkeypatch, ending, failure_stage
+):
+    from dataclasses import replace
+
+    registry = DurableJobRegistry()
+    token = _ScopedToken(ProcessContainmentResult(True, forced=True))
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        launcher=lambda *a, **k: _Process(),
+        platform_name="posix",
+        memory_limiter=_ScopedLimiter(token),
+        max_concurrent_processes=1,
+        process_identity_resolver=lambda pid: "stable",
+    )
+    retries = []
+    monkeypatch.setattr(
+        provider, "_schedule_deadline", lambda job_id, delay: retries.append(job_id)
+    )
+    provider.start(replace(_request("close-retry"), require_job_scope=True))
+    close = token.close
+    failures = [True]
+
+    def fail_once():
+        if failures:
+            failures.pop()
+            raise OSError("native close unavailable")
+        close()
+
+    if failure_stage == "close":
+        monkeypatch.setattr(token, "close", fail_once)
+    else:
+        monkeypatch.setattr(provider, "_release_capacity", lambda job_id: fail_once())
+    with pytest.raises(OSError):
+        if ending == "cancel":
+            provider.cancel("close-retry")
+        else:
+            provider.wait("close-retry")
+    assert "close-retry" in retries
+    assert registry.poll("close-retry").is_terminal
+    assert provider.cleanup_proof("close-retry") is None
+    with pytest.raises(RuntimeError, match="capacity"):
+        provider.start(_request("too-soon"))
+    provider._expire_deadline_owned("close-retry")
+    assert token.closed
+    assert provider.cleanup_proof("close-retry")["resources_released"]
+    provider.start(replace(_request("after-close"), require_job_scope=True))
+    provider.wait("after-close")

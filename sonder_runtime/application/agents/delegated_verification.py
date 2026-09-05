@@ -160,6 +160,9 @@ class DelegatedVerificationService:
             signatures, roots, jobs = self._children(tx, parent_session_id, context)
             for job, parent in jobs:
                 self._proof(job, parent, context.principal_id)
+            tx.require_verification_workspace_quiescence(
+                parent_session_id, context.principal_id, roots
+            )
             generation = tx.verification_generation(
                 parent_session_id, context.principal_id
             )

@@ -112,6 +112,7 @@ class SubprocessJobProvider:
         )
         self._process_slot_owners: dict[str, _ProcessSlotLease] = {}
         self._failed_launches: set[str] = set()
+        self._cleanup_observations: dict[str, int] = {}
         self._restore_deadlines()
 
     def start(self, request: ProcessJobRequest) -> ProcessJobStart:
@@ -428,12 +429,22 @@ class SubprocessJobProvider:
             records = self._jobs.cancel(
                 job_id, reason, max_descendants=self._limits.get(job_id, 64),
             )
-            self._forget_local_job(job_id)
-            self._publish_cleanup(job_id, exit_code)
+            self._cleanup_observations[job_id] = exit_code
+            try:
+                self._forget_local_job(job_id)
+                self._publish_cleanup(job_id, exit_code)
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
             return ProcessJobWait(records[-1], exit_code)
-        if containment is not None:
-            self._release_memory_limit(job_id)
-            self._release_capacity(job_id)
+        if containment is not None or job_id in self._cleanup_observations:
+            self._cleanup_observations[job_id] = exit_code
+            try:
+                self._release_memory_limit(job_id)
+                self._release_capacity(job_id)
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         output_failure = self._take_output_failure(job_id)
         status = (
             JobStatus.SUCCEEDED
@@ -461,8 +472,12 @@ class SubprocessJobProvider:
         self._release_process_slot(job_id)
         if containment is None:
             self._release_memory_limit(job_id)
-        if containment is not None and containment.complete:
-            self._publish_cleanup(job_id, exit_code)
+        if job_id in self._cleanup_observations:
+            try:
+                self._publish_cleanup(job_id, self._cleanup_observations[job_id])
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         return ProcessJobWait(record, exit_code)
 
     def cancel(self, job_id: str, reason: str = "cancelled") -> JobCancellationResult:
@@ -543,13 +558,19 @@ class SubprocessJobProvider:
                     cleanup_completed=False,
                     detail="root process exit remains unobserved",
                 )
-            self._forget_local_job(job_id)
             if (
                 containment is not None
                 and containment.complete
                 and observed_exit is not None
             ):
-                self._publish_cleanup(job_id, observed_exit)
+                self._cleanup_observations[job_id] = observed_exit
+            try:
+                self._forget_local_job(job_id)
+                if job_id in self._cleanup_observations:
+                    self._publish_cleanup(job_id, self._cleanup_observations[job_id])
+            except Exception:
+                self._schedule_deadline(job_id, self._cleanup_retry_seconds)
+                raise
         else:
             self._schedule_deadline(job_id, self._cleanup_retry_seconds)
         return result
@@ -562,6 +583,7 @@ class SubprocessJobProvider:
         view = self._registry.view(job_id)
         metadata = view.metadata or {}
         if metadata.get("require_job_scope") != "1":
+            self._cleanup_observations.pop(job_id, None)
             return
         if any(
             job_id in collection
@@ -594,6 +616,7 @@ class SubprocessJobProvider:
             json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         self._registry._record_process_cleanup(job_id, proof)
+        self._cleanup_observations.pop(job_id, None)
 
     def cleanup_proof(self, job_id):
         read = getattr(self._registry, "process_cleanup_proof", None)
@@ -662,6 +685,12 @@ class SubprocessJobProvider:
         try:
             record = self._registry.poll(job_id)
             if record.is_terminal:
+                if job_id in self._cleanup_observations:
+                    exit_code = self._cleanup_observations[job_id]
+                    self._forget_local_job(job_id)
+                    self._publish_cleanup(job_id, exit_code)
+                elif self._owns_cleanup_resources(job_id):
+                    self.cancel(job_id, reason="terminal job resource cleanup retry")
                 return
             process = self._processes.get(job_id)
             if process is not None:
@@ -708,15 +737,30 @@ class SubprocessJobProvider:
         except KeyError:
             # A normal completion or concurrent cancellation may win the race.
             return
-        except OSError:
+        except Exception:
             retry_cleanup = True
         finally:
             if retry_cleanup:
                 try:
-                    if not self._registry.poll(job_id).is_terminal:
+                    if (
+                        not self._registry.poll(job_id).is_terminal
+                        or self._owns_cleanup_resources(job_id)
+                        or job_id in self._cleanup_observations
+                    ):
                         self._schedule_deadline(job_id, self._cleanup_retry_seconds)
                 except KeyError:
                     pass
+
+    def _owns_cleanup_resources(self, job_id):
+        return any(
+            job_id in collection
+            for collection in (
+                self._processes,
+                self._memory_tokens,
+                self._unresolved_scopes,
+                self._process_slot_owners,
+            )
+        )
 
     def _schedule_deadline(self, job_id: str, delay_seconds: float) -> None:
         timer = self._timer_factory(
