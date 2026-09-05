@@ -7,6 +7,27 @@ install a service, or transfer authority after the foreground owner exits.
 sibling workspace anchors and launch exclusion from creation through cleanup.
 Existing paths are refused. The private path inventory is the exact owned root.
 
+Managed launches use a required-new private copy of the Sonder Python package,
+root compatibility modules, migrations and seed data. They never use the live
+checkout as cwd or import path. A bounded canonical manifest covers this copy,
+the resolved Windows CPython 3.12 executable/runtime files, standard library,
+DLL directory and the current isolated environment's site-packages. Unknown
+runtime path configurations, reparse entries, more than 50,000 files, more than
+4 GiB of external/payload files, or a manifest larger than 32 MiB are refused.
+The Sonder copy itself is limited to 10,000 files and 256 MiB.
+
+The digest is bound into configuration, prepared launch, process metadata and
+READY/CLEAN evidence. Content/identity and live writable-root separation are
+rechecked before the process effect, immediately before native spawn, and at
+child startup. The child uses explicit import paths with `-E -S`, no user-site
+or `.pth` execution, a private pycache prefix with bytecode writes disabled,
+and a minimal declared runtime DLL PATH. Standard operating-system libraries
+remain part of the trusted Windows platform. Files belonging to another
+trusted same-user host administrator are **not** write-locked for the duration
+of execution: hashes and directory anchors do not prevent that administrator
+from updating them after validation. Such concurrent host updates are outside
+this slice's guarantee; model-writable closure paths are refused.
+
 The owner stores prepared operations in schema 2 of the existing owner journal.
 The immutable identity includes namespace, incarnation, epoch, owner revision,
 configuration revision and child-selector revision. Configurations are bounded,

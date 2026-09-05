@@ -40,6 +40,16 @@ def _run(root, workspace, namespace, job_id, anchor):
         raise OwnerRefused("exact managed process admission required")
     selected = journal.selected_config()
     descriptor = read_configuration(anchor, selected, root=root, namespace=namespace, incarnation=status["incarnation"])
+    from ..adapters.execution.runtime_payload import RuntimePayload
+    artifact = RuntimePayload(root)
+    try:
+        artifact.validate((str(workspace),), expected=descriptor["artifact_digest"])
+        if (pending.payload != __import__("json").dumps({"artifact_digest": artifact.digest}, sort_keys=True, separators=(",", ":")).encode()
+                or dict(record.metadata).get("runtime_artifact_digest") != artifact.digest
+                or Path(sys.executable).resolve() != Path(artifact.manifest["executable"])):
+            raise OwnerRefused("actual runtime artifact admission differs")
+    finally:
+        artifact.close()
     if descriptor["child_storage"]["backend"] != "sqlite":
         raise OwnerRefused("unsupported contained child backend")
     from ..platform.config import SonderConfig, Secrets
@@ -116,7 +126,7 @@ def _run(root, workspace, namespace, job_id, anchor):
     def evidence(phase, receipt=None):
         value = dict(namespace=namespace, incarnation=status["incarnation"], epoch=status["epoch"],
             job_id=job_id, pid=os.getpid(), process_identity=identity, phase=phase,
-            selection=status["selection"], manifest=MANIFEST_DIGEST)
+            selection=status["selection"], manifest=MANIFEST_DIGEST, artifact_digest=descriptor["artifact_digest"])
         if receipt is not None:
             value["components"] = [asdict(item) for item in receipt.components]
         write_json_atomic(root / ("runtime-" + job_id + ".json"), value)

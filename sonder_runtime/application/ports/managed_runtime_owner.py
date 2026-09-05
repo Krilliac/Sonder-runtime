@@ -52,7 +52,10 @@ class PreparedManagedOwnerOperation:
             if type(value) is not dict or canonical(value) != self.payload:
                 raise ValueError()
             keys = {"select": {"config"}, "launch": set(), "stop": set(), "activate": {"manifest_digest", "target"}}
-            if set(value) != keys[self.action]:
+            if self.action == "launch" and set(value) == {"artifact_digest"}:
+                if type(value["artifact_digest"]) is not str or re.fullmatch(r"[a-f0-9]{64}", value["artifact_digest"]) is None:
+                    raise ValueError()
+            elif set(value) != keys[self.action]:
                 raise ValueError()
             if self.action == "select":
                 config_reference(value["config"])

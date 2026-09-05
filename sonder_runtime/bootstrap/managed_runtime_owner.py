@@ -34,7 +34,11 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
         self._cutover_manifest = self._cutover_bundle = self._cutover_selection = None
         self._cutover_stores = ()
         self._selection = None
+        self._payload = None
         try:
+            from ..adapters.execution.runtime_payload import RuntimePayload
+            self._payload = RuntimePayload(self.path, create=True, writable_roots=self._roots())
+            self._process.bind_payload(self._payload, self._roots)
             self._selection = SQLiteChildMigrationStore(self.path / "children.sqlite")
             self._catalog = set()
             self._activations = {}
@@ -43,7 +47,11 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
             try:
                 _unregister_host_issuer(self)
             finally:
-                DisposableRuntimeOwner.close(self)
+                try:
+                    if self._payload is not None:
+                        self._payload.close()
+                finally:
+                    DisposableRuntimeOwner.close(self)
             raise
 
     @property
@@ -78,6 +86,7 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
                 raise OwnerRefused("immutable configuration capacity exhausted")
             status = self.journal.status()
             value = dict(schema=1, namespace=self.namespace, incarnation=status["incarnation"], port=port,
+                artifact_digest=self._payload.digest,
                 request_timeout_seconds=5, stream_idle_timeout_seconds=5, components=MANIFEST_DIGEST,
                 child_storage=asdict(ChildStorageConfig()), child_path=str(target.path), child_identity=target.identity)
             reference = dict(generation=status["config_revision"]+1, digest=sha256(canonical(value)).hexdigest(),
@@ -97,6 +106,8 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
 
     def _config(self, reference):
         value = self._read_config(reference)
+        if value["artifact_digest"] != self._payload.digest:
+            raise OwnerRefused("selected runtime artifact differs")
         if value["child_identity"] != self._selection.identity:
             raise OwnerRefused("configuration cannot bypass aggregate activation")
         return value
@@ -106,6 +117,10 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
             self._validate()
             if action == "select":
                 self._config(arguments.get("config"))
+            elif action == "launch":
+                if arguments:
+                    raise OwnerRefused("launch artifact is host-derived")
+                arguments = {"artifact_digest": self._payload.digest}
             elif action == "activate":
                 if operation_id not in self._activations:
                     raise OwnerRefused("live registered migration required")
@@ -155,12 +170,17 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
         self.journal.phase(command, "STARTING", {"config": self.journal.selected_config(), "manifest": MANIFEST_DIGEST})
         super()._launch_prepared(command)
 
+    def _before_launch(self, command):
+        self._payload.validate(self._roots())
+
     def _evidence(self, job_id):
         value = super()._evidence(job_id)
         if value is not None:
             status = self.journal.status()
             if value.get("incarnation") != status["incarnation"] or value.get("epoch") != status["epoch"] or value.get("manifest") != MANIFEST_DIGEST:
                 raise OwnerRefused("managed runtime evidence ownership changed")
+            if value.get("artifact_digest") != self._payload.digest:
+                raise OwnerRefused("managed runtime artifact evidence changed")
             if value.get("phase") == "CLEAN":
                 rows = value.get("components")
                 from .managed_configuration import COMPONENTS
@@ -170,4 +190,6 @@ class ManagedRuntimeOwner(DisposableRuntimeOwner, ChildMigrationActivation):
 
     def close(self):
         super().close()
+        if self._payload is not None:
+            self._payload.close()
         _unregister_host_issuer(self)
