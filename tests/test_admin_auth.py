@@ -25,6 +25,81 @@ def test_login_returns_authenticatable_token():
     assert admin_auth.authenticate(conn, token)["username"] == "user1"
 
 
+def test_session_reauthentication_checks_password_without_minting_login_token():
+    conn = memory_store.connect(':memory:')
+    try:
+        admin_auth.register(conn, 'owner', 'password123')
+        token, expected = admin_auth.login(conn, 'owner', 'password123')
+        before = [tuple(row) for row in conn.execute('SELECT * FROM account_sessions')]
+        account = admin_auth.reauthenticate(conn, token, 'password123')
+        assert account == expected
+        assert not any('password' in key or 'token' in key for key in account)
+        assert [tuple(row) for row in conn.execute('SELECT * FROM account_sessions')] == before
+        with pytest.raises(PermissionError):
+            admin_auth.reauthenticate(conn, token, 'wrong-password')
+        assert admin_auth.authenticate(conn, token) is not None
+    finally:
+        conn.close()
+
+
+def test_session_reauthentication_refuses_revoked_or_expired_session():
+    conn = memory_store.connect(':memory:')
+    try:
+        admin_auth.register(conn, 'owner', 'password123')
+        token, _ = admin_auth.login(conn, 'owner', 'password123')
+        conn.execute('UPDATE account_sessions SET expires_ts=?', (admin_auth._now(),))
+        conn.commit()
+        with pytest.raises(PermissionError):
+            admin_auth.reauthenticate(conn, token, 'password123')
+        token, _ = admin_auth.login(conn, 'owner', 'password123')
+        admin_auth.set_account(conn, 'owner', banned=True)
+        admin_auth.set_account(conn, 'owner', banned=False)
+        with pytest.raises(PermissionError):
+            admin_auth.reauthenticate(conn, token, 'password123')
+    finally:
+        conn.close()
+
+
+def test_session_reauthentication_preserves_caller_transaction():
+    conn = memory_store.connect(':memory:')
+    try:
+        admin_auth.register(conn, 'owner', 'password123')
+        token, _ = admin_auth.login(conn, 'owner', 'password123')
+        conn.execute("UPDATE accounts SET tier='pro' WHERE username='owner'")
+        with pytest.raises(PermissionError, match='idle owned connection'):
+            admin_auth.reauthenticate(conn, token, 'password123')
+        assert conn.in_transaction
+        conn.rollback()
+        assert admin_auth.public_account(conn, 'owner')['tier'] == 'free'
+    finally:
+        conn.close()
+
+
+def test_session_reauthentication_returns_live_role_and_checks_expiry_after_hash(monkeypatch):
+    conn = memory_store.connect(':memory:')
+    try:
+        admin_auth.register(conn, 'owner', 'password123')
+        token, _ = admin_auth.login(conn, 'owner', 'password123')
+        admin_auth.set_account(conn, 'owner', role='user')
+        assert admin_auth.reauthenticate(conn, token, 'password123')['role'] == 'user'
+        now = admin_auth._now()
+        conn.execute('UPDATE account_sessions SET expires_ts=?', (now + 1,))
+        conn.commit()
+        clock = [now]
+        hash_password = admin_auth._hash_password
+        def delayed_hash(*args):
+            result = hash_password(*args)
+            clock[0] += 2
+            return result
+        monkeypatch.setattr(admin_auth, '_now', lambda: clock[0])
+        monkeypatch.setattr(admin_auth, '_hash_password', delayed_hash)
+        with pytest.raises(PermissionError):
+            admin_auth.reauthenticate(conn, token, 'password123')
+        assert not conn.in_transaction
+    finally:
+        conn.close()
+
+
 def test_banned_account_cannot_login_or_authenticate():
     conn = memory_store.connect(":memory:")
     admin_auth.register(conn, "user1", "password123")

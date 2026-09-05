@@ -242,6 +242,10 @@ def public_account(conn: sqlite3.Connection, username: str) -> dict:
     ).fetchone()
     if not row:
         raise ValueError("unknown account")
+    return _public_account_row(row)
+
+
+def _public_account_row(row) -> dict:
     return {
         "username": row["username"],
         "role": row["role"],
@@ -274,6 +278,43 @@ def login(conn: sqlite3.Connection, username: str, password: str) -> tuple[str, 
     conn.execute("UPDATE accounts SET last_login_ts=? WHERE username=?", (_now(), username))
     conn.commit()
     return token, public_account(conn, username)
+
+
+def reauthenticate(conn: sqlite3.Connection, token: str, password: str) -> dict:
+    """Check fresh password against the exact live login; mint no credential.
+
+    Intended for private host control enrollment. Consumers must still validate
+    current roles, project grants and session revocation at every later action.
+    This is not evidence of human presence or permission to execute work.
+    """
+    refusal = "session reauthentication required"
+    if not isinstance(token, str) or not 1 <= len(token) <= 512:
+        raise PermissionError(refusal)
+    try:
+        password = _password(password, generic_error=True)
+    except ValueError:
+        raise PermissionError(refusal) from None
+    # init() commits schema work; never commit a caller's existing transaction.
+    if conn.in_transaction:
+        raise PermissionError("reauthentication requires an idle owned connection")
+    init(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT a.*,s.expires_ts AS session_expires,s.revoked AS session_revoked "
+            "FROM account_sessions s JOIN accounts a ON a.username=s.username "
+            "WHERE s.token_hash=?", (_hash_token(token),),
+        ).fetchone()
+        if (row is None or row['banned'] or row['session_revoked']
+                or int(row['session_expires'] or 0) <= _now()):
+            raise PermissionError(refusal)
+        _, digest = _hash_password(password, row['password_salt'])
+        if (not hmac.compare_digest(digest, row['password_hash'])
+                or int(row['session_expires'] or 0) <= _now()):
+            raise PermissionError(refusal)
+        return _public_account_row(row)
+    finally:
+        conn.rollback()
 
 
 def authenticate(conn: sqlite3.Connection, token: str) -> dict | None:
