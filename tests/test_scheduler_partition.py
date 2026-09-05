@@ -52,9 +52,13 @@ def test_inventory_pages_are_stable_bounded_and_resumable():
     assert tuple(item.partition_id for item in page.items) == ("p00", "p01")
     assert page.complete is False
     assert page.next_cursor == "p01"
-    tail = router.page(after=page.next_cursor, limit=8)
+    assert page.revision >= 1
+    tail = router.page(after=page.next_cursor, limit=8, snapshot_revision=page.revision)
     assert tuple(item.partition_id for item in tail.items) == ("p02", "p03", "p04")
     assert tail.complete is True
+    router.upsert(_partition("p04", "node-04", revision=2))
+    with pytest.raises(PartitionRoutingError, match="revision changed"):
+        router.page(after=page.next_cursor, limit=8, snapshot_revision=page.revision)
     with pytest.raises(PartitionRoutingError, match="limit"):
         router.page(limit=0)
 

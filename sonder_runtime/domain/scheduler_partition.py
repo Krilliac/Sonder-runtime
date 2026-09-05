@@ -55,6 +55,7 @@ class PartitionPage:
     items: tuple[PartitionDescriptor, ...]
     next_cursor: str | None
     complete: bool
+    revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,7 @@ class PartitionRouter:
         self.protocol_version = protocol_version
         self.max_partitions = max_partitions
         self._partitions: dict[str, PartitionDescriptor] = {}
+        self._inventory_revision = 1
         for descriptor in tuple(partitions):
             self._insert(descriptor)
 
@@ -114,18 +116,22 @@ class PartitionRouter:
         current = self._partitions.get(descriptor.partition_id)
         if current is None:
             self._insert(descriptor)
+            self._inventory_revision += 1
             return
         if descriptor.revision < current.revision:
             raise PartitionRoutingError("partition revision must be monotonic")
         if descriptor.revision == current.revision and descriptor != current:
             raise PartitionRoutingError("partition revision conflicts with existing metadata")
-        self._partitions[descriptor.partition_id] = descriptor
+        if descriptor != current:
+            self._partitions[descriptor.partition_id] = descriptor
+            self._inventory_revision += 1
 
     def remove(self, partition_id: str, *, expected_revision: int | None = None) -> bool:
         current = self.partition(partition_id)
         if expected_revision is not None and expected_revision != current.revision:
             raise PartitionRoutingError("partition revision is stale")
         del self._partitions[current.partition_id]
+        self._inventory_revision += 1
         return True
 
     def route(self, key: str) -> PartitionDescriptor:
@@ -144,9 +150,14 @@ class PartitionRouter:
 
         return max(active, key=score)
 
-    def page(self, *, after: str | None = None, limit: int = 50) -> PartitionPage:
+    def page(
+        self, *, after: str | None = None, limit: int = 50,
+        snapshot_revision: int | None = None,
+    ) -> PartitionPage:
         if type(limit) is not int or not 1 <= limit <= MAX_PAGE_SIZE:
             raise PartitionRoutingError(f"limit must be an integer within 1..{MAX_PAGE_SIZE}")
+        if snapshot_revision is not None and snapshot_revision != self._inventory_revision:
+            raise PartitionRoutingError("partition inventory revision changed")
         records = self.partitions
         start = 0
         if after is not None:
@@ -161,6 +172,7 @@ class PartitionRouter:
             items=items,
             next_cursor=None if complete else items[-1].partition_id,
             complete=complete,
+            revision=self._inventory_revision,
         )
 
     def negotiate(self, client_version: int) -> ProtocolDecision:
