@@ -3,9 +3,61 @@
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from typing import Protocol
 
 MAX_PROJECTION_BYTES = 65536
+
+
+def _approval_identity(tool, call_digest, surface, expires_at):
+    if (not isinstance(tool, str) or not 1 <= len(tool) <= 128
+            or not isinstance(surface, str) or not 1 <= len(surface) <= 128
+            or not isinstance(call_digest, str) or len(call_digest) != 64
+            or any(c not in "0123456789abcdef" for c in call_digest)
+            or type(expires_at) not in {int, float} or not math.isfinite(expires_at)):
+        raise ValueError("invalid exact approval identity")
+
+
+@dataclass(frozen=True)
+class PendingApprovalEvidence:
+    tool: str
+    call_digest: str
+    surface: str
+    call_id: str
+    expires_at: float
+
+    def __post_init__(self):
+        _approval_identity(self.tool, self.call_digest, self.surface, self.expires_at)
+        if self.call_id != self.call_digest[:16]:
+            raise ValueError("pending display call identity mismatch")
+
+
+class VerificationApprovalPending(Exception):
+    def __init__(self, evidence: PendingApprovalEvidence):
+        if not isinstance(evidence, PendingApprovalEvidence):
+            raise TypeError("typed pending ledger evidence required")
+        self.evidence = evidence
+        super().__init__("exact verification approval is pending")
+
+
+@dataclass(frozen=True)
+class GrantedApprovalEvidence:
+    tool: str
+    call_digest: str
+    surface: str
+    decision_id: str
+    approval_nonce: str
+    expires_at: float
+    source: str
+
+    def __post_init__(self):
+        _approval_identity(self.tool, self.call_digest, self.surface, self.expires_at)
+        if (self.source not in {"approval", "policy"}
+                or not isinstance(self.decision_id, str) or not 1 <= len(self.decision_id) <= 256
+                or not isinstance(self.approval_nonce, str) or len(self.approval_nonce) > 256
+                or (self.source == "approval") != bool(self.approval_nonce)):
+            raise ValueError("invalid approval spend or policy decision evidence")
+
 
 
 @dataclass(frozen=True)
