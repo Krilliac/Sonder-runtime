@@ -20,6 +20,7 @@ _CURRENT = ContextVar("standalone_lane_controller", default=None)
 _DEPTH = ContextVar("standalone_lane_controller_depth", default=0)
 _LOOP_DEPTH = ContextVar("standalone_lane_loop_depth", default=0)
 _MANAGED_FACTORY = ContextVar("private_managed_controller_factory", default=None)
+_RUNG = ContextVar("private_managed_rung", default=None)
 _ACTIONS = frozenset(
     {
         "spawn",
@@ -126,10 +127,11 @@ class StandaloneLaneController:
         )
         self._managed_session = None
         self._managed_initialization_failed = False
+        self._escalation = None
 
     def require_current(self):
         """Root host guard; managed authority is checked at each admission."""
-        self._initialize()
+        self._initialize(host_only=True)
         if self._context.expired or self._context.cancellation.cancelled:
             raise PermissionError(
                 "standalone controller authority expired or cancelled"
@@ -141,6 +143,10 @@ class StandaloneLaneController:
 
     def begin_host_turn(self, ledger):
         self._guard_host_evidence()
+        if self._escalation is not None and self._host_ledger is not None:
+            if self._host_terminal is not None:
+                raise PermissionError("terminal projection already frozen")
+            return
         # The composition root owns the adapter; interfaces only consume its
         # host-only observe/seal seam.
         self._host_ledger = ledger
@@ -161,6 +167,9 @@ class StandaloneLaneController:
 
     def freeze_host_terminal(self, output, *, terminal_class, blockers):
         self._guard_host_evidence()
+        if self._escalation is not None and not self._escalation.finalizing:
+            self._escalation.blockers.update(blockers)
+            return not self._host_evidence_error
         if self._host_evidence_error or self._host_ledger is None:
             return False
         try:
@@ -176,6 +185,12 @@ class StandaloneLaneController:
             return False
         self._host_terminal = candidate
         return True
+
+    def parent_effect_evidence(self):
+        self._guard_host_evidence()
+        if self._host_evidence_error or self._host_ledger is None:
+            raise PermissionError("complete host effect evidence unavailable")
+        return self._host_ledger.resolve()
 
     def host_terminal_draft(self):
         self._guard_host_evidence()
@@ -194,6 +209,8 @@ class StandaloneLaneController:
         from ..application.ports.delegated_verification import VerificationVerdict
 
         refused = VerificationVerdict(False, "VERIFICATION_UNAVAILABLE")
+        if self._escalation is not None and not self._escalation.finalizing:
+            return refused
         self._verification_verdict = refused
         try:
             self._initialize()
@@ -278,10 +295,15 @@ class StandaloneLaneController:
     def available(self):
         return not (self._closed or self._cancelled or self._restricted)
 
-    def _initialize(self):
+    def _initialize(self, *, host_only=False):
         if self._managed_nested_forbidden:
             raise PermissionError("nested managed controller authority is forbidden")
-        if not self.available:
+        if not self.available and not (
+            host_only
+            and self._managed_factory is not None
+            and not self._closed
+            and not self._cancelled
+        ):
             raise PermissionError("standalone lane authority is not active")
         if self._managed_initialization_failed:
             raise PermissionError("managed controller initialization unavailable")
@@ -346,6 +368,8 @@ class StandaloneLaneController:
         self._application = application
 
     def prepare(self, arguments):
+        if not self.available:
+            raise PermissionError("standalone lane authority is not active")
         if not isinstance(arguments, dict) or set(arguments) != {"action", "payload"}:
             raise PermissionError(
                 "standalone lane arguments accept only action and payload"
@@ -533,10 +557,22 @@ class StandaloneLaneController:
 @contextmanager
 def controller_scope(application_factory, *, project=""):
     # A recursively invoked agent must not inherit or mint another controller.
+    rung = _RUNG.get()
+    borrowed = bool(
+        rung is not None and not rung.used and not (_DEPTH.get() or _LOOP_DEPTH.get())
+    )
+    if borrowed:
+        if project != rung.owner.project:
+            raise PermissionError("managed rung project changed")
+        rung.used = True
     controller = (
-        None
-        if (_DEPTH.get() or _LOOP_DEPTH.get())
-        else StandaloneLaneController(application_factory, project)
+        rung.owner.controller
+        if borrowed
+        else (
+            None
+            if (_DEPTH.get() or _LOOP_DEPTH.get())
+            else StandaloneLaneController(application_factory, project)
+        )
     )
     depth_token = _DEPTH.set(_DEPTH.get() + 1)
     token = _CURRENT.set(controller)
@@ -548,11 +584,97 @@ def controller_scope(application_factory, *, project=""):
         raise
     finally:
         try:
-            if controller is not None:
+            if controller is not None and not borrowed:
                 controller.close()
         finally:
             _CURRENT.reset(token)
             _DEPTH.reset(depth_token)
+
+
+class _RungPermit:
+    def __init__(self, owner):
+        self.owner = owner
+        self.used = False
+
+
+class _ManagedEscalation:
+    """One host lifetime; private sequential permits never enter model payloads."""
+
+    def __init__(self, application_factory, project, max_rungs):
+        if type(max_rungs) is not int or not 1 <= max_rungs <= 8:
+            raise ValueError("bounded managed rung limit required")
+        self.project = project
+        self._remaining = max_rungs
+        self.controller = StandaloneLaneController(application_factory, project)
+        self.controller._escalation = self
+        self.finalizing = False
+        self.finalizer = None
+        self.blockers = set()
+        self._active = False
+        self._finished = False
+
+    @contextmanager
+    def rung(self):
+        if (
+            self._active
+            or self._finished
+            or not self._remaining
+            or _LOOP_DEPTH.get()
+            or _DEPTH.get()
+        ):
+            raise PermissionError("sequential top-level managed rung required")
+        if self.controller._host_terminal is not None:
+            raise PermissionError("original terminal projection cannot be replaced")
+        self._active = True
+        self._remaining -= 1
+        self.finalizer = None
+        token = _RUNG.set(_RungPermit(self))
+        try:
+            yield
+        finally:
+            _RUNG.reset(token)
+            self._active = False
+
+    def capture(self, finalizer):
+        if not self._active or self.finalizing:
+            raise PermissionError("active managed rung required")
+        self.finalizer = finalizer
+
+    def finish(self):
+        if self._finished or self._active:
+            raise PermissionError("managed plan already finished or still running")
+        self._finished = True
+        if self.finalizer is None:
+            return None
+        self.finalizing = True
+        token = _CURRENT.set(self.controller)
+        depth_token = _DEPTH.set(_DEPTH.get() + 1)
+        try:
+            self.controller.require_current()
+            return self.finalizer()
+        finally:
+            _CURRENT.reset(token)
+            _DEPTH.reset(depth_token)
+
+
+@contextmanager
+def managed_escalation_scope(application_factory, *, project="", max_rungs=8):
+    if (
+        _MANAGED_FACTORY.get() is None
+        or _DEPTH.get()
+        or _LOOP_DEPTH.get()
+        or _RUNG.get() is not None
+    ):
+        yield None
+        return
+    owner = _ManagedEscalation(application_factory, project, max_rungs)
+    try:
+        yield owner
+    except BaseException:
+        owner.controller.request_cancel()
+        raise
+    finally:
+        owner.controller.close()
 
 
 @contextmanager
