@@ -406,6 +406,27 @@ class SQLiteDurableContinuationRepository:
                 prior = self._receipt(connection, prepared)
                 if prior is not None:
                     return prior
+                # Admission preflight cannot establish ordering: another writer
+                # may retain an intent before this transaction acquires its lock.
+                # Enforce the durable per-child order under the same writer lock
+                # that covers state changes and their receipt.
+                pending = connection.execute(
+                    "SELECT i.kind,i.child_id,i.operation_id,i.payload,i.digest "
+                    "FROM continuation_intent i LEFT JOIN continuation_receipt r "
+                    "ON r.operation_id=i.operation_id WHERE i.child_id=? "
+                    "AND r.operation_id IS NULL ORDER BY i.position LIMIT 1",
+                    (prepared.child_id,),
+                ).fetchone()
+                if pending is not None and pending[2] != prepared.operation_id:
+                    raise ContinuationCommitAmbiguous(
+                        PreparedContinuationMutation(
+                            pending[0],
+                            pending[1],
+                            pending[2],
+                            bytes(pending[3]),
+                            pending[4],
+                        )
+                    )
                 connection.execute("SAVEPOINT mutation_effect")
                 try:
                     value = getattr(self, "_apply_" + prepared.kind)(
