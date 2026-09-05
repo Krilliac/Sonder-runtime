@@ -59,6 +59,7 @@ def test_link_cannot_admit_prepared_work_or_change_original_encoding(state):
     old = asdict(record)
     old.pop("run_id")
     old.pop("host_turn")
+    old.pop("interruption", None)
     raw = json.dumps(old, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     assert _encode(record) == raw
     assert _decode(raw, AppWorkRecord) == record
@@ -75,3 +76,49 @@ def test_link_cannot_admit_prepared_work_or_change_original_encoding(state):
             )
         )
     assert store.atomic(lambda tx: tx.prepare_work(work)) == record
+
+
+@pytest.mark.parametrize("phase", ["admitted", "run_binding", "running"])
+def test_interruption_retains_links_and_never_allows_redispatch(state, phase):
+    from sonder_runtime.application.ports.app_managed_work import WorkInterruption
+    from sonder_runtime.adapters.persistence.app_control import SQLiteAppControlStore
+
+    store, work = preparation(state)
+    store.atomic(lambda tx: tx.prepare_work(work))
+    original = admit(store).record
+    scope = dict(
+        principal_id=OWNER,
+        control_session_id="session1",
+        work_id="work1",
+        dispatch_id="dispatch1",
+        process_incarnation="process1",
+    )
+    if phase != "admitted":
+        original = store.atomic(
+            lambda tx: tx.bind_work_run(**scope, expected_revision=2, run_id="run1")
+        )
+    if phase == "running":
+        link = ManagedHostTurnLink(
+            "continuation1", "parent1", work.binding.canonical_host_id, OWNER, "run1", 1
+        )
+        original = store.atomic(
+            lambda tx: tx.bind_work_host(**scope, expected_revision=3, host_turn=link)
+        )
+    evidence = WorkInterruption(phase, "CALLBACK_OUTCOME_UNKNOWN", "a" * 64)
+    unknown = store.atomic(
+        lambda tx: tx.mark_work_unknown(
+            **scope, expected_revision=original.revision, interruption=evidence
+        )
+    )
+    assert unknown.state == "unknown" and unknown.revision == original.revision + 1
+    assert unknown.host_turn == original.host_turn and unknown.run_id == original.run_id
+    reopened = SQLiteAppControlStore(store.path, clock=lambda: 100)
+    assert admit(reopened).record == unknown and not admit(reopened).newly_admitted
+    with pytest.raises(CommandConflict):
+        reopened.atomic(
+            lambda tx: tx.bind_work_run(
+                **scope, expected_revision=unknown.revision, run_id="replacement"
+            )
+        )
+    with pytest.raises(CommandConflict):
+        admit(reopened, process_incarnation="replacement")
