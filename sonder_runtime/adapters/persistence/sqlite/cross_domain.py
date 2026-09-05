@@ -1,7 +1,9 @@
 """SQLite adapter for atomic, idempotent cross-domain record/outbox writes."""
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from contextlib import contextmanager
+
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 
 import hashlib
 import json
@@ -78,13 +80,14 @@ class SQLiteCrossDomainCoordinator:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._clock = clock or (lambda: "now")
         self._lock = Lock()
-        with owned_sqlite_connect(str(self._path)) as connection:
+        with owned_sqlite_transaction(str(self._path)) as connection:
             connection.executescript(_DDL)
 
+    @contextmanager
     def _connect(self):
-        connection = owned_sqlite_connect(str(self._path), timeout=5.0)
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+        with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            yield connection
 
     @staticmethod
     def _tables(domain: str) -> tuple[str, str]:

@@ -5,8 +5,9 @@ that sqlite3.connect calls live only in the adapters layer.
 """
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
 
+from contextlib import contextmanager
 import json
 import logging
 import sqlite3
@@ -42,24 +43,32 @@ class CheckpointStore:
         self._db_path = str(db_path)
         self._max_checkpoints = max(1, max_checkpoints)
         self._lock = threading.Lock()
-        self._conn: sqlite3.Connection | None = None
+        self._memory_rows: tuple[tuple, ...] = ()
 
-    def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            path = self._db_path
-            if path != ":memory:":
-                Path(path).parent.mkdir(parents=True, exist_ok=True)
-            conn = owned_sqlite_connect(path, check_same_thread=False)
+    @contextmanager
+    def _connection(self):
+        path = self._db_path
+        if path != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        # Each operation closes on its constructing thread. In-memory mode
+        # retains only canonical rows between operations, never a SQLite handle
+        # belonging to a worker that may have exited. The existing store lock
+        # serializes snapshot replacement; failed transactions retain old rows.
+        with owned_sqlite_transaction(path) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.executescript(self._SCHEMA)
-            self._conn = conn
-        return self._conn
+            if path == ":memory:":
+                conn.executemany("INSERT INTO checkpoints VALUES (?,?,?,?,?,?)", self._memory_rows)
+            yield conn
+            if path == ":memory:":
+                rows = tuple(tuple(row) for row in conn.execute("SELECT * FROM checkpoints"))
+        if path == ":memory:":
+            self._memory_rows = rows
 
     def save(self, checkpoint: Checkpoint) -> str:
-        with self._lock:
-            conn = self._get_conn()
+        with self._lock, self._connection() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO checkpoints "
                 "(checkpoint_id, session_id, step_index, status, "
@@ -78,8 +87,7 @@ class CheckpointStore:
         return checkpoint.checkpoint_id
 
     def latest(self, session_id: str) -> Checkpoint | None:
-        with self._lock:
-            conn = self._get_conn()
+        with self._lock, self._connection() as conn:
             row = conn.execute(
                 "SELECT * FROM checkpoints WHERE session_id=? "
                 "ORDER BY step_index DESC, created_at DESC LIMIT 1",
@@ -90,8 +98,7 @@ class CheckpointStore:
         return self._row_to_checkpoint(row)
 
     def get(self, checkpoint_id: str) -> Checkpoint | None:
-        with self._lock:
-            conn = self._get_conn()
+        with self._lock, self._connection() as conn:
             row = conn.execute(
                 "SELECT * FROM checkpoints WHERE checkpoint_id=?",
                 (checkpoint_id,),
@@ -103,8 +110,7 @@ class CheckpointStore:
     def list_checkpoints(
         self, session_id: str, limit: int = 10,
     ) -> list[Checkpoint]:
-        with self._lock:
-            conn = self._get_conn()
+        with self._lock, self._connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM checkpoints WHERE session_id=? "
                 "ORDER BY step_index DESC, created_at DESC LIMIT ?",
@@ -113,8 +119,7 @@ class CheckpointStore:
         return [self._row_to_checkpoint(r) for r in rows]
 
     def delete(self, checkpoint_id: str) -> bool:
-        with self._lock:
-            conn = self._get_conn()
+        with self._lock, self._connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM checkpoints WHERE checkpoint_id=?",
                 (checkpoint_id,),
@@ -123,8 +128,7 @@ class CheckpointStore:
         return cursor.rowcount > 0
 
     def clear_session(self, session_id: str) -> int:
-        with self._lock:
-            conn = self._get_conn()
+        with self._lock, self._connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM checkpoints WHERE session_id=?",
                 (session_id,),
@@ -134,9 +138,7 @@ class CheckpointStore:
 
     def close(self) -> None:
         with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+            self._memory_rows = ()
 
     def _prune(self, conn: sqlite3.Connection, session_id: str) -> None:
         conn.execute(
