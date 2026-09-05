@@ -76,6 +76,8 @@ class LaneTransaction:
         from dataclasses import asdict
 
         sealed.validate()
+        if sealed.binding.continuation_id != continuation_id or sealed.binding.principal_id != principal:
+            raise PermissionError("sealed projection scope mismatch")
         for value in (continuation_id, principal):
             if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
                 raise ValueError("projection scope is invalid")
@@ -121,6 +123,9 @@ class LaneTransaction:
             ProjectionBinding(**binding), row["payload"], row["digest"]
         )
         sealed.validate()
+        if (sealed.binding.continuation_id != continuation_id or sealed.binding.principal_id != principal
+                or sealed.binding.verification_id != verification_id):
+            raise PermissionError("stored projection scope mismatch")
         return sealed
 
     def verification_generation(self, parent, principal):
