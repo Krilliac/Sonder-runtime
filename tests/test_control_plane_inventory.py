@@ -13,6 +13,12 @@ def state(tmp_path, monkeypatch):
         "SONDER_SESSIONS_DB",
         "SONDER_JOBS_DB",
         "SONDER_CHILD_SESSIONS_DB",
+        "SONDER_QUEUED_ACTION_DB",
+        "SONDER_SERVED_ACTION_RECEIPTS_DB",
+        "SONDER_OPERATIONS_DB",
+        "SONDER_AUTOPILOT_DB",
+        "SONDER_COMPOSITION_DB",
+        "SONDER_UPDATES_DB",
         "SONDER_TOOL_AUDIT",
         "SONDER_LANE_TEST_TARGETS_FILE",
         "SONDER_FANOUT_DB",
@@ -148,3 +154,137 @@ def test_live_additional_provider_and_context_scope_are_isolated(state):
         )
     with pytest.raises(TypeError):
         live_control_plane_inventory(additional=lambda: {"files": []})
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "SONDER_QUEUED_ACTION_DB",
+        "SONDER_SERVED_ACTION_RECEIPTS_DB",
+        "SONDER_OPERATIONS_DB",
+        "SONDER_AUTOPILOT_DB",
+        "SONDER_COMPOSITION_DB",
+        "SONDER_UPDATES_DB",
+    ],
+)
+def test_active_control_database_override_admission_and_sidecars(
+    state, monkeypatch, variable
+):
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        live_control_plane_inventory,
+    )
+
+    target = state / "isolated-control" / "relocated.db"
+    monkeypatch.setenv(variable, str(target))
+    inventory = live_control_plane_inventory()
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        assert inventory.protects(Path(str(target) + suffix))
+        with pytest.raises(PermissionError):
+            file_ops.write_file(str(target) + suffix, "mutation", bypass=True)
+    with pytest.raises(PermissionError):
+        inventory.require_disjoint((target.parent,))
+
+
+@pytest.mark.parametrize("variable", ["SONDER_RUNTIME_POLICY", "SONDER_ROTATION_STATE"])
+def test_policy_secret_rotation_atomic_files_and_admission(
+    state, monkeypatch, variable
+):
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        live_control_plane_inventory,
+    )
+
+    target = state / "isolated-control" / "custom.json"
+    monkeypatch.setenv(variable, str(target))
+    inventory = live_control_plane_inventory()
+    for suffix in ("", ".lock", ".tmp-123", ".tmp-" + "a" * 32):
+        assert inventory.protects(Path(str(target) + suffix))
+    if variable == "SONDER_RUNTIME_POLICY":
+        assert inventory.protects(Path(str(target) + ".transition.json"))
+        assert inventory.protects(
+            Path(str(target) + ".transition.json.tmp-" + "b" * 32)
+        )
+    with pytest.raises(PermissionError):
+        inventory.require_disjoint((target.parent,))
+
+
+def test_database_manifest_matches_active_shared_literal_resolvers():
+    import ast
+    from sonder_runtime.adapters.security.control_plane_paths import STATE_DATABASES
+    from sonder_runtime.adapters.persistence.migrations import _STORE_FILENAMES
+
+    root = Path(__file__).resolve().parents[1] / "sonder_runtime"
+    sources = (
+        "bootstrap/app.py",
+        "adapters/persistence/queued_actions.py",
+        "adapters/persistence/served_action_receipts.py",
+        "adapters/persistence/composition_store.py",
+        "adapters/persistence/autopilot_store.py",
+        "adapters/persistence/fanout_store.py",
+        "adapters/persistence/fleet_store.py",
+        "adapters/persistence/migrations.py",
+        "adapters/embedding_cache.py",
+        "adapters/web/lifecycle.py",
+    )
+    observed = {(filename, variable) for _, filename, variable in _STORE_FILENAMES}
+    for source in sources:
+        tree = ast.parse((root / source).read_text(encoding="utf-8-sig"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or len(node.args) < 2:
+                continue
+            name = (
+                node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else getattr(node.func, "id", "")
+            )
+            if name != "state_path" or not all(
+                isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                for arg in node.args[:2]
+            ):
+                continue
+            filename, variable = (arg.value for arg in node.args[:2])
+            if filename.endswith(".db"):
+                observed.add((filename, variable))
+    # These two have distinct direct/session precedence in live inventory.
+    covered = set(STATE_DATABASES) | {
+        ("fleet.db", "SONDER_FLEET_DB"),
+        ("sessions.db", "SONDER_SESSIONS_DB"),
+    }
+    assert observed <= covered
+
+
+def test_direct_session_config_paths_preserve_literal_tilde_semantics(
+    state, monkeypatch
+):
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        live_control_plane_inventory,
+    )
+
+    monkeypatch.setenv("SONDER_SESSIONS_DB", "~/sessions.sqlite")
+    monkeypatch.setenv("SONDER_SECRETS", "~/local.env")
+    inventory = live_control_plane_inventory()
+    assert inventory.protects(state / "~" / "sessions.sqlite")
+    assert inventory.protects(state / "~" / "local.env")
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "SONDER_FILE_ROOTS_FILE",
+        "SONDER_WORKFLOWS",
+        "SONDER_EMOTION_VECTORS",
+        "SONDER_SYSTEM_PROFILE",
+    ],
+)
+def test_relocated_filesystem_authority_config_is_in_admission_inventory(
+    state, monkeypatch, variable
+):
+    from sonder_runtime.adapters.security.control_plane_paths import (
+        live_control_plane_inventory,
+    )
+
+    target = state / "independent-policy" / "custom.txt"
+    monkeypatch.setenv(variable, str(target))
+    inventory = live_control_plane_inventory()
+    assert inventory.protects(target)
+    with pytest.raises(PermissionError):
+        inventory.require_disjoint((target.parent,))
