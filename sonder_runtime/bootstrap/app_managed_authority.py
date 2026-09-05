@@ -133,10 +133,15 @@ class AppManagedAuthority:
         self._parents = {}
         self._workers = {}
         self._admissions = {}
+        self._selection_uses = {}
+        self._admission_threads = {}
+        self._retained = {}
+        self._callback_threads = set()
         binding._managed_authority = self
         lanes.managed_authority = self
 
     def issue_selection(self, *, account_token, control_token, context):
+        self._outside_work_callback()
         binding = self.binding
         binding._config()
         binding._private(context_roots=context.workspace_roots)
@@ -237,7 +242,7 @@ class AppManagedAuthority:
                 binding._current(conn, account_token, account, grant)
                 with self._lock:
                     for key, (prior, _) in tuple(self._selections.items()):
-                        if prior.context.expired:
+                        if prior.context.expired and not self._referenced_locked(prior):
                             self._selections.pop(key, None)
                     if len(self._selections) >= self.capacity:
                         raise PermissionError("app selection capacity unavailable")
@@ -246,9 +251,8 @@ class AppManagedAuthority:
         finally:
             conn.close()
 
-    def _selection(self, selection):
-        with self._lock:
-            issued = self._selections.get(id(selection))
+    def _issued_locked(self, selection):
+        issued = self._selections.get(id(selection))
         if (
             type(selection) is not AppHostSelection
             or issued is None
@@ -257,12 +261,121 @@ class AppManagedAuthority:
             or selection._issuer is not self._issuer
         ):
             raise PermissionError("private app selection issuer required")
+        return selection
+
+    def _referenced_locked(self, selection):
+        return (
+            self._selection_uses.get(id(selection), 0)
+            or any(value is selection for value in self._retained.values())
+            or any(entry.selection is selection for entry in self._parents.values())
+        )
+
+    def _outside_work_callback(self):
+        with self._lock:
+            if threading.get_ident() in self._callback_threads:
+                raise PermissionError("work callback cannot enter host authority")
+
+    def retain_selection(self, selection):
+        """Retain one exact work reference; this is not renewed authority."""
+        self._outside_work_callback()
+        self._selection(selection)
+        with self._lock:
+            self._issued_locked(selection)
+            if len(self._retained) >= 512:
+                raise PermissionError("retained app selection capacity unavailable")
+            lease = object()
+            self._retained[lease] = selection
+            return lease
+
+    def release_retained(self, lease):
+        """Release only a live issuer-owned lease, including after revocation."""
+        with self._lock:
+            if type(lease) is not object or lease not in self._retained:
+                raise PermissionError("exact retained app selection lease required")
+            self._issued_locked(self._retained[lease])
+            del self._retained[lease]
+
+    def release_selection(self, selection):
+        """Forget an unreferenced request selection without granting authority."""
+        with self._lock:
+            self._issued_locked(selection)
+            if self._referenced_locked(selection):
+                raise PermissionError("app selection still has active references")
+            del self._selections[id(selection)]
+
+    def work_atomic(self, selection, context, callback):
+        """Account-before-fleet admission with an explicitly borrowed app write."""
+        self._outside_work_callback()
+        with self._lock:
+            if self._admission_threads.get(threading.get_ident(), 0):
+                raise PermissionError("work transaction cannot nest inside admission")
+        if not callable(callback):
+            raise TypeError("app work transaction callback required")
+        with self.admit(selection, context) as admission:
+            with self.lanes.store.transaction() as tx:
+                self.authorize_host(
+                    admission,
+                    context,
+                    selection.host_conversation_id,
+                    connection=tx.conn,
+                )
+                thread = threading.get_ident()
+                with self._lock:
+                    self._callback_threads.add(thread)
+                try:
+                    result = self.binding.store.atomic(callback, connection=tx.conn)
+                finally:
+                    with self._lock:
+                        self._callback_threads.discard(thread)
+                self.authorize_host(
+                    admission,
+                    context,
+                    selection.host_conversation_id,
+                    connection=tx.conn,
+                )
+            return result
+
+    def _selection(self, selection):
+        self._outside_work_callback()
+        with self._lock:
+            self._issued_locked(selection)
         _context_within(selection.context, selection.original_context)
         self.binding._private(context_roots=selection.original_context.workspace_roots)
         return selection
 
     @contextmanager
     def admit(self, subject, context):
+        self._outside_work_callback()
+        with self._lock:
+            if type(subject) is AppHostSelection:
+                selection = self._issued_locked(subject)
+            else:
+                entry = self._parents.get(subject)
+                if entry is None:
+                    raise PermissionError("active app parent registration unavailable")
+                selection = self._issued_locked(entry.selection)
+            key = id(selection)
+            self._selection_uses[key] = self._selection_uses.get(key, 0) + 1
+            thread = threading.get_ident()
+            self._admission_threads[thread] = self._admission_threads.get(thread, 0) + 1
+        try:
+            with self._admit(subject, context) as admission:
+                yield admission
+        finally:
+            with self._lock:
+                thread_uses = self._admission_threads[thread] - 1
+                if thread_uses:
+                    self._admission_threads[thread] = thread_uses
+                else:
+                    del self._admission_threads[thread]
+                remaining = self._selection_uses[key] - 1
+                if remaining:
+                    self._selection_uses[key] = remaining
+                else:
+                    del self._selection_uses[key]
+
+    @contextmanager
+    def _admit(self, subject, context):
         registration = None
         if type(subject) is AppHostSelection:
             selection = self._selection(subject)
@@ -348,6 +461,7 @@ class AppManagedAuthority:
             conn.close()
 
     def _check(self, admission, context, connection):
+        self._outside_work_callback()
         with self._lock:
             scope = self._admissions.get(id(admission))
             if (
@@ -570,6 +684,7 @@ class AppManagedAuthority:
                 return entry
 
     def release_parent(self, bound):
+        self._outside_work_callback()
         with self._lock:
             matches = [p for p, v in self._parents.items() if v.bound is bound]
             for parent in matches:
