@@ -61,6 +61,15 @@ that case requires state restore from the pre-update backup
 (backup-restore.md), which the install created and recorded in the
 update journal (`backup_id` on the plan).
 
+Before a planned release change, the local-only offline recovery rehearsal in
+`backup-restore.md` can exercise that relationship on a disposable copy.  It
+checks the backup manifest and checksum index against an expected source
+revision, restores every authoritative store, simulates a candidate upgrade,
+rolls the candidate back after the expected failure, restores the state, and
+verifies bounded cleanup.  The rehearsal never activates a release pointer,
+stops a live service, or claims coordinator takeover; live failover and
+provider behavior remain separate operational concerns.
+
 ## Failure triage
 
 - `update status` shows the plan state and error code.
