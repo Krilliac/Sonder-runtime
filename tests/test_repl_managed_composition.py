@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 import permission_modes
@@ -85,3 +86,35 @@ def test_private_state_in_other_configured_project_refuses_before_provider(tmp_p
             permission_engine=permission_modes,
             additional_paths=lambda: ControlPlanePaths(files=(other / 'secrets.env',)),
         )
+
+
+def test_loaded_toml_and_real_application_support_managed_repl_work(
+        tmp_path, tmp_path_factory, monkeypatch):
+    import server
+    from sonder_runtime.bootstrap.app import build_application
+    from sonder_runtime.platform.config import load_config
+    from sonder_runtime.interfaces.repl import repl
+
+    project = tmp_path_factory.mktemp('configured-project')
+    source = tmp_path / 'sonder.toml'
+    source.write_text('[state]\nworkspace_roots = ' + json.dumps([str(project)]) + '\n',
+                      encoding='utf-8')
+    application = build_application(config=load_config(source))
+    monkeypatch.setattr(file_ops, 'workspace_root', lambda: project)
+    monkeypatch.setattr(server, '_application', lambda: application)
+    monkeypatch.setattr(repl, '_legacy_runtime', None)
+    repl.configure_legacy_runtime(server)
+
+    def work(**arguments):
+        with controller_scope(server._application, project=str(project)) as controller:
+            controller.require_current()
+            return controller._managed_session.report_metadata()
+
+    monkeypatch.setattr(server, 'workbench_agent', work)
+    try:
+        result = repl._run_session_work('2222222222222222', host_project='configured',
+                                        project=str(project), prompt='inspect')
+        assert result['continuation_id']
+        assert str(source.resolve()) in application.private_source_paths
+    finally:
+        application.close_providers(timeout=5)

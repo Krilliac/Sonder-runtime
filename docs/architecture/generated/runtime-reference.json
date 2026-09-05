@@ -9011,10 +9011,22 @@
       "type": "tuple[str, ...]"
     },
     {
+      "default": [],
+      "field": "private_source_paths",
+      "section": "root",
+      "type": "tuple[str, ...]"
+    },
+    {
       "default": null,
       "field": "artifact_transfer",
       "section": "root",
       "type": "ArtifactTransferConfig"
+    },
+    {
+      "default": null,
+      "field": "child_storage",
+      "section": "root",
+      "type": "ChildStorageConfig"
     },
     {
       "default": "[redacted]",
@@ -9195,6 +9207,54 @@
       "field": "queue_depth",
       "section": "capacity",
       "type": "int"
+    },
+    {
+      "default": "sqlite",
+      "field": "backend",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "binding_file",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "owner_id",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "primary",
+      "field": "durability",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": "",
+      "field": "required_standby",
+      "section": "child_storage",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 2,
+      "field": "pool_size",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 5,
+      "field": "operation_timeout_seconds",
+      "section": "child_storage",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 1,
+      "field": "cancel_timeout_seconds",
+      "section": "child_storage",
+      "type": "<class 'int'>"
     },
     {
       "default": "single-host",
@@ -9521,11 +9581,11 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES",
   "counts": {
     "commands": 316,
-    "configuration": 97,
+    "configuration": 107,
     "events": 43,
     "tools": 212
   },
-  "digest": "f03936258ab9e480437257083485c4d9f59553a30f534f09c6e11beb40650dfd",
+  "digest": "e21c880c2f46ae360f05e2df79fedeb3271fa8408e62d4e03aae12ce269fd04b",
   "events": [
     {
       "name": "session.started",
@@ -9996,10 +10056,10 @@
   "schema": "sonder-runtime-document-reference-v1",
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "3a087796c98108103b62d85b5ff9f1e6965234936bfaa9d15146a32438c65886",
+    "server.py": "965ae3c6d2914ed674ba42b438da1c0051f831dfca632c7e0f69281f27ef9f43",
     "sonder_runtime/application/tools/generated_catalogs.py": "e19611103f4b26e760fe520f2eb7d3997d646dcc44b137c7cbf44b34f2b05899",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
-    "sonder_runtime/platform/config.py": "e3df035b9601e5d83210a1cf1fbb084d1d0f5a4688f75e52680e6166d2fb239b"
+    "sonder_runtime/platform/config.py": "5f43c2c7576fac2fbfc4f2393d89562a90c2b0938dbec67a48f3de70b797f95b"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
   "tools": [
