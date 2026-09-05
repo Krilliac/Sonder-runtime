@@ -12,7 +12,7 @@ import stat
 import time
 
 from ..application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
-from ..platform.app_control_config import app_control_errors
+from ..platform.app_control_config import app_control_errors, canonical_catalog_path
 
 MAX_CATALOG_BYTES = 262144
 
@@ -125,7 +125,7 @@ class AppProjectGrantCatalog:
         config = self._config()
         if not config.app_control.enabled or app_control_errors(config):
             raise PermissionError("app policy unavailable")
-        path = Path(config.app_control.catalog_file)
+        path = canonical_catalog_path(config.app_control.catalog_file)
         try:
             roots = self._boundary(config, path)
             with PrivateDirectoryAnchor(path.parent) as anchor:

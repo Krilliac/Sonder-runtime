@@ -279,3 +279,37 @@ def test_config_source_closure_cannot_be_model_writable(tmp_path):
     )
     with pytest.raises(PermissionError):
         loader.snapshot()
+
+
+def test_direct_catalog_parent_alias_into_model_root_refused(tmp_path):
+    loader, state, path, _ = enabled(tmp_path)
+    private_workspace = tmp_path / "workspace" / "private"
+    with PrivateDirectoryAnchor.open_base(private_workspace):
+        pass
+    target = private_workspace / "grants.json"
+    target.write_bytes(path.read_bytes())
+    target.chmod(0o600)
+    alias = path.parent / ".." / "workspace" / "private" / "grants.json"
+    state["config"] = replace(
+        state["config"],
+        app_control=replace(state["config"].app_control, catalog_file=str(alias)),
+    )
+    with pytest.raises(PermissionError):
+        loader.snapshot()
+
+
+def test_toml_catalog_alias_refused_canonical_preserved(tmp_path):
+    from sonder_runtime.platform.config import ConfigError
+
+    config_path = tmp_path / "config.toml"
+    canonical = tmp_path / "catalog.json"
+    alias = tmp_path / "unused" / ".." / "catalog.json"
+    config_path.write_text(
+        "[app_control]\ncatalog_file=" + json.dumps(str(alias)), encoding="utf8"
+    )
+    with pytest.raises(ConfigError):
+        load_config(config_path, env={})
+    config_path.write_text(
+        "[app_control]\ncatalog_file=" + json.dumps(str(canonical)), encoding="utf8"
+    )
+    assert load_config(config_path, env={}).app_control.catalog_file == str(canonical)
