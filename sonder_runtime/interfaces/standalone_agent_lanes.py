@@ -101,7 +101,7 @@ class StandaloneLaneController:
         self._host_evidence_error = False
 
     def observe_host_tool(self, **facts):
-        if self._host_ledger is None:
+        if self._host_ledger is None or self._host_terminal is not None:
             self._host_evidence_error = True
             return
         try:
@@ -119,7 +119,11 @@ class StandaloneLaneController:
         except ValueError:
             self._host_evidence_error = True
             return False
-        self._host_terminal = HostTerminalDraft(ledger_bytes, output, terminal_class, tuple(blockers))
+        candidate = HostTerminalDraft(ledger_bytes, output, terminal_class, tuple(blockers))
+        if self._host_terminal is not None and self._host_terminal != candidate:
+            self._host_evidence_error = True
+            return False
+        self._host_terminal = candidate
         return True
 
     def host_terminal_draft(self):

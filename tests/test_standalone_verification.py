@@ -113,6 +113,55 @@ def test_real_loop_projects_parent_and_child_validation_separately(consumer, mon
     assert draft.terminal_class == ("ERROR" if failed else "NORMAL")
 
 
+@pytest.mark.parametrize("text", ["  CANCELLED by host", "  EVIDENCE_REQUIRED missing evidence"])
+def test_whitespace_failure_never_enters_delegated_gate(consumer, monkeypatch, text):
+    import server
+    from sonder_runtime.interfaces import standalone_agent_lanes
+    controller, verifier, gateway, root = consumer
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda *a, **k: json.dumps({"final": text}))
+    def forbidden(*args, **kwargs):
+        pytest.fail("failure entered delegated verifier")
+    monkeypatch.setattr(server, "_standalone_verifier_factory", forbidden)
+    token = standalone_agent_lanes._CURRENT.set(controller)
+    try:
+        result = server._agent_impl("Report current state", max_steps=1, return_host_receipt=True)
+    finally:
+        standalone_agent_lanes._CURRENT.reset(token)
+    assert result.output.startswith(text.lstrip().split()[0])
+    assert result.validation_passed is False
+    assert gateway.calls == 0
+
+
+def test_terminal_draft_freeze_refuses_replacement(consumer):
+    from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
+    controller, _, _, root = consumer
+    controller.begin_host_turn(HostObservationLedger(project_scope=str(root)))
+    assert controller.freeze_host_terminal("original", terminal_class="NORMAL", blockers=())
+    assert controller.freeze_host_terminal("original", terminal_class="NORMAL", blockers=())
+    assert not controller.freeze_host_terminal("replacement", terminal_class="NORMAL", blockers=())
+    assert controller._host_terminal.output == "original"
+
+
+def test_aborting_dispatched_failure_is_in_terminal_ledger(consumer, monkeypatch):
+    import server
+    from sonder_runtime.interfaces import standalone_agent_lanes
+    controller, _, gateway, _ = consumer
+    monkeypatch.setattr(server, "_make_generate", lambda *a, **k: lambda *a, **k: json.dumps({
+        "tool": "web_search", "args": {"query": "bounded query"}}))
+    monkeypatch.setattr(server, "_agent_permission_gate_error", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_agent_dispatch_observed", lambda *a, **k: "ERROR: source unavailable")
+    token = standalone_agent_lanes._CURRENT.set(controller)
+    try:
+        result = server._agent_impl("Look up a fact", max_steps=1, allow_web=True,
+            abort_on_tool_failure_names=("web_search",), return_host_receipt=True)
+    finally:
+        standalone_agent_lanes._CURRENT.reset(token)
+    records = json.loads(controller.host_terminal_draft().ledger_bytes)["records"]
+    assert any(r["tool"] == "web_search" and r["dispatched"] and not r["success"] for r in records)
+    assert result.output.startswith("ERROR:")
+    assert gateway.calls == 0
+
+
 def test_standalone_composed_catalog_certifies_real_repair_and_diff(coding, monkeypatch):
     import subprocess
     import server

@@ -19362,7 +19362,9 @@ def _agent_turn(
         final = str(final or "")
         controller = _standalone_lanes.current()
         delegated = controller is not None and controller.delegated_work
-        failed = failed or final.startswith(autopilot_controller.FAILURE_PREFIXES)
+        if final.lstrip().startswith(autopilot_controller.FAILURE_PREFIXES):
+            final = final.lstrip()
+            failed = True
         if completion_blocking_failures:
             failures = "; ".join(
                 "%s: %s" % (name, detail[:240])
@@ -20024,6 +20026,7 @@ def _agent_turn(
                 )
         observation_text = str(observation)
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
+        abort_observation = None
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
             completion_blocking_failures.pop(call_signature, None)
@@ -20060,10 +20063,9 @@ def _agent_turn(
                         checklist_id, checklist_states,
                         "%s failed: %s" % (tool_name, observation_text[:240]),
                     )
-                return _early_exit(
-                    "ERROR: required %s failed; no answer was produced from "
-                    "unverified sources (%s)." % (tool_name, observation_text[:600])
-                )
+                # Preserve the original failure detail, but finish host effect
+                # accounting and observation before freezing the early result.
+                abort_observation = observation_text[:600]
             # Multiple required tools are intentionally alternatives.  A
             # singleton is a hard caller contract; evidence-required review
             # likewise needs a successful evidence tool of the failed kind.
@@ -20242,6 +20244,11 @@ def _agent_turn(
                 observation_text[:6000],
             )
         )
+        if abort_observation is not None:
+            return _early_exit(
+                "ERROR: required %s failed; no answer was produced from "
+                "unverified sources (%s)." % (tool_name, abort_observation)
+            )
     final = ""
     while True:
         final_prompt = transcript
