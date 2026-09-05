@@ -264,6 +264,14 @@ class PostgreSQLDurableContinuationRepository:
             )
         self._require_owner()
 
+        def prove_committed_owner(connection, outcome):
+            # The dedicated session can disappear while this leased connection
+            # commits. An existing receipt alone cannot publish owner success.
+            self._begin(connection)
+            self._owner_row(connection)
+            connection.rollback()
+            return outcome
+
         def apply(connection):
             self._begin(connection)
             self._owner_row(connection)
@@ -292,7 +300,7 @@ class PostgreSQLDurableContinuationRepository:
                         "UPDATE sonder_child.meta SET barrier=barrier+1 WHERE id=1"
                     )
                 connection.commit()
-                return prior
+                return prove_committed_owner(connection, prior)
             pending = connection.execute(
                 "SELECT i.kind,i.child_id,i.operation_id,i.payload,i.digest FROM sonder_child.intent i LEFT JOIN sonder_child.receipt r USING(operation_id) WHERE i.child_id=%s AND r.operation_id IS NULL ORDER BY i.position LIMIT 1",
                 (prepared.child_id,),
@@ -360,7 +368,7 @@ class PostgreSQLDurableContinuationRepository:
                 ),
             )
             connection.commit()
-            return outcome
+            return prove_committed_owner(connection, outcome)
 
         outcome = self._transport.run(apply, prepared=prepared)
         return (
