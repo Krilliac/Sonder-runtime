@@ -20,12 +20,13 @@ import io
 import json
 import pathlib
 import time
+from unittest.mock import Mock
 
 import pytest
 
 import permission_modes as pm
 import server
-from sonder_runtime.adapters.filesystem import file_ops
+from sonder_runtime.adapters.filesystem import file_ops, workbench
 from sonder_runtime.adapters.persistence.tool_audit import (
     DurableToolAuditRepository,
     ToolAuditLimits,
@@ -134,8 +135,16 @@ PARITY = [
 
 @pytest.mark.parametrize("legacy_name, legacy_args, native_name, native_args", PARITY)
 def test_both_surfaces_run_one_pipeline_and_leave_one_receipt_each(
-    application, tmp_path, legacy_name, legacy_args, native_name, native_args,
+    application, tmp_path, monkeypatch, legacy_name, legacy_args, native_name, native_args,
 ):
+    # Search output includes measured elapsed_ms, and the receipt deliberately
+    # hashes that exact output. Equal filesystem input alone does not imply
+    # identical output on two successive calls. Control only the filesystem
+    # adapter's clock for this surface-parity test; retain real gateway clocks
+    # and the complete output digest (including scan timing).
+    adapter_clock = Mock(wraps=time)
+    adapter_clock.monotonic.return_value = 1000.0
+    monkeypatch.setattr(workbench, "time", adapter_clock)
     legacy = getattr(server, legacy_name)(**legacy_args)
     native = _native(application, native_name, native_args)
 
