@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:sonder_runtime/account_session.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -35,6 +36,17 @@ class _FailingCredentialStore implements CredentialStore {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('malformed restored account tokens are never activated or rewritten', () async {
+    SharedPreferences.setMockInitialValues({'sonder_server_url':'https://host.test'});
+    final store = _MemoryCredentialStore();
+    for(final token in ['x' * 513, 'has space', 'has\u0000control']) {
+      final raw = jsonEncode({'token':token,'origin':'https://host.test'});
+      store.values['sonder_account_session'] = raw;
+      final loaded = await Settings.load(credentialStore:store);
+      expect(loaded.accountSession,isNull);
+      expect(store.values['sonder_account_session'],raw);
+    }
+  });
   test('account record is secure, origin-bound and independent', () async {
     SharedPreferences.setMockInitialValues({});
     final store = _MemoryCredentialStore();

@@ -4,7 +4,8 @@ class AccountSession {
   final String origin;
   AccountSession({required this.token, required String origin})
       : origin = serverOrigin(origin) {
-    if (token.trim().isEmpty || token.contains(RegExp(r'[\r\n]'))) {
+    if (token.isEmpty || token.length > 512 ||
+        token.codeUnits.any((unit) => unit < 33 || unit > 126)) {
       throw ArgumentError('Invalid account session');
     }
   }
