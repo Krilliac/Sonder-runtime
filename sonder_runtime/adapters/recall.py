@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import math
 
 import sonder_runtime.adapters.embeddings as embeddings
 import sonder_runtime.adapters.memory_store as memory_store
@@ -16,6 +18,32 @@ MAX_RESP_CHARS = 400
 
 
 @dataclass(frozen=True)
+class RecallItem:
+    """One recalled memory with bounded, inspectable evidence.
+
+    ``text`` intentionally remains the exact compatibility rendering returned
+    by :func:`recall`.  The additional fields let a UI or an agent explain why
+    a result was selected without exposing raw storage rows or changing the
+    legacy list API.
+    """
+
+    interaction_id: str
+    text: str
+    score: float
+    score_components: dict[str, float]
+    provenance: tuple[str, ...]
+    freshness: float | None
+    confidence: float | None
+    evidence: tuple[str, ...]
+    degradation_reasons: tuple[str, ...] = ()
+
+    @property
+    def memory_id(self) -> str:
+        """Stable memory identity used by application and UI callers."""
+        return self.interaction_id
+
+
+@dataclass(frozen=True)
 class RecallPage:
     results: tuple[str, ...]
     incomplete: bool
@@ -23,6 +51,87 @@ class RecallPage:
     termination: str
     candidates_examined: int
     candidates_scored: int
+    items: tuple[RecallItem, ...] = ()
+    degradation_reasons: tuple[str, ...] = ()
+
+
+_FRESHNESS_HALF_LIFE_SECONDS = 180.0 * 24.0 * 60.0 * 60.0
+
+
+def _freshness_score(timestamp, *, now=None):
+    """Return a clamped time-decay score, or ``None`` for legacy timestamps."""
+    if not isinstance(timestamp, str) or not timestamp.strip():
+        return None
+    value = timestamp.strip()
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        observed = datetime.fromisoformat(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    else:
+        observed = observed.astimezone(timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    else:
+        reference = reference.astimezone(timezone.utc)
+    age_seconds = max(0.0, (reference - observed).total_seconds())
+    try:
+        score = math.exp(-math.log(2.0) * age_seconds / _FRESHNESS_HALF_LIFE_SECONDS)
+    except (OverflowError, ValueError):
+        return None
+    return min(1.0, max(0.0, score))
+
+
+def _bounded_confidence(reward):
+    if isinstance(reward, bool):
+        return None
+    try:
+        value = float(reward)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return min(1.0, max(0.0, value)) if math.isfinite(value) else None
+
+
+def _recall_item(row, text, similarity):
+    interaction_id = row.get("id")
+    outcome_signal = row.get("outcome_signal")
+    outcome_source = row.get("outcome_source")
+    model = row.get("task_embedding_model")
+    revision = row.get("task_embedding_revision")
+    provenance = []
+    if isinstance(interaction_id, str) and interaction_id:
+        provenance.append("interaction:%s" % interaction_id)
+    if isinstance(outcome_signal, str) and isinstance(outcome_source, str):
+        provenance.append("outcome:%s:%s" % (outcome_signal, outcome_source))
+    if isinstance(model, str) and model and isinstance(revision, str) and revision:
+        provenance.append("embedding:%s@%s" % (model, revision))
+    evidence = (
+        (outcome_signal, outcome_source)
+        if isinstance(outcome_signal, str) and isinstance(outcome_source, str)
+        else ()
+    )
+    freshness = _freshness_score(row.get("ts"))
+    confidence = _bounded_confidence(row.get("outcome_reward"))
+    degradations = []
+    if freshness is None:
+        degradations.append("freshness_unavailable")
+    if not evidence:
+        degradations.append("outcome_provenance_unavailable")
+    return RecallItem(
+        interaction_id=interaction_id if isinstance(interaction_id, str) else "",
+        text=text,
+        score=float(similarity),
+        score_components={"semantic": float(similarity)},
+        provenance=tuple(provenance),
+        freshness=freshness,
+        confidence=confidence,
+        evidence=evidence,
+        degradation_reasons=tuple(degradations),
+    )
 
 
 def _fence_count(text):
@@ -59,7 +168,10 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
     if qv is None:
         qv = embed_fn(task)
     if qv is None or not embeddings.valid_vector(qv):
-        return RecallPage((), False, None, "no_query_embedding", 0, 0)
+        return RecallPage(
+            (), False, None, "no_query_embedding", 0, 0,
+            degradation_reasons=("no_query_embedding",),
+        )
     query_provenance = embeddings.trusted_provenance(qv, embed_fn, runtime_default)
     if embedding_model is None:
         embedding_model = query_provenance.get("model")
@@ -114,16 +226,33 @@ def recall_page(conn, task, k=2, embed_fn=None, min_sim=None,
         if _rules.passes_similarity(sim, min_sim):
             scored.append((sim, candidate_rank, row))
     scored.sort(key=lambda item: (-item[0], item[1]))
+    selected = scored[:k]
+    formatted = tuple(
+        _format(row["task"], row["response"])
+        for _, _, row in selected
+    )
+    items = tuple(
+        _recall_item(row, text, similarity)
+        for (similarity, _, row), text in zip(selected, formatted)
+    )
+    degradation_reasons = []
+    if candidates.incomplete:
+        degradation_reasons.append(
+            "candidate_enumeration_%s" % candidates.termination
+        )
+    degradation_reasons.extend(
+        reason for item in items for reason in item.degradation_reasons
+        if reason not in degradation_reasons
+    )
     return RecallPage(
-        results=tuple(
-            _format(row["task"], row["response"])
-            for _, _, row in scored[:k]
-        ),
+        results=formatted,
         incomplete=candidates.incomplete,
         next_cursor=candidates.next_cursor,
         termination=candidates.termination,
         candidates_examined=candidates.rows_examined,
         candidates_scored=scored_count,
+        items=items,
+        degradation_reasons=tuple(degradation_reasons),
     )
 
 

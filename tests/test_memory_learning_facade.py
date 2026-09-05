@@ -22,6 +22,25 @@ def test_facade_recall_uses_existing_recall_service_and_transaction(tmp_path):
     assert seen[0][1:] == ("question", {"k": 1, "project": "p"})
 
 
+def test_facade_exposes_additive_explained_recall_boundary(tmp_path):
+    seen = []
+
+    class Recall:
+        def retrieve_page(self, connection, task, **options):
+            seen.append((connection, task, options))
+            return {"items": (), "degradation_reasons": ()}
+
+    facade = MemoryLearningFacade(
+        lambda: UnitOfWorkAdapter(str(tmp_path / "memory.db")),
+        recall_service=Recall(),
+    )
+
+    assert facade.recall_explained("question", k=1) == {
+        "items": (), "degradation_reasons": (),
+    }
+    assert seen[0][1:] == ("question", {"k": 1})
+
+
 def test_facade_records_outcome_and_outbox_atomically(tmp_path):
     db = str(tmp_path / "memory.db")
     with UnitOfWorkAdapter(db) as uow:
