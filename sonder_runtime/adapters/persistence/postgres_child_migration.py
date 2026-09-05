@@ -1,7 +1,6 @@
 """PostgreSQL offline transfer while holding the aggregate admission lock."""
 
 from contextlib import contextmanager
-import hashlib
 import json
 import uuid
 
@@ -112,12 +111,18 @@ class PostgresChildMigrationStore:
     _begin = PostgreSQLDurableContinuationRepository._begin
     _schema = PostgreSQLDurableContinuationRepository._schema
 
-    def __init__(self, config, binding):
+    def __init__(self, config, binding, *, expected_storage_identity=None):
         from types import SimpleNamespace
         from ...platform.child_storage_config import child_storage_errors
 
         if child_storage_errors(SimpleNamespace(child_storage=config)):
             raise MigrationRefused("invalid PostgreSQL migration configuration")
+        if expected_storage_identity is not None and (
+            type(expected_storage_identity) is not str
+            or len(expected_storage_identity) != 64
+            or any(c not in "0123456789abcdef" for c in expected_storage_identity)
+        ):
+            raise MigrationRefused("invalid expected migration storage identity")
         self.config, self.binding = config, binding
         # Identity binds the host-selected endpoint without exposing credentials.
         values = binding.connection_kwargs(config)
@@ -126,6 +131,8 @@ class PostgresChildMigrationStore:
         self._transport = PostgresContinuationTransport(config, binding)
         self._owner_connection = None
         self._closed = False
+        self._namespace_identity = None
+        self._expected_storage_identity = expected_storage_identity
         try:
             self._owner_connection = self._transport.connection_class.connect(**values)
 
@@ -141,11 +148,18 @@ class PostgresChildMigrationStore:
                 ).fetchone()
 
             self._transport.run(lock, connection=self._owner_connection)
-            self._transport.run(self._schema)
+            if expected_storage_identity is None:
+                self._transport.run(self._schema)
 
             def check(connection):
                 self._begin(connection)
                 self._held(connection)
+                if self._expected_storage_identity is not None:
+                    migration = connection.execute(
+                        "SELECT phase FROM sonder_child.migration WHERE id=1"
+                    ).fetchone()
+                    if migration is None or migration[0] != "ACTIVE":
+                        raise MigrationRefused("selected child migration is not active")
                 owner = connection.execute(
                     "SELECT clean FROM sonder_child.owner WHERE id=1"
                 ).fetchone()
@@ -173,6 +187,10 @@ class PostgresChildMigrationStore:
                     "SELECT to_regclass('sonder_child.migration_namespace')"
                 ).fetchone()[0]
                 if not exists:
+                    if expected_storage_identity is not None:
+                        raise MigrationRefused(
+                            "selected migration namespace is missing"
+                        )
                     connection.execute(
                         "CREATE TABLE sonder_child.migration_namespace(id integer PRIMARY KEY CHECK(id=1),identity text NOT NULL)"
                     )
@@ -192,14 +210,20 @@ class PostgresChildMigrationStore:
                 return row[0]
 
             namespace_id = self._transport.run(namespace)
-            self.identity = hashlib.sha256(
-                encode({"endpoint": self.identity, "namespace": namespace_id})
-            ).hexdigest()
+            from .postgres_child_identity import storage_identity
+
+            self.identity = storage_identity(self.identity, namespace_id)
+            self._namespace_identity = namespace_id
+            if (
+                expected_storage_identity is not None
+                and self.identity != expected_storage_identity
+            ):
+                raise MigrationRefused("selected migration storage identity changed")
         except BaseException:
             self.close()
             raise
 
-    def _held(self, connection):
+    def _held(self, connection, *, retirement=None):
         self.validate_policy()
         if self._closed or self._owner_connection.closed:
             raise MigrationRefused("migration lock session was lost")
@@ -209,30 +233,40 @@ class PostgresChildMigrationStore:
         ).fetchone()[0]
         if not held:
             raise MigrationRefused("migration lock identity was lost")
+        if self._namespace_identity is not None:
+            row = connection.execute(
+                "SELECT m.version,n.identity FROM sonder_child.meta m JOIN sonder_child.migration_namespace n ON n.id=m.id WHERE m.id=1"
+            ).fetchone()
+            if row is None or row[0] != 1 or row[1] != self._namespace_identity:
+                raise MigrationRefused("selected migration namespace changed")
+            if self._expected_storage_identity is not None:
+                migration = connection.execute(
+                    "SELECT phase FROM sonder_child.migration WHERE id=1"
+                ).fetchone()
+                if migration is None or migration[0] != "ACTIVE":
+                    if retirement is None:
+                        raise MigrationRefused("selected child migration is not active")
+                    self._retirement_proof(connection, retirement)
+
+    def _retirement_proof(self, connection, manifest):
+        row = connection.execute(
+            "SELECT o.owner_id,o.incarnation,o.clean,m.barrier,g.phase FROM sonder_child.owner o JOIN sonder_child.meta m ON m.id=o.id JOIN sonder_child.migration g ON g.id=o.id WHERE o.id=1"
+        ).fetchone()
+        if row != (
+            self.config.owner_id,
+            "retired-" + manifest["migration_id"],
+            False,
+            manifest["source"]["barrier"] + 1,
+            "RETIRED",
+        ):
+            raise MigrationRefused("exact source retirement proof changed")
 
     def _live_policy_identity(self, binding=None):
-        binding = self.binding if binding is None else binding
-        values = binding.connection_kwargs(self.config)
-        return hashlib.sha256(
-            encode(
-                {
-                    "endpoint": {
-                        key: values[key] for key in ("host", "port", "dbname", "user")
-                    },
-                    "policy": {
-                        key: getattr(self.config, key)
-                        for key in (
-                            "owner_id",
-                            "durability",
-                            "required_standby",
-                            "operation_timeout_seconds",
-                            "cancel_timeout_seconds",
-                        )
-                    },
-                    "binding": binding.private_closure_identity(),
-                }
-            )
-        ).hexdigest()
+        from .postgres_child_identity import policy_identity
+
+        return policy_identity(
+            self.config, self.binding if binding is None else binding
+        )
 
     def validate_policy(self, binding=None):
         if self._live_policy_identity(binding) != self._policy_identity:
@@ -266,17 +300,50 @@ class PostgresChildMigrationStore:
 
         return self._transport.run(read)
 
-    def _write(self, function):
+    def _read_retirement_snapshot(self, function, *, bundle, guard):
+        from ...application.subagents.child_migration_activation import (
+            require_host_guard,
+        )
+
+        manifest = bundle.manifest()
+
+        def validate():
+            bundle.validate()
+            require_host_guard(guard, manifest)
+            if manifest["source_identity"] != self.identity or not bundle.has_phase(
+                "SOURCE_RETIRE_INTENT", manifest
+            ):
+                raise MigrationRefused("exact source retirement intent required")
+
+        validate()
+        if not self._transport.quiescent():
+            raise MigrationRefused("migration SQL cleanup is unresolved")
+
+        def read(connection):
+            validate()
+            connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            self._held(connection, retirement=manifest)
+            result = function(PostgresChildSnapshot(connection))
+            self._held(connection, retirement=manifest)
+            validate()
+            connection.rollback()
+            return result
+
+        return self._transport.run(read)
+
+    def _write(self, function, *, retirement=None):
         if not self._transport.quiescent():
             raise MigrationRefused("migration SQL cleanup is unresolved")
 
         def write(connection):
             self._begin(connection)
-            self._held(connection)
+            self._held(connection, retirement=retirement)
             value = function(connection)
             connection.commit()
             self._begin(connection)
-            self._held(connection)
+            self._held(connection, retirement=retirement)
+            if retirement is not None:
+                self._retirement_proof(connection, retirement)
             connection.rollback()
             return value
 
@@ -533,5 +600,5 @@ class PostgresChildMigrationStore:
                     "UPDATE sonder_child.meta SET barrier=barrier+1 WHERE id=1"
                 )
 
-        self._write(retire)
+        self._write(retire, retirement=manifest)
         require_host_guard(guard, manifest)

@@ -5,7 +5,7 @@ namespace. It does not adopt an installed runtime, expose an HTTP owner API,
 install a service, or transfer authority after the foreground owner exits.
 `ManagedRuntimeOwner(path, writable_roots=live_roots)` holds the namespace and
 sibling workspace anchors and launch exclusion from creation through cleanup.
-Existing paths are refused. The private path inventory is the exact owned root.
+Existing paths are refused. The private path inventory contains the exact owned root and any registered PostgreSQL credential bundle directories.
 
 Managed launches use a required-new private copy of the Sonder Python package,
 root compatibility modules, migrations and seed data. They never use the live
@@ -76,11 +76,10 @@ an executor. Enabled app-work HTTP composition is a separate typed startup hook.
 
 ## Current limits and remaining work
 
-The contained runtime profile currently admits owned SQLite only. Existing
-PostgreSQL export/stage/activation infrastructure is not yet wired into this
-foreground runtime's startup policy/namespace admission. PostgreSQL runtime
-selection is explicitly refused; there is no fallback to SQLite. The tested
-composed migration is SQLite to a new SQLite target in the same owned namespace.
+The contained runtime profile admits owned SQLite and explicitly selected
+PostgreSQL child storage through the migration protocol described below.
+Other application aggregates retain their existing storage; selecting child
+PostgreSQL does not establish all-aggregate replication or HA.
 
 An owner crash leaves durable pending state and loses its live issuer. Reopening
 the journal is observational; it does not grant recovery or clean a namespace.
@@ -93,3 +92,15 @@ used to advertise those capabilities. No installed data is changed by the tests.
 App-work startup registration returns a private, exact slot lease. The constructor commits it only after current configuration and inventory checks; listener sealing refuses an incomplete lease. A failed constructor can roll back only its own uncommitted lease, after the concrete dispatcher drain finishes within the deadline. Failed or late cleanup retains the slot and prevents replacement.
 
 Shutdown fences dispatch admission synchronously and cancels queued futures. One retained runtime-owned thread drains the concrete dispatcher. A deadline returns an unresolved component proof while that thread and dispatcher remain owned; later resource and OS containment cleanup can continue. Running Python callbacks are not terminated or reported clean merely because the deadline elapsed. Legacy caller-owned dispatcher close remains synchronous by default.
+
+## Selected PostgreSQL child storage
+
+The required-new foreground owner can register an exact `PostgresChildMigrationStore` target and its existing typed `ChildStorageConfig`. Activation still requires the reviewed export/stage/verification and live owner guard; selecting a configuration cannot bypass it. SQLite remains the default. A PostgreSQL launch requires the supported optional driver and its dependencies inside the declared interpreter environment; there is no SQLite fallback.
+
+Configuration binds the exact policy and database namespace digest: endpoint/database/user, configured owner, durability/required standby, operation/cancel deadlines and private binding/TLS closure. The contained repository checks that digest under the aggregate owner lock before owner mutation and during subsequent transaction admission. Selected startup does not create missing schema or namespace metadata. Wrong identity, different owner, weaker policy and changed namespace refuse admission.
+
+The parent closes its migration lock and pool before launching the child. After proven child cleanup, it can reopen only the exact selected policy/namespace. Retired and current migration handles remain explicitly owned; shutdown closes all retained handles under one bounded deadline. Store and private inventory retention are bounded. Binding paths remain private and must stay disjoint from live model-writable roots.
+
+Reverse migration exports fresh current PostgreSQL state after cleanup, including any newer committed records; it never promotes the original SQLite backup. The disposable acceptance fixture verifies canonical data written after the PG runtime stops and closes its exact fixture repository before export. This fixture performs no model operations.
+
+This remains a single-host foreground composition. It does not provide installed-manager adoption, owner recovery after a process crash, remote fencing, automatic takeover/failback, or replication eligibility for other application aggregates. A PostgreSQL pair acknowledgement is not proof that a previous runtime owner or remote machine has stopped.

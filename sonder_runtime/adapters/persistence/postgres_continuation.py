@@ -47,7 +47,13 @@ def _prepared(row):
 
 
 class PostgreSQLDurableContinuationRepository:
-    def __init__(self, config, binding):
+    def __init__(self, config, binding, *, expected_storage_identity=None):
+        if expected_storage_identity is not None and (
+            type(expected_storage_identity) is not str
+            or re.fullmatch(r"[a-f0-9]{64}", expected_storage_identity) is None
+        ):
+            raise ContinuationStorageFailure("invalid expected child storage identity")
+        self._expected_storage_identity = expected_storage_identity
         self.config, self.binding = config, binding
         self._transport = PostgresContinuationTransport(config, binding)
         self._incarnation = uuid.uuid4().hex
@@ -58,7 +64,8 @@ class PostgreSQLDurableContinuationRepository:
         self._admissions_stopped = False
         self._close_lock = Lock()
         try:
-            self._transport.run(self._schema)
+            if expected_storage_identity is None:
+                self._transport.run(self._schema)
             self._owner_connection = self._transport.connection_class.connect(
                 **binding.connection_kwargs(config)
             )
@@ -130,6 +137,7 @@ class PostgreSQLDurableContinuationRepository:
         ).fetchone()
         connection.commit()
         self._begin(connection)
+        self._require_expected_identity(connection)
         if connection.execute(
             "SELECT to_regclass('sonder_child.migration')"
         ).fetchone()[0]:
@@ -179,6 +187,7 @@ class PostgreSQLDurableContinuationRepository:
             raise ContinuationStorageFailure("child execution owner session was lost")
 
     def _owner_row(self, connection):
+        self._require_expected_identity(connection)
         held = connection.execute(
             "SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.locktype=%s AND l.pid=%s AND a.backend_start=%s AND l.classid=%s AND l.objid=%s AND l.granted)",
             (
@@ -200,6 +209,34 @@ class PostgreSQLDurableContinuationRepository:
             raise ContinuationStorageFailure(
                 "child execution owner incarnation changed"
             )
+
+    def _require_expected_identity(self, connection):
+        expected = self._expected_storage_identity
+        if expected is None:
+            return
+        from .postgres_child_identity import policy_identity, storage_identity
+
+        try:
+            row = connection.execute(
+                "SELECT m.version,n.identity FROM sonder_child.meta m JOIN sonder_child.migration_namespace n ON n.id=m.id WHERE m.id=1"
+            ).fetchone()
+            if (
+                row is None
+                or row[0] != 1
+                or storage_identity(policy_identity(self.config, self.binding), row[1])
+                != expected
+            ):
+                raise ValueError()
+            migration = connection.execute(
+                "SELECT phase FROM sonder_child.migration WHERE id=1"
+            ).fetchone()
+            if migration is None or migration[0] != "ACTIVE":
+                raise ValueError()
+        except Exception:
+            self._owner_fenced = True
+            raise ContinuationStorageFailure(
+                "selected child storage identity is unavailable or changed"
+            ) from None
 
     @staticmethod
     def _lock_child(connection, child_id):

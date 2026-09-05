@@ -4,6 +4,7 @@ import os
 import json
 from ..adapters.filesystem.atomic_json import write_json_atomic
 from ..adapters.persistence.child_migration import SQLiteChildMigrationStore
+from ..adapters.persistence.postgres_child_migration import PostgresChildMigrationStore
 from ..application.subagents.child_migration import MigrationRefused, MigrationUnsupported, STREAMS, stream_descriptor, verify_snapshot, digest
 from ..application.subagents.child_migration_activation import issue_host_guard
 
@@ -132,6 +133,8 @@ class ChildMigrationActivation:
             ):
                 SQLiteChildMigrationStore(retired).read_snapshot(compare)
                 already_retired = True
+            elif type(source) is PostgresChildMigrationStore and bundle.has_phase("SOURCE_RETIRE_INTENT", manifest):
+                source._read_retirement_snapshot(compare, bundle=bundle, guard=issue_host_guard(self, manifest))
             else:
                 source.read_snapshot(compare)
             verify_snapshot(bundle, target)
