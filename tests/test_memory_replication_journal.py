@@ -127,3 +127,13 @@ def test_unscoped_project_filter_is_rejected_to_preserve_cursor_continuity(tmp_p
     journal.append((_mutation(),))
     with pytest.raises(MemoryReplicationError, match="project-scoped"):
         journal.export(project="sonder")
+
+
+def test_in_memory_journal_keeps_one_stateful_database_until_closed():
+    journal = SQLiteMemoryReplicationJournal(source_id="cluster-a")
+    try:
+        assert journal.append((_mutation(),)) == 1
+        assert journal.export().records[0].entity_id == "fact-1"
+        assert journal.current_records()[0].payload["text"] == "keep scope"
+    finally:
+        journal.close()
