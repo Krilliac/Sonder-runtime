@@ -7,11 +7,14 @@ from ..application.agents.host_turns import (
     capture_host_turn,
     capture_host_final,
     close_host_turn,
+    host_turn_link,
+    read_host_terminal_link,
 )
 from ..adapters.agent_terminal_evidence import HostObservationLedger
 from ..interfaces.standalone_agent_lanes import HostTerminalDraft
 from .managed_standalone import ManagedStandaloneSession
 from ..application.ports.host_final import HostFinalFacts
+from ..application.ports.host_turn_links import FinalizedHostResult
 
 
 class ManagedConversationLifetime:
@@ -87,9 +90,24 @@ class ManagedConversationLifetime:
                 raise PermissionError('outer host final boundary unavailable')
             capture_host_final(view._session._bound, view._admission, result,
                 view._final_facts, HostObservationLedger.restore(view._draft.ledger_bytes))
-            close_host_turn(view._session._bound, view._admission)
+            view._terminal_link = close_host_turn(view._session._bound, view._admission)
             self._previous, self._active = view, None
             return result
+
+    def finalize_result_with_receipt(self, result):
+        with self._lock:
+            self._require_current()
+            if self._active is None:
+                raise PermissionError("an active outward host final boundary is required")
+            output = self.finalize_result(result)
+            return FinalizedHostResult(output, self._previous._terminal_link)
+
+    def terminal_receipt(self, run_id, ordinal):
+        with self._lock:
+            self._require_current()
+            if self._owner is None:
+                raise PermissionError("current attached host owner required")
+            return read_host_terminal_link(self._owner._bound, run_id, ordinal)
 
     def close(self):
         with self._lock:
@@ -244,6 +262,11 @@ class _ManagedTurn:
             return dict(
                 self._session.report_metadata(), host_turn=self._admission.ordinal
             )
+
+    def turn_link(self):
+        with self._lifetime._lock:
+            self.require_current()
+            return host_turn_link(self._session._bound, self._admission)
 
     def request_cancel(self):
         with self._lifetime._lock:

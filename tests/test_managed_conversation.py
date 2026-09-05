@@ -17,6 +17,43 @@ def final_receipt(view, output, terminal_class='NORMAL', *, validated=False):
         False, validated, validated, terminal_class))
 
 
+def test_typed_turn_and_terminal_links_bind_exact_outward_result(lanes):
+    from sonder_runtime.bootstrap.managed_conversation import ManagedConversationLifetime
+    app = object()
+    lifetime = ManagedConversationLifetime(application=app,
+        session_factory=lambda c, a: setup(lanes, c)[0], require_current=lambda: None)
+    try:
+        view = lifetime.factory(SimpleNamespace(run_id="linked-turn"), app)
+        link = view.turn_link()
+        assert link.run_id == "linked-turn" and link.ordinal == 1
+        assert link.parent_session_id == view.report_metadata()["parent_session_id"]
+        ledger = HostObservationLedger(project_scope=str(lanes[3]))
+        view.capture_terminal(HostTerminalDraft(ledger.seal(), "original", "NORMAL", ()))
+        view.stage_final(HostFinalFacts((), str(lanes[3]), False, False, False, "NORMAL"))
+        view.close()
+        with pytest.raises(PermissionError):
+            view.turn_link()
+        result = lifetime.finalize_result_with_receipt("original\nFinal report")
+        assert result.output == "original\nFinal report"
+        assert result.receipt.turn == link
+        assert result.receipt.output_digest == hashlib.sha256(result.output.encode()).hexdigest()
+        assert result.receipt.original_projection_digest != result.receipt.final_projection_digest
+        assert lifetime.terminal_receipt("linked-turn", 1) == result.receipt
+        with pytest.raises(PermissionError):
+            lifetime.terminal_receipt("linked-turn", 2)
+        with pytest.raises(PermissionError):
+            lifetime.finalize_result_with_receipt("unrelated replacement")
+        with lanes[1].transaction() as tx:
+            owner = lifetime._owner
+            stored = owner._host._row(tx, owner._bound.continuation_id)
+            stored['host_turn']['final_receipt']['digest'] = '0' * 64
+            owner._host._save(tx, stored)
+        with pytest.raises(PermissionError):
+            lifetime.terminal_receipt("linked-turn", 1)
+    finally:
+        lifetime.close()
+
+
 @pytest.mark.parametrize('failure_after_release', [False, True])
 def test_failed_owner_close_retains_fenced_retry_handle(lanes, monkeypatch, failure_after_release):
     from sonder_runtime.bootstrap.managed_conversation import (
