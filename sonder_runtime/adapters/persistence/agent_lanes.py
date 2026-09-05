@@ -109,6 +109,50 @@ class LaneTransaction:
                     return True
         return False
 
+    def require_verification_workspace_quiescence(self, parent, principal, roots):
+        """Check global ownership in the same writer transaction as admission."""
+        requested = tuple(Path(root).resolve() for root in roots)
+
+        def overlaps(raw):
+            other = Path(raw).resolve()
+            return any(
+                root == other or root in other.parents or other in root.parents
+                for root in requested
+            )
+
+        barriers = self.conn.execute(
+            "SELECT v.data FROM agent_parent_verification p LEFT JOIN agent_verifications v ON v.id=p.barrier WHERE p.barrier<>'' LIMIT 10001"
+        ).fetchall()
+        if len(barriers) > 10000:
+            raise ValueError("global verification barrier bound exceeded")
+        for row in barriers:
+            if row[0] is None or any(
+                overlaps(root) for root in json.loads(row[0])["prepared"]["roots"]
+            ):
+                raise ValueError("workspace overlaps an existing verification barrier")
+        rows = self.conn.execute(
+            """SELECT l.id, json_extract(l.data,'$.workspace_root') AS root,
+                json_extract(l.data,'$.status') AS status,
+                json_extract(l.data,'$.owner') AS owner,
+                json_extract(l.data,'$.pending_effect') AS pending_effect,
+                json_extract(l.data,'$.pending_response') AS pending_response,
+                EXISTS(SELECT 1 FROM agent_lane_messages m WHERE m.lane_id=l.id AND m.report=0 AND m.delivery_state='queued') AS queued
+                FROM agent_lanes l WHERE NOT (l.parent_session=? AND l.principal=?)
+                ORDER BY l.position LIMIT 10001""",
+            (parent, principal),
+        ).fetchall()
+        if len(rows) > 10000:
+            raise ValueError("global lane ownership bound exceeded")
+        for row in rows:
+            if overlaps(row["root"]) and (
+                row["status"] not in {"completed", "failed", "cancelled", "interrupted"}
+                or row["owner"]
+                or row["pending_effect"]
+                or row["pending_response"]
+                or row["queued"]
+            ):
+                raise ValueError("workspace overlaps nonquiescent foreign lane")
+
     def acquire_verification_barrier(self, parent, principal, verification_id):
         current = self.verification_barrier(parent, principal)
         if current and current != verification_id:
