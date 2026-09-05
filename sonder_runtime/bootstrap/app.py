@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import importlib
 import logging
 import os
@@ -465,7 +466,17 @@ def build_application(
     compute_remote_snapshot_source = None
     compute_remote_transport = None
     compute_refresh_coordinator = None
-    compute_refresh_lock = RLock()
+    compute_composition_lock = RLock()
+
+    def compute_component(operation):
+        # Registry, source, worker, service and coordinator form one graph.
+        # Reentrancy permits lazy dependencies to call each other. Remote probes
+        # runs outside this lock; close shares it with coordinator publication.
+        @wraps(operation)
+        def synchronized(*args, **kwargs):
+            with compute_composition_lock:
+                return operation(*args, **kwargs)
+        return synchronized
     effective_config = config or SonderConfig()
     compute_scheduler = ComputePlacementScheduler(
         snapshot_ttl=timedelta(seconds=effective_config.compute.snapshot_ttl_seconds)
@@ -582,6 +593,7 @@ def build_application(
             )
         return process_job_provider
 
+    @compute_component
     def get_compute_registry() -> ComputeNodeRegistry:
         nonlocal compute_registry
         if compute_registry is None:
@@ -628,6 +640,7 @@ def build_application(
             )
         return compute_registry
 
+    @compute_component
     def get_compute_snapshot() -> NodeSnapshot:
         nonlocal compute_snapshot_source
         if compute_snapshot_source is None:
@@ -653,6 +666,7 @@ def build_application(
         )
         return registry.observe(snapshot)
 
+    @compute_component
     def get_compute_job_worker() -> ComputeJobWorker:
         nonlocal compute_job_worker
         if compute_job_worker is None:
@@ -719,7 +733,7 @@ def build_application(
             raise PermissionError("remote compute is disabled by host configuration")
         if not effective_config.secrets.api_key:
             raise ValueError("remote compute requires SONDER_API_KEY")
-        with compute_refresh_lock:
+        with compute_composition_lock:
             if compute_refresh_coordinator is None:
                 from ..adapters.compute_fabric.http_client import HttpsComputeSnapshotSource
                 from ..application.compute_fabric.coordinator import ComputeRefreshCoordinator
@@ -746,7 +760,7 @@ def build_application(
 
     def close_compute(timeout=None):
         nonlocal compute_refresh_coordinator
-        with compute_refresh_lock:
+        with compute_composition_lock:
             if compute_refresh_coordinator is not None:
                 compute_refresh_coordinator.close(timeout=timeout)
                 compute_refresh_coordinator = None
@@ -755,6 +769,7 @@ def build_application(
         # Inventory reads never trigger network/hardware probing or enrollment.
         return get_compute_registry().inventory_page(now=datetime.now(timezone.utc), limit=limit, cursor=cursor)
 
+    @compute_component
     def get_compute_service() -> ComputeFabricService:
         nonlocal compute_service, compute_remote_transport
         if compute_service is None:
