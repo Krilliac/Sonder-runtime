@@ -461,3 +461,28 @@ def test_unknown_pool_ownership_shape_fails_closed(storage_config, monkeypatch):
     with pytest.raises(ContinuationStorageFailure, match="ownership structure"):
         PostgresContinuationTransport(storage_config, None)
     assert closed == [0]
+
+
+@pytest.mark.parametrize("sqlstate", ["01000", "01001", "P0001"])
+def test_localized_warning_stops_success_and_next_transaction(repository, sqlstate):
+    from sonder_runtime.application.ports.continuation_mutations import (
+        ContinuationStorageFailure,
+    )
+
+    after = []
+
+    def warned(connection):
+        repository._begin(connection)
+        connection.execute(
+            "DO $$ BEGIN RAISE WARNING USING ERRCODE = '"
+            + sqlstate
+            + "', MESSAGE = 'réplication interrompue'; END $$"
+        )
+        connection.commit()
+        repository._begin(connection)
+        after.append(True)
+        connection.rollback()
+
+    with pytest.raises(ContinuationStorageFailure):
+        repository._transport.run(warned)
+    assert after == []

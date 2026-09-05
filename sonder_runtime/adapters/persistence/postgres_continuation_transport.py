@@ -134,9 +134,9 @@ class PostgresContinuationTransport:
             self._operation_context.boundary = boundary
 
             def notice(value):
-                if value.sqlstate == "01000" and "synchronous replication" in (
-                    value.message_primary or ""
-                ):
+                if (value.sqlstate or "").startswith(
+                    "01"
+                ) or value.severity_nonlocalized == "WARNING":
                     notices.append(True)
 
             try:
