@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .cluster_availability import AvailabilityProfile
+
 
 @dataclass(frozen=True, slots=True)
 class DeploymentStatus:
@@ -15,6 +17,15 @@ class DeploymentStatus:
     preferred_primary: str = ''
     allow_remote_compute: bool = False
 
+    @property
+    def canonical_profile(self) -> str:
+        """Return the explicit availability-profile name for status consumers."""
+        aliases = {
+            'single-host': AvailabilityProfile.SINGLE_PC.value,
+            'pooled-pair': AvailabilityProfile.TWO_PC.value,
+        }
+        return aliases.get(self.profile, self.profile)
+
     def as_dict(self) -> dict:
         prerequisites = (
             'Independent old-owner fencing, acknowledged durable-state replication, '
@@ -23,6 +34,7 @@ class DeploymentStatus:
         remote = self.allow_remote_compute and bool(self.peers)
         return {
             'profile': self.profile,
+            'profile_id': self.canonical_profile,
             'local_node': self.local_node,
             'configured_members': [self.local_node, *self.peers],
             'preferred_primary': self.preferred_primary or self.local_node,

@@ -57,8 +57,9 @@ It is an operator preference displayed in status. It grants no exclusive control
 authority, reroutes no requests, and does not block a secondary worker.
 
 Authenticated `/health` includes `deployment`, containing the configured members,
-preference, local-instance control-state scope, and capability reasons. These are
-integrated capability/configuration facts, not live peer-health measurements.
+the legacy `profile` value, the canonical `profile_id`, preference,
+local-instance control-state scope, and capability reasons. These are integrated
+capability/configuration facts, not live peer-health measurements.
 Takeover, failback, explicit promotion, acknowledged state replication,
 cluster-wide worker-epoch fencing, and quorum are reported unavailable.
 

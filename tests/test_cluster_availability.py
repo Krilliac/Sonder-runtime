@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
 
+import pytest
+
+from sonder_runtime.domain.deployment_topology import DeploymentStatus
 from sonder_runtime.domain.cluster_availability import (
     AvailabilityProfile,
     AvailabilityProfileError,
@@ -16,6 +18,71 @@ from sonder_runtime.domain.cluster_availability import (
     evaluate_takeover,
     validate_replication_acknowledgement,
 )
+
+
+def test_runtime_default_config_is_the_explicit_single_pc_profile():
+    from sonder_runtime.platform.config import load_config, validate_deployment
+
+    config = load_config(env={})
+    validate_deployment(config)
+    members = (config.compute.node_id,)
+    contract = assess_availability_profile(
+        config.deployment.profile,
+        members,
+        local_node_id=config.compute.node_id,
+    )
+    status = DeploymentStatus(
+        profile=config.deployment.profile,
+        local_node=config.compute.node_id,
+    ).as_dict()
+
+    assert contract.profile is AvailabilityProfile.SINGLE_PC
+    assert contract.control_state_scope == "local-sqlite"
+    assert status["profile"] == "single-host"
+    assert status["profile_id"] == "single-pc"
+    assert status["capabilities"]["automatic_takeover"]["available"] is False
+
+
+def test_runtime_pair_config_maps_to_two_pc_pool_without_a_witness_or_takeover():
+    from sonder_runtime.platform.config import (
+        ComputeConfig,
+        ComputeNodeConfig,
+        DeploymentConfig,
+        SonderConfig,
+        validate_deployment,
+    )
+
+    config = SonderConfig(
+        deployment=DeploymentConfig(profile="pooled-pair", preferred_primary="pc-a"),
+        compute=ComputeConfig(
+            node_id="pc-a",
+            allow_remote=True,
+            nodes=(ComputeNodeConfig(node_id="pc-b", origin="https://pc-b:11435"),),
+        ),
+    )
+    validate_deployment(config)
+    members = (config.compute.node_id, *(node.node_id for node in config.compute.nodes))
+    contract = assess_availability_profile(
+        config.deployment.profile,
+        members,
+        local_node_id=config.compute.node_id,
+        preferred_primary=config.deployment.preferred_primary,
+    )
+    status = DeploymentStatus(
+        profile=config.deployment.profile,
+        local_node=config.compute.node_id,
+        peers=tuple(node.node_id for node in config.compute.nodes),
+        preferred_primary=config.deployment.preferred_primary,
+        allow_remote_compute=config.compute.allow_remote,
+    ).as_dict()
+
+    assert contract.profile is AvailabilityProfile.TWO_PC
+    assert contract.resource_pooling
+    assert contract.control_state_scope == "per-node-local-sqlite"
+    assert contract.takeover_mode == "external-provider-required"
+    assert status["profile_id"] == "two-pc"
+    assert status["configured_members"] == ["pc-a", "pc-b"]
+    assert status["capabilities"]["automatic_takeover"]["available"] is False
 
 
 def _provider(**changes):
